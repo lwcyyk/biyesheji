@@ -783,6 +783,9 @@ func resolveRequestAt100K(t testing.TB) (ResolveRequest, int, int) {
 }
 
 func TestResolveL1L5P95At100KLeaves(t *testing.T) {
+	if raceDetectorEnabled {
+		t.Skip("performance threshold is measured by the non-race test job")
+	}
 	request, proofHashes, proofBytes := resolveRequestAt100K(t)
 	const samples = 101
 	durations := make([]time.Duration, samples)
