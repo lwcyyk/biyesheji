@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"testing"
 
-	"vdns.local/vdns/internal/protocol"
+	"vpass.local/vpass/internal/protocol"
 )
 
 func TestMerkleKATAndProofs(t *testing.T) {

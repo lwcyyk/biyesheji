@@ -51,7 +51,7 @@ EVIDENCE_DIR="$DATA_DIR/evidence"
 mkdir -p "$EVIDENCE_DIR"
 cd "$PROJECT_ROOT"
 
-sqlite3 -batch -bail "$DATA_DIR/vdns-demo.db" \
+sqlite3 -batch -bail "$DATA_DIR/vpass-demo.db" \
   ".read migrations/0002_v2_initial.sql" \
   ".read migrations/0003_g2_core.sql" \
   ".read migrations/0004_g3_lifecycle_sync.sql" \
@@ -66,12 +66,12 @@ env -u GOPATH go test -json -count=1 ./tests/e2e \
   >"$EVIDENCE_DIR/02-daily-password-lifecycle.json"
 
 env -u GOPATH go test -json -count=1 ./internal/resolver/application \
-  -run 'TestResolverSelectsVDNSCurrentState|TestResolveL1L5P95At100KLeaves' \
-  >"$EVIDENCE_DIR/03-vdns-resolution.json"
+  -run 'TestResolverSelectsCurrentState|TestResolveL1L5P95At100KLeaves' \
+  >"$EVIDENCE_DIR/03-state-resolution.json"
 
 env -u GOPATH go test -json -count=1 \
   ./internal/audit/application ./internal/localapi/application \
-  -run 'TestAuthorizedAnalysis|TestAgentSecurityAnalysis' \
+  -run 'TestAuthorizedAnalysis|TestLocalSecureClientSecurityAnalysis' \
   >"$EVIDENCE_DIR/04-private-audit.json"
 
 env -u GOPATH go test -json -count=1 \
@@ -85,31 +85,32 @@ env -u GOPATH go run ./cmd/g6-research-runner -out "$EVIDENCE_DIR" \
 env -u GOPATH go run ./cmd/g7-fault-runner -out "$EVIDENCE_DIR/faults" \
   >"$EVIDENCE_DIR/07-fault-runner.txt"
 
-DATABASE_DIGEST=$(sha256sum "$DATA_DIR/vdns-demo.db" | cut -d' ' -f1)
+DATABASE_DIGEST=$(sha256sum "$DATA_DIR/vpass-demo.db" | cut -d' ' -f1)
 DAILY_DIGEST=$(sha256sum "$EVIDENCE_DIR/02-daily-password-lifecycle.json" | cut -d' ' -f1)
-VDNS_DIGEST=$(sha256sum "$EVIDENCE_DIR/03-vdns-resolution.json" | cut -d' ' -f1)
+STATE_DIGEST=$(sha256sum "$EVIDENCE_DIR/03-state-resolution.json" | cut -d' ' -f1)
 AUDIT_DIGEST=$(sha256sum "$EVIDENCE_DIR/04-private-audit.json" | cut -d' ' -f1)
-OPTIONAL_DIGEST=$(sha256sum "$EVIDENCE_DIR/e8-optional-response.json" | cut -d' ' -f1)
+OPTIONAL_DIGEST=$(sha256sum "$EVIDENCE_DIR/05-optional-response.json" | cut -d' ' -f1)
 FAULT_DIGEST=$(sha256sum "$EVIDENCE_DIR/faults/fault-injection.json" | cut -d' ' -f1)
 
 jq -n \
   --arg databaseDigest "$DATABASE_DIGEST" \
   --arg dailyDigest "$DAILY_DIGEST" \
-  --arg vdnsDigest "$VDNS_DIGEST" \
+  --arg stateDigest "$STATE_DIGEST" \
   --arg auditDigest "$AUDIT_DIGEST" \
   --arg optionalDigest "$OPTIONAL_DIGEST" \
   --arg faultDigest "$FAULT_DIGEST" \
   '{
     schemaVersion: "1.0.0",
-    product: "VDNS-PM",
-    protocol: "VDNS-PM/2",
-    suite: "VDNS-PM-CP-2",
+    product: "VPass",
+    protocol: "VPass/2",
+    legacyWireProtocol: "VDNS-PM/2",
+    legacyWireSuite: "VDNS-PM-CP-2",
     dataClassification: "TEST_ONLY",
     containsRealUserData: false,
     steps: [
       {id:"INITIALIZE",status:"COMPLETED",digest:$databaseDigest},
       {id:"CREATE_AUTOFILL_SYNC_UPDATE_REVOKE_OFFLINE",status:"COMPLETED",digest:$dailyDigest},
-      {id:"VDNS_L1_L5",status:"COMPLETED",digest:$vdnsDigest},
+      {id:"TRUSTED_STATE_L1_L5",status:"COMPLETED",digest:$stateDigest},
       {id:"PRIVATE_AUDIT",status:"COMPLETED",digest:$auditDigest},
       {id:"OPTIONAL_RESPONSE",status:"COMPLETED_WITH_PROVIDERS_UNAVAILABLE",digest:$optionalDigest},
       {id:"FAULT_INJECTION",status:"COMPLETED",digest:$faultDigest}
@@ -124,10 +125,10 @@ jq -n \
   echo "step,status"
   echo "INITIALIZE,COMPLETED"
   echo "CREATE_AUTOFILL_SYNC_UPDATE_REVOKE_OFFLINE,COMPLETED"
-  echo "VDNS_L1_L5,COMPLETED"
+  echo "TRUSTED_STATE_L1_L5,COMPLETED"
   echo "PRIVATE_AUDIT,COMPLETED"
   echo "OPTIONAL_RESPONSE,COMPLETED_WITH_PROVIDERS_UNAVAILABLE"
   echo "FAULT_INJECTION,COMPLETED"
 } >"$EVIDENCE_DIR/demo-steps.csv"
 
-echo "vdns-pm-demo-ok data=$DATA_DIR"
+echo "vpass-demo-ok data=$DATA_DIR"

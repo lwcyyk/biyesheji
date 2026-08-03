@@ -3,8 +3,8 @@ package application
 import (
 	"crypto/sha256"
 
-	exposuredomain "vdns.local/vdns/internal/exposure/domain"
-	"vdns.local/vdns/internal/protocol"
+	exposuredomain "vpass.local/vpass/internal/exposure/domain"
+	"vpass.local/vpass/internal/protocol"
 )
 
 // ValidatedAffectedScope adapts a previously validated AffectedSet to the

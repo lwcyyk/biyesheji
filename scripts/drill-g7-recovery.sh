@@ -54,7 +54,7 @@ run_case "DRILL_LOCK_001" \
   "锁定、会话超时和句柄绑定" \
   "锁定或超时后根和一次性句柄不可继续使用" \
   go test ./internal/localapi/application ./internal/credential/domain \
-  -run 'TestAgentSessionExpiryAndHandleBinding|TestVaultSessionLockAndTimeoutDestroyHandlesAndRoots' \
+  -run 'TestLocalSecureClientSessionExpiryAndHandleBinding|TestVaultSessionLockAndTimeoutDestroyHandlesAndRoots' \
   -count=1
 
 run_case "DRILL_OFFLINE_001" \
@@ -72,10 +72,10 @@ run_case "DRILL_RESTART_001" \
   -count=1
 
 run_case "DRILL_BACKUP_001" \
-  "高熵恢复秘密、胶囊、对象和 VDNS 状态联合恢复" \
+  "高熵恢复秘密、胶囊、对象和可信状态联合恢复" \
   "完整且一致的恢复材料成功；错误秘密、缺对象和回滚均失败关闭" \
   go test ./internal/cryptokit ./internal/recovery/domain \
-  -run 'TestRecoveryCapsuleRoundTripAndHighEntropySecretRequirement|TestRecoveryRequiresCapsuleObjectsVDNSAndRootConsistency|TestRecoveryRejectsMissingObjectsRollbackAndBypass' \
+  -run 'TestRecoveryCapsuleRoundTripAndHighEntropySecretRequirement|TestRecoveryRequiresCapsuleObjectsTrustedStateAndRootConsistency|TestRecoveryRejectsMissingObjectsRollbackAndBypass' \
   -count=1
 
 run_case "DRILL_DEVICE_LOSS_001" \
@@ -102,7 +102,7 @@ run_case "DRILL_UNKNOWN_001" \
 failed="$(jq -s '[.[] | select(.status != "PASSED")] | length' "${jsonl}")"
 jq -s \
   --arg schemaVersion "1.0.0" \
-  --arg datasetVersion "vdns-pm-g7-datasets-v1" \
+  --arg datasetVersion "vpass-g7-datasets-v1" \
   --arg classification "EXECUTABLE_RECOVERY_DRILL" \
   --argjson seed 20260723 \
   --argjson failed "${failed}" \

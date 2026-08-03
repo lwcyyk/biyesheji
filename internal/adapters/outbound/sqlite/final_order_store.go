@@ -8,7 +8,7 @@ import (
 	"errors"
 	"time"
 
-	finalorderdomain "vdns.local/vdns/internal/finalorder/domain"
+	finalorderdomain "vpass.local/vpass/internal/finalorder/domain"
 )
 
 type FinalOrderSnapshotStore struct {

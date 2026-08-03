@@ -13,7 +13,7 @@ cd "$PROJECT_ROOT"
 env -u GOPATH go mod verify >"$EVIDENCE_DIR/go-mod-verify.txt"
 env -u GOPATH go list -m all >"$EVIDENCE_DIR/go-modules.txt"
 env -u GOPATH go run ./cmd/g7-sbom \
-  -out "$SECURITY_DIR/vdns-pm.cdx.json" \
+  -out "$SECURITY_DIR/vpass.cdx.json" \
   -licenses-out "$SECURITY_DIR/licenses.json" \
   >"$EVIDENCE_DIR/sbom-generator.txt"
 
@@ -21,8 +21,8 @@ jq -e '
   .bomFormat == "CycloneDX"
   and .specVersion == "1.5"
   and (.components | length) > 0
-  and ([.components[].properties[]? | select(.name == "vdns:go-module-sum" and .value == "")] | length) == 0
-' "$SECURITY_DIR/vdns-pm.cdx.json" >/dev/null
+  and ([.components[].properties[]? | select(.name == "vpass:go-module-sum" and .value == "")] | length) == 0
+' "$SECURITY_DIR/vpass.cdx.json" >/dev/null
 
 jq -e '
   ([.modules[] | select(.reviewStatus != "APPROVED")] | length) == 0
@@ -30,8 +30,8 @@ jq -e '
 ' "$SECURITY_DIR/licenses.json" >/dev/null
 
 BUILD_DIR=$(mktemp -d)
-env -u GOPATH go build -trimpath -o "$BUILD_DIR/vdns-local-agent" ./cmd/vdns-local-agent
-env -u GOPATH go version -m "$BUILD_DIR/vdns-local-agent" >"$EVIDENCE_DIR/binary-build-info.txt"
+env -u GOPATH go build -trimpath -o "$BUILD_DIR/vpass-local-client" ./cmd/vpass-local-client
+env -u GOPATH go version -m "$BUILD_DIR/vpass-local-client" >"$EVIDENCE_DIR/binary-build-info.txt"
 
 "$SCRIPT_DIR/check-secrets.sh" >"$EVIDENCE_DIR/project-secret-scan.txt"
 "$SCRIPT_DIR/check-g5-extension-secrets.sh" >"$EVIDENCE_DIR/extension-security-scan.txt"
@@ -97,7 +97,7 @@ env -u GOPATH go test -json -count=1 \
   -run 'KAT|Domain|Context|Tamper|Authentication|Idempotency|Nonce|Secret|LocalChannel|Origin|ProofMutation|Rollback' \
   >"$EVIDENCE_DIR/security-regression.json"
 
-SBOM_DIGEST=$(sha256sum "$SECURITY_DIR/vdns-pm.cdx.json" | cut -d' ' -f1)
+SBOM_DIGEST=$(sha256sum "$SECURITY_DIR/vpass.cdx.json" | cut -d' ' -f1)
 LICENSE_DIGEST=$(sha256sum "$SECURITY_DIR/licenses.json" | cut -d' ' -f1)
 VULN_DIGEST=$(sha256sum "$VULN_FILE" | cut -d' ' -f1)
 

@@ -7,7 +7,7 @@ import (
 	"errors"
 	"testing"
 
-	"vdns.local/vdns/internal/protocol"
+	"vpass.local/vpass/internal/protocol"
 )
 
 func TestSignedEventRoundTripAndDefensiveCopies(t *testing.T) {
@@ -16,7 +16,7 @@ func TestSignedEventRoundTripAndDefensiveCopies(t *testing.T) {
 	publicKey := privateKey.Public().(ed25519.PublicKey)
 	payload := validPayload()
 
-	event, err := Sign(privateKey, "vdns-test-chain", 3, payload)
+	event, err := Sign(privateKey, "vpass-test-chain", 3, payload)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -26,7 +26,7 @@ func TestSignedEventRoundTripAndDefensiveCopies(t *testing.T) {
 	}
 	expected := protocol.VerificationContext{
 		ObjectType:    protocol.ObjectTypeOperationEvent,
-		ChainID:       "vdns-test-chain",
+		ChainID:       "vpass-test-chain",
 		NamespaceID:   payload.NamespaceID,
 		KeyID:         keyID,
 		KeyGeneration: 3,

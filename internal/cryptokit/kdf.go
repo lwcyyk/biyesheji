@@ -8,7 +8,7 @@ import (
 
 	"golang.org/x/crypto/hkdf"
 
-	"vdns.local/vdns/internal/protocol"
+	"vpass.local/vpass/internal/protocol"
 )
 
 const (
@@ -20,7 +20,7 @@ const (
 	maxCanonicalOrigin  = 4096
 )
 
-// NamespaceKeys contains the five generation-wide VDNS-PM/2 keys. Callers
+// NamespaceKeys contains the five generation-wide VPass v2 keys. Callers
 // receive purpose-scoped handles and cannot retag raw material.
 type NamespaceKeys struct {
 	Wrap     *Key

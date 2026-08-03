@@ -4,7 +4,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 dist_dir="${repo_root}/dist"
 evidence_dir="${repo_root}/test-results/g7/submission"
-archive_name="vdns-pm-graduate-design-v2.0.0.tar.gz"
+archive_name="vpass-graduate-design-v2.1.0.tar.gz"
 archive_path="${dist_dir}/${archive_name}"
 
 cd "${repo_root}"
@@ -13,10 +13,10 @@ required_files=(
   "README.md"
   "go.mod"
   "go.sum"
-  "docs/论文/VDNS-PM研究生毕业论文.md"
-  "docs/论文/VDNS-PM研究生毕业论文.docx"
-  "docs/答辩/VDNS-PM答辩演示.pptx"
-  "docs/答辩/vdns-pm-defense.js"
+  "docs/论文/VPass研究生毕业论文.md"
+  "docs/论文/VPass研究生毕业论文.docx"
+  "docs/答辩/VPass答辩演示.pptx"
+  "docs/答辩/vpass-defense.js"
   "test-results/g7/final-gate-summary.json"
   "test-results/g7/evidence-manifest.json"
 )
@@ -30,8 +30,8 @@ done
 ./scripts/check-spec-trace.sh >/dev/null
 ./scripts/check-secrets.sh >/dev/null
 python3 scripts/check_thesis_docx.py \
-  docs/论文/VDNS-PM研究生毕业论文.docx >/dev/null
-unzip -t docs/答辩/VDNS-PM答辩演示.pptx >/dev/null
+  docs/论文/VPass研究生毕业论文.docx >/dev/null
+unzip -t docs/答辩/VPass答辩演示.pptx >/dev/null
 jq -e '.result == "PASSED"' test-results/g7/final-gate-summary.json >/dev/null
 jq -e '.acceptancePassed == 21 and .acceptanceTotal == 21' \
   test-results/g7/evidence-manifest.json >/dev/null
@@ -39,7 +39,7 @@ jq -e '.acceptancePassed == 21 and .acceptanceTotal == 21' \
 staging_parent="$(mktemp -d)"
 verification_parent="$(mktemp -d)"
 trap 'rm -rf -- "${staging_parent}" "${verification_parent}"' EXIT
-package_root="${staging_parent}/vdns-pm-graduate-design-v2.0.0"
+package_root="${staging_parent}/vpass-graduate-design-v2.1.0"
 mkdir -p "${package_root}" "${dist_dir}" "${evidence_dir}"
 
 tar \

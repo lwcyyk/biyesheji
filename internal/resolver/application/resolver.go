@@ -3,9 +3,9 @@ package application
 import (
 	"crypto/sha256"
 
-	"vdns.local/vdns/internal/protocol"
-	resolverdomain "vdns.local/vdns/internal/resolver/domain"
-	transparencydomain "vdns.local/vdns/internal/transparency/domain"
+	"vpass.local/vpass/internal/protocol"
+	resolverdomain "vpass.local/vpass/internal/resolver/domain"
+	transparencydomain "vpass.local/vpass/internal/transparency/domain"
 )
 
 // ResolveRequest contains receiver-owned trust context and an untrusted
@@ -21,7 +21,7 @@ type ResolveRequest struct {
 	Policy          PolicyInput
 }
 
-// Resolve executes L1-L5 in order and returns the VDNS-selected state. A
+// Resolve executes L1-L5 in order and returns the locally accepted state. A
 // cryptographically invalid proof is a rejection, while an absent proof may
 // enter the explicit L5 offline policy.
 func Resolve(request ResolveRequest) (resolverdomain.Resolution, error) {

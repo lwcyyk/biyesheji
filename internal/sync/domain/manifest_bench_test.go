@@ -6,7 +6,7 @@ import (
 	"crypto/sha256"
 	"testing"
 
-	"vdns.local/vdns/internal/protocol"
+	"vpass.local/vpass/internal/protocol"
 )
 
 func BenchmarkSyncManifestSignVerify100(b *testing.B) {

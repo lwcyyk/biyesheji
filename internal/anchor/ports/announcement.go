@@ -4,7 +4,7 @@ package ports
 import (
 	"context"
 
-	"vdns.local/vdns/internal/anchor/domain"
+	"vpass.local/vpass/internal/anchor/domain"
 )
 
 type AnnouncementProvider interface {

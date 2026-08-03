@@ -14,9 +14,9 @@ import (
 	"testing"
 	"time"
 
-	"vdns.local/vdns/internal/adapters/inbound/httpapi"
-	"vdns.local/vdns/internal/cryptokit"
-	localapp "vdns.local/vdns/internal/localapi/application"
+	"vpass.local/vpass/internal/adapters/inbound/httpapi"
+	"vpass.local/vpass/internal/cryptokit"
+	localapp "vpass.local/vpass/internal/localapi/application"
 )
 
 const performanceToken = "performance-install-token-000000000000000000001"
@@ -26,35 +26,35 @@ func TestDailyAutofillEndToEndP95(t *testing.T) {
 		t.Skip("performance evidence is skipped in short mode")
 	}
 	master := []byte("performance-master-input")
-	agent, err := localapp.NewAgent(localapp.Config{
+	localClient, err := localapp.NewLocalSecureClient(localapp.LocalSecureClientConfig{
 		UnlockVerifier: performanceUnlock(sha256.Sum256(master)),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	deviceID := performanceID(16, 1)
-	masterHandle, _ := agent.StageMasterPassword(deviceID, master)
-	session, fault := agent.CreateVaultSession(localapp.CreateVaultSessionRequest{
+	masterHandle, _ := localClient.StageMasterPassword(deviceID, master)
+	session, fault := localClient.CreateVaultSession(localapp.CreateVaultSessionRequest{
 		DeviceID: deviceID, MasterPasswordHandle: masterHandle,
 	})
 	if fault != nil {
 		t.Fatal(fault)
 	}
 	origin, account := "https://performance.example", "benchmark"
-	username, _ := agent.StageCredentialField(
+	username, _ := localClient.StageCredentialField(
 		session.SessionID, origin, account, "USERNAME", []byte(account),
 	)
-	password, _ := agent.StageCredentialField(
+	password, _ := localClient.StageCredentialField(
 		session.SessionID, origin, account, "PASSWORD", []byte("benchmark-password-value"),
 	)
-	created, fault := agent.CreateCredential(session.SessionID, localapp.CreateCredentialRequest{
+	created, fault := localClient.CreateCredential(session.SessionID, localapp.CreateCredentialRequest{
 		Origin: origin, AccountID: account, UsernameHandle: username,
 		PasswordHandle: password, CryptoPolicyHash: performanceID(32, 11),
 	})
 	if fault != nil {
 		t.Fatal(fault)
 	}
-	handler, err := httpapi.New(agent, httpapi.Config{
+	handler, err := httpapi.New(localClient, httpapi.Config{
 		InstallToken: performanceToken,
 		AllowedExtensionOrigins: []string{
 			"chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -82,8 +82,8 @@ func TestDailyAutofillEndToEndP95(t *testing.T) {
 		request.Header.Set("Authorization", "Bearer "+performanceToken)
 		request.Header.Set("Origin", "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
 		request.Header.Set("Content-Type", "application/json")
-		request.Header.Set("X-VDNS-Vault-Session", session.SessionID)
-		request.Header.Set("X-VDNS-Request-Nonce", fmt.Sprintf("performance-request-nonce-%012d", index))
+		request.Header.Set("X-VPass-Vault-Session", session.SessionID)
+		request.Header.Set("X-VPass-Request-Nonce", fmt.Sprintf("performance-request-nonce-%012d", index))
 		request.Header.Set("Idempotency-Key", fmt.Sprintf("performance-autofill-key-%012d", index))
 		response := httptest.NewRecorder()
 		started := time.Now()
@@ -95,7 +95,7 @@ func TestDailyAutofillEndToEndP95(t *testing.T) {
 		if err := json.Unmarshal(response.Body.Bytes(), &authorization); err != nil {
 			t.Fatal(err)
 		}
-		if err := agent.ConsumeNativeHandle(
+		if err := localClient.ConsumeNativeHandle(
 			session.SessionID, authorization.SecretHandle.SecretHandle,
 			origin, "PASSWORD", func(value []byte) error {
 				if len(value) != len("benchmark-password-value") {
@@ -129,7 +129,7 @@ func TestDailyAutofillEndToEndP95(t *testing.T) {
 		"arch":                runtime.GOARCH,
 		"cpuCount":            runtime.NumCPU(),
 		"heapAllocDeltaBytes": signedDelta(after.HeapAlloc, before.HeapAlloc),
-		"path":                "HTTP auth+nonce+VDNS projection+object clone+Native handle consume",
+		"path":                "HTTP auth+nonce+state projection+object clone+Native handle consume",
 		"waitsForChainOrVRF":  false,
 	}
 	encoded, _ := json.Marshal(evidence)
@@ -138,24 +138,24 @@ func TestDailyAutofillEndToEndP95(t *testing.T) {
 
 func BenchmarkDailyAutofillAuthorization(b *testing.B) {
 	master := []byte("benchmark-master-input")
-	agent, _ := localapp.NewAgent(localapp.Config{
+	localClient, _ := localapp.NewLocalSecureClient(localapp.LocalSecureClientConfig{
 		UnlockVerifier: performanceUnlock(sha256.Sum256(master)),
 	})
 	device := performanceID(16, 21)
-	handle, _ := agent.StageMasterPassword(device, master)
-	session, _ := agent.CreateVaultSession(localapp.CreateVaultSessionRequest{
+	handle, _ := localClient.StageMasterPassword(device, master)
+	session, _ := localClient.CreateVaultSession(localapp.CreateVaultSessionRequest{
 		DeviceID: device, MasterPasswordHandle: handle,
 	})
 	origin, account := "https://benchmark.example", "alice"
-	username, _ := agent.StageCredentialField(session.SessionID, origin, account, "USERNAME", []byte(account))
-	password, _ := agent.StageCredentialField(session.SessionID, origin, account, "PASSWORD", []byte("benchmark-password-value"))
-	created, _ := agent.CreateCredential(session.SessionID, localapp.CreateCredentialRequest{
+	username, _ := localClient.StageCredentialField(session.SessionID, origin, account, "USERNAME", []byte(account))
+	password, _ := localClient.StageCredentialField(session.SessionID, origin, account, "PASSWORD", []byte("benchmark-password-value"))
+	created, _ := localClient.CreateCredential(session.SessionID, localapp.CreateCredentialRequest{
 		Origin: origin, AccountID: account, UsernameHandle: username,
 		PasswordHandle: password, CryptoPolicyHash: performanceID(32, 31),
 	})
 	b.ResetTimer()
 	for index := 0; index < b.N; index++ {
-		authorization, fault := agent.AuthorizeAutofill(
+		authorization, fault := localClient.AuthorizeAutofill(
 			session.SessionID, created.CredentialID,
 			localapp.AutofillAuthorizationRequest{
 				Origin: origin, FieldType: "PASSWORD", ExpectedVersion: 1,
@@ -164,7 +164,7 @@ func BenchmarkDailyAutofillAuthorization(b *testing.B) {
 		if fault != nil {
 			b.Fatal(fault)
 		}
-		if err := agent.ConsumeNativeHandle(
+		if err := localClient.ConsumeNativeHandle(
 			session.SessionID, authorization.SecretHandle.SecretHandle,
 			origin, "PASSWORD", func([]byte) error { return nil },
 		); err != nil {

@@ -1,5 +1,7 @@
 # Stage 2安全状态
 
+> 当前产品名为 VPass；Stage 2 历史证据中的 VDNS-PM 是旧名。
+
 日期：2026-07-31  
 结论：本阶段安全门禁通过，结论限定于当前工作区快照和本次工具范围。
 
@@ -51,7 +53,7 @@ GOPATH=/home/lwc/go go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 -show verbos
 - `RESEARCH_HTTP_SYNC_ADAPTER`没有生产认证、租户隔离、公网TLS运维和高可用；
 - Mock Site没有真实网站证明能力；
 - Anvil/模拟checkpoint没有生产链最终性；
-- local agent仅在注入真实Verifier后返回L1～L5结果；
+- 本地安全客户端仅在注入真实Verifier后返回L1～L5结果；
 - 撤销设备已知旧密码仍可能在外部网站有效。
 
 ## 5. 未完成安全工作

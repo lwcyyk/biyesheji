@@ -11,8 +11,8 @@ import (
 	"fmt"
 	"io"
 
-	"vdns.local/vdns/internal/cryptokit"
-	"vdns.local/vdns/internal/protocol"
+	"vpass.local/vpass/internal/cryptokit"
+	"vpass.local/vpass/internal/protocol"
 )
 
 const PairingCodeDigits = 6

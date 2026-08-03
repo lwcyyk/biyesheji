@@ -8,8 +8,8 @@ import (
 	"errors"
 	"testing"
 
-	"vdns.local/vdns/internal/cryptokit"
-	"vdns.local/vdns/internal/protocol"
+	"vpass.local/vpass/internal/cryptokit"
+	"vpass.local/vpass/internal/protocol"
 )
 
 func TestDeviceCredentialRoundTripAndDefensiveCopies(t *testing.T) {
@@ -18,7 +18,7 @@ func TestDeviceCredentialRoundTripAndDefensiveCopies(t *testing.T) {
 	rootPublic := rootPrivate.Public().(ed25519.PublicKey)
 	payload := validDeviceCredentialPayload(t, NewNamespaceScope())
 
-	credential, err := IssueDeviceOperationCredential(rootPrivate, "vdns-test-chain", 4, payload)
+	credential, err := IssueDeviceOperationCredential(rootPrivate, "vpass-test-chain", 4, payload)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +59,7 @@ func TestDeviceCredentialRoundTripAndDefensiveCopies(t *testing.T) {
 		t.Fatal(err)
 	}
 	setPayload := validDeviceCredentialPayload(t, setScope)
-	setCredential, err := IssueDeviceOperationCredential(rootPrivate, "vdns-test-chain", 4, setPayload)
+	setCredential, err := IssueDeviceOperationCredential(rootPrivate, "vpass-test-chain", 4, setPayload)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -281,6 +281,7 @@ func TestDeviceOperationCredentialFixedKAT(t *testing.T) {
 	t.Parallel()
 	target := filledCredentialID(0x72)
 	payload := validDeviceCredentialPayload(t, mustSingleCredentialScope(t, target))
+	// Frozen legacy wire test vector; the chain identifier is part of the signed bytes.
 	credential, err := IssueDeviceOperationCredential(
 		deviceCredentialRootKey(), "vdns-kat-chain", 9, payload,
 	)
@@ -312,7 +313,7 @@ func FuzzParseAndVerifyDeviceOperationCredential(f *testing.F) {
 	target := filledCredentialID(0x72)
 	payload := validDeviceCredentialPayload(f, mustSingleCredentialScope(f, target))
 	credential, err := IssueDeviceOperationCredential(
-		rootPrivate, "vdns-fuzz-chain", 5, payload,
+		rootPrivate, "vpass-fuzz-chain", 5, payload,
 	)
 	if err != nil {
 		f.Fatal(err)
@@ -327,7 +328,7 @@ func FuzzParseAndVerifyDeviceOperationCredential(f *testing.F) {
 	}
 	expected := protocol.VerificationContext{
 		ObjectType:    protocol.ObjectTypeDeviceCredential,
-		ChainID:       "vdns-fuzz-chain",
+		ChainID:       "vpass-fuzz-chain",
 		NamespaceID:   payload.NamespaceID,
 		KeyID:         keyID,
 		KeyGeneration: 5,
@@ -409,7 +410,7 @@ func deviceCredentialVerificationContext(
 	}
 	return protocol.VerificationContext{
 		ObjectType:    protocol.ObjectTypeDeviceCredential,
-		ChainID:       "vdns-test-chain",
+		ChainID:       "vpass-test-chain",
 		NamespaceID:   namespaceID,
 		KeyID:         keyID,
 		KeyGeneration: generation,
@@ -422,7 +423,7 @@ func issueDeviceCredentialForTest(
 ) *SignedDeviceOperationCredential {
 	t.Helper()
 	credential, err := IssueDeviceOperationCredential(
-		deviceCredentialRootKey(), "vdns-test-chain", 4, payload,
+		deviceCredentialRootKey(), "vpass-test-chain", 4, payload,
 	)
 	if err != nil {
 		t.Fatal(err)

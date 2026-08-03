@@ -3,7 +3,7 @@ package domain
 import (
 	"testing"
 
-	"vdns.local/vdns/internal/protocol"
+	"vpass.local/vpass/internal/protocol"
 )
 
 func TestIncidentSnapshotAndAffectedRootAreCanonicalBindings(t *testing.T) {

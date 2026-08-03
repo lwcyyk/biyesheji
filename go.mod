@@ -1,4 +1,4 @@
-module vdns.local/vdns
+module vpass.local/vpass
 
 go 1.25.0
 

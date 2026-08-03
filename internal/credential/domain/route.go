@@ -4,8 +4,8 @@ import (
 	"crypto/sha256"
 	"errors"
 
-	"vdns.local/vdns/internal/cryptokit"
-	"vdns.local/vdns/internal/protocol"
+	"vpass.local/vpass/internal/cryptokit"
+	"vpass.local/vpass/internal/protocol"
 )
 
 var ErrInvalidRouteEntry = errors.New("invalid encrypted route entry")

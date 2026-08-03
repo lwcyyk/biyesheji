@@ -10,8 +10,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"vdns.local/vdns/internal/cryptokit"
-	"vdns.local/vdns/internal/protocol"
+	"vpass.local/vpass/internal/cryptokit"
+	"vpass.local/vpass/internal/protocol"
 )
 
 func TestVaultProfileRepositoryRestartRecoveryAndNoBareRoot(t *testing.T) {
@@ -194,7 +194,7 @@ func vaultProfileFixture(t testing.TB) (
 	copy(recoveryID[:], bytes.Repeat([]byte{0x67}, len(recoveryID)))
 	rootPublic := append(ed25519.PublicKey(nil), signingPrivate[ed25519.SeedSize:]...)
 	return CreateVaultProfileRequest{
-			NamespaceID: namespaceID, DeviceID: deviceID, ChainID: "vdns-test-chain",
+			NamespaceID: namespaceID, DeviceID: deviceID, ChainID: "vpass-test-chain",
 			ActiveSecretGeneration: 1,
 			RootPublicKey:          rootPublic,
 			CryptoPolicyHash:       sha256.Sum256([]byte("cp2-default-policy")),

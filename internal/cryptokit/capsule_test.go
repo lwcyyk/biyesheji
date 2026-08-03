@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"testing"
 
-	"vdns.local/vdns/internal/protocol"
+	"vpass.local/vpass/internal/protocol"
 )
 
 func TestRootCapsuleRoundTripAndDeviceBinding(t *testing.T) {
@@ -119,7 +119,7 @@ func TestRootCapsuleRejectsMetadataCiphertextAndEncodingTampering(t *testing.T) 
 		mutate func(*RootCapsule)
 	}{
 		{"protocol", func(value *RootCapsule) { value.ProtocolVersion-- }},
-		{"suite", func(value *RootCapsule) { value.SuiteID = "VDNS-CP-1" }},
+		{"suite", func(value *RootCapsule) { value.SuiteID = "INVALID-SUITE-1" }},
 		{"namespace", func(value *RootCapsule) { value.NamespaceID[0] ^= 1 }},
 		{"device", func(value *RootCapsule) { value.DeviceID[0] ^= 1 }},
 		{"salt", func(value *RootCapsule) { value.ArgonSalt[0] ^= 1 }},

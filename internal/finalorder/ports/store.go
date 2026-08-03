@@ -3,7 +3,7 @@ package ports
 import (
 	"context"
 
-	finalorderdomain "vdns.local/vdns/internal/finalorder/domain"
+	finalorderdomain "vpass.local/vpass/internal/finalorder/domain"
 )
 
 // SnapshotStore persists the complete public state of the research adapter.

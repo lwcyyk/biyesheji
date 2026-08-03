@@ -4,10 +4,10 @@ import (
 	"errors"
 	"testing"
 
-	exposuredomain "vdns.local/vdns/internal/exposure/domain"
-	"vdns.local/vdns/internal/protocol"
-	remediationapp "vdns.local/vdns/internal/remediation/application"
-	remediationdomain "vdns.local/vdns/internal/remediation/domain"
+	exposuredomain "vpass.local/vpass/internal/exposure/domain"
+	"vpass.local/vpass/internal/protocol"
+	remediationapp "vpass.local/vpass/internal/remediation/application"
+	remediationdomain "vpass.local/vpass/internal/remediation/domain"
 )
 
 func TestPlannerSupportsAllActionsAndChoosesLowestSafeCost(t *testing.T) {

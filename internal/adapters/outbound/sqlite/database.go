@@ -1,9 +1,9 @@
-// Package sqlite provides the production database boundary for VDNS.
+// Package sqlite provides the Local Secure Client database boundary for VPass.
 //
 // The adapter owns one connection for the lifetime of a database and
 // deliberately exposes no way to enlarge the pool. This keeps BEGIN IMMEDIATE,
 // WAL durability and outbox ordering independent of driver pool behavior.
-// Other processes, including monitors, must use the VDNS API instead of
+// Other processes, including monitors, must use the Local Client API instead of
 // opening the database file directly.
 package sqlite
 
@@ -20,35 +20,36 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"vdns.local/vdns/internal/platform"
-	"vdns.local/vdns/migrations"
+	"vpass.local/vpass/internal/platform"
+	"vpass.local/vpass/migrations"
 )
 
 const (
-	driverName         = "sqlite"
-	legacyVersion      = 1
-	cp2BaseVersion     = 2
-	g2CoreVersion      = 3
-	g3LifecycleVersion = 4
-	g4VDNSVersion      = 5
-	g5LocalAPIVersion  = 6
-	g6PrivacyVersion   = 7
-	currentVersion     = 8
-	initialName        = "0002_v2_initial"
-	initialChecksum    = "18bd457a1fbf4e5d904c46512402c31dcc8bb96cb51b75eb62b8cca0566af152"
-	g2CoreName         = "0003_g2_core"
-	g2CoreChecksum     = "70934a17beba6ac5cd942c57f5b310d04ca9257a5e6dda9d3f6d027a1a696a9e"
-	g3LifecycleName    = "0004_g3_lifecycle_sync"
-	g3LifecycleCheck   = "c064e22d26cd0b703c82a3b8f53145110c799d6cd8a7ba5b03fb4501b89b2ac7"
-	g4VDNSName         = "0005_g4_vdns_transparency"
-	g4VDNSChecksum     = "8706b8da3cab1a182d70ae1d053556d1274c7d88ea612988abc3c53bce043f9b"
-	g5LocalAPIName     = "0006_g5_local_api"
-	g5LocalAPIChecksum = "8d0f548d0dc65ab00f4b9e4a13b4cc80b64b09c4ffe0e7fb8527200c1d45e056"
-	g6PrivacyName      = "0007_g6_privacy_response"
-	g6PrivacyChecksum  = "bda97d75cd1717c7afa0f1172be04781f01ac0e327647d423883746db8cc67eb"
-	stage2Name         = "0008_stage2_protocol_closure"
-	stage2Checksum     = "7c11ff6b5af6959c41c160789f395187440aa385aec441dbe034a32276b13b07"
-	busyTimeoutMilli   = 5000
+	driverName           = "sqlite"
+	legacyVersion        = 1
+	cp2BaseVersion       = 2
+	g2CoreVersion        = 3
+	g3LifecycleVersion   = 4
+	legacyG4StateVersion = 5
+	g5LocalAPIVersion    = 6
+	g6PrivacyVersion     = 7
+	currentVersion       = 8
+	initialName          = "0002_v2_initial"
+	initialChecksum      = "18bd457a1fbf4e5d904c46512402c31dcc8bb96cb51b75eb62b8cca0566af152"
+	g2CoreName           = "0003_g2_core"
+	g2CoreChecksum       = "70934a17beba6ac5cd942c57f5b310d04ca9257a5e6dda9d3f6d027a1a696a9e"
+	g3LifecycleName      = "0004_g3_lifecycle_sync"
+	g3LifecycleCheck     = "c064e22d26cd0b703c82a3b8f53145110c799d6cd8a7ba5b03fb4501b89b2ac7"
+	// The G4 filename/checksum are immutable legacy migration identifiers.
+	legacyG4StateName     = "0005_g4_vdns_transparency"
+	legacyG4StateChecksum = "8706b8da3cab1a182d70ae1d053556d1274c7d88ea612988abc3c53bce043f9b"
+	g5LocalAPIName        = "0006_g5_local_api"
+	g5LocalAPIChecksum    = "8d0f548d0dc65ab00f4b9e4a13b4cc80b64b09c4ffe0e7fb8527200c1d45e056"
+	g6PrivacyName         = "0007_g6_privacy_response"
+	g6PrivacyChecksum     = "bda97d75cd1717c7afa0f1172be04781f01ac0e327647d423883746db8cc67eb"
+	stage2Name            = "0008_stage2_protocol_closure"
+	stage2Checksum        = "7c11ff6b5af6959c41c160789f395187440aa385aec441dbe034a32276b13b07"
+	busyTimeoutMilli      = 5000
 )
 
 var (
@@ -64,7 +65,7 @@ type Database struct {
 	db *sql.DB
 }
 
-// Open creates or validates a file-backed VDNS database. In-memory databases
+// Open creates or validates a file-backed VPass database. In-memory databases
 // are rejected because they cannot exercise the required WAL durability mode.
 func Open(ctx context.Context, path string) (*Database, error) {
 	if ctx == nil || strings.TrimSpace(path) == "" || path == ":memory:" {
@@ -128,7 +129,7 @@ func (database *Database) migrateAndVerify(ctx context.Context) error {
 			return fmt.Errorf("apply migration %s: %w", g3LifecycleName, err)
 		}
 		if _, err := database.db.ExecContext(ctx, migrations.G4VDNSTransparencySQL); err != nil {
-			return fmt.Errorf("apply migration %s: %w", g4VDNSName, err)
+			return fmt.Errorf("apply migration %s: %w", legacyG4StateName, err)
 		}
 		if _, err := database.db.ExecContext(ctx, migrations.G5LocalAPISQL); err != nil {
 			return fmt.Errorf("apply migration %s: %w", g5LocalAPIName, err)
@@ -154,7 +155,7 @@ func (database *Database) migrateAndVerify(ctx context.Context) error {
 			return fmt.Errorf("apply migration %s: %w", g3LifecycleName, err)
 		}
 		if _, err := database.db.ExecContext(ctx, migrations.G4VDNSTransparencySQL); err != nil {
-			return fmt.Errorf("apply migration %s: %w", g4VDNSName, err)
+			return fmt.Errorf("apply migration %s: %w", legacyG4StateName, err)
 		}
 		if _, err := database.db.ExecContext(ctx, migrations.G5LocalAPISQL); err != nil {
 			return fmt.Errorf("apply migration %s: %w", g5LocalAPIName, err)
@@ -177,7 +178,7 @@ func (database *Database) migrateAndVerify(ctx context.Context) error {
 			return fmt.Errorf("apply migration %s: %w", g3LifecycleName, err)
 		}
 		if _, err := database.db.ExecContext(ctx, migrations.G4VDNSTransparencySQL); err != nil {
-			return fmt.Errorf("apply migration %s: %w", g4VDNSName, err)
+			return fmt.Errorf("apply migration %s: %w", legacyG4StateName, err)
 		}
 		if _, err := database.db.ExecContext(ctx, migrations.G5LocalAPISQL); err != nil {
 			return fmt.Errorf("apply migration %s: %w", g5LocalAPIName, err)
@@ -202,7 +203,7 @@ func (database *Database) migrateAndVerify(ctx context.Context) error {
 			return err
 		}
 		if _, err := database.db.ExecContext(ctx, migrations.G4VDNSTransparencySQL); err != nil {
-			return fmt.Errorf("apply migration %s: %w", g4VDNSName, err)
+			return fmt.Errorf("apply migration %s: %w", legacyG4StateName, err)
 		}
 		if _, err := database.db.ExecContext(ctx, migrations.G5LocalAPISQL); err != nil {
 			return fmt.Errorf("apply migration %s: %w", g5LocalAPIName, err)
@@ -210,7 +211,7 @@ func (database *Database) migrateAndVerify(ctx context.Context) error {
 		if _, err := database.db.ExecContext(ctx, migrations.G6PrivacyResponseSQL); err != nil {
 			return fmt.Errorf("apply migration %s: %w", g6PrivacyName, err)
 		}
-	case g4VDNSVersion:
+	case legacyG4StateVersion:
 		if err := database.verifyMigration(
 			ctx, cp2BaseVersion, initialName, initialChecksum,
 		); err != nil {
@@ -227,7 +228,7 @@ func (database *Database) migrateAndVerify(ctx context.Context) error {
 			return err
 		}
 		if err := database.verifyMigration(
-			ctx, g4VDNSVersion, g4VDNSName, g4VDNSChecksum,
+			ctx, legacyG4StateVersion, legacyG4StateName, legacyG4StateChecksum,
 		); err != nil {
 			return err
 		}
@@ -287,7 +288,7 @@ func (database *Database) verifyMigrationIdentity(ctx context.Context) error {
 		return err
 	}
 	if err := database.verifyMigration(
-		ctx, g4VDNSVersion, g4VDNSName, g4VDNSChecksum,
+		ctx, legacyG4StateVersion, legacyG4StateName, legacyG4StateChecksum,
 	); err != nil {
 		return err
 	}

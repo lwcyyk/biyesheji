@@ -5,7 +5,7 @@ import (
 	"encoding/hex"
 	"testing"
 
-	"vdns.local/vdns/internal/protocol"
+	"vpass.local/vpass/internal/protocol"
 )
 
 func TestCheckpointKATWhitelistAndProvider(t *testing.T) {

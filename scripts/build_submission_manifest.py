@@ -60,8 +60,8 @@ def create(root: Path, output: Path) -> None:
     entries = collect(root, output)
     result = {
         "schemaVersion": "1.0.0",
-        "project": "VDNS-PM",
-        "version": "2.0.0",
+        "project": "VPass",
+        "version": "2.1.0",
         "classification": "GRADUATE_DESIGN_SOURCE_DOCUMENTS_AND_TEST_EVIDENCE",
         "containsRealUserData": False,
         "files": entries,

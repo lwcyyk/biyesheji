@@ -7,9 +7,9 @@ import (
 	"errors"
 	"testing"
 
-	"vdns.local/vdns/internal/cryptokit"
-	"vdns.local/vdns/internal/platform"
-	"vdns.local/vdns/internal/protocol"
+	"vpass.local/vpass/internal/cryptokit"
+	"vpass.local/vpass/internal/platform"
+	"vpass.local/vpass/internal/protocol"
 )
 
 func TestCredentialEnvelopeV2CanonicalRoundTripAndKAT(t *testing.T) {

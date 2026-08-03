@@ -13,7 +13,7 @@ import (
 	"regexp"
 	"strings"
 
-	localapp "vdns.local/vdns/internal/localapi/application"
+	localapp "vpass.local/vpass/internal/localapi/application"
 )
 
 const maxMessageBytes = 1024 * 1024
@@ -26,8 +26,8 @@ type Config struct {
 }
 
 type Host struct {
-	agent  *localapp.Agent
-	config Config
+	localClient *localapp.LocalSecureClient
+	config      Config
 }
 
 type request struct {
@@ -59,13 +59,13 @@ type response struct {
 	Result       any    `json:"result,omitempty"`
 }
 
-func New(agent *localapp.Agent, config Config) (*Host, error) {
+func New(localClient *localapp.LocalSecureClient, config Config) (*Host, error) {
 	match := loopbackBaseURL.FindStringSubmatch(config.BaseURL)
-	if agent == nil || match == nil || len(config.InstallToken) < 32 ||
+	if localClient == nil || match == nil || len(config.InstallToken) < 32 ||
 		len(config.InstallToken) > 512 || strings.ContainsAny(config.InstallToken, "\r\n") {
 		return nil, errors.New("invalid Native Messaging configuration")
 	}
-	return &Host{agent: agent, config: config}, nil
+	return &Host{localClient: localClient, config: config}, nil
 }
 
 // Run processes a persistent Native Messaging connection. It emits no logs;
@@ -123,21 +123,21 @@ func (host *Host) Handle(message []byte) []byte {
 		result.BaseURL = host.config.BaseURL
 		result.InstallToken = host.config.InstallToken
 	case "stageMasterPassword":
-		handle, err := host.agent.StageMasterPassword(input.DeviceID, secretBytes)
+		handle, err := host.localClient.StageMasterPassword(input.DeviceID, secretBytes)
 		if err != nil {
 			result.Code = stableCode(err)
 			break
 		}
 		result.OK, result.SecretHandle = true, handle
 	case "stageRecoverySecret":
-		handle, err := host.agent.StageRecoverySecret(input.NamespaceID, input.DeviceID, secretBytes)
+		handle, err := host.localClient.StageRecoverySecret(input.NamespaceID, input.DeviceID, secretBytes)
 		if err != nil {
 			result.Code = stableCode(err)
 			break
 		}
 		result.OK, result.SecretHandle = true, handle
 	case "stageCredentialField":
-		handle, err := host.agent.StageCredentialField(
+		handle, err := host.localClient.StageCredentialField(
 			input.SessionID, input.Origin, input.AccountID, input.FieldType, secretBytes,
 		)
 		if err != nil {
@@ -146,7 +146,7 @@ func (host *Host) Handle(message []byte) []byte {
 		}
 		result.OK, result.SecretHandle = true, handle
 	case "stageAuditAnalysisSecret":
-		handle, err := host.agent.StageAuditAnalysisSecret(input.SessionID, secretBytes)
+		handle, err := host.localClient.StageAuditAnalysisSecret(input.SessionID, secretBytes)
 		if err != nil {
 			result.Code = stableCode(err)
 			break
@@ -158,7 +158,7 @@ func (host *Host) Handle(message []byte) []byte {
 			break
 		}
 		var exposed []byte
-		err := host.agent.ConsumeNativeHandle(
+		err := host.localClient.ConsumeNativeHandle(
 			input.SessionID, input.SecretHandle, input.Origin, input.FieldType,
 			func(value []byte) error {
 				exposed = append(exposed, value...)
@@ -177,7 +177,7 @@ func (host *Host) Handle(message []byte) []byte {
 			result.Code = "NATIVE_REQUEST_REJECTED"
 			break
 		}
-		handle, fault := host.agent.AuthorizeCandidateField(
+		handle, fault := host.localClient.AuthorizeCandidateField(
 			input.SessionID, input.CredentialID, input.CandidateVersion,
 			input.Origin, input.FieldType,
 		)
@@ -191,7 +191,7 @@ func (host *Host) Handle(message []byte) []byte {
 			result.Code = "NATIVE_REQUEST_REJECTED"
 			break
 		}
-		page, fault := host.agent.ListSecurityFindings(
+		page, fault := host.localClient.ListSecurityFindings(
 			input.SessionID, input.ResultReference, input.Cursor, input.Limit,
 		)
 		if fault != nil {

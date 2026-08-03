@@ -10,13 +10,13 @@ import (
 	"errors"
 	"time"
 
-	"vdns.local/vdns/internal/adapters/outbound/sqlite"
-	credential "vdns.local/vdns/internal/credential/domain"
-	"vdns.local/vdns/internal/cryptokit"
-	operation "vdns.local/vdns/internal/operation/domain"
-	password "vdns.local/vdns/internal/password/domain"
-	"vdns.local/vdns/internal/platform"
-	"vdns.local/vdns/internal/protocol"
+	"vpass.local/vpass/internal/adapters/outbound/sqlite"
+	credential "vpass.local/vpass/internal/credential/domain"
+	"vpass.local/vpass/internal/cryptokit"
+	operation "vpass.local/vpass/internal/operation/domain"
+	password "vpass.local/vpass/internal/password/domain"
+	"vpass.local/vpass/internal/platform"
+	"vpass.local/vpass/internal/protocol"
 )
 
 var (
@@ -31,7 +31,7 @@ type DeviceControlSigner interface {
 }
 
 // StateDescriptorVerifier is the G2 verification seam. G4 supplies the full
-// VDNS five-layer verifier at this boundary.
+// five-layer Local State Verifier at this boundary.
 type StateDescriptorVerifier interface {
 	VerifyStateDescriptor(
 		ctx context.Context,

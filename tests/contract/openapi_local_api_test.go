@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"vdns.local/vdns/internal/adapters/inbound/httpapi"
+	"vpass.local/vpass/internal/adapters/inbound/httpapi"
 )
 
 type openAPIDocument struct {
@@ -85,7 +85,8 @@ func TestOpenAPISecurityAndMutationHeaders(t *testing.T) {
 			for _, parameter := range operation.Parameters {
 				refs[parameter.Ref] = true
 			}
-			if path != "/credential-route-resolutions" && path != "/vdns-resolutions" &&
+			if path != "/credential-route-resolutions" && path != "/state-resolutions" &&
+				path != "/vdns-resolutions" &&
 				!refs["#/components/parameters/IdempotencyKey"] {
 				t.Errorf("POST %s lacks Idempotency-Key", path)
 			}

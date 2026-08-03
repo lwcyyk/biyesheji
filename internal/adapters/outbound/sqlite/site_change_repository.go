@@ -8,10 +8,10 @@ import (
 	"errors"
 	"math"
 
-	"vdns.local/vdns/internal/platform"
-	"vdns.local/vdns/internal/protocol"
-	siteapp "vdns.local/vdns/internal/site/application"
-	sitedomain "vdns.local/vdns/internal/site/domain"
+	"vpass.local/vpass/internal/platform"
+	"vpass.local/vpass/internal/protocol"
+	siteapp "vpass.local/vpass/internal/site/application"
+	sitedomain "vpass.local/vpass/internal/site/domain"
 )
 
 var (

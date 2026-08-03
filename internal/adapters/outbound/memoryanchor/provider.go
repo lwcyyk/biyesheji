@@ -8,7 +8,7 @@ import (
 	"errors"
 	"sync"
 
-	anchordomain "vdns.local/vdns/internal/anchor/domain"
+	anchordomain "vpass.local/vpass/internal/anchor/domain"
 )
 
 var ErrConflictingCheckpoint = errors.New("conflicting simulated checkpoint")

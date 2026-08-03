@@ -112,7 +112,7 @@ test("credential view explains source, verdict, and conflict recovery", () => {
     lifecycleStatus: "CONFLICTED", verdict: "REVIEW_REQUIRED"
   });
   assert.equal(view.needsReview, true);
-  assert.match(view.sourceText, /VDNS/);
+  assert.match(view.sourceText, /可验证状态/);
   assert.match(view.verdictText, /人工复核/);
   assert.ok(view.recoveryActions.some((value) => value.includes("descriptor")));
 });

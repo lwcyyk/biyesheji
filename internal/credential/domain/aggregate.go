@@ -4,7 +4,7 @@ import (
 	"crypto/sha256"
 	"errors"
 
-	"vdns.local/vdns/internal/protocol"
+	"vpass.local/vpass/internal/protocol"
 )
 
 var (

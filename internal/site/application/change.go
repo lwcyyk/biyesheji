@@ -8,8 +8,8 @@ import (
 	"crypto/sha256"
 	"errors"
 
-	"vdns.local/vdns/internal/protocol"
-	sitedomain "vdns.local/vdns/internal/site/domain"
+	"vpass.local/vpass/internal/protocol"
+	sitedomain "vpass.local/vpass/internal/site/domain"
 )
 
 var (

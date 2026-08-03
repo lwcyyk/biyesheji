@@ -26,17 +26,17 @@ import (
 	"syscall"
 	"time"
 
-	sqliteadapter "vdns.local/vdns/internal/adapters/outbound/sqlite"
-	credentialdomain "vdns.local/vdns/internal/credential/domain"
-	"vdns.local/vdns/internal/cryptokit"
-	"vdns.local/vdns/internal/protocol"
-	syncdomain "vdns.local/vdns/internal/sync/domain"
-	transparencydomain "vdns.local/vdns/internal/transparency/domain"
+	sqliteadapter "vpass.local/vpass/internal/adapters/outbound/sqlite"
+	credentialdomain "vpass.local/vpass/internal/credential/domain"
+	"vpass.local/vpass/internal/cryptokit"
+	"vpass.local/vpass/internal/protocol"
+	syncdomain "vpass.local/vpass/internal/sync/domain"
+	transparencydomain "vpass.local/vpass/internal/transparency/domain"
 )
 
 const (
 	schemaVersion   = "1.0.0"
-	datasetVersion  = "vdns-pm-g7-datasets-v1"
+	datasetVersion  = "vpass-g7-datasets-v1"
 	experimentSeed  = uint64(20260723)
 	warmupCount     = 10
 	repetitionCount = 30
@@ -330,8 +330,8 @@ func runE2(outputDirectory string) ([]metric, error) {
   namespace_id, protocol_version, suite_id, chain_id,
   root_signing_public_key, root_key_id, current_secret_generation,
   status, created_at_ms, updated_at_ms
-) VALUES (?, 2, 'VDNS-PM-CP-2', 'g7-research-chain', ?, ?, 1, 'ACTIVE', 1, 1)`,
-		namespace[:], rootPublicKey, rootKeyID[:],
+) VALUES (?, 2, ?, 'g7-research-chain', ?, ?, 1, 'ACTIVE', 1, 1)`,
+		namespace[:], protocol.SuiteID, rootPublicKey, rootKeyID[:],
 	); err != nil {
 		return nil, err
 	}
@@ -341,8 +341,8 @@ func runE2(outputDirectory string) ([]metric, error) {
 		`INSERT INTO vault_profiles (
   namespace_id, protocol_version, suite_id, active_secret_generation,
   root_public_key, crypto_policy_hash, created_at_ms
-) VALUES (?, 2, 'VDNS-PM-CP-2', 1, ?, ?, 1)`,
-		namespace[:], rootPublicKey, policyHash[:],
+) VALUES (?, 2, ?, 1, ?, ?, 1)`,
+		namespace[:], protocol.SuiteID, rootPublicKey, policyHash[:],
 	); err != nil {
 		return nil, err
 	}

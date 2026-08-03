@@ -6,8 +6,8 @@ import (
 	"crypto/sha256"
 	"errors"
 
-	"vdns.local/vdns/internal/protocol"
-	transparencydomain "vdns.local/vdns/internal/transparency/domain"
+	"vpass.local/vpass/internal/protocol"
+	transparencydomain "vpass.local/vpass/internal/transparency/domain"
 )
 
 var ErrInvalidEvidence = errors.New("invalid monitor evidence")

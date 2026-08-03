@@ -18,12 +18,12 @@ import (
 	"runtime"
 	"time"
 
-	exposureapp "vdns.local/vdns/internal/exposure/application"
-	exposuredomain "vdns.local/vdns/internal/exposure/domain"
-	exposureports "vdns.local/vdns/internal/exposure/ports"
-	"vdns.local/vdns/internal/protocol"
-	remediationapp "vdns.local/vdns/internal/remediation/application"
-	remediationdomain "vdns.local/vdns/internal/remediation/domain"
+	exposureapp "vpass.local/vpass/internal/exposure/application"
+	exposuredomain "vpass.local/vpass/internal/exposure/domain"
+	exposureports "vpass.local/vpass/internal/exposure/ports"
+	"vpass.local/vpass/internal/protocol"
+	remediationapp "vpass.local/vpass/internal/remediation/application"
+	remediationdomain "vpass.local/vpass/internal/remediation/domain"
 )
 
 const (

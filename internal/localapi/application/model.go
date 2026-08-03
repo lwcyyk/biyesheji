@@ -1,4 +1,4 @@
-// Package application implements the authenticated local-agent use cases.
+// Package application implements the authenticated local-localClient use cases.
 // DTOs in this package mirror the frozen /api/v2 OpenAPI contract. Secret
 // values are represented only by one-use handles.
 package application
@@ -164,7 +164,7 @@ type RecoverySessionRequest struct {
 	RecoverySecretHandle string `json:"recoverySecretHandle"`
 }
 
-type VDNSResolutionRequest struct {
+type StateResolutionRequest struct {
 	CredentialID            string `json:"credentialId"`
 	Operation               string `json:"operation"`
 	TrustedCheckpointHash   string `json:"trustedCheckpointHash"`
@@ -179,7 +179,7 @@ type LayerResults struct {
 	L5 string `json:"l5"`
 }
 
-type VDNSResolution struct {
+type StateResolution struct {
 	ResolutionID       string       `json:"resolutionId"`
 	CredentialID       string       `json:"credentialId"`
 	ActiveVersion      uint64       `json:"activeVersion"`

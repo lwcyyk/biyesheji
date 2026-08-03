@@ -7,7 +7,7 @@ import (
 
 	"github.com/google/uuid"
 
-	localports "vdns.local/vdns/internal/localapi/ports"
+	localports "vpass.local/vpass/internal/localapi/ports"
 )
 
 func TestLocalOperationRepositoryRetainsPendingAndUnknown(t *testing.T) {

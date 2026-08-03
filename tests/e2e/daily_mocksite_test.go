@@ -14,11 +14,11 @@ import (
 
 	"github.com/google/uuid"
 
-	"vdns.local/vdns/internal/adapters/inbound/httpapi"
-	"vdns.local/vdns/internal/adapters/inbound/mocksiteweb"
-	"vdns.local/vdns/internal/adapters/inbound/nativemessaging"
-	"vdns.local/vdns/internal/cryptokit"
-	localapp "vdns.local/vdns/internal/localapi/application"
+	"vpass.local/vpass/internal/adapters/inbound/httpapi"
+	"vpass.local/vpass/internal/adapters/inbound/mocksiteweb"
+	"vpass.local/vpass/internal/adapters/inbound/nativemessaging"
+	"vpass.local/vpass/internal/cryptokit"
+	localapp "vpass.local/vpass/internal/localapi/application"
 )
 
 const (
@@ -35,13 +35,13 @@ type dailyClient struct {
 
 func TestDailyMockSiteRegisterLoginChangeSyncRevokeAndOffline(t *testing.T) {
 	master := []byte("e2e-master-input")
-	agent, err := localapp.NewAgent(localapp.Config{
+	localClient, err := localapp.NewLocalSecureClient(localapp.LocalSecureClientConfig{
 		UnlockVerifier: digestUnlock(sha256.Sum256(master)),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	apiHandler, err := httpapi.New(agent, httpapi.Config{
+	apiHandler, err := httpapi.New(localClient, httpapi.Config{
 		InstallToken: e2eToken, AllowedExtensionOrigins: []string{e2eOrigin},
 	})
 	if err != nil {
@@ -49,7 +49,7 @@ func TestDailyMockSiteRegisterLoginChangeSyncRevokeAndOffline(t *testing.T) {
 	}
 	apiServer := httptest.NewServer(apiHandler)
 	defer apiServer.Close()
-	nativeHost, err := nativemessaging.New(agent, nativemessaging.Config{
+	nativeHost, err := nativemessaging.New(localClient, nativemessaging.Config{
 		BaseURL: apiServer.URL, InstallToken: e2eToken,
 	})
 	if err != nil {
@@ -188,9 +188,9 @@ func (client *dailyClient) post(path, idempotency string, input any, want int) m
 	request.Header.Set("Authorization", "Bearer "+e2eToken)
 	request.Header.Set("Origin", e2eOrigin)
 	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("X-VDNS-Request-Nonce", fmt.Sprintf("e2e-request-nonce-%012d", client.counter.Add(1)))
+	request.Header.Set("X-VPass-Request-Nonce", fmt.Sprintf("e2e-request-nonce-%012d", client.counter.Add(1)))
 	if client.session != "" {
-		request.Header.Set("X-VDNS-Vault-Session", client.session)
+		request.Header.Set("X-VPass-Vault-Session", client.session)
 	}
 	if idempotency != "" {
 		request.Header.Set("Idempotency-Key", idempotency)

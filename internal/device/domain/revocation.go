@@ -4,7 +4,7 @@ import (
 	"errors"
 	"sort"
 
-	"vdns.local/vdns/internal/protocol"
+	"vpass.local/vpass/internal/protocol"
 )
 
 var (

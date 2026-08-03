@@ -8,12 +8,12 @@ import (
 	"errors"
 	"testing"
 
-	"vdns.local/vdns/internal/adapters/outbound/memorysync"
-	credential "vdns.local/vdns/internal/credential/domain"
-	"vdns.local/vdns/internal/cryptokit"
-	"vdns.local/vdns/internal/platform"
-	"vdns.local/vdns/internal/protocol"
-	syncdomain "vdns.local/vdns/internal/sync/domain"
+	"vpass.local/vpass/internal/adapters/outbound/memorysync"
+	credential "vpass.local/vpass/internal/credential/domain"
+	"vpass.local/vpass/internal/cryptokit"
+	"vpass.local/vpass/internal/platform"
+	"vpass.local/vpass/internal/protocol"
+	syncdomain "vpass.local/vpass/internal/sync/domain"
 )
 
 func TestAcceptanceVerifiesCompleteCandidateBeforeSingleCommit(t *testing.T) {

@@ -7,8 +7,8 @@ import (
 	"crypto/sha256"
 	"errors"
 
-	devicedomain "vdns.local/vdns/internal/device/domain"
-	"vdns.local/vdns/internal/protocol"
+	devicedomain "vpass.local/vpass/internal/device/domain"
+	"vpass.local/vpass/internal/protocol"
 )
 
 var ErrEnrollmentCoordination = errors.New("device enrollment coordination failed")

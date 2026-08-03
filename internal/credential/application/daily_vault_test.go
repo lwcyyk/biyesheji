@@ -13,14 +13,14 @@ import (
 	"testing"
 	"time"
 
-	"vdns.local/vdns/internal/adapters/outbound/objectfs"
-	"vdns.local/vdns/internal/adapters/outbound/sqlite"
-	credential "vdns.local/vdns/internal/credential/domain"
-	"vdns.local/vdns/internal/cryptokit"
-	operation "vdns.local/vdns/internal/operation/domain"
-	password "vdns.local/vdns/internal/password/domain"
-	"vdns.local/vdns/internal/platform"
-	"vdns.local/vdns/internal/protocol"
+	"vpass.local/vpass/internal/adapters/outbound/objectfs"
+	"vpass.local/vpass/internal/adapters/outbound/sqlite"
+	credential "vpass.local/vpass/internal/credential/domain"
+	"vpass.local/vpass/internal/cryptokit"
+	operation "vpass.local/vpass/internal/operation/domain"
+	password "vpass.local/vpass/internal/password/domain"
+	"vpass.local/vpass/internal/platform"
+	"vpass.local/vpass/internal/protocol"
 )
 
 func TestDailyVaultCreateReadAndAtomicDuplicateRollback(t *testing.T) {
@@ -230,7 +230,7 @@ type dailyVaultFixture struct {
 func newDailyVaultFixture(t testing.TB) *dailyVaultFixture {
 	t.Helper()
 	ctx := context.Background()
-	database, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "vdns.db"))
+	database, err := sqlite.Open(ctx, filepath.Join(t.TempDir(), "vpass.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -273,7 +273,7 @@ func newDailyVaultFixture(t testing.TB) *dailyVaultFixture {
 	}
 	t.Cleanup(session.Lock)
 	signer := &testControlSigner{
-		privateKey: devicePrivate, chainID: "vdns-test-chain", keyGeneration: 1,
+		privateKey: devicePrivate, chainID: "vpass-test-chain", keyGeneration: 1,
 	}
 	verifier := testStateVerifier{
 		publicKey: devicePublic, chainID: signer.chainID, keyGeneration: 1,
@@ -330,7 +330,7 @@ func seedDailyVaultDatabase(
   namespace_id, protocol_version, suite_id, chain_id,
   root_signing_public_key, root_key_id, current_secret_generation,
   status, created_at_ms, updated_at_ms
-) VALUES (?, 2, ?, 'vdns-test-chain', ?, ?, 1, 'ACTIVE', ?, ?)`,
+) VALUES (?, 2, ?, 'vpass-test-chain', ?, ?, 1, 'ACTIVE', ?, ?)`,
 			[]any{namespaceID[:], protocol.SuiteID, rootPublic, rootKeyID[:], createdAt, createdAt},
 		},
 		{

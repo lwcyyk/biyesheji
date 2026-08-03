@@ -5,8 +5,8 @@ import (
 	"crypto/sha256"
 	"sync"
 
-	"vdns.local/vdns/internal/protocol"
-	remediationdomain "vdns.local/vdns/internal/remediation/domain"
+	"vpass.local/vpass/internal/protocol"
+	remediationdomain "vpass.local/vpass/internal/remediation/domain"
 )
 
 type attemptKey struct {

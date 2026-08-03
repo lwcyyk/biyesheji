@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify the immutable G0 specification baseline."""
+"""Verify the current explicitly versioned specification baseline."""
 
 from __future__ import annotations
 

@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"vdns.local/vdns/migrations"
+	"vpass.local/vpass/migrations"
 )
 
 func TestOpenAppliesMigrationAndSecurityProfile(t *testing.T) {
@@ -45,7 +45,7 @@ func TestOpenAppliesMigrationAndSecurityProfile(t *testing.T) {
 
 func TestOpenIsIdempotentAndRejectsMigrationTampering(t *testing.T) {
 	t.Parallel()
-	path := filepath.Join(t.TempDir(), "vdns.db")
+	path := filepath.Join(t.TempDir(), "vpass.db")
 	database, err := Open(context.Background(), path)
 	if err != nil {
 		t.Fatal(err)
@@ -316,7 +316,7 @@ func TestOpenRejectsMemoryAndNewerSchema(t *testing.T) {
 		t.Fatalf("memory Open error = %v", err)
 	}
 
-	path := filepath.Join(t.TempDir(), "vdns.db")
+	path := filepath.Join(t.TempDir(), "vpass.db")
 	database, err := Open(context.Background(), path)
 	if err != nil {
 		t.Fatal(err)
@@ -336,7 +336,7 @@ func TestOpenRejectsMemoryAndNewerSchema(t *testing.T) {
 
 func openTestDatabase(t *testing.T) *Database {
 	t.Helper()
-	database, err := Open(context.Background(), filepath.Join(t.TempDir(), "vdns.db"))
+	database, err := Open(context.Background(), filepath.Join(t.TempDir(), "vpass.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

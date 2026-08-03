@@ -13,7 +13,7 @@ class APICoverageTest(unittest.TestCase):
     def test_all_openapi_operations_are_accounted_for(self):
         report = MODULE.generate()
         self.assertEqual(report["contractVersion"], "2.1.0")
-        self.assertEqual(report["operationCount"], 22)
+        self.assertEqual(report["operationCount"], 23)
         self.assertTrue(report["allOperationsAccountedFor"])
         self.assertNotIn("UNVERIFIED", report["counts"])
 
@@ -25,7 +25,8 @@ class APICoverageTest(unittest.TestCase):
         }
         self.assertEqual(statuses["createExposureAnalysis"], "NOT_IMPLEMENTED")
         self.assertEqual(statuses["createRemediationCampaign"], "NOT_IMPLEMENTED")
-        self.assertEqual(statuses["createVdnsResolution"], "PARTIAL")
+        self.assertEqual(statuses["createStateResolution"], "PARTIAL")
+        self.assertEqual(statuses["createLegacyVdnsResolution"], "PARTIAL")
 
 
 if __name__ == "__main__":

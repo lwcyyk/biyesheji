@@ -44,14 +44,14 @@ def main() -> None:
         "docProps/core.xml",
     }
     required_texts = [
-        "基于 VDNS 的可验证密码生命周期管理与隐私审计方法研究",
+        "VPass：可验证密码生命周期管理系统的设计与实现",
         "摘要",
         "Abstract",
         "第一章 绪论",
         "第八章 系统实现与实验评估",
         "结论",
         "参考文献",
-        "AEAD 保护密码内容，VDNS 保护密码控制过程",
+        "AEAD 保护密码内容，可验证状态控制层保证凭据版本和生命周期状态可信",
     ]
 
     with zipfile.ZipFile(document_path) as archive:

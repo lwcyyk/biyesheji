@@ -9,11 +9,11 @@ import (
 	"errors"
 	"sort"
 
-	credential "vdns.local/vdns/internal/credential/domain"
-	"vdns.local/vdns/internal/cryptokit"
-	"vdns.local/vdns/internal/platform"
-	"vdns.local/vdns/internal/protocol"
-	syncdomain "vdns.local/vdns/internal/sync/domain"
+	credential "vpass.local/vpass/internal/credential/domain"
+	"vpass.local/vpass/internal/cryptokit"
+	"vpass.local/vpass/internal/platform"
+	"vpass.local/vpass/internal/protocol"
+	syncdomain "vpass.local/vpass/internal/sync/domain"
 )
 
 var (
@@ -24,7 +24,7 @@ var (
 )
 
 // ManifestTrustVerifier supplies signature, device authorization, revocation
-// and counter checks. G4 binds its implementation to the VDNS five-layer
+// and counter checks. G4 binds its implementation to the five-layer state
 // verifier; the cloud record itself never selects a key.
 type ManifestTrustVerifier interface {
 	VerifyManifest(context.Context, syncdomain.ManifestRecord) (*syncdomain.SignedManifest, error)

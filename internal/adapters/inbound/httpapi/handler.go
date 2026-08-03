@@ -1,6 +1,6 @@
 // Package httpapi exposes the loopback-only /api/v2 adapter. It performs
 // transport authentication, Origin/Host checks, replay protection, limits and
-// idempotency before dispatching to the local-agent application.
+// idempotency before dispatching to the local-localClient application.
 package httpapi
 
 import (
@@ -22,8 +22,8 @@ import (
 
 	"github.com/google/uuid"
 
-	localapp "vdns.local/vdns/internal/localapi/application"
-	localports "vdns.local/vdns/internal/localapi/ports"
+	localapp "vpass.local/vpass/internal/localapi/application"
+	localports "vpass.local/vpass/internal/localapi/ports"
 )
 
 const (
@@ -62,7 +62,7 @@ type rateWindow struct {
 }
 
 type Handler struct {
-	agent       *localapp.Agent
+	localClient *localapp.LocalSecureClient
 	config      Config
 	tokenDigest [sha256.Size]byte
 	origins     map[string]struct{}
@@ -86,14 +86,14 @@ func ImplementedOperationIDs() []string {
 		"createCredentialVersion", "createSiteConfirmation",
 		"createSyncPublication", "createSyncPull",
 		"createDeviceEnrollment", "createDeviceRevocation",
-		"createRecoverySession", "createVdnsResolution", "createAuditEvent",
+		"createRecoverySession", "createStateResolution", "createLegacyVdnsResolution", "createAuditEvent",
 		"createSecurityAnalysis", "createExposureAnalysis",
 		"createRemediationCampaign", "getOperation",
 	}
 }
 
-func New(agent *localapp.Agent, config Config) (*Handler, error) {
-	if agent == nil || len(config.InstallToken) < 32 || len(config.InstallToken) > 512 {
+func New(localClient *localapp.LocalSecureClient, config Config) (*Handler, error) {
+	if localClient == nil || len(config.InstallToken) < 32 || len(config.InstallToken) > 512 {
 		return nil, errors.New("invalid local API configuration")
 	}
 	if config.Now == nil {
@@ -122,7 +122,7 @@ func New(agent *localapp.Agent, config Config) (*Handler, error) {
 		origins[origin] = struct{}{}
 	}
 	return &Handler{
-		agent: agent, config: config,
+		localClient: localClient, config: config,
 		tokenDigest: sha256.Sum256([]byte(config.InstallToken)),
 		origins:     origins, nonces: make(map[string]nonceRecord),
 		idempotency: make(map[[sha256.Size]byte]cachedResponse),
@@ -175,7 +175,11 @@ func (handler *Handler) ServeHTTP(writer http.ResponseWriter, request *http.Requ
 		return
 	}
 	if requiresNonce(request.Method, request.URL.Path) {
-		if fault := handler.consumeNonce(request.Header.Get("X-VDNS-Request-Nonce")); fault != nil {
+		if fault := handler.consumeNonce(preferredHeader(
+			request.Header,
+			"X-VPass-Request-Nonce",
+			"X-VDNS-Request-Nonce",
+		)); fault != nil {
 			writeFault(writer, requestID, http.StatusUnauthorized, fault)
 			return
 		}
@@ -218,7 +222,11 @@ func (handler *Handler) dispatch(
 	requestID string,
 ) {
 	path := strings.TrimPrefix(request.URL.Path, "/api/v2")
-	sessionID := request.Header.Get("X-VDNS-Vault-Session")
+	sessionID := preferredHeader(
+		request.Header,
+		"X-VPass-Vault-Session",
+		"X-VDNS-Vault-Session",
+	)
 	segments := splitPath(path)
 
 	switch {
@@ -228,7 +236,7 @@ func (handler *Handler) dispatch(
 			writeValidation(writer, requestID)
 			return
 		}
-		result, fault := handler.agent.CreateVaultSession(input)
+		result, fault := handler.localClient.CreateVaultSession(input)
 		if fault != nil {
 			writeApplicationFault(writer, requestID, fault)
 			return
@@ -236,7 +244,7 @@ func (handler *Handler) dispatch(
 		writer.Header().Set("Location", "/api/v2/vault-sessions/"+result.SessionID)
 		writeJSON(writer, http.StatusCreated, result)
 	case request.Method == http.MethodDelete && len(segments) == 2 && segments[0] == "vault-sessions":
-		if fault := handler.agent.DeleteVaultSession(segments[1]); fault != nil {
+		if fault := handler.localClient.DeleteVaultSession(segments[1]); fault != nil {
 			writeApplicationFault(writer, requestID, fault)
 			return
 		}
@@ -247,7 +255,7 @@ func (handler *Handler) dispatch(
 			writeValidation(writer, requestID)
 			return
 		}
-		result, fault := handler.agent.GeneratePassword(sessionID, input)
+		result, fault := handler.localClient.GeneratePassword(sessionID, input)
 		writeResult(writer, requestID, http.StatusCreated, result, fault)
 	case request.Method == http.MethodPost && path == "/credential-route-resolutions":
 		var input localapp.RouteResolutionRequest
@@ -255,7 +263,7 @@ func (handler *Handler) dispatch(
 			writeValidation(writer, requestID)
 			return
 		}
-		result, fault := handler.agent.ResolveRoute(sessionID, input)
+		result, fault := handler.localClient.ResolveRoute(sessionID, input)
 		writeResult(writer, requestID, http.StatusOK, result, fault)
 	case request.Method == http.MethodGet && path == "/credentials":
 		limit, fault := parseLimit(request.URL.Query())
@@ -263,7 +271,7 @@ func (handler *Handler) dispatch(
 			writeApplicationFault(writer, requestID, fault)
 			return
 		}
-		result, appFault := handler.agent.ListCredentials(sessionID, request.URL.Query().Get("cursor"), limit)
+		result, appFault := handler.localClient.ListCredentials(sessionID, request.URL.Query().Get("cursor"), limit)
 		writeResult(writer, requestID, http.StatusOK, result, appFault)
 	case request.Method == http.MethodPost && path == "/credentials":
 		var input localapp.CreateCredentialRequest
@@ -271,10 +279,10 @@ func (handler *Handler) dispatch(
 			writeValidation(writer, requestID)
 			return
 		}
-		result, fault := handler.agent.CreateCredential(sessionID, input)
+		result, fault := handler.localClient.CreateCredential(sessionID, input)
 		writeResult(writer, requestID, http.StatusCreated, result, fault)
 	case len(segments) == 2 && segments[0] == "credentials" && request.Method == http.MethodGet:
-		result, fault := handler.agent.GetCredential(sessionID, segments[1])
+		result, fault := handler.localClient.GetCredential(sessionID, segments[1])
 		writeResult(writer, requestID, http.StatusOK, result, fault)
 	case len(segments) == 3 && segments[0] == "credentials" && segments[2] == "autofill-authorizations" && request.Method == http.MethodPost:
 		var input localapp.AutofillAuthorizationRequest
@@ -282,7 +290,7 @@ func (handler *Handler) dispatch(
 			writeValidation(writer, requestID)
 			return
 		}
-		result, fault := handler.agent.AuthorizeAutofill(sessionID, segments[1], input)
+		result, fault := handler.localClient.AuthorizeAutofill(sessionID, segments[1], input)
 		writeResult(writer, requestID, http.StatusCreated, result, fault)
 	case len(segments) == 3 && segments[0] == "credentials" && segments[2] == "versions" && request.Method == http.MethodPost:
 		var input localapp.CreateVersionRequest
@@ -290,7 +298,7 @@ func (handler *Handler) dispatch(
 			writeValidation(writer, requestID)
 			return
 		}
-		result, fault := handler.agent.CreateVersion(sessionID, segments[1], input)
+		result, fault := handler.localClient.CreateVersion(sessionID, segments[1], input)
 		writeResult(writer, requestID, http.StatusCreated, result, fault)
 	case len(segments) == 3 && segments[0] == "credentials" && segments[2] == "versions" && request.Method == http.MethodGet:
 		limit, fault := parseLimit(request.URL.Query())
@@ -298,7 +306,7 @@ func (handler *Handler) dispatch(
 			writeApplicationFault(writer, requestID, fault)
 			return
 		}
-		result, appFault := handler.agent.ListVersions(sessionID, segments[1], request.URL.Query().Get("cursor"), limit)
+		result, appFault := handler.localClient.ListVersions(sessionID, segments[1], request.URL.Query().Get("cursor"), limit)
 		writeResult(writer, requestID, http.StatusOK, result, appFault)
 	case len(segments) == 3 && segments[0] == "credentials" && segments[2] == "site-confirmations" && request.Method == http.MethodPost:
 		var input localapp.SiteConfirmationRequest
@@ -306,7 +314,7 @@ func (handler *Handler) dispatch(
 			writeValidation(writer, requestID)
 			return
 		}
-		result, fault := handler.agent.ConfirmSite(sessionID, segments[1], input)
+		result, fault := handler.localClient.ConfirmSite(sessionID, segments[1], input)
 		writeResult(writer, requestID, http.StatusCreated, result, fault)
 	case request.Method == http.MethodPost && path == "/sync-publications":
 		var input localapp.SyncPublicationRequest
@@ -315,7 +323,7 @@ func (handler *Handler) dispatch(
 			writeValidation(writer, requestID)
 			return
 		}
-		result, fault := handler.agent.QueueOperation(sessionID, "SYNC_PUBLICATION")
+		result, fault := handler.localClient.QueueOperation(sessionID, "SYNC_PUBLICATION")
 		handler.writeDurableOperation(writer, request, body, requestID, http.StatusAccepted, "SYNC_PUBLICATION", result, fault)
 	case request.Method == http.MethodPost && path == "/sync-pulls":
 		var input localapp.SyncPullRequest
@@ -324,7 +332,7 @@ func (handler *Handler) dispatch(
 			writeValidation(writer, requestID)
 			return
 		}
-		result, fault := handler.agent.QueueOperation(sessionID, "SYNC_PULL")
+		result, fault := handler.localClient.QueueOperation(sessionID, "SYNC_PULL")
 		handler.writeDurableOperation(writer, request, body, requestID, http.StatusAccepted, "SYNC_PULL", result, fault)
 	case request.Method == http.MethodPost && path == "/device-enrollments":
 		var input localapp.DeviceEnrollmentRequest
@@ -332,7 +340,7 @@ func (handler *Handler) dispatch(
 			writeValidation(writer, requestID)
 			return
 		}
-		result, fault := handler.agent.EnrollDevice(sessionID, input)
+		result, fault := handler.localClient.EnrollDevice(sessionID, input)
 		handler.writeDurableOperation(writer, request, body, requestID, http.StatusCreated, "DEVICE_ENROLL", result, fault)
 	case request.Method == http.MethodPost && path == "/device-revocations":
 		var input localapp.DeviceRevocationRequest
@@ -340,7 +348,7 @@ func (handler *Handler) dispatch(
 			writeValidation(writer, requestID)
 			return
 		}
-		result, fault := handler.agent.RevokeDevice(sessionID, input)
+		result, fault := handler.localClient.RevokeDevice(sessionID, input)
 		handler.writeDurableOperation(writer, request, body, requestID, http.StatusAccepted, "DEVICE_REVOKE", result, fault)
 	case request.Method == http.MethodPost && path == "/recovery-sessions":
 		var input localapp.RecoverySessionRequest
@@ -348,15 +356,16 @@ func (handler *Handler) dispatch(
 			writeValidation(writer, requestID)
 			return
 		}
-		result, fault := handler.agent.Recover(input)
+		result, fault := handler.localClient.Recover(input)
 		handler.writeDurableOperation(writer, request, body, requestID, http.StatusCreated, "RECOVERY", result, fault)
-	case request.Method == http.MethodPost && path == "/vdns-resolutions":
-		var input localapp.VDNSResolutionRequest
+	case request.Method == http.MethodPost &&
+		(path == "/state-resolutions" || path == "/vdns-resolutions"):
+		var input localapp.StateResolutionRequest
 		if !decodeStrict(body, &input) {
 			writeValidation(writer, requestID)
 			return
 		}
-		result, fault := handler.agent.ResolveVDNS(sessionID, input)
+		result, fault := handler.localClient.ResolveState(sessionID, input)
 		writeResult(writer, requestID, http.StatusOK, result, fault)
 	case request.Method == http.MethodPost && path == "/audit-events":
 		var input localapp.AuditEventRequest
@@ -366,7 +375,7 @@ func (handler *Handler) dispatch(
 			writeValidation(writer, requestID)
 			return
 		}
-		result, fault := handler.agent.QueueOperation(sessionID, "AUDIT_EVENT")
+		result, fault := handler.localClient.QueueOperation(sessionID, "AUDIT_EVENT")
 		handler.writeDurableOperation(writer, request, body, requestID, http.StatusAccepted, "AUDIT_EVENT", result, fault)
 	case request.Method == http.MethodPost && path == "/security-analyses":
 		var input localapp.SecurityAnalysisRequest
@@ -375,12 +384,12 @@ func (handler *Handler) dispatch(
 			writeValidation(writer, requestID)
 			return
 		}
-		result, fault := handler.agent.CreateSecurityAnalysis(sessionID, input)
+		result, fault := handler.localClient.CreateSecurityAnalysis(sessionID, input)
 		handler.writeDurableOperation(writer, request, body, requestID, http.StatusAccepted, "SECURITY_ANALYSIS", result, fault)
 	case request.Method == http.MethodPost && (path == "/exposure-analyses" || path == "/remediation-campaigns"):
 		writeFault(writer, requestID, http.StatusNotImplemented, localapp.NewFault("OPTIONAL_FEATURE_UNAVAILABLE", "optional privacy response module is not enabled"))
 	case request.Method == http.MethodGet && len(segments) == 2 && segments[0] == "operations":
-		result, fault := handler.agent.GetOperation(sessionID, segments[1])
+		result, fault := handler.localClient.GetOperation(sessionID, segments[1])
 		if fault != nil && fault.Code == "RESOURCE_NOT_FOUND" && handler.config.OperationStore != nil {
 			stored, found, err := handler.config.OperationStore.LoadOperation(request.Context(), segments[1])
 			if err != nil {
@@ -424,7 +433,7 @@ func (handler *Handler) applyCORS(writer http.ResponseWriter, request *http.Requ
 	writer.Header().Set("Access-Control-Allow-Origin", origin)
 	writer.Header().Set("Vary", "Origin")
 	writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-	writer.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Idempotency-Key, X-VDNS-Request-Nonce, X-VDNS-Vault-Session")
+	writer.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Idempotency-Key, X-VPass-Request-Nonce, X-VPass-Vault-Session, X-VDNS-Request-Nonce, X-VDNS-Vault-Session")
 	writer.Header().Set("Access-Control-Max-Age", "300")
 	return nil
 }
@@ -737,6 +746,7 @@ func statusForFault(code string) int {
 	case "INSTALLATION_TOKEN_INVALID", "VAULT_SESSION_INVALID", "UNLOCK_REJECTED",
 		"REQUEST_NONCE_INVALID", "REQUEST_NONCE_REPLAYED", "RECOVERY_REJECTED", "DEVICE_REVOKED":
 		return http.StatusUnauthorized
+	// The two VDNS_* values are deprecated frozen v2 wire error codes.
 	case "ORIGIN_REJECTED", "VDNS_REJECTED", "VDNS_VERIFICATION_REJECTED",
 		"CAPABILITY_REJECTED":
 		return http.StatusForbidden
@@ -884,7 +894,18 @@ func requiresIdempotency(method, path string) bool {
 		return false
 	}
 	return path != "/api/v2/credential-route-resolutions" &&
+		path != "/api/v2/state-resolutions" &&
 		path != "/api/v2/vdns-resolutions"
+}
+
+// preferredHeader accepts the VPass v2 header first and falls back to the
+// deprecated VDNS-PM v2 header so existing browser installations can upgrade
+// without weakening session or replay checks.
+func preferredHeader(header http.Header, current, legacy string) string {
+	if value := header.Get(current); value != "" {
+		return value
+	}
+	return header.Get(legacy)
 }
 
 func splitPath(path string) []string {

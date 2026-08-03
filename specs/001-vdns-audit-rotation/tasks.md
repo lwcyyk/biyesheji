@@ -1,4 +1,4 @@
-# VDNS-PM 第二阶段实施任务清单
+# VPass 第二阶段实施任务清单
 
 | 属性 | 值 |
 |---|---|
@@ -33,13 +33,13 @@
 - **涉及模块：** `internal/protocol`、`internal/transparency`、`internal/anchor`、`internal/resolver`、SQLite迁移、OpenAPI。
 - **验收条件：** 普通调用方不能自报最终序；Authority对对象摘要、前序、Namespace、序号和key generation签署回执；同序双摘要触发finding；检查点前标记provisional，高风险写不把它当final。
 - **需要增加的测试：** 伪造回执、重复序号、前序错、Authority换代、同序分叉、检查点前撤销/写入竞争、重启恢复。
-- **对应论文章节：** 第三章VDNS架构、第五章生命周期协议、第七章安全分析。
+- **对应论文章节：** 第三章可验证状态架构、第五章生命周期协议、第七章安全分析。
 
 ### P0-002 修正跨设备CAS与冲突终局
 
 - **问题：** 本地CAS不能阻止设备A/B分别生成`v2-A/v2-B`，旧文档误写成全局唯一。
 - **涉及模块：** credential aggregate、SQLite conflict repository、sync acceptance、resolver L3、local API。
-- **验收条件：** 双设备同base不同候选全部保留并进入CONFLICTED；云端、墙钟和到达顺序不能自动选择；显式`CONFLICT_RESOLVE`引用全部候选并经最终序后更新accepted。
+- **验收条件：** 双设备同base不同候选全部保留并进入CONFLICTED；同步存储层、墙钟和到达顺序不能自动选择；显式`CONFLICT_RESOLVE`引用全部候选并经最终序后更新accepted。
 - **需要增加的测试：** 两个独立SQLite进程并发、离线重连、候选缺失、恶意云只返回一支、裁决重放、裁决后旧分支回滚。
 - **对应论文章节：** 第四章多设备同步、第五章版本与冲突、第七章因果一致性。
 
@@ -71,7 +71,7 @@
 
 - **问题：** 新设备如何得到第一份可信检查点、日志分叉后如何停止/恢复高风险操作尚未落到代码。
 - **涉及模块：** enrollment、recovery、resolver L4/L5、monitor、checkpoint store。
-- **验收条件：** 仅已有设备、恢复承诺或带外核对可引入高风险信任；云端TOFU只能只读受限；分叉触发REVIEW/REJECT并保留证据；恢复需要用户选择或治理回执。
+- **验收条件：** 仅已有设备、恢复承诺或带外核对可引入高风险信任；同步存储TOFU只能只读受限；分叉触发REVIEW/REJECT并保留证据；恢复需要用户选择或治理回执。
 - **需要增加的测试：** 恶意首个检查点、旧恢复检查点、相同高度双根、gossip证据导入、离线读取、高风险写失败关闭。
 - **对应论文章节：** 第三章信任模型、第五章L4/L5、第七章透明历史。
 
@@ -93,10 +93,10 @@
 - **需要增加的测试：** 权限、进程重启、锁屏、备份误包含、key store拒绝和降级提示。
 - **对应论文章节：** 第四章本地密码学、第七章残余风险。
 
-### P1-002 强化本地Agent与扩展进程边界
+### P1-002 强化本地安全客户端与扩展进程边界
 
 - **问题：** 研究原型已有InstallToken、nonce和handle，仍需真实浏览器/Native Messaging环境验证。
-- **涉及模块：** `cmd/vdns-local-agent`、httpapi、nativemessaging、browser extension。
+- **涉及模块：** `cmd/vpass-local-client`、httpapi、nativemessaging、browser extension。
 - **验收条件：** Host/CORS/extension ID/CSRF/Origin全部独立验证；secret不进入HTTP普通JSON、日志、命令行或持久前端存储；真实浏览器完成日常闭环。
 - **需要增加的测试：** 跨扩展调用、恶意网页直连、nonce重放、handle过期、并发消费、浏览器重启。
 - **对应论文章节：** 第三章信任边界、第四章自动填充、第八章实现。
@@ -123,7 +123,7 @@
 - **涉及模块：** `internal/resolver/application`、`internal/resolver/domain`、`internal/finalorder`、local API composition。
 - **验收条件：** L1～L5逐层验证并返回独立错误码；L3可强制验证Authority回执；冲突进入REVIEW；失败清空身份、授权、状态和审计投影；未配置完整Verifier的API明确返回不可用。
 - **需要增加的测试：** 五层各自成功/失败、回执篡改、已知冲突、离线缓存过期、高风险写不降级、失败投影清空、100k叶完整流程与Merkle微基准分名。
-- **对应论文章节：** 第五章VDNS验证、第七章安全分析、第八章性能方法。
+- **对应论文章节：** 第五章五层可信状态验证、第七章安全分析、第八章性能方法。
 - **Stage 2状态：** COMPLETE（研究原型）；第三阶段重新冻结性能数据。
 
 ### P1-006 研究型HTTP同步适配器
@@ -133,13 +133,13 @@
 - **验收条件：** 真实HTTP完成内容寻址对象/manifest上传下载、分批、cursor、幂等、重试和大小限制；可模拟回滚、替换、对象损坏和隐藏分支；部署标签固定为`RESEARCH_HTTP_SYNC_ADAPTER`。
 - **需要增加的测试：** 10k对象分批、网络中断、延迟/超时、重复上传、部分响应、hash不匹配、旧manifest和隐藏分支。
 - **对应论文章节：** 第四章同步协议、第八章网络化试验方法。
-- **Stage 2状态：** COMPLETE（localhost研究适配器）；公网与生产云`NOT_IMPLEMENTED`。
+- **Stage 2状态：** COMPLETE（localhost研究适配器）；公网与生产同步存储`NOT_IMPLEMENTED`。
 
 ### P1-007 OpenAPI实现覆盖与能力边界
 
 - **问题：** 仅比较22个operationId无法证明handler、领域逻辑和测试一致，且可选接口容易被误报为已实现。
 - **涉及模块：** OpenAPI、httpapi、localapi、`scripts/generate_api_coverage.py`、合同测试。
-- **验收条件：** 22项逐项生成机器报告；字段、错误码、Idempotency-Key、expectedVersion和cursor匹配；合成VDNS成功被移除；SCOPE-ZK/E4等未实现能力返回明确错误。
+- **验收条件：** 当前23项操作逐项生成机器报告；字段、错误码、Idempotency-Key、expectedVersion和cursor匹配；未注入验证器时不生成合成成功；SCOPE-ZK/E4等未实现能力返回明确错误。
 - **需要增加的测试：** operation清单、secret字段扫描、写请求头、严格JSON、分页、可选501、API覆盖生成器回归。
 - **对应论文章节：** 第三章接口架构、第四/五章实现、第八章工程验证。
 - **Stage 2状态：** COMPLETE（覆盖结论包含PARTIAL/NOT_IMPLEMENTED，不宣称22项全部完成）。

@@ -20,10 +20,10 @@ import (
 	"sync"
 	"time"
 
-	"vdns.local/vdns/internal/adapters/outbound/memorysync"
-	"vdns.local/vdns/internal/platform"
-	"vdns.local/vdns/internal/protocol"
-	syncdomain "vdns.local/vdns/internal/sync/domain"
+	"vpass.local/vpass/internal/adapters/outbound/memorysync"
+	"vpass.local/vpass/internal/platform"
+	"vpass.local/vpass/internal/protocol"
+	syncdomain "vpass.local/vpass/internal/sync/domain"
 )
 
 const (

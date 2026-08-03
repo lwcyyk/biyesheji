@@ -8,14 +8,14 @@ import (
 	"testing"
 	"time"
 
-	anchordomain "vdns.local/vdns/internal/anchor/domain"
-	credentialdomain "vdns.local/vdns/internal/credential/domain"
-	"vdns.local/vdns/internal/cryptokit"
-	finalorderdomain "vdns.local/vdns/internal/finalorder/domain"
-	operationdomain "vdns.local/vdns/internal/operation/domain"
-	"vdns.local/vdns/internal/protocol"
-	resolverdomain "vdns.local/vdns/internal/resolver/domain"
-	transparencydomain "vdns.local/vdns/internal/transparency/domain"
+	anchordomain "vpass.local/vpass/internal/anchor/domain"
+	credentialdomain "vpass.local/vpass/internal/credential/domain"
+	"vpass.local/vpass/internal/cryptokit"
+	finalorderdomain "vpass.local/vpass/internal/finalorder/domain"
+	operationdomain "vpass.local/vpass/internal/operation/domain"
+	"vpass.local/vpass/internal/protocol"
+	resolverdomain "vpass.local/vpass/internal/resolver/domain"
+	transparencydomain "vpass.local/vpass/internal/transparency/domain"
 )
 
 func TestL1L2L3CreateAndNegativeMatrix(t *testing.T) {
@@ -357,7 +357,7 @@ func TestL4ProofBundleAndL5PolicyMatrix(t *testing.T) {
 	}
 }
 
-func TestResolverSelectsVDNSCurrentState(t *testing.T) {
+func TestResolverSelectsCurrentState(t *testing.T) {
 	fixture := newCreateFixture(t)
 	bundle, trust := proofForCreateFixture(t, fixture)
 	request := ResolveRequest{

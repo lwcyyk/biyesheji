@@ -11,9 +11,9 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 OPENAPI = ROOT / "specs/001-vdns-audit-rotation/contracts/openapi.json"
 HANDLER = ROOT / "internal/adapters/inbound/httpapi/handler.go"
-AGENT = ROOT / "internal/localapi/application/agent.go"
+LOCAL_CLIENT = ROOT / "internal/localapi/application/local_secure_client.go"
 HANDLER_TEST = ROOT / "internal/adapters/inbound/httpapi/handler_test.go"
-AGENT_TEST = ROOT / "internal/localapi/application/agent_test.go"
+LOCAL_CLIENT_TEST = ROOT / "internal/localapi/application/local_secure_client_test.go"
 CONTRACT_TEST = ROOT / "tests/contract/openapi_local_api_test.go"
 
 
@@ -38,7 +38,8 @@ REGISTRY = {
     "createDeviceEnrollment": ("EnrollDevice(", "TestHTTPStage2CapabilityBoundaries", "PARTIAL"),
     "createDeviceRevocation": ("RevokeDevice(", "TestHTTPStage2CapabilityBoundaries", "PARTIAL"),
     "createRecoverySession": ("Recover(", "TestHTTPStage2CapabilityBoundaries", "PARTIAL"),
-    "createVdnsResolution": ("ResolveVDNS(", "TestHTTPStage2CapabilityBoundaries", "PARTIAL"),
+    "createStateResolution": ("ResolveState(", "TestHTTPStage2CapabilityBoundaries", "PARTIAL"),
+    "createLegacyVdnsResolution": ("ResolveState(", "TestHTTPLegacyV2RouteAndHeadersRemainReadable", "PARTIAL"),
     "createAuditEvent": ("QueueOperation(sessionID, \"AUDIT_EVENT\")", "TestHTTPStage2CapabilityBoundaries", "PARTIAL"),
     "createSecurityAnalysis": ("CreateSecurityAnalysis(", "TestHTTPStage2CapabilityBoundaries", "COMPLETE"),
     "createExposureAnalysis": ("OPTIONAL_FEATURE_UNAVAILABLE", "TestHTTPStage2CapabilityBoundaries", "NOT_IMPLEMENTED"),
@@ -54,8 +55,8 @@ def read(path: Path) -> str:
 def generate() -> dict:
     document = json.loads(read(OPENAPI))
     handler = read(HANDLER)
-    domain = read(AGENT)
-    tests = "\n".join((read(HANDLER_TEST), read(AGENT_TEST), read(CONTRACT_TEST)))
+    domain = read(LOCAL_CLIENT)
+    tests = "\n".join((read(HANDLER_TEST), read(LOCAL_CLIENT_TEST), read(CONTRACT_TEST)))
     operations = []
     unknown = []
     seen = set()
@@ -102,14 +103,14 @@ def generate() -> dict:
     for operation in operations:
         counts[operation["status"]] = counts.get(operation["status"], 0) + 1
     return {
-        "schemaVersion": "vdns-pm-stage2-api-coverage/1",
+        "schemaVersion": "vpass-api-coverage/1",
         "contractVersion": document["info"]["version"],
         "sourceFiles": [
             str(OPENAPI.relative_to(ROOT)),
             str(HANDLER.relative_to(ROOT)),
-            str(AGENT.relative_to(ROOT)),
+            str(LOCAL_CLIENT.relative_to(ROOT)),
             str(HANDLER_TEST.relative_to(ROOT)),
-            str(AGENT_TEST.relative_to(ROOT)),
+            str(LOCAL_CLIENT_TEST.relative_to(ROOT)),
             str(CONTRACT_TEST.relative_to(ROOT)),
         ],
         "operationCount": len(operations),

@@ -1,11 +1,11 @@
-# VDNS-PM v2 数据模型
+# VPass Spec 2.1.0 数据模型
 
 | 属性 | 值 |
 |---|---|
 | 版本 | `2.1.0` |
-| 协议 | `VDNS-PM/2` / `VDNS-PM-CP-2` |
+| 协议 | 展示 `VPass/2`；legacy wire `VDNS-PM/2` / `VDNS-PM-CP-2` |
 | 主存储 | SQLite（本地元数据）+ 内容寻址对象库（密文） |
-| 目标 | 支持密码库、生命周期、多设备、VDNS 和可选审计 |
+| 目标 | 支持密码库、生命周期、多设备、可验证状态控制和可选审计 |
 
 本文定义v2.1逻辑模型和事务不变量。仓库已经存在`0002_v2_initial.sql`～`0007_g6_privacy_response.sql`研究迁移；证据等级、排序回执和冲突终局的v2.1物理迁移尚未实现，不能因为现有表名相似而宣称schema已经兼容。
 
@@ -13,10 +13,10 @@
 
 | 数据层 | 主要数据 | 所有者 | 明文策略 |
 |---|---|---|---|
-| 解锁层 | VaultProfile、RootCapsule、RecoveryCapsule、session | 本地代理 | 仅活动内存解密 |
-| 私有映射层 | RouteMap、账号显示元数据 | 本地代理 | 持久化前加密 |
-| 密文对象层 | 字段 ciphertext、wrapped DEK、Envelope、manifest | 本地/不可信云 | 不含字段明文 |
-| 控制层 | DeviceCredential、StateDescriptor、OperationEvent、Verdict | 本地/VDNS | 只含伪名和摘要 |
+| 解锁层 | VaultProfile、RootCapsule、RecoveryCapsule、session | 本地安全客户端 | 仅活动内存解密 |
+| 私有映射层 | RouteMap、账号显示元数据 | 本地安全客户端 | 持久化前加密 |
+| 密文对象层 | 字段 ciphertext、wrapped DEK、Envelope、manifest | 本地/不可信同步存储层 | 不含字段明文 |
+| 控制层 | DeviceCredential、StateDescriptor、OperationEvent、Verdict | 本地/可验证状态控制层 | 只含伪名和摘要 |
 | 透明层 | log leaf、tree head、proof、checkpoint、finding | 日志/Monitor | 最小公开投影 |
 | 审计层 | encrypted audit event、analysis、campaign/item | 本地 | 结果最小化 |
 
@@ -57,7 +57,7 @@ RootCapsule 与 Credential ciphertext 都可同步，但 RouteMap 的解密和�
 |---|---|---|
 | namespace_id | BLOB(16) | PK、非全零 |
 | protocol_version | INTEGER | 固定 2 |
-| suite_id | TEXT | `VDNS-PM-CP-2` |
+| suite_id | TEXT | legacy wire `VDNS-PM-CP-2`，已冻结以兼容旧SQLite数据 |
 | active_secret_generation | INTEGER | ≥1 |
 | root_public_key | BLOB(32) | NOT NULL |
 | crypto_policy_hash | BLOB(32) | NOT NULL |
@@ -190,13 +190,13 @@ RootCapsule 与 Credential ciphertext 都可同步，但 RouteMap 的解密和�
 
 #### `sync_peers`
 
-本地保存 peer/device、last_accepted_checkpoint、last_manifest_digest、last_pull_cursor 和 error_state。云端 cursor 只用于分页，不作为可信顺序。
+本地保存 peer/device、last_accepted_checkpoint、last_manifest_digest、last_pull_cursor 和 error_state。同步存储 cursor 只用于分页，不作为可信顺序。
 
 #### `credential_conflicts_v2`
 
 保存credential_id、base_descriptor_hash、candidate_descriptor_hash、candidate_version、device_id、local_counter、provisional_sequence、final_order_receipt_hash和status。同一base出现不同候选时全部保留并把凭据聚合置为CONFLICTED。冲突裁决记录必须引用完整候选集合和选中摘要。
 
-### 4.8 VDNS、日志和 Monitor
+### 4.8 可验证状态、日志和 Monitor
 
 #### `verdicts`
 
@@ -319,14 +319,14 @@ REVOKED 为终态；恢复设备使用新 DeviceID 和新 credential，不复活
 1. 规范 Origin、生成 CredentialID/密码/字段 DEK；
 2. 先原子写所有内容对象；
 3. SQLite 事务插入 route、credential、v1 fields、candidate descriptor、CREATE event 和 outbox；
-4. VDNS 接受后以 CAS 更新 accepted 指针；
+4. 可验证状态控制层接受后以 CAS 更新 accepted 指针；
 5. 失败保留可恢复 outbox 或明确 CREATE_PENDING，不删除仍被引用对象。
 
 ### 6.3 自动填充只读事务
 
 1. 解锁会话和 Origin 校验；
 2. RouteMap 定位 CredentialID；
-3. 读取 trusted checkpoint 和 VDNS descriptor，验证 L1～L5；
+3. 读取 trusted checkpoint 和可验证状态 descriptor，验证 L1～L5；
 4. 取对象并核对 digest/version/policy；
 5. 解密密码并再次核对 OriginBinding；
 6. 创建内存 secret handle；
@@ -339,12 +339,12 @@ REVOKED 为终态；恢复设备使用新 DeviceID 和新 credential，不复活
 1. 在事务中写 v+1 候选和状态；
 2. 确认本地 ciphertext/object fsync 后调用网站；
 3. 根据回执原子写证据和内部状态；
-4. 成功时发布 descriptor/event，VDNS 接受后 CAS active pointer；
+4. 成功时发布 descriptor/event，可验证状态控制层接受后 CAS active pointer；
 5. 崩溃恢复根据内部状态重试发布或查询网站，不重新生成密码。
 
 ### 6.5 同步接受
 
-sync manifest只描述候选对象。接收端验证VDNS current descriptor、对象齐全、hash、version、previous descriptor、counter、FinalOrderReceipt和local policy，再在本地事务中更新accepted pointer/peer checkpoint。若同一base出现不同候选，先写入冲突集合并进入CONFLICTED，不自动更新accepted。云cursor、object mtime、到达时间不参与信任决定。
+sync manifest只描述候选对象。接收端验证可验证current descriptor、对象齐全、hash、version、previous descriptor、counter、FinalOrderReceipt和local policy，再在本地事务中更新accepted pointer/peer checkpoint。若同一base出现不同候选，先写入冲突集合并进入CONFLICTED，不自动更新accepted。同步存储cursor、object mtime、到达时间不参与信任决定。
 
 ### 6.6 撤销与新代际
 
@@ -352,7 +352,7 @@ sync manifest只描述候选对象。接收端验证VDNS current descriptor、�
 
 ### 6.7 新设备可信检查点
 
-设备记录bootstrap_checkpoint_digest、source_kind（EXISTING_DEVICE、RECOVERY_COMMITMENT、OUT_OF_BAND）和source_evidence_digest。普通云端返回或无提示TOFU不能创建可用于高风险写的初始信任。
+设备记录bootstrap_checkpoint_digest、source_kind（EXISTING_DEVICE、RECOVERY_COMMITMENT、OUT_OF_BAND）和source_evidence_digest。普通同步存储返回或无提示TOFU不能创建可用于高风险写的初始信任。
 
 ## 7. 索引与规模
 

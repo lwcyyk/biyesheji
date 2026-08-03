@@ -1,6 +1,6 @@
-// Package domain implements the infrastructure-independent VDNS-PM
-// transparency log. Hashing follows the RFC 9162 tree shape while using the
-// protocol-frozen VDNS-PM/2 leaf and node domains.
+// Package domain implements the infrastructure-independent VPass transparency
+// log. Hashing follows the RFC 9162 tree shape while using protocol-frozen
+// legacy wire leaf and node domains.
 package domain
 
 import (
@@ -8,7 +8,7 @@ import (
 	"crypto/subtle"
 	"errors"
 
-	"vdns.local/vdns/internal/protocol"
+	"vpass.local/vpass/internal/protocol"
 )
 
 const (

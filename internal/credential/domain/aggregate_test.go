@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"vdns.local/vdns/internal/protocol"
+	"vpass.local/vpass/internal/protocol"
 )
 
 func TestAggregateLifecycleHappyPathsAndOldVersionRetention(t *testing.T) {

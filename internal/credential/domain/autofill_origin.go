@@ -6,8 +6,8 @@ import (
 	"net/url"
 	"strings"
 
-	"vdns.local/vdns/internal/cryptokit"
-	"vdns.local/vdns/internal/protocol"
+	"vpass.local/vpass/internal/cryptokit"
+	"vpass.local/vpass/internal/protocol"
 )
 
 var ErrAutofillOriginRejected = errors.New("autofill origin rejected")
@@ -45,7 +45,7 @@ type RedirectDecision struct {
 
 // EvaluateTopLevelRedirect never authorizes a credential. It only determines
 // whether a previously issued handle must be invalidated; the caller must
-// always repeat RouteMap, VDNS and OriginBinding checks for the final target.
+// always repeat RouteMap, trusted-state and OriginBinding checks for the final target.
 func EvaluateTopLevelRedirect(
 	previousTopOrigin string,
 	currentTopOrigin string,

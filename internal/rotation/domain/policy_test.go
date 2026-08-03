@@ -13,7 +13,7 @@ import (
 	"testing"
 	"unicode/utf8"
 
-	"vdns.local/vdns/internal/protocol"
+	"vpass.local/vpass/internal/protocol"
 )
 
 var errDeterministicPolicyPRF = errors.New("deterministic policy PRF unavailable")

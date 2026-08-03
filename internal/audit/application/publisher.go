@@ -8,11 +8,11 @@ import (
 	"errors"
 	"time"
 
-	auditdomain "vdns.local/vdns/internal/audit/domain"
-	credentialdomain "vdns.local/vdns/internal/credential/domain"
-	"vdns.local/vdns/internal/cryptokit"
-	"vdns.local/vdns/internal/protocol"
-	transparencydomain "vdns.local/vdns/internal/transparency/domain"
+	auditdomain "vpass.local/vpass/internal/audit/domain"
+	credentialdomain "vpass.local/vpass/internal/credential/domain"
+	"vpass.local/vpass/internal/cryptokit"
+	"vpass.local/vpass/internal/protocol"
+	transparencydomain "vpass.local/vpass/internal/transparency/domain"
 )
 
 var (

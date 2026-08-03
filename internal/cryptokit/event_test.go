@@ -7,7 +7,7 @@ import (
 	"errors"
 	"testing"
 
-	"vdns.local/vdns/internal/protocol"
+	"vpass.local/vpass/internal/protocol"
 )
 
 func TestAES256GCMNISTVector(t *testing.T) {
@@ -95,7 +95,7 @@ func TestEventEnvelopeTamperingAlwaysRejectsWithoutPlaintext(t *testing.T) {
 		{name: "ciphertext", mutate: func(value *EventEnvelope) { value.ciphertext[0] ^= 1 }},
 		{name: "tag", mutate: func(value *EventEnvelope) { value.ciphertext[len(value.ciphertext)-1] ^= 1 }},
 		{name: "hash", mutate: func(value *EventEnvelope) { value.payloadHash[0] ^= 1 }},
-		{name: "suite", mutate: func(value *EventEnvelope) { value.suiteID = "VDNS-CP-X" }},
+		{name: "suite", mutate: func(value *EventEnvelope) { value.suiteID = "INVALID-SUITE-X" }},
 	}
 	for _, test := range tests {
 		test := test

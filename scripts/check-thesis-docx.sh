@@ -6,6 +6,6 @@ cd "${repo_root}"
 
 ./scripts/build-thesis-docx.sh
 python3 scripts/check_thesis_docx.py \
-  docs/论文/VDNS-PM研究生毕业论文.docx
+  docs/论文/VPass研究生毕业论文.docx
 
 echo "thesis-docx-check-ok"

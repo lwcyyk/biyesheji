@@ -5,8 +5,8 @@ import (
 	"context"
 	"errors"
 
-	anchordomain "vdns.local/vdns/internal/anchor/domain"
-	"vdns.local/vdns/internal/anchor/ports"
+	anchordomain "vpass.local/vpass/internal/anchor/domain"
+	"vpass.local/vpass/internal/anchor/ports"
 )
 
 var ErrProviderKindMismatch = errors.New("checkpoint provider kind mismatch")

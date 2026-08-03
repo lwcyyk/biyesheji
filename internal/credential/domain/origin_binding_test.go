@@ -3,8 +3,8 @@ package domain
 import (
 	"testing"
 
-	"vdns.local/vdns/internal/cryptokit"
-	"vdns.local/vdns/internal/protocol"
+	"vpass.local/vpass/internal/cryptokit"
+	"vpass.local/vpass/internal/protocol"
 )
 
 func TestOriginBindingUsesCanonicalOriginAndAccount(t *testing.T) {

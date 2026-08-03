@@ -1,12 +1,12 @@
-# VDNS-PM v2 实施计划
+# VPass Spec 2.1.0 实施计划
 
 | 属性 | 值 |
 |---|---|
 | 版本 | `2.1.0` |
 | 阶段 | G6研究原型集成；Stage 1协议设计冻结；G7未达成 |
-| 产品主线 | 解锁 → 生成/保存 → VDNS 解析 → 填充 → 同步 → 更新/确认/撤销 |
+| 产品主线 | 解锁 → 生成/保存 → 可信状态解析 → 填充 → 同步 → 更新/确认/撤销 |
 | 架构 | Go 模块化单体 + 端口/适配器 + 独立 Monitor |
-| 协议 | `VDNS-PM/2` / `VDNS-PM-CP-2` |
+| 协议 | 展示 `VPass/2`；legacy wire `VDNS-PM/2` / `VDNS-PM-CP-2` |
 | 规范依据 | `spec.md`、ADR-011～017、开发报告 v2.1.0 |
 
 > 本文件的G0.2～G7章节保留原阶段路线，用于比较计划与实际。当前执行入口已经切换到`tasks.md`的P0～P3清单；历史阶段标题不表示相应任务已经完成。
@@ -14,8 +14,8 @@
 ## 1. 计划原则
 
 1. 日常密码管理先于审计增强：先交付解锁、创建、填充、同步、更新和恢复，再接 SCOPE-ZK。
-2. 本地代理是唯一明文边界；浏览器扩展只取得短期 secret handle，不持久化密码。
-3. 云端保存对象，VDNS 决定可验证当前状态；链和 VRF 不进入普通填充关键路径。
+2. 本地安全客户端是唯一明文边界；浏览器扩展只取得短期 secret handle，不持久化密码。
+3. 同步存储层保存对象，可验证状态控制层固定可验证当前状态；链和 VRF 不进入普通填充关键路径。
 4. 所有安全决定进入领域状态机和验证器，HTTP、SQL、扩展与链适配器不得自行推进状态。
 5. v1.0.1 代码作为迁移资产；v2 协议字节、ID 宽度和 API 不做静默兼容。
 6. 每个阶段同时交付正向功能、负向路径、自动化证据和对应文档。
@@ -30,7 +30,7 @@ apps/security-dashboard ┘                             │
 packages/vault + crypto + route + lifecycle + verifier
            │                 │                  │
            ▼                 ▼                  ▼
- object-store adapter   sync adapter       VDNS/log adapters
+ object-store adapter   sync adapter       state/log adapters
            │                 │                  │
            ▼                 ▼                  ▼
        local disk      untrusted cloud     log/anchor/monitor
@@ -61,7 +61,7 @@ packages/vault + crypto + route + lifecycle + verifier
 交付：
 
 - v2 开发报告、Spec、计划、安全模型、数据模型和研究方案；
-- `VDNS-PM/2` 注册表、`/api/v2` OpenAPI 和 API 评审；
+- VPass Spec 2.1.0 wire注册表、`/api/v2` OpenAPI 和 API 评审；
 - ADR-011、v1 历史清单、v2 冻结清单；
 - 43 FR、30 NFR、21 AC、97 任务追踪通过。
 
@@ -111,9 +111,9 @@ packages/vault + crypto + route + lifecycle + verifier
 
 退出条件：双设备及多设备同步、回滚、替换、并发、撤销、每个崩溃点和恢复演练通过。
 
-### G4：VDNS、透明日志与检查点
+### G4：可验证状态、透明日志与检查点
 
-目标：把云端版本选择替换为设备本地可验证解析。
+目标：把同步存储层的版本选择替换为设备本地可验证解析。
 
 交付：
 
@@ -175,7 +175,7 @@ G0.2
   → G1.1 protocol/crypto
   → G2 vault ─────────────┐
   → G3 lifecycle/sync ────┼→ G5 UX
-  → G4 VDNS/log ──────────┘
+  → G4 state/log ──────────┘
              ↓
             G6 audit/optional remediation
              ↓
@@ -198,7 +198,7 @@ v1.0.1 是未发布原型。默认开发迁移采用：导出明确标记的测�
 | 状态机 | 表驱动/模型测试 | 非法边、双激活、确认前覆盖 |
 | 持久化 | 事务与崩溃注入 | CAS 双写、outbox 丢失、半写对象 |
 | 同步 | 多设备集成 | 云回滚、删除、替换、重排、冲突 |
-| VDNS | 证明变异 | 坏签名、scope、撤销、counter、Merkle 路径 |
+| 可验证状态 | 证明变异 | 坏签名、scope、撤销、counter、Merkle 路径 |
 | 扩展 | E2E | iframe、IDN、默认端口、错误账号、会话过期 |
 | 安全 | secret/dependency/SBOM | 日志泄密、错误堆栈、供应链漏洞 |
 | 实验 | 固定场景重复 | 抖动、规模、故障恢复、结果可复现 |
@@ -223,7 +223,7 @@ v1.0.1 是未发布原型。默认开发迁移采用：导出明确标记的测�
 | v1/v2 语义混用 | 证明和数据不可解释 | 协议版本硬拒绝、独立 KAT、显式迁移 |
 | 浏览器页面误导 | 跨站填充或虚假确认 | 本地重验 Origin、top-frame 门禁、证据分级 |
 | 网站改密结果未知 | 用户被锁号 | 新密码先耐久、UNKNOWN/Review、Connector 查询 |
-| 云回滚/删除 | 旧密码或不可用 | VDNS current version、对象缓存、明确缺失错误 |
+| 同步存储回滚/删除 | 旧密码或不可用 | 可验证current version、对象缓存、明确缺失错误 |
 | 撤销设备保留旧秘密 | 历史机密残余 | 新代际、停止封装、论文明确边界 |
 | 日志/链泄露关系 | 隐私损失 | 随机伪名、粗粒度元数据、Epoch 隔离、最小锚定 |
 | SCOPE-ZK 工期过大 | 挤压日常主线 | P2 可插拔、稳定 unavailable、最后实施 |

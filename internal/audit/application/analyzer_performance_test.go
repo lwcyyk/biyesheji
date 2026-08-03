@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"vdns.local/vdns/internal/cryptokit"
-	"vdns.local/vdns/internal/protocol"
+	"vpass.local/vpass/internal/cryptokit"
+	"vpass.local/vpass/internal/protocol"
 )
 
 func TestAuditScan100KUnderFiveSeconds(t *testing.T) {

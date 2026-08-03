@@ -10,10 +10,10 @@ import (
 	"sync"
 	"testing"
 
-	"vdns.local/vdns/internal/adapters/outbound/sqlite"
-	finalorderapp "vdns.local/vdns/internal/finalorder/application"
-	finalorderdomain "vdns.local/vdns/internal/finalorder/domain"
-	"vdns.local/vdns/internal/protocol"
+	"vpass.local/vpass/internal/adapters/outbound/sqlite"
+	finalorderapp "vpass.local/vpass/internal/finalorder/application"
+	finalorderdomain "vpass.local/vpass/internal/finalorder/domain"
+	"vpass.local/vpass/internal/protocol"
 )
 
 func TestResearchAuthorityDetectsTwoAndThreeDeviceBranches(t *testing.T) {

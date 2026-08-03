@@ -7,8 +7,8 @@ import (
 	"crypto/sha256"
 	"testing"
 
-	monitoringdomain "vdns.local/vdns/internal/monitoring/domain"
-	"vdns.local/vdns/internal/protocol"
+	monitoringdomain "vpass.local/vpass/internal/monitoring/domain"
+	"vpass.local/vpass/internal/protocol"
 )
 
 func TestMonitorEvidenceRepositoryPreservesIdempotentEvidence(t *testing.T) {

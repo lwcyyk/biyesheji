@@ -16,9 +16,9 @@ import (
 	"testing"
 	"time"
 
-	sqliteadapter "vdns.local/vdns/internal/adapters/outbound/sqlite"
-	"vdns.local/vdns/internal/cryptokit"
-	localapp "vdns.local/vdns/internal/localapi/application"
+	sqliteadapter "vpass.local/vpass/internal/adapters/outbound/sqlite"
+	"vpass.local/vpass/internal/cryptokit"
+	localapp "vpass.local/vpass/internal/localapi/application"
 )
 
 const (
@@ -27,10 +27,10 @@ const (
 )
 
 type apiFixture struct {
-	handler *Handler
-	agent   *localapp.Agent
-	session localapp.VaultSession
-	nonce   atomic.Uint64
+	handler     *Handler
+	localClient *localapp.LocalSecureClient
+	session     localapp.VaultSession
+	nonce       atomic.Uint64
 }
 
 func TestHTTPDailyCredentialContract(t *testing.T) {
@@ -47,7 +47,7 @@ func TestHTTPDailyCredentialContract(t *testing.T) {
 	}
 	var generated localapp.SecretHandle
 	decodeResponse(t, generation, &generated)
-	username, err := fixture.agent.StageCredentialField(
+	username, err := fixture.localClient.StageCredentialField(
 		fixture.session.SessionID, "https://xn--bcher-kva.example", "alice", "USERNAME", []byte("alice"),
 	)
 	if err != nil {
@@ -117,7 +117,7 @@ func TestHTTPDailyCredentialContract(t *testing.T) {
 		t.Fatalf("authorization = %+v", authorization)
 	}
 	var filled string
-	if err := fixture.agent.ConsumeNativeHandle(
+	if err := fixture.localClient.ConsumeNativeHandle(
 		fixture.session.SessionID, authorization.SecretHandle.SecretHandle,
 		"https://xn--bcher-kva.example", "PASSWORD",
 		func(value []byte) error {
@@ -186,14 +186,14 @@ func TestHTTPIdempotencyNonceAndStrictJSON(t *testing.T) {
 func TestHTTPDurableIdempotencySurvivesHandlerRestart(t *testing.T) {
 	t.Parallel()
 	master := []byte("durable-idempotency-master")
-	agent, err := localapp.NewAgent(localapp.Config{
+	localClient, err := localapp.NewLocalSecureClient(localapp.LocalSecureClientConfig{
 		UnlockVerifier: testUnlockVerifier(sha256.Sum256(master)),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	database, err := sqliteadapter.Open(
-		context.Background(), filepath.Join(t.TempDir(), "vdns.db"),
+		context.Background(), filepath.Join(t.TempDir(), "vpass.db"),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -204,7 +204,7 @@ func TestHTTPDurableIdempotencySurvivesHandlerRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	newHandler := func() *Handler {
-		value, createErr := New(agent, Config{
+		value, createErr := New(localClient, Config{
 			InstallToken: testToken, AllowedExtensionOrigins: []string{testOrigin},
 			IdempotencyStore: store, OperationStore: store,
 		})
@@ -214,17 +214,17 @@ func TestHTTPDurableIdempotencySurvivesHandlerRestart(t *testing.T) {
 		return value
 	}
 	device := testIdentifier(16, 81)
-	masterHandle, _ := agent.StageMasterPassword(device, master)
-	session, fault := agent.CreateVaultSession(localapp.CreateVaultSessionRequest{
+	masterHandle, _ := localClient.StageMasterPassword(device, master)
+	session, fault := localClient.CreateVaultSession(localapp.CreateVaultSessionRequest{
 		DeviceID: device, MasterPasswordHandle: masterHandle,
 	})
 	if fault != nil {
 		t.Fatal(fault)
 	}
-	username, _ := agent.StageCredentialField(
+	username, _ := localClient.StageCredentialField(
 		session.SessionID, "https://durable.example", "alice", "USERNAME", []byte("alice"),
 	)
-	password, _ := agent.StageCredentialField(
+	password, _ := localClient.StageCredentialField(
 		session.SessionID, "https://durable.example", "alice", "PASSWORD", []byte("durable-password-value"),
 	)
 	body, _ := json.Marshal(map[string]any{
@@ -232,7 +232,7 @@ func TestHTTPDurableIdempotencySurvivesHandlerRestart(t *testing.T) {
 		"usernameHandle": username, "passwordHandle": password,
 		"cryptoPolicyHash": testIdentifier(32, 82),
 	})
-	fixture := &apiFixture{handler: newHandler(), agent: agent, session: session}
+	fixture := &apiFixture{handler: newHandler(), localClient: localClient, session: session}
 	firstRequest := fixture.rawRequest(
 		http.MethodPost, "/api/v2/credentials", "durable-create-key-0001",
 		session.SessionID, "durable-first-nonce-000001", body,
@@ -349,7 +349,7 @@ func TestHTTPVersionUnknownDoesNotActivate(t *testing.T) {
 	t.Parallel()
 	fixture := newAPIFixture(t)
 	created := fixture.createCredential(t, "https://change.example", "alice")
-	replacement, err := fixture.agent.StageCredentialField(
+	replacement, err := fixture.localClient.StageCredentialField(
 		fixture.session.SessionID, "https://change.example", "alice", "PASSWORD", []byte("replacement-value"),
 	)
 	if err != nil {
@@ -424,7 +424,7 @@ func TestHTTPStage2CapabilityBoundaries(t *testing.T) {
 			},
 		},
 		{
-			name: "VDNS verifier unconfigured", path: "/api/v2/vdns-resolutions",
+			name: "state verifier unconfigured", path: "/api/v2/state-resolutions",
 			status: http.StatusNotImplemented,
 			body: map[string]any{
 				"credentialId": testIdentifier(32, 0x61),
@@ -485,7 +485,7 @@ func TestHTTPStage2CapabilityBoundaries(t *testing.T) {
 
 	recoverySecret := []byte("http-fixture-recovery-input")
 	recoveryDevice := testIdentifier(16, 0x74)
-	recoveryHandle, err := fixture.agent.StageRecoverySecret(
+	recoveryHandle, err := fixture.localClient.StageRecoverySecret(
 		testIdentifier(16, 0x75), recoveryDevice, recoverySecret,
 	)
 	if err != nil {
@@ -504,7 +504,7 @@ func TestHTTPStage2CapabilityBoundaries(t *testing.T) {
 		t.Fatalf("recovery=%d %s", recovery.Code, recovery.Body.String())
 	}
 
-	if _, err := fixture.agent.StageAuditAnalysisSecret(
+	if _, err := fixture.localClient.StageAuditAnalysisSecret(
 		sessionID, []byte("stage2-audit-candidate"),
 	); err != nil {
 		t.Fatal(err)
@@ -522,16 +522,59 @@ func TestHTTPStage2CapabilityBoundaries(t *testing.T) {
 	}
 }
 
+func TestHTTPLegacyV2RouteAndHeadersRemainReadable(t *testing.T) {
+	t.Parallel()
+	fixture := newAPIFixture(t)
+	checkpoint := testIdentifier(32, 0x71)
+	body, err := json.Marshal(map[string]any{
+		"credentialId":          testIdentifier(32, 0x72),
+		"operation":             "RESOLVE",
+		"trustedCheckpointHash": checkpoint,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	legacyResolution := fixture.rawRequest(
+		http.MethodPost, "/api/v2/vdns-resolutions", "", "", "", body,
+	)
+	legacyResolution.Header.Set("X-VDNS-Vault-Session", fixture.session.SessionID)
+	resolutionResponse := httptest.NewRecorder()
+	fixture.handler.ServeHTTP(resolutionResponse, legacyResolution)
+	if resolutionResponse.Code != http.StatusNotImplemented {
+		t.Fatalf("legacy resolution status=%d body=%s", resolutionResponse.Code, resolutionResponse.Body.String())
+	}
+
+	generationBody, err := json.Marshal(map[string]any{
+		"origin": "https://example.test", "accountId": "legacy",
+		"policyVersion": 1, "length": 20,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyHeaders := fixture.rawRequest(
+		http.MethodPost, "/api/v2/password-generations",
+		"legacy-header-generation-0001", "", "", generationBody,
+	)
+	legacyHeaders.Header.Set("X-VDNS-Vault-Session", fixture.session.SessionID)
+	legacyHeaders.Header.Set("X-VDNS-Request-Nonce", "legacy-request-nonce-00000001")
+	generationResponse := httptest.NewRecorder()
+	fixture.handler.ServeHTTP(generationResponse, legacyHeaders)
+	if generationResponse.Code != http.StatusCreated {
+		t.Fatalf("legacy header status=%d body=%s", generationResponse.Code, generationResponse.Body.String())
+	}
+}
+
 func TestHTTPRateLimitHasStableError(t *testing.T) {
 	t.Parallel()
 	master := []byte("rate-limit-master-input")
-	agent, err := localapp.NewAgent(localapp.Config{
+	localClient, err := localapp.NewLocalSecureClient(localapp.LocalSecureClientConfig{
 		UnlockVerifier: testUnlockVerifier(sha256.Sum256(master)),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler, err := New(agent, Config{
+	handler, err := New(localClient, Config{
 		InstallToken: testToken, AllowedExtensionOrigins: []string{testOrigin},
 		UnlocksPerMinute: 1,
 	})
@@ -540,14 +583,14 @@ func TestHTTPRateLimitHasStableError(t *testing.T) {
 	}
 	device := testIdentifier(16, 2)
 	for index := 0; index < 2; index++ {
-		handle, _ := agent.StageMasterPassword(device, master)
+		handle, _ := localClient.StageMasterPassword(device, master)
 		body, _ := json.Marshal(map[string]any{"deviceId": device, "masterPasswordHandle": handle})
 		request := httptest.NewRequest(http.MethodPost, "/api/v2/vault-sessions", bytes.NewReader(body))
 		request.RemoteAddr, request.Host = "127.0.0.1:40100", "127.0.0.1:43821"
 		request.Header.Set("Authorization", "Bearer "+testToken)
 		request.Header.Set("Content-Type", "application/json")
 		request.Header.Set("Origin", testOrigin)
-		request.Header.Set("X-VDNS-Request-Nonce", fmt.Sprintf("rate-limit-nonce-%08d", index))
+		request.Header.Set("X-VPass-Request-Nonce", fmt.Sprintf("rate-limit-nonce-%08d", index))
 		request.Header.Set("Idempotency-Key", fmt.Sprintf("rate-limit-key-%08d", index))
 		response := httptest.NewRecorder()
 		handler.ServeHTTP(response, request)
@@ -563,25 +606,25 @@ func TestHTTPRateLimitHasStableError(t *testing.T) {
 func newAPIFixture(t *testing.T) *apiFixture {
 	t.Helper()
 	master := []byte("http-fixture-master-input")
-	agent, err := localapp.NewAgent(localapp.Config{
+	localClient, err := localapp.NewLocalSecureClient(localapp.LocalSecureClientConfig{
 		UnlockVerifier:   testUnlockVerifier(sha256.Sum256(master)),
 		RecoveryVerifier: testRecoveryVerifier(sha256.Sum256([]byte("http-fixture-recovery-input"))),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	handler, err := New(agent, Config{
+	handler, err := New(localClient, Config{
 		InstallToken: testToken, AllowedExtensionOrigins: []string{testOrigin},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	device := testIdentifier(16, 1)
-	masterHandle, err := agent.StageMasterPassword(device, master)
+	masterHandle, err := localClient.StageMasterPassword(device, master)
 	if err != nil {
 		t.Fatal(err)
 	}
-	fixture := &apiFixture{handler: handler, agent: agent}
+	fixture := &apiFixture{handler: handler, localClient: localClient}
 	response := fixture.request(t, http.MethodPost, "/api/v2/vault-sessions",
 		"vault-session-key-0001", "",
 		map[string]any{"deviceId": device, "masterPasswordHandle": masterHandle})
@@ -594,10 +637,10 @@ func newAPIFixture(t *testing.T) *apiFixture {
 
 func (fixture *apiFixture) createCredential(t *testing.T, origin, account string) localapp.Credential {
 	t.Helper()
-	username, _ := fixture.agent.StageCredentialField(
+	username, _ := fixture.localClient.StageCredentialField(
 		fixture.session.SessionID, origin, account, "USERNAME", []byte(account),
 	)
-	password, _ := fixture.agent.StageCredentialField(
+	password, _ := fixture.localClient.StageCredentialField(
 		fixture.session.SessionID, origin, account, "PASSWORD", []byte("fixture-password-value"),
 	)
 	response := fixture.request(t, http.MethodPost, "/api/v2/credentials",
@@ -651,10 +694,10 @@ func (fixture *apiFixture) rawRequest(
 		request.Header.Set("Idempotency-Key", idempotencyKey)
 	}
 	if sessionID != "" {
-		request.Header.Set("X-VDNS-Vault-Session", sessionID)
+		request.Header.Set("X-VPass-Vault-Session", sessionID)
 	}
 	if nonce != "" {
-		request.Header.Set("X-VDNS-Request-Nonce", nonce)
+		request.Header.Set("X-VPass-Request-Nonce", nonce)
 	}
 	return request
 }

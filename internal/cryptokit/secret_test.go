@@ -12,7 +12,7 @@ import (
 func TestSecretDoesNotLeakThroughFormattingOrJSON(t *testing.T) {
 	t.Parallel()
 
-	const sample = "vdns-super-secret-sample"
+	const sample = "vpass-super-secret-sample"
 	secret, err := NewSecret([]byte(sample))
 	if err != nil {
 		t.Fatalf("NewSecret: %v", err)
@@ -34,7 +34,7 @@ func TestSecretDoesNotLeakThroughFormattingOrJSON(t *testing.T) {
 		fmt.Sprintf("%#v", secret),
 		fmt.Sprintf("%#v", value),
 		strings.Join([]string{"command", fmt.Sprint(secret)}, " "),
-		strings.Join([]string{"VDNS_SECRET=" + fmt.Sprint(secret)}, " "),
+		strings.Join([]string{"VPASS_SECRET=" + fmt.Sprint(secret)}, " "),
 	}
 	for _, output := range formatted {
 		if strings.Contains(output, sample) {
