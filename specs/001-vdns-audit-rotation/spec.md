@@ -1,15 +1,16 @@
-# Spec 001：VDNS-PM 可验证密码生命周期管理系统
+# Spec 001：VPass 可验证密码生命周期管理系统
 
 | 属性 | 值 |
 |---|---|
-| Spec ID | `001-vdns-pm`（仓库沿用历史目录名） |
+| Spec ID | `001-vpass`（仓库沿用历史目录名） |
 | 版本 | `2.1.0` |
 | 状态 | Stage 1 protocol design frozen；实现阶段 G6，G7 未达成 |
-| 日期 | 2026-07-31 |
-| 产品名 | `VDNS-PM: Verifiable Password Lifecycle Management over VDNS` |
-| 论文题目 | 基于VDNS的可验证密码生命周期管理与隐私审计方法研究 |
-| 协议 | `VDNS-PM/2`，`VDNS-PM-CP-2` |
-| 上位依据 | `docs/VDNS研究生毕业设计开发报告.md` v2.1.0、ADR-011～017 |
+| 日期 | 2026-08-03 |
+| 产品名 | `VPass: Verifiable Password Lifecycle Management System` |
+| 论文题目 | VPass：可验证密码生命周期管理系统的设计与实现 |
+| 当前展示协议 | `VPass/2` |
+| legacy wire协议 | `VDNS-PM/2`，`VDNS-PM-CP-2`，冻结签名/KDF/AAD与旧数据兼容 |
+| 上位依据 | `docs/VPass研究生毕业设计开发报告.md` v2.1.0、ADR-011～019 |
 
 > 本文件是 v2 实现、测试和论文结论的规范性依据。“必须（MUST）”“不得（MUST NOT）”“应当（SHOULD）”“可以（MAY）”具有规范性。`protocol-registry.md`、`security.md`、`data-model.md` 和 OpenAPI 合同属于同一 v2.1.0 设计基线。Stage 2已完成部分研究原型闭环，生产共识、真实E4 Connector、SCOPE-ZK和G7证据仍未完成；文档或单元测试存在不等于生产能力完成。
 
@@ -17,17 +18,17 @@
 
 ## 1. 产品定位与成功定义
 
-VDNS-PM 首先是完整密码管理器。用户只记一个主密码，系统负责生成、加密保存、识别、查询、自动填充、同步、更新、撤销、备份和恢复各网站复杂凭据。其差异化研究目标是：
+VPass 首先是完整密码管理器。用户只记一个主密码，系统负责生成、加密保存、识别、查询、自动填充、同步、更新、撤销、备份和恢复各网站复杂凭据。其差异化研究目标是：
 
 ```text
-AEAD 保护密码内容；VDNS 保护密码控制过程。
+AEAD 保护密码内容，可验证状态控制层保证凭据版本和生命周期状态可信。
 ```
 
 系统必须同时提供四类能力：
 
 1. 安全保存密码内容和本地 Origin/账号映射；
 2. 验证创建、解析、填充、更新、同步、撤销和迁移等生命周期操作；
-3. 在不可信云环境中支持多设备独立解析当前可信版本；
+3. 在不可信同步存储环境中支持多设备独立解析当前可信版本；
 4. 提供隐私化安全审计，并可选地执行 SCOPE-ZK 泄露分析和最小影响修复。
 
 首版成功定义：AC-001～AC-021 全部通过；日常密码管理主路径不依赖链、VRF 或 SCOPE-ZK 在线；E1～E8 产生机器可读证据；所有 FR/NFR/AC 均有任务和测试映射。
@@ -36,7 +37,7 @@ AEAD 保护密码内容；VDNS 保护密码控制过程。
 
 ### 2.1 核心研究问题
 
-> 在多设备和不可信云同步环境中，如何构建可验证密码生命周期管理机制，使用户仅凭一个主密码管理多个网站的复杂凭据，同时让每台设备独立验证凭据当前版本、操作来源、授权状态、撤销状态和历史完整性，而不向云端、VDNS 节点或区块链暴露密码、网站和账号关系？
+> 在多设备和不可信同步存储环境中，如何构建可验证密码生命周期管理机制，使用户仅凭一个主密码管理多个网站的复杂凭据，同时让每台设备独立验证凭据当前版本、操作来源、授权状态、撤销状态和历史完整性，而不向同步存储层、可验证状态控制节点或区块链暴露密码、网站和账号关系？
 
 研究主线依次为：内容机密性、可信版本解析、生命周期操作验证、多设备同步；泄露响应是附加增强。
 
@@ -44,21 +45,21 @@ AEAD 保护密码内容；VDNS 保护密码控制过程。
 
 | 平面 | 日常职责 | 信任边界 |
 |---|---|---|
-| 交互平面 | 浏览器扩展、桌面 UI、网站识别、生成、填充、改密辅助 | 页面输入不可信，本地代理重验 Origin |
+| 交互平面 | 浏览器扩展、桌面 UI、网站识别、生成、填充、改密辅助 | 页面输入不可信，本地安全客户端重验 Origin |
 | 本地密码学/数据平面 | 主密码解锁、RootCapsule、RouteMap、字段加密、策略 | 唯一明文秘密边界 |
-| 生命周期/同步平面 | 创建、查询、版本、冲突、同步、备份、恢复 | 云端对象可删改回滚 |
-| VDNS 控制平面 | 身份、能力、撤销、L1～L5、Verdict | 解析器按本地信任根判定 |
+| 生命周期/同步平面 | 创建、查询、版本、冲突、同步、备份、恢复 | 同步存储对象可删改回滚 |
+| 可验证状态控制平面 | 身份、能力、撤销、L1～L5、Verdict | 状态解析器返回证明，本地验证器按本地信任根判定 |
 | 透明存储/检查点平面 | 密文对象、Merkle 日志、状态根、最小锚定 | 链和日志不保存秘密 |
 | 隐私审计/响应平面 | 重复检测、异常使用、SCOPE-ZK、修复规划 | 仅用户明确发起重任务 |
 
 ### 2.3 首版范围
 
-- Go 模块化单体、本地代理 API/CLI、独立 Monitor；
+- Go 模块化单体、本地安全客户端 API/CLI、独立 Monitor；
 - RootCapsule、Argon2id 解锁、密码生成器、本地 RouteMap；
 - 六类字段的信封加密和内容寻址对象；
 - 凭据创建、可信解析、自动填充、更新、冲突与版本历史；
 - 多设备加入、HPKE 分发、加密同步、撤销和新秘密代际；
-- RFC 9162 风格透明日志、ProofBundle、VDNS L1～L5；
+- RFC 9162 风格透明日志、ProofBundle、五层可信状态验证；
 - 密码重复/异常使用审计和 Epoch 隔离见证；
 - 可选 SCOPE-ZK 接口、AffectedRoot、修复任务和 RotationRoot；
 - Manifest V3 扩展、React 控制台、Mock Site、E1～E8 实验。
@@ -75,7 +76,7 @@ AEAD 保护密码内容；VDNS 保护密码控制过程。
 | `CredentialID` | v2 固定为 32 字节随机标识；公开日志仍不得直接暴露 |
 | `OriginBinding` | `HMAC(Kname, Encode(CanonicalOrigin, AccountID))`，用于 AAD/路由绑定 |
 | `DeviceOperationCredential` | 根签名的设备能力、作用域、有效期与状态凭证 |
-| `CredentialStateDescriptor` | VDNS 解析的版本、状态、主体、授权与检查点摘要 |
+| `CredentialStateDescriptor` | 可验证状态解析返回的版本、状态、主体、授权与检查点摘要 |
 | `ProofBundle` | L1～L5 所需身份、能力、撤销、因果、日志和本地策略证据 |
 | `Final Order Authority` | 为竞争事件签发唯一最终序回执的逻辑权威；当前仅实现`RESEARCH_ADAPTER`单节点版本，未实现生产或多节点共识 |
 | `SCOPE-ZK` | 可选泄露影响集合证明模块，不在日常解锁/填充主路径 |
@@ -90,13 +91,13 @@ AEAD 保护密码内容；VDNS 保护密码控制过程。
 
 ### US-002 生成、创建和自动填充密码（P0）
 
-用户在网站注册/登录时生成符合策略的复杂密码，本地创建加密凭据；再次访问时通过 RouteMap 和 VDNS 解析当前版本，再安全填充。
+用户在网站注册/登录时生成符合策略的复杂密码，本地创建加密凭据；再次访问时通过 RouteMap 和可信状态解析取得当前版本，再安全填充。
 
 追踪：FR-009～018；AC-002、AC-015～016、AC-019。
 
 ### US-003 多设备可信同步（P0）
 
-用户在设备 A 更新后，设备 B 从不可信云下载对象，但只接受 VDNS 指定版本和哈希，拒绝旧密文、冲突版本和错误对象。
+用户在设备 A 更新后，设备 B 从不可信同步存储层下载对象，但只接受可验证状态控制层指定的版本和哈希，拒绝旧密文、冲突版本和错误对象。
 
 追踪：FR-019～027；AC-003～008。
 
@@ -112,9 +113,9 @@ AEAD 保护密码内容；VDNS 保护密码控制过程。
 
 追踪：FR-005～008、FR-027；AC-007～008。
 
-### US-006 独立 VDNS 解析（P0）
+### US-006 独立可信状态解析（P0）
 
-设备依次执行 L1～L5，得到 `ACCEPT/DEGRADED/REVIEW_REQUIRED/REJECT`，云端不能自称当前状态裁判。
+设备依次执行 L1～L5，得到 `ACCEPT/DEGRADED/REVIEW_REQUIRED/REJECT`，同步存储层无权决定当前状态。
 
 追踪：FR-028～035；AC-003、AC-009～010、AC-012～013、AC-016。
 
@@ -133,14 +134,14 @@ AEAD 保护密码内容；VDNS 保护密码控制过程。
 ## 4. 明确非目标
 
 1. 不宣称发明新的 AEAD、签名、KDF、HPKE、VRF 或零知识基础原语；
-2. 不防御已完全控制本地代理、浏览器或内核且能读取解锁后明文的恶意软件；
+2. 不防御已完全控制本地安全客户端、浏览器或内核且能读取解锁后明文的恶意软件；
 3. 不把主密码、网站密码、Origin、账号、完整凭据或稳定关系写入公开日志/链；
 4. 不要求区块链、VRF 或 SCOPE-ZK 在线才能解锁、查询或自动填充；
 5. 不把 `AUTOFILL_OBSERVED` 或页面推断当作网站认证成功证明；
 6. 不承诺任意真实网站无人值守改密；首版以 Mock Site 和人工/可信 Connector 为验收边界；
 7. 不声称设备撤销能够远程擦除其撤销前已经得到的历史秘密或明文；
 8. 不声称 AffectedRoot 自身证明影响集合语义正确或全局完整；
-9. 不要求新设备仅凭低熵主密码从云端恢复全部根秘密；
+9. 不要求新设备仅凭低熵主密码从同步存储层恢复全部根秘密；
 10. 不把 Anvil、单机日志或 `SIMULATED` Provider 描述为生产拜占庭共识或真实随机信标。
 
 ## 5. 规范性功能需求
@@ -152,7 +153,7 @@ AEAD 保护密码内容；VDNS 保护密码控制过程。
 | FR-001 | P0 | 初始化必须由 OS CSPRNG 独立生成 NamespaceID、`SKroot`、`Rᵤ[1]`、设备秘密和 256 位 RecoverySecret；`SKroot` 与 `Rᵤ` 不得互相派生。 | AC-001、AC-013 |
 | FR-002 | P0 | 主密码必须经 Argon2id v1.3 派生 `Kpwd`，再与设备 32 字节高熵秘密、DeviceID 经 HKDF 得到设备专属 `Kunlock`；参数进入胶囊格式并可升级。 | AC-001、AC-011、AC-019 |
 | FR-003 | P0 | `RootCapsule_i` 必须以 AEAD 封装 `RootSecretBundle`，AAD 绑定 Namespace、Device、胶囊版本和 KDF 参数；主密码、设备秘密和 `Kunlock` 不得上传或记录。 | AC-001、AC-011～013 |
-| FR-004 | P0 | 恢复必须使用已有合法设备批准或 256 位 RecoverySecret；仅有主密码和云端数据不得恢复完整根秘密。 | AC-008、AC-011 |
+| FR-004 | P0 | 恢复必须使用已有合法设备批准或 256 位 RecoverySecret；仅有主密码和同步存储数据不得恢复完整根秘密。 | AC-008、AC-011 |
 | FR-005 | P0 | 每台设备必须拥有独立 Ed25519 认证密钥、X25519/HPKE 接收密钥和稳定 DeviceID，私钥不得离开设备安全边界。 | AC-007～009、AC-013 |
 | FR-006 | P0 | `DeviceOperationCredential` 必须绑定 Namespace、设备公钥、能力、CredentialScope、有效期、发行计数器、状态引用、秘密代际和根签名。 | AC-007、AC-009、AC-012～013 |
 | FR-007 | P0 | 新设备加入必须验证一次性挑战及 `DEVICE_ENROLL` 权限，通过端到端加密通道传输根包，并发布新设备凭证。 | AC-008、AC-012～013 |
@@ -168,7 +169,7 @@ AEAD 保护密码内容；VDNS 保护密码控制过程。
 | FR-012 | P0 | Origin、用户名、密码、TOTP、恢复码和备注必须使用独立随机 DEK 信封加密；字段 AAD 绑定 Namespace、CredentialID、原 encryption version、FieldType、CryptoPolicyHash 和 OriginBinding。 | AC-002、AC-011～015 |
 | FR-013 | P0 | 创建流程必须经过 `NONEXISTENT → CREATE_PENDING → ACTIVE(v1)`；只有密文对象、本地映射、签名 CREATE 事件和可验证状态均满足时才发布 ACTIVE。 | AC-002、AC-009、AC-012 |
 | FR-014 | P0 | 查询/填充前必须先解析 `CredentialStateDescriptor` 和 ProofBundle，得到可信 current version、envelope hash、授权状态和 Verdict。 | AC-002～003、AC-009 |
-| FR-015 | P0 | 从云端获取的 CredentialEnvelope 必须匹配 VDNS 返回的 CredentialID、version、envelope hash、policy hash 和字段引用；旧版、缺失、冲突或错误密文 fail closed。 | AC-003、AC-012～013 |
+| FR-015 | P0 | 从同步存储层获取的 CredentialEnvelope 必须匹配可信状态解析返回的 CredentialID、version、envelope hash、policy hash 和字段引用；旧版、缺失、冲突或错误密文 fail closed。 | AC-003、AC-012～013 |
 | FR-016 | P0 | 解密前后必须重新规范化并核对当前浏览器 Origin 与 OriginBinding；扩展不得指定任意 CredentialID 绕过 RouteMap。 | AC-002、AC-012、AC-015 |
 | FR-017 | P0 | 自动填充只产生 `USE_OBSERVED/AUTOFILL_OBSERVED`；提交、登录推断、网站确认必须保持不同证据等级。 | AC-002、AC-017 |
 | FR-018 | P0 | 查询和填充不得等待链、VRF 或 SCOPE-ZK；使用事件只等待本地耐久 outbox，后台完成日志和检查点发布。 | AC-002、AC-016、AC-019 |
@@ -183,11 +184,11 @@ AEAD 保护密码内容；VDNS 保护密码控制过程。
 | FR-022 | P0 | 同一设备计数器必须单调递增；counter、前序摘要或已接受 descriptor 冲突必须原子拒绝且不产生部分 outbox/指针更新。 | AC-004、AC-006、AC-012 |
 | FR-023 | P0 | 修改必须经过 `ACTIVE(v) → UPDATE_PENDING(v+1) → SITE_CONFIRM_PENDING → ACTIVE(v+1)`；E0～E2不得激活，E3仅在严格L5策略下激活，E4/E5可按策略激活；确认前旧版本保持可用。 | AC-005、AC-014 |
 | FR-024 | P0 | 网站已改密后，新密码必须先本地加密耐久并进入 `SITE_CHANGED_LOCAL_COMMIT_PENDING`；外部失败不得丢失新密码或回退使用旧密码。 | AC-005、AC-014、AC-016 |
-| FR-025 | P0 | 其他设备必须以 VDNS current version 和 envelope hash 接受同步；`returned_version < VDNS_version` 或 hash 不一致必须拒绝。 | AC-003～004、AC-012 |
+| FR-025 | P0 | 其他设备必须以可验证当前版本和 envelope hash 接受同步；`returned_version < trusted_version` 或 hash 不一致必须拒绝。 | AC-003～004、AC-012 |
 | FR-026 | P0 | 同版本多 descriptor、模糊网站结果或无法证明当前值必须进入 `CONFLICTED/REVIEW_REQUIRED/UNKNOWN`，不得自动选择或覆盖。 | AC-004～005、AC-009 |
-| FR-027 | P0 | 备份、恢复和设备迁移必须保持 RootCapsule、RouteMap、版本历史、对象引用和可信检查点一致；恢复后仍需执行 VDNS 验证。 | AC-008、AC-012、AC-016 |
+| FR-027 | P0 | 备份、恢复和设备迁移必须保持 RootCapsule、RouteMap、版本历史、对象引用和可信检查点一致；恢复后仍需执行五层可信状态验证。 | AC-008、AC-012、AC-016 |
 
-### 5.4 VDNS 控制、透明历史与最小锚定
+### 5.4 可验证状态控制、透明历史与最小锚定
 
 | ID | Pri | 规范性要求 | 验收 |
 |---|---:|---|---|
@@ -224,7 +225,7 @@ AEAD 保护密码内容；VDNS 保护密码控制过程。
 | NFR-SEC-003 | P0 | KDF、AEAD、签名、哈希、Merkle 和证明均带协议/套件/对象/Namespace/用途域分离。 | AC-012～013 |
 | NFR-SEC-004 | P0 | 密码学、解析、证明或 Origin 核对失败必须 fail closed，不返回部分明文、不填充、不迁移状态。 | AC-012、AC-015 |
 | NFR-SEC-005 | P0 | 敏感缓冲使用后尽力清零；锁屏、超时、进程退出必须销毁活动解锁会话。 | AC-001、AC-011 |
-| NFR-SEC-006 | P0 | 扩展仅通过 Native Messaging/受认证回环连接本地代理，校验安装令牌、Origin 和短期 CSRF nonce。 | AC-002、AC-015 |
+| NFR-SEC-006 | P0 | 扩展仅通过 Native Messaging/受认证回环连接本地安全客户端，校验安装令牌、Origin 和短期 CSRF nonce。 | AC-002、AC-015 |
 | NFR-SEC-007 | P1 | 依赖锁版本并生成 SBOM；发布前执行漏洞、许可证和秘密扫描。 | AC-020～021 |
 
 ### 6.2 正确性与一致性
@@ -278,7 +279,7 @@ AEAD 保护密码内容；VDNS 保护密码控制过程。
 Browser Origin
   → local RouteMap
   → CredentialID
-  → VDNS Resolve(State + Version + ProofBundle)
+  → State Resolve(State + Version + ProofBundle)
   → verify L1-L5
   → fetch encrypted object
   → verify version/hash/policy
@@ -289,7 +290,7 @@ Browser Origin
   → durable encrypted USE_OBSERVED outbox
 ```
 
-除本地代理和已验证缓存外，任一外部组件离线都不能导致设备接受未经证明的新版本。普通填充不得调用 SCOPE-ZK。
+除本地安全客户端和已验证缓存外，任一外部组件离线都不能导致设备接受未经证明的新版本。普通填充不得调用 SCOPE-ZK。
 
 ### 7.2 独立状态机
 
@@ -310,9 +311,9 @@ Browser Origin
 | `REVIEW_REQUIRED` | 默认不填充冲突项 | 只允许解决冲突 | 用户明确确认 | 允许查看证据 |
 | `REJECT_*` | 禁止 | 禁止 | 禁止 | 禁止 |
 
-### 7.4 VDNS部署与最终序
+### 7.4 可验证状态控制层部署与最终序
 
-VDNS是私有凭据状态的可验证解析控制平面，不是传统DNS或DNSSEC替代。名称空间根负责中心化授权治理；设备、Resolver、Verifier、Monitor和见证者执行分布式验证。授权设备发布候选对象，Resolver收集并返回解析包，本地Verifier作最终采信。
+可验证状态控制层继承VDNS可验证私有名称状态的信任模型，不是传统DNS或DNSSEC替代。名称空间根负责中心化授权治理；设备、State Resolver、Local State Verifier、Monitor和见证者执行分布式验证。授权设备发布候选对象，State Resolver收集并返回解析包，Local State Verifier作最终采信。
 
 `finalSequence`只能由Final Order Authority通过签名排序回执产生。透明日志记录已排序对象并给出包含/一致性证明；检查点公告层周期发布根。检查点前的日志位置属于provisional，达到L5要求的受信检查点后才作为final。当前仓库实现了`ResearchSingleNodeFinalOrderAuthority`、`SINGLE_PROCESS_RESEARCH_LOG`与模拟/Anvil研究适配器，没有实现多节点共识或拜占庭容错。Authority自身的恢复检查点不替代透明日志/公告层检查点。
 
@@ -320,7 +321,7 @@ VDNS是私有凭据状态的可验证解析控制平面，不是传统DNS或DNSS
 
 ### 7.5 跨设备冲突
 
-两台设备可同时从v1生成`v2-A`和`v2-B`。各自本地CAS成功不代表全局成功。发现相同base上的不同候选或同版本不同DescriptorHash时必须保留两分支并进入`CONFLICTED`。云端、到达时间、墙钟和设备ID均无裁决权。具有`CONFLICT_RESOLVE`能力的用户主体显式选择后，裁决事件引用全部候选并进入最终序。
+两台设备可同时从v1生成`v2-A`和`v2-B`。各自本地CAS成功不代表全局成功。发现相同base上的不同候选或同版本不同DescriptorHash时必须保留两分支并进入`CONFLICTED`。同步存储层、到达时间、墙钟和设备ID均无裁决权。具有`CONFLICT_RESOLVE`能力的用户主体显式选择后，裁决事件引用全部候选并进入最终序。
 
 ### 7.6 网站证据等级
 
@@ -349,11 +350,11 @@ CanonicalOrigin由小写scheme、IDNA/Punycode小写hostname和非默认端口�
 
 ### AC-002 创建、解析和自动填充主闭环
 
-**Given** 用户在规范 HTTPS Origin 创建账号；**When** 生成密码、创建 v1、再次打开网站并填充；**Then** 先完成 VDNS 解析和对象验证，填充正确密码，总流程不等待链、VRF 或 SCOPE-ZK。
+**Given** 用户在规范 HTTPS Origin 创建账号；**When** 生成密码、创建 v1、再次打开网站并填充；**Then** 先完成可信状态解析和对象验证，填充正确密码，总流程不等待链、VRF 或 SCOPE-ZK。
 
-### AC-003 不可信云回滚/替换被拒绝
+### AC-003 不可信同步存储回滚/替换被拒绝
 
-**Given** VDNS current version 为 v2；**When** 云返回 v1、其他 Credential 的对象、错误 hash 或缺失字段；**Then** 本地拒绝且不返回/填充部分明文。
+**Given** 可验证当前版本为 v2；**When** 同步存储层返回 v1、其他 Credential 的对象、错误 hash 或缺失字段；**Then** 本地拒绝且不返回/填充部分明文。
 
 ### AC-004 多设备同步与冲突
 
@@ -421,7 +422,7 @@ CanonicalOrigin由小写scheme、IDNA/Punycode小写hostname和非默认端口�
 
 ### AC-020 一键演示与机器证据
 
-**Given** 空数据目录和已安装工具链；**When** 执行单一顶层命令；**Then** 初始化、创建/填充、双设备同步、更新、撤销、VDNS 验证、审计和可选响应演示均可复现并导出 JSON/CSV。
+**Given** 空数据目录和已安装工具链；**When** 执行单一顶层命令；**Then** 初始化、创建/填充、双设备同步、更新、撤销、五层可信状态验证、审计和可选响应演示均可复现并导出 JSON/CSV。
 
 ### AC-021 论文与 UI 声明准确
 
@@ -433,9 +434,9 @@ CanonicalOrigin由小写scheme、IDNA/Punycode小写hostname和非默认端口�
 |---|---|---|
 | E1 | 解锁、胶囊、设备加入和恢复 | 正/负向成功率、Argon2 时间/内存、跨设备胶囊拒绝 |
 | E2 | 日常密码管理 | 生成、创建、RouteMap、解密、自动填充延迟；10k/100k 查询 |
-| E3 | 多设备同步与不可信云 | 同步延迟、回滚/替换拒绝、冲突解析、离线恢复 |
+| E3 | 多设备与不可信同步存储 | 同步延迟、回滚/替换拒绝、冲突解析、离线恢复 |
 | E4 | 生命周期与网站确认 | CREATE/UPDATE/CONFIRM/UNKNOWN/崩溃点，锁号和密码丢失均为 0 |
-| E5 | VDNS 与透明日志 | 分别报告完整L1～L5延迟和Merkle微基准、证明大小、检查点、分叉/回滚检测 |
+| E5 | 可验证状态与透明日志 | 分别报告完整L1～L5延迟和Merkle微基准、证明大小、检查点、分叉/回滚检测 |
 | E6 | 撤销和新代际 | 撤销后误接纳 0，新代际解密成功 0，传播延迟 |
 | E7 | 隐私审计 | 写入/窗口扫描开销、风险 precision/recall、跨 Epoch 不可链接投影 |
 | E8 | 可选泄露响应 | SCOPE-ZK/基线对比、部分失败、越界修改拒绝、最小影响字节数 |
@@ -445,7 +446,7 @@ CanonicalOrigin由小写scheme、IDNA/Punycode小写hostname和非默认端口�
 - FR-001～008 → 根/设备/恢复 → AC-001、007～009、011～013、016 → G1/G3；
 - FR-009～018 → 日常密码管理 → AC-002～003、011～016、019 → G1/G2/G5；
 - FR-019～027 → 生命周期/同步 → AC-003～008、012、014、016 → G2/G3；
-- FR-028～035 → VDNS/透明日志 → AC-003、007、009～013、016 → G4；
+- FR-028～035 → 可验证状态/透明日志 → AC-003、007、009～013、016 → G4；
 - FR-036～043 → 审计/可选响应 → AC-011、014、016～019、021 → G6；
 - 全部 NFR 必须至少映射一个 AC 并在 `tasks.md` 有实现或验证任务。
 

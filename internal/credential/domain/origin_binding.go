@@ -3,7 +3,7 @@ package domain
 import (
 	"errors"
 
-	"vdns.local/vdns/internal/cryptokit"
+	"vpass.local/vpass/internal/cryptokit"
 )
 
 var ErrOriginBinding = errors.New("origin binding failed")

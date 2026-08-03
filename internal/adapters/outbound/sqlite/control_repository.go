@@ -8,8 +8,8 @@ import (
 	"errors"
 	"fmt"
 
-	credential "vdns.local/vdns/internal/credential/domain"
-	"vdns.local/vdns/internal/protocol"
+	credential "vpass.local/vpass/internal/credential/domain"
+	"vpass.local/vpass/internal/protocol"
 )
 
 var (

@@ -7,9 +7,9 @@ import (
 	"errors"
 	"sync"
 
-	"vdns.local/vdns/internal/cryptokit"
-	"vdns.local/vdns/internal/protocol"
-	site "vdns.local/vdns/internal/site/domain"
+	"vpass.local/vpass/internal/cryptokit"
+	"vpass.local/vpass/internal/protocol"
+	site "vpass.local/vpass/internal/site/domain"
 )
 
 var (

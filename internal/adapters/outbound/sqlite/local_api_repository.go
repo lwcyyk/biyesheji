@@ -9,7 +9,7 @@ import (
 	"math"
 	"strings"
 
-	localports "vdns.local/vdns/internal/localapi/ports"
+	localports "vpass.local/vpass/internal/localapi/ports"
 )
 
 var (

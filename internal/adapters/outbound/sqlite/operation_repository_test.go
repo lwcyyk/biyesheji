@@ -11,10 +11,10 @@ import (
 	"path/filepath"
 	"testing"
 
-	"vdns.local/vdns/internal/adapters/outbound/objectfs"
-	"vdns.local/vdns/internal/cryptokit"
-	operation "vdns.local/vdns/internal/operation/domain"
-	"vdns.local/vdns/internal/protocol"
+	"vpass.local/vpass/internal/adapters/outbound/objectfs"
+	"vpass.local/vpass/internal/cryptokit"
+	operation "vpass.local/vpass/internal/operation/domain"
+	"vpass.local/vpass/internal/protocol"
 )
 
 func TestOperationRepositoryRetryReturnsFirstPersistedCiphertext(t *testing.T) {
@@ -137,7 +137,7 @@ func newOperationFixture(t *testing.T) *operationFixture {
 		database:         database,
 		repository:       repository,
 		objectStore:      objectStore,
-		chainID:          "vdns-integration-chain",
+		chainID:          "vpass-integration-chain",
 		credentialHash:   sha256.Sum256([]byte("device operation credential")),
 		devicePrivateKey: ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x61}, ed25519.SeedSize)),
 		pseudonym:        [cryptokit.DevicePseudonymSize]byte{1, 3, 3, 7},

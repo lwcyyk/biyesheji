@@ -1,5 +1,7 @@
 # VDNS-PM 第一阶段实现状态
 
+> 本文为历史阶段记录，其中VDNS-PM为VPass的旧名称。
+
 ## 1. 当前真实完成度
 
 当前仓库已经形成可运行的Go模块化研究原型。核心包括RootCapsule/RecoveryCapsule、字段级加密、RouteMap、密码生成、SQLite事务与outbox、凭据生命周期、Mock Site确认、同步清单接受、VDNS L1～L5本地验证、Merkle透明日志、Monitor、隐私审计、本地修复基线、浏览器扩展和本地Agent。审计前全量Go测试通过，vet、race及扩展测试通过。v2.1.0冻结后除合同包外的Go包通过；合同包因旧2.0.0版本/摘要断言产生两项预期失败，准确反映代码迁移尚未完成。

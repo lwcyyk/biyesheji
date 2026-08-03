@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"vdns.local/vdns/internal/cryptokit"
-	"vdns.local/vdns/internal/protocol"
+	"vpass.local/vpass/internal/cryptokit"
+	"vpass.local/vpass/internal/protocol"
 )
 
 const (
@@ -184,7 +184,7 @@ func (session *VaultSession) Metadata(now time.Time) (VaultSessionMetadata, erro
 }
 
 // AuthorizeOriginForAccount derives and adds one private OriginBinding to this
-// unlocked session. The trusted local agent calls it only after an explicit
+// unlocked session. The trusted local localClient calls it only after an explicit
 // create/autofill user gesture; browser page data cannot call it directly.
 func (session *VaultSession) AuthorizeOriginForAccount(
 	now time.Time,

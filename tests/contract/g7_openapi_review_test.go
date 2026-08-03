@@ -48,8 +48,8 @@ func TestG7OpenAPIReferencesResolveAndOperationsAreUnique(t *testing.T) {
 			seen[operationID] = true
 		}
 	}
-	if len(seen) != 22 {
-		t.Fatalf("operation count=%d, want 22", len(seen))
+	if len(seen) != 23 {
+		t.Fatalf("operation count=%d, want 23", len(seen))
 	}
 	baseline := loadJSONFile(t, filepath.Join(root, "specs", "001-vdns-audit-rotation", "BASELINE.json"))
 	artifacts := objectMap(t, baseline, "artifacts")
@@ -85,7 +85,7 @@ func TestG7OpenAPIResolvedParametersErrorsPaginationAndSecretHandles(t *testing.
 				}
 			}
 			if method == "post" && path != "/credential-route-resolutions" &&
-				path != "/vdns-resolutions" {
+				path != "/state-resolutions" && path != "/vdns-resolutions" {
 				if _, ok := parameters["Idempotency-Key"]; !ok {
 					t.Errorf("POST %s lacks Idempotency-Key", path)
 				}

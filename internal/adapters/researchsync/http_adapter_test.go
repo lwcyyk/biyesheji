@@ -13,10 +13,10 @@ import (
 	"testing"
 	"time"
 
-	"vdns.local/vdns/internal/adapters/outbound/memorysync"
-	"vdns.local/vdns/internal/platform"
-	"vdns.local/vdns/internal/protocol"
-	syncdomain "vdns.local/vdns/internal/sync/domain"
+	"vpass.local/vpass/internal/adapters/outbound/memorysync"
+	"vpass.local/vpass/internal/platform"
+	"vpass.local/vpass/internal/protocol"
+	syncdomain "vpass.local/vpass/internal/sync/domain"
 )
 
 func TestResearchHTTPAdapterTenThousandObjectBatchAndManifestPaging(t *testing.T) {
@@ -198,7 +198,7 @@ func TestResearchHTTPAdapterCloudCanHideBranchAndReturnOldManifest(t *testing.T)
 		t.Fatalf("hidden branch/old manifest page = %+v, %v", page, err)
 	}
 	// This test demonstrates transport adversarial behavior only. A receiver
-	// must compare the page with VDNS finalized/conflict state before accepting.
+	// must compare the page with finalized/conflict state before accepting.
 }
 
 func TestResearchHTTPAdapterRejectsIdempotencyReuseAndOversizeBody(t *testing.T) {

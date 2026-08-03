@@ -15,7 +15,7 @@ import (
 	"github.com/cloudflare/circl/hpke"
 	"golang.org/x/crypto/curve25519"
 
-	"vdns.local/vdns/internal/protocol"
+	"vpass.local/vpass/internal/protocol"
 )
 
 const (
@@ -110,7 +110,8 @@ type hpkeEnvelopeWire struct {
 	InfoHash        [sha256.Size]byte   `cbor:"info_hash"`
 }
 
-// NewHPKEInfo constructs a VDNS-PM/2 recipient-bound context.
+// NewHPKEInfo constructs a VPass v2 recipient-bound context using the frozen
+// legacy wire domain from protocol.DomainPrefix.
 func NewHPKEInfo(
 	namespaceID protocol.NamespaceID,
 	deviceID protocol.DeviceID,

@@ -9,6 +9,12 @@ import (
 )
 
 const (
+	ProductName          = "VPass"
+	ProductProtocolLabel = "VPass/2"
+
+	// ProtocolID, SuiteID and DomainPrefix are frozen legacy wire identifiers.
+	// VPass keeps them for deterministic signatures, KDF/AAD domains and
+	// existing SQLite objects. They are deprecated as product display names.
 	ProtocolID      = "VDNS-PM"
 	ProtocolVersion = uint64(2)
 	SuiteID         = "VDNS-PM-CP-2"
@@ -44,7 +50,7 @@ func (objectType ObjectType) valid() bool {
 	return objectType >= ObjectTypeRootCapsule && objectType <= ObjectTypeRotationRoot
 }
 
-// Valid reports whether the object type belongs to VDNS-PM/2.
+// Valid reports whether the object type belongs to the VPass v2 registry.
 func (objectType ObjectType) Valid() bool { return objectType.valid() }
 
 // SigInput contains every protocol domain separator signed by an Ed25519 key.

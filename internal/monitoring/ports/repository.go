@@ -4,7 +4,7 @@ package ports
 import (
 	"context"
 
-	monitoringdomain "vdns.local/vdns/internal/monitoring/domain"
+	monitoringdomain "vpass.local/vpass/internal/monitoring/domain"
 )
 
 type EvidenceRepository interface {

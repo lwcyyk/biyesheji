@@ -1,4 +1,4 @@
-const HOST_NAME = "org.vdns_pm.local_agent";
+const HOST_NAME = "org.vpass.local_client";
 let nativePort = null;
 let requestCounter = 0;
 const pending = new Map();

@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"testing"
 
-	"vdns.local/vdns/internal/cryptokit"
-	"vdns.local/vdns/internal/protocol"
+	"vpass.local/vpass/internal/cryptokit"
+	"vpass.local/vpass/internal/protocol"
 )
 
 func TestPrivateUseEventCanonicalRoundTripAndNoJSONWitness(t *testing.T) {

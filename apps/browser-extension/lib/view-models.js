@@ -33,13 +33,13 @@ export function credentialViewModel(credential) {
     lifecycle: credential.lifecycleStatus,
     verdict: credential.verdict,
     verdictText: VERDICT_TEXT[credential.verdict] || credential.verdict,
-    sourceText: "当前版本来源：VDNS 状态描述与已验证对象哈希",
+    sourceText: "当前版本来源：可验证状态描述与已验证对象哈希",
     needsReview: credential.lifecycleStatus === "CONFLICTED" ||
       credential.verdict.startsWith("REJECT_") ||
       credential.verdict === "REVIEW_REQUIRED",
     recoveryActions: credential.lifecycleStatus === "CONFLICTED"
       ? ["查看冲突 descriptor", "保留双分支证据", "选择已确认版本"]
-      : ["查看版本历史", "重新解析 VDNS"]
+      : ["查看版本历史", "重新解析可信状态"]
   };
 }
 

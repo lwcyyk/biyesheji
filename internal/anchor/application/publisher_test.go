@@ -7,9 +7,9 @@ import (
 	"crypto/sha256"
 	"testing"
 
-	"vdns.local/vdns/internal/adapters/outbound/memoryanchor"
-	anchordomain "vdns.local/vdns/internal/anchor/domain"
-	"vdns.local/vdns/internal/protocol"
+	"vpass.local/vpass/internal/adapters/outbound/memoryanchor"
+	anchordomain "vpass.local/vpass/internal/anchor/domain"
+	"vpass.local/vpass/internal/protocol"
 )
 
 func TestPublisherLabelsSimulatorAndRejectsProviderMismatch(t *testing.T) {

@@ -11,9 +11,9 @@ import (
 	"math"
 	"strings"
 
-	operation "vdns.local/vdns/internal/operation/domain"
-	"vdns.local/vdns/internal/platform"
-	"vdns.local/vdns/internal/protocol"
+	operation "vpass.local/vpass/internal/operation/domain"
+	"vpass.local/vpass/internal/platform"
+	"vpass.local/vpass/internal/protocol"
 )
 
 var (

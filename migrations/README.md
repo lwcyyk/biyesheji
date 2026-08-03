@@ -1,4 +1,6 @@
-# VDNS-PM SQLite migrations
+# VPass SQLite migrations
+
+> 迁移文件中的 VDNS-PM 是冻结 legacy wire 标识和历史名称。已发布 SQL 文本、文件名和校验和不因 VPass 展示名迁移而修改。
 
 当前可执行研究原型schema版本为`8`。迁移文件发布后只追加，不覆盖。`0001_initial.sql`属于CP-1历史资产，运行时拒绝把它静默升级为CP-2；新建数据库从`0002_v2_initial.sql`开始并依次应用至`0008_stage2_protocol_closure.sql`。
 

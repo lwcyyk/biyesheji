@@ -9,7 +9,7 @@ import (
 	"sort"
 	"strings"
 
-	"vdns.local/vdns/internal/protocol"
+	"vpass.local/vpass/internal/protocol"
 )
 
 const (

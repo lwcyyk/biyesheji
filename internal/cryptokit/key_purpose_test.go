@@ -7,8 +7,8 @@ import (
 	"errors"
 	"testing"
 
-	"vdns.local/vdns/internal/protocol"
-	rotationdomain "vdns.local/vdns/internal/rotation/domain"
+	"vpass.local/vpass/internal/protocol"
+	rotationdomain "vpass.local/vpass/internal/rotation/domain"
 )
 
 type policyPRFContract interface {

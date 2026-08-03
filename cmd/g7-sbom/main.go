@@ -17,6 +17,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"vpass.local/vpass/internal/protocol"
 )
 
 type module struct {
@@ -84,7 +86,7 @@ type licenseRecord struct {
 }
 
 func main() {
-	output := flag.String("out", "docs/security/vdns-pm.cdx.json", "CycloneDX output")
+	output := flag.String("out", "docs/security/vpass.cdx.json", "CycloneDX output")
 	licensesOutput := flag.String("licenses-out", "docs/security/licenses.json", "license inventory output")
 	flag.Parse()
 	modules, goVersion, err := resolvedModules()
@@ -156,13 +158,14 @@ func buildBOM(modules []module, goVersion string) (bom, []licenseRecord, error) 
 		serialHex[16:20], serialHex[20:32],
 	)
 	root := component{
-		Type: "application", BOMRef: "pkg:golang/vdns.local/vdns",
-		Name: "vdns-pm", Version: "0.7.0", Scope: "required",
-		PURL: "pkg:golang/vdns.local/vdns",
+		Type: "application", BOMRef: "pkg:golang/vpass.local/vpass",
+		Name: "vpass", Version: "0.6.0", Scope: "required",
+		PURL: "pkg:golang/vpass.local/vpass",
 		Properties: []property{
-			{Name: "vdns:protocol", Value: "VDNS-PM/2"},
-			{Name: "vdns:suite", Value: "VDNS-PM-CP-2"},
-			{Name: "vdns:go-toolchain", Value: goVersion},
+			{Name: "vpass:protocol", Value: protocol.ProductProtocolLabel},
+			{Name: "vpass:legacy-wire-protocol", Value: fmt.Sprintf("%s/%d", protocol.ProtocolID, protocol.ProtocolVersion)},
+			{Name: "vpass:legacy-wire-suite", Value: protocol.SuiteID},
+			{Name: "vpass:go-toolchain", Value: goVersion},
 		},
 	}
 	result := bom{
@@ -173,7 +176,7 @@ func buildBOM(modules []module, goVersion string) (bom, []licenseRecord, error) 
 		Vendor  string `json:"vendor"`
 		Name    string `json:"name"`
 		Version string `json:"version"`
-	}{Vendor: "VDNS-PM", Name: "g7-sbom", Version: "1.0.0"})
+	}{Vendor: protocol.ProductName, Name: "g7-sbom", Version: "1.0.0"})
 	result.Metadata.Component = root
 	var licenses []licenseRecord
 	rootDependency := dependency{Ref: root.BOMRef}
@@ -196,9 +199,9 @@ func buildBOM(modules []module, goVersion string) (bom, []licenseRecord, error) 
 			Type: "library", BOMRef: bomRef, Group: group, Name: name,
 			Version: current.Version, Scope: scope, PURL: bomRef,
 			Properties: []property{
-				{Name: "vdns:go-module-path", Value: current.Path},
-				{Name: "vdns:go-module-sum", Value: current.Sum},
-				{Name: "vdns:dependency-kind", Value: scope},
+				{Name: "vpass:go-module-path", Value: current.Path},
+				{Name: "vpass:go-module-sum", Value: current.Sum},
+				{Name: "vpass:dependency-kind", Value: scope},
 			},
 		}
 		if licenseID != "NOASSERTION" {

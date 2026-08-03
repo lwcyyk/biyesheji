@@ -5,8 +5,8 @@ import (
 	"context"
 	"errors"
 
-	monitoringdomain "vdns.local/vdns/internal/monitoring/domain"
-	"vdns.local/vdns/internal/monitoring/ports"
+	monitoringdomain "vpass.local/vpass/internal/monitoring/domain"
+	"vpass.local/vpass/internal/monitoring/ports"
 )
 
 var ErrMonitorUnavailable = errors.New("monitor repository unavailable")

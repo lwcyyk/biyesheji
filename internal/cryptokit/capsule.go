@@ -15,7 +15,7 @@ import (
 	"golang.org/x/crypto/argon2"
 	"golang.org/x/crypto/hkdf"
 
-	"vdns.local/vdns/internal/protocol"
+	"vpass.local/vpass/internal/protocol"
 )
 
 const (

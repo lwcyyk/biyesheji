@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build and style the editable VDNS-PM thesis DOCX from Markdown."""
+"""Build and style the editable VPass thesis DOCX from Markdown."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from docx.oxml.ns import qn
 from docx.shared import Mm, Pt
 
 
-TITLE = "基于 VDNS 的可验证密码生命周期管理与隐私审计方法研究"
+TITLE = "VPass：可验证密码生命周期管理系统的设计与实现"
 BODY_EAST_ASIA_FONT = "宋体"
 HEADING_EAST_ASIA_FONT = "黑体"
 LATIN_FONT = "Times New Roman"
@@ -27,12 +27,12 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--input",
-        default="docs/论文/VDNS-PM研究生毕业论文.md",
+        default="docs/论文/VPass研究生毕业论文.md",
         help="Markdown thesis source",
     )
     parser.add_argument(
         "--output",
-        default="docs/论文/VDNS-PM研究生毕业论文.docx",
+        default="docs/论文/VPass研究生毕业论文.docx",
         help="DOCX output",
     )
     return parser.parse_args()
@@ -224,7 +224,7 @@ def build(source: Path, output: Path) -> None:
         raise FileNotFoundError(source)
     output.parent.mkdir(parents=True, exist_ok=True)
 
-    with tempfile.TemporaryDirectory(prefix="vdns-pm-docx-") as temp_directory:
+    with tempfile.TemporaryDirectory(prefix="vpass-docx-") as temp_directory:
         intermediate = Path(temp_directory) / "thesis.docx"
         pypandoc.convert_file(
             str(source),
@@ -245,9 +245,9 @@ def build(source: Path, output: Path) -> None:
         )
         document = Document(intermediate)
         document.core_properties.title = TITLE
-        document.core_properties.subject = "VDNS-PM 研究生毕业设计论文"
+        document.core_properties.subject = "VPass 研究生毕业设计论文"
         document.core_properties.author = "待按学校模板填写"
-        document.core_properties.keywords = "密码管理器; VDNS; 可验证生命周期; 隐私审计"
+        document.core_properties.keywords = "VPass; 密码管理器; 可验证状态; 可验证生命周期; 隐私审计"
         document.core_properties.comments = (
             "由 scripts/build-thesis-docx.sh 从冻结 Markdown 源生成。"
         )

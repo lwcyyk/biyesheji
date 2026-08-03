@@ -11,9 +11,9 @@ import (
 	"sync"
 	"testing"
 
-	credential "vdns.local/vdns/internal/credential/domain"
-	"vdns.local/vdns/internal/cryptokit"
-	"vdns.local/vdns/internal/protocol"
+	credential "vpass.local/vpass/internal/credential/domain"
+	"vpass.local/vpass/internal/cryptokit"
+	"vpass.local/vpass/internal/protocol"
 )
 
 func TestCredentialControlRepositoryAcceptLoadAndIdempotentReplay(t *testing.T) {

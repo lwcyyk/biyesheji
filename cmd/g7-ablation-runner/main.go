@@ -65,11 +65,11 @@ func main() {
 	one, zero := 1.0, 0.0
 	done := true
 	result := evidence{
-		SchemaVersion: "1.0.0", DatasetVersion: "vdns-pm-g7-datasets-v1",
+		SchemaVersion: "1.0.0", DatasetVersion: "vpass-g7-datasets-v1",
 		Seed: 20260723, Classification: "MIXED_EXECUTABLE_AND_TEST_ONLY_DECISION_MODEL",
 		Hypotheses: []hypothesis{
 			{
-				ID: "H1", Statement: "VDNS current-state resolution blocks cloud rollback and substitution.",
+				ID: "H1", Statement: "Trusted current-state resolution blocks storage rollback and substitution.",
 				Primary: true, Metric: "attackAcceptanceRate",
 				SupportCondition:      "all preset rollback/substitution attacks have zero acceptance and valid inputs have zero false rejection",
 				Falsification:         "any stale or substituted object reaches autofill/current-state acceptance",
@@ -77,7 +77,7 @@ func main() {
 				Variants: []variant{
 					modelVariant("cloud-version-index-only", trials, trials, "cloud is treated as current-state authority"),
 					modelVariant("object-hash-only", trials, trials, "an authentic old object remains acceptable without a trusted current version"),
-					fullVariant("complete-l1-l5", 0, 0, []string{"faults/fault-injection.json", "../g3/e3-sync-untrusted-cloud.json"}, "receiver-owned VDNS state rejects rollback and substitution"),
+					fullVariant("complete-l1-l5", 0, 0, []string{"faults/fault-injection.json", "../g3/e3-sync-untrusted-cloud.json"}, "receiver-owned trusted state rejects rollback and substitution"),
 				},
 			},
 			{

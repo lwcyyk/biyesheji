@@ -1,4 +1,4 @@
-// Command vdns-local-agent starts the authenticated loopback API and serves a
+// Command vpass-local-client starts the authenticated loopback API and serves a
 // persistent Native Messaging connection on stdin/stdout. It expects an
 // already initialized CP-2 vault profile; initialization is intentionally a
 // separate ceremony.
@@ -17,12 +17,12 @@ import (
 	"strings"
 	"time"
 
-	"vdns.local/vdns/internal/adapters/inbound/httpapi"
-	"vdns.local/vdns/internal/adapters/inbound/nativemessaging"
-	sqliteadapter "vdns.local/vdns/internal/adapters/outbound/sqlite"
-	"vdns.local/vdns/internal/cryptokit"
-	localapp "vdns.local/vdns/internal/localapi/application"
-	"vdns.local/vdns/internal/protocol"
+	"vpass.local/vpass/internal/adapters/inbound/httpapi"
+	"vpass.local/vpass/internal/adapters/inbound/nativemessaging"
+	sqliteadapter "vpass.local/vpass/internal/adapters/outbound/sqlite"
+	"vpass.local/vpass/internal/cryptokit"
+	localapp "vpass.local/vpass/internal/localapi/application"
+	"vpass.local/vpass/internal/protocol"
 )
 
 type options struct {
@@ -36,7 +36,7 @@ type options struct {
 
 func main() {
 	var options options
-	flag.StringVar(&options.databasePath, "db", "", "initialized VDNS-PM SQLite database")
+	flag.StringVar(&options.databasePath, "db", "", "initialized VPass SQLite database")
 	flag.StringVar(&options.namespaceText, "namespace", "", "base64url NamespaceID")
 	flag.StringVar(&options.deviceText, "device", "", "base64url DeviceID")
 	flag.StringVar(&options.deviceSecretPath, "device-secret-file", "", "0600 file containing a 32-byte base64url device secret")
@@ -44,7 +44,7 @@ func main() {
 	flag.StringVar(&options.extensionID, "extension-id", "", "32-character Chrome extension ID")
 	flag.Parse()
 	if err := run(options); err != nil {
-		_, _ = fmt.Fprintln(os.Stderr, "vdns-local-agent:", stableStartupError(err))
+		_, _ = fmt.Fprintln(os.Stderr, "vpass-local-client:", stableStartupError(err))
 		os.Exit(1)
 	}
 }
@@ -126,13 +126,13 @@ func run(options options) error {
 		bundle.Destroy()
 		return nil
 	}
-	agent, err := localapp.NewAgent(localapp.Config{
+	localClient, err := localapp.NewLocalSecureClient(localapp.LocalSecureClientConfig{
 		UnlockVerifier: unlock, RecoveryVerifier: recoverVault,
 	})
 	if err != nil {
 		return errors.New("local application initialization failed")
 	}
-	api, err := httpapi.New(agent, httpapi.Config{
+	api, err := httpapi.New(localClient, httpapi.Config{
 		InstallToken: installToken,
 		AllowedExtensionOrigins: []string{
 			"chrome-extension://" + options.extensionID,
@@ -161,7 +161,7 @@ func run(options options) error {
 		}
 		close(serverErrors)
 	}()
-	host, err := nativemessaging.New(agent, nativemessaging.Config{
+	host, err := nativemessaging.New(localClient, nativemessaging.Config{
 		BaseURL: "http://" + listener.Addr().String(), InstallToken: installToken,
 	})
 	if err != nil {

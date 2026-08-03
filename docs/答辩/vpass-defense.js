@@ -8,9 +8,9 @@ const {
 
 const pptx = new pptxgen();
 pptx.layout = "LAYOUT_WIDE";
-pptx.author = "VDNS-PM Graduate Design";
-pptx.subject = "基于 VDNS 的可验证密码生命周期管理与隐私审计方法研究";
-pptx.title = "VDNS-PM 研究生毕业设计答辩";
+pptx.author = "VPass Graduate Design";
+pptx.subject = "VPass：可验证密码生命周期管理系统的设计与实现";
+pptx.title = "VPass 研究生毕业设计答辩";
 pptx.company = "Graduate Design";
 pptx.lang = "zh-CN";
 pptx.theme = {
@@ -19,7 +19,7 @@ pptx.theme = {
   lang: "zh-CN",
 };
 pptx.defineSlideMaster({
-  title: "VDNS",
+  title: "VPass",
   background: { color: "07111F" },
   objects: [
     {
@@ -33,7 +33,7 @@ pptx.defineSlideMaster({
     },
     {
       text: {
-        text: "VDNS-PM · AEAD 保护密码内容，VDNS 保护密码控制过程",
+        text: "VPass · AEAD保护密码内容，可验证状态控制层保证生命周期状态可信",
         options: {
           x: 0.58,
           y: 7.17,
@@ -76,7 +76,7 @@ const C = {
 };
 
 function addSlide(title, section) {
-  const slide = pptx.addSlide("VDNS");
+  const slide = pptx.addSlide("VPass");
   slide.background = { color: C.bg };
   slide.addText(section.toUpperCase(), {
     x: 0.62,
@@ -256,7 +256,7 @@ function addSpeakerNotes(slide, lines) {
     line: { color: C.cyan, width: 1.2 },
   });
   addPill(slide, "研究生毕业设计答辩", 0.75, 0.72, 2.2, C.cyan);
-  slide.addText("基于 VDNS 的可验证密码生命周期管理\n与隐私审计方法研究", {
+  slide.addText("VPass：可验证密码生命周期管理系统\n的设计与实现", {
     x: 0.74,
     y: 1.45,
     w: 10.55,
@@ -269,7 +269,7 @@ function addSpeakerNotes(slide, lines) {
     breakLine: false,
     valign: "mid",
   });
-  slide.addText("VDNS-PM: Verifiable Password Lifecycle Management over VDNS", {
+  slide.addText("VPass: Verifiable Password Lifecycle Management System", {
     x: 0.78,
     y: 3.4,
     w: 9.7,
@@ -308,7 +308,7 @@ function addSpeakerNotes(slide, lines) {
     color: C.cyan,
     margin: 0,
   });
-  slide.addText("AEAD 保护密码内容\nVDNS 保护密码控制过程", {
+  slide.addText("AEAD保护密码内容\n可验证状态控制层保证生命周期状态可信", {
     x: 8.18,
     y: 4.94,
     w: 4.25,
@@ -327,8 +327,8 @@ function addSpeakerNotes(slide, lines) {
 {
   const slide = addSlide("问题不是“能否解密”，还包括“为何相信它是当前密码”", "01 研究定位");
   addCard(slide, 0.65, 1.55, 3.72, 3.45, "普通密码库保护", "主密码 → KDF → 密文库\n\n关注：服务器是否看见密码\n不足：合法旧密文仍可能通过认证", C.blue);
-  addCard(slide, 4.8, 1.55, 3.72, 3.45, "不可信同步控制", "云可回滚、替换、重放、制造冲突\n\n设备还需确认版本、主体、授权、撤销与历史", C.amber);
-  addCard(slide, 8.95, 1.55, 3.72, 3.45, "VDNS-PM", "完整密码管理主线\n+\n可验证生命周期控制\n+\n隐私审计与可选事故响应", C.cyan);
+  addCard(slide, 4.8, 1.55, 3.72, 3.45, "不可信同步控制", "存储层可回滚、替换、重放、制造冲突\n\n设备还需确认版本、主体、授权、撤销与历史", C.amber);
+  addCard(slide, 8.95, 1.55, 3.72, 3.45, "VPass", "完整密码管理主线\n+\n可验证生命周期控制\n+\n隐私审计与可选事故响应", C.cyan);
   addFlowArrow(slide, 4.42, 3.02, 0.32);
   addFlowArrow(slide, 8.57, 3.02, 0.32);
   addPill(slide, "主线：生成 · 保存 · 填充 · 同步 · 更新 · 撤销 · 恢复", 2.0, 5.55, 9.3, C.cyan);
@@ -352,11 +352,11 @@ function addSpeakerNotes(slide, lines) {
     4.5,
     { fontSize: 13 }
   );
-  addCard(slide, 7.25, 1.45, 2.55, 1.28, "贡献 1–2", "五层 VDNS 解析\n名称空间授权主体", C.cyan, { bodySize: 10 });
+  addCard(slide, 7.25, 1.45, 2.55, 1.28, "贡献 1–2", "五层可信状态解析\n名称空间授权主体", C.cyan, { bodySize: 10 });
   addCard(slide, 10.05, 1.45, 2.55, 1.28, "贡献 3–4", "接收方验证同步\n网站确认绑定生命周期", C.blue, { bodySize: 10 });
   addCard(slide, 7.25, 3.05, 2.55, 1.28, "贡献 5", "Epoch 隔离的\n隐私使用审计", C.purple, { bodySize: 10 });
   addCard(slide, 10.05, 3.05, 2.55, 1.28, "贡献 6", "可选泄露—修复\n一致性边界", C.amber, { bodySize: 10 });
-  addCard(slide, 7.25, 4.65, 5.35, 1.3, "论文主次", "生命周期与 VDNS 是核心创新；SCOPE-ZK 是事故时增强，不参与日常路径。", C.red, { bodySize: 10.5 });
+  addCard(slide, 7.25, 4.65, 5.35, 1.3, "论文主次", "生命周期与可验证状态是核心创新；SCOPE-ZK 是事故时增强，不参与日常路径。", C.red, { bodySize: 10.5 });
 }
 
 // 4. Architecture
@@ -366,8 +366,8 @@ function addSpeakerNotes(slide, lines) {
     ["交互平面", "扩展 / 桌面 / 移动", C.blue],
     ["本地密码学与数据", "解锁 / 字段加密 / RouteMap", C.cyan],
     ["生命周期与同步", "创建 / 版本 / 确认 / 撤销", C.green],
-    ["VDNS 控制平面", "身份 / 权限 / 状态 / 证明", C.amber],
-    ["云与检查点", "密文对象 / 日志 / 周期根", C.purple],
+    ["可验证状态控制层", "身份 / 权限 / 状态 / 证明", C.amber],
+    ["存储与检查点", "密文对象 / 日志 / 周期根", C.purple],
     ["隐私审计与响应", "安全检查 / 可选 SCOPE-ZK", C.red],
   ];
   labels.forEach((entry, index) => {
@@ -427,7 +427,7 @@ function addSpeakerNotes(slide, lines) {
   addFlowArrow(slide, 4.34, 2.25, 0.42);
   addFlowArrow(slide, 8.54, 2.25, 0.42);
   addCard(slide, 0.68, 4.0, 11.95, 1.75, "字段级 CredentialEnvelope", "Origin · Username · Password · TOTP · Recovery Codes · Notes\n每字段独立随机 DEK；AAD 绑定 Namespace、CredentialID、版本、字段、策略摘要和 OriginBinding。\n只改 password 时，其他 ciphertext / wrapped key / digest 逐字节不变。", C.green, { bodySize: 11 });
-  addPill(slide, "主密码不上传；只凭主密码 + 云数据不能恢复根", 3.35, 6.1, 6.6, C.cyan);
+  addPill(slide, "主密码不上传；只凭主密码 + 存储层数据不能恢复根", 3.35, 6.1, 6.6, C.cyan);
 }
 
 // 6. Autofill
@@ -436,7 +436,7 @@ function addSpeakerNotes(slide, lines) {
   const steps = [
     ["1", "识别 Origin", C.blue],
     ["2", "本地 RouteMap", C.cyan],
-    ["3", "VDNS 解析", C.amber],
+    ["3", "可信状态解析", C.amber],
     ["4", "L1–L5 验证", C.purple],
     ["5", "获取当前密文", C.green],
     ["6", "版本/hash/AAD", C.red],
@@ -479,7 +479,7 @@ function addSpeakerNotes(slide, lines) {
     });
     if (index < steps.length - 1) addFlowArrow(slide, x + 0.92, 2.23, 0.55, C.line);
   });
-  addCard(slide, 1.0, 4.25, 3.35, 1.45, "不发送", "主密码 · 网站密码 · Origin 明文\n到云、VDNS 或公告层", C.red, { bodySize: 10.5 });
+  addCard(slide, 1.0, 4.25, 3.35, 1.45, "不发送", "主密码 · 网站密码 · Origin 明文\n到存储层、状态节点或公告层", C.red, { bodySize: 10.5 });
   addCard(slide, 4.98, 4.25, 3.35, 1.45, "不等待", "区块链确认 · VRF\nSCOPE-ZK / 通用 zkVM", C.amber, { bodySize: 10.5 });
   addCard(slide, 8.96, 4.25, 3.35, 1.45, "不夸大", "AUTOFILL ≠ LOGIN\nSUBMIT ≠ SITE_CONFIRMED", C.cyan, { bodySize: 10.5 });
 }
@@ -523,9 +523,9 @@ function addSpeakerNotes(slide, lines) {
   addPill(slide, "填充、提交、页面跳转只能产生观察事件", 3.38, 5.9, 6.55, C.amber);
 }
 
-// 8. VDNS
+// 8. Trusted state verification
 {
-  const slide = addSlide("VDNS 五层验证：签名有效只是第一层", "05 生命周期协议");
+  const slide = addSlide("五层可信状态验证：签名有效只是第一层", "05 生命周期协议");
   const layers = [
     ["L1", "主体真实性", "设备签名 · 根凭证链", C.blue],
     ["L2", "操作资格", "Capability · Scope · 有效期", C.cyan],
@@ -578,18 +578,18 @@ function addSpeakerNotes(slide, lines) {
   });
   addCard(slide, 9.52, 1.42, 2.85, 2.05, "联合不变量", "IdentityValid\n∧ AuthorizationValid\n∧ NotRevoked\n∧ CausallyFresh\n∧ LogIncluded\n∧ PolicyAccepted", C.cyan, { bodySize: 10 });
   addCard(slide, 9.52, 3.82, 2.85, 1.82, "最终 Verdict", "ACCEPT\nDEGRADED\nREVIEW_REQUIRED\nREJECT", C.amber, { bodySize: 11 });
-  addPill(slide, "current state 由接收设备验证，不由同步云宣告", 3.2, 6.2, 6.95, C.cyan);
+  addPill(slide, "current state 由接收设备验证，不由同步存储层宣告", 3.2, 6.2, 6.95, C.cyan);
 }
 
 // 9. Sync
 {
-  const slide = addSlide("多设备同步：云保存对象，VDNS 确定当前状态", "05 生命周期协议");
+  const slide = addSlide("多设备同步：存储层保存对象，设备验证当前状态", "05 生命周期协议");
   addCard(slide, 0.75, 1.55, 2.65, 3.65, "设备 A", "生成候选\n→ 网站确认\n→ 签名事件\n→ 对象/manifest\n→ ACTIVE(v+1)", C.blue, { bodySize: 12 });
-  addCard(slide, 5.34, 1.55, 2.65, 3.65, "不可信云", "可删除\n可回滚\n可替换\n可重放\n可制造缺失", C.red, { bodySize: 12 });
-  addCard(slide, 9.93, 1.55, 2.65, 3.65, "设备 B", "解析 VDNS\n→ 验证 L1–L5\n→ 下载当前 hash\n→ 原子接受\n→ ACTIVE(v+1)", C.cyan, { bodySize: 12 });
+  addCard(slide, 5.34, 1.55, 2.65, 3.65, "不可信存储", "可删除\n可回滚\n可替换\n可重放\n可制造缺失", C.red, { bodySize: 12 });
+  addCard(slide, 9.93, 1.55, 2.65, 3.65, "设备 B", "解析可信状态\n→ 验证 L1–L5\n→ 下载当前 hash\n→ 原子接受\n→ ACTIVE(v+1)", C.cyan, { bodySize: 12 });
   addFlowArrow(slide, 3.62, 2.8, 1.4, C.blue);
   addFlowArrow(slide, 8.21, 2.8, 1.4, C.cyan);
-  addPill(slide, "returnedVersion < VDNSVersion  ⇒  REJECT", 3.17, 5.72, 7.0, C.red);
+  addPill(slide, "returnedVersion < trustedVersion  ⇒  REJECT", 3.17, 5.72, 7.0, C.red);
   slide.addText("同版本异摘要 → CONFLICTED；两个分支均保留，等待显式裁决", {
     x: 2.25,
     y: 6.34,
@@ -615,7 +615,7 @@ function addSpeakerNotes(slide, lines) {
 // 11. Implementation
 {
   const slide = addSlide("参考实现：模块化单体 + 端口/适配器", "07 系统实现");
-  addCard(slide, 0.68, 1.45, 3.55, 2.02, "交互与入口", "Browser Extension\nNative Messaging\nLocal Agent / HTTP / Mock Site", C.blue, { bodySize: 11 });
+  addCard(slide, 0.68, 1.45, 3.55, 2.02, "交互与入口", "Browser Extension\nNative Messaging\nLocal Secure Client / HTTP / Mock Site", C.blue, { bodySize: 11 });
   addCard(slide, 4.88, 1.45, 3.55, 2.02, "领域核心", "cryptokit · credential · device\nsync · resolver · transparency\nmonitoring · audit · remediation", C.cyan, { bodySize: 10.5 });
   addCard(slide, 9.08, 1.45, 3.55, 2.02, "外部适配器", "SQLite WAL/FULL\n内容寻址对象库\n模拟日志 / Anvil research adapter", C.purple, { bodySize: 10.5 });
   addFlowArrow(slide, 4.34, 2.28, 0.42);
@@ -698,7 +698,7 @@ function addSpeakerNotes(slide, lines) {
   addMetric(slide, 5.55, 1.45, 2.2, "6", "消融假设 H1–H6", C.blue);
   addMetric(slide, 7.95, 1.45, 2.2, "0", "完整方案预置攻击接受", C.green);
   addMetric(slide, 10.35, 1.45, 2.2, "0 B", "无关字段变化", C.purple);
-  addCard(slide, 0.72, 3.05, 3.7, 2.45, "H1–H2：控制面", "移除 VDNS current state → 旧对象可被当成当前\n移除 capability/final sequence → 撤销后签名仍可能被接受", C.red, { bodySize: 10.5 });
+  addCard(slide, 0.72, 3.05, 3.7, 2.45, "H1–H2：控制面", "移除 trusted current state → 旧对象可被当成当前\n移除 capability/final sequence → 撤销后签名仍可能被接受", C.red, { bodySize: 10.5 });
   addCard(slide, 4.82, 3.05, 3.7, 2.45, "H3–H4：生命周期", "直接覆盖/候选不耐久 → 密码失配或丢失窗口\n整包重加密 → 无关字段变化", C.amber, { bodySize: 10.5 });
   addCard(slide, 8.92, 3.05, 3.7, 2.45, "H5–H6：隐私与响应", "稳定公开 tag → 跨 Epoch 关联\n无界批量修复 → 越界变化；完整方案只改 Completed", C.purple, { bodySize: 10.5 });
   addPill(slide, "弱化变体 = TEST_ONLY_DECISION_MODEL，不是生产隐藏开关", 3.05, 6.05, 7.3, C.amber);
@@ -723,9 +723,9 @@ function addSpeakerNotes(slide, lines) {
 
 // 17. Conclusion
 {
-  const slide = addSlide("结论：把“当前密码的裁判权”从云端交回验证设备", "10 总结");
+  const slide = addSlide("结论：把“当前密码的裁判权”从存储层交回验证设备", "10 总结");
   addCard(slide, 0.72, 1.48, 3.72, 2.18, "内容安全", "随机高熵根\n设备绑定 RootCapsule\n字段级 AEAD\n私有 RouteMap", C.blue, { bodySize: 11.5 });
-  addCard(slide, 4.81, 1.48, 3.72, 2.18, "控制安全", "名称空间 capability\nVDNS L1–L5\n透明历史与最终序\n网站确认生命周期", C.cyan, { bodySize: 11.5 });
+  addCard(slide, 4.81, 1.48, 3.72, 2.18, "控制安全", "名称空间 capability\n可信状态 L1–L5\n透明历史与最终序\n网站确认生命周期", C.cyan, { bodySize: 11.5 });
   addCard(slide, 8.9, 1.48, 3.72, 2.18, "增强能力", "Epoch 隐私审计\n固定事故快照\n最小影响修复\n可选证明 provider", C.purple, { bodySize: 11.5 });
   slide.addText("AEAD 保护密码内容", {
     x: 1.2,
@@ -751,7 +751,7 @@ function addSpeakerNotes(slide, lines) {
     color: C.muted,
     margin: 0,
   });
-  slide.addText("VDNS 保护控制过程", {
+  slide.addText("可验证状态控制层保护控制过程", {
     x: 7.1,
     y: 4.35,
     w: 4.95,
@@ -778,8 +778,8 @@ for (const slide of pptx._slides) {
 }
 
 pptx
-  .writeFile({ fileName: "VDNS-PM答辩演示.pptx" })
-  .then(() => console.log("vdns-pm-defense-pptx-ok"))
+  .writeFile({ fileName: "VPass答辩演示.pptx" })
+  .then(() => console.log("vpass-defense-pptx-ok"))
   .catch((error) => {
     console.error(error);
     process.exitCode = 1;

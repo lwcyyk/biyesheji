@@ -6,9 +6,9 @@ import (
 	"errors"
 	"testing"
 
-	exposuredomain "vdns.local/vdns/internal/exposure/domain"
-	exposureports "vdns.local/vdns/internal/exposure/ports"
-	"vdns.local/vdns/internal/protocol"
+	exposuredomain "vpass.local/vpass/internal/exposure/domain"
+	exposureports "vpass.local/vpass/internal/exposure/ports"
+	"vpass.local/vpass/internal/protocol"
 )
 
 type fixedProvider struct {

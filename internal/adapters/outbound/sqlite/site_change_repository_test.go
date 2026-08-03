@@ -11,11 +11,11 @@ import (
 	"testing"
 	"time"
 
-	credential "vdns.local/vdns/internal/credential/domain"
-	"vdns.local/vdns/internal/cryptokit"
-	"vdns.local/vdns/internal/protocol"
-	siteapp "vdns.local/vdns/internal/site/application"
-	sitedomain "vdns.local/vdns/internal/site/domain"
+	credential "vpass.local/vpass/internal/credential/domain"
+	"vpass.local/vpass/internal/cryptokit"
+	"vpass.local/vpass/internal/protocol"
+	siteapp "vpass.local/vpass/internal/site/application"
+	sitedomain "vpass.local/vpass/internal/site/domain"
 )
 
 func TestSiteChangeRepositoryRequiresDurableCandidateAndPersistsRecoveryState(t *testing.T) {

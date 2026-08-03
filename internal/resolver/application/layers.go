@@ -1,4 +1,4 @@
-// Package application composes receiver-owned trust state with the pure VDNS
+// Package application composes receiver-owned trust state with the pure state
 // verification rules.
 package application
 
@@ -7,17 +7,17 @@ import (
 	"crypto/sha256"
 	"errors"
 
-	anchordomain "vdns.local/vdns/internal/anchor/domain"
-	credentialdomain "vdns.local/vdns/internal/credential/domain"
-	"vdns.local/vdns/internal/cryptokit"
-	finalorderdomain "vdns.local/vdns/internal/finalorder/domain"
-	operationdomain "vdns.local/vdns/internal/operation/domain"
-	"vdns.local/vdns/internal/protocol"
-	resolverdomain "vdns.local/vdns/internal/resolver/domain"
-	transparencydomain "vdns.local/vdns/internal/transparency/domain"
+	anchordomain "vpass.local/vpass/internal/anchor/domain"
+	credentialdomain "vpass.local/vpass/internal/credential/domain"
+	"vpass.local/vpass/internal/cryptokit"
+	finalorderdomain "vpass.local/vpass/internal/finalorder/domain"
+	operationdomain "vpass.local/vpass/internal/operation/domain"
+	"vpass.local/vpass/internal/protocol"
+	resolverdomain "vpass.local/vpass/internal/resolver/domain"
+	transparencydomain "vpass.local/vpass/internal/transparency/domain"
 )
 
-var ErrVerificationRejected = errors.New("VDNS verification rejected")
+var ErrVerificationRejected = errors.New("trusted state verification rejected")
 
 // L1Input contains untrusted bytes plus receiver-owned root context.
 type L1Input struct {
@@ -187,7 +187,7 @@ func VerifyL2(input L2Input) (resolverdomain.Authorization, resolverdomain.Layer
 		}, nil
 }
 
-// TrustedDynamicState is loaded from locally accepted VDNS state, never from
+// TrustedDynamicState is loaded from locally accepted verifiable state, never from
 // the candidate event or cloud response.
 type TrustedDynamicState struct {
 	CurrentSecretGeneration uint64

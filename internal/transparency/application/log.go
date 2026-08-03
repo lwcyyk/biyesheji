@@ -6,8 +6,8 @@ import (
 	"errors"
 	"sync"
 
-	"vdns.local/vdns/internal/protocol"
-	transparencydomain "vdns.local/vdns/internal/transparency/domain"
+	"vpass.local/vpass/internal/protocol"
+	transparencydomain "vpass.local/vpass/internal/transparency/domain"
 )
 
 var (

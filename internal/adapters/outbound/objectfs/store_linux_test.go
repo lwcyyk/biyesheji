@@ -13,13 +13,13 @@ import (
 	"testing"
 	"time"
 
-	"vdns.local/vdns/internal/platform"
+	"vpass.local/vpass/internal/platform"
 )
 
 func TestPutGetHasAndDuplicateReuse(t *testing.T) {
 	t.Parallel()
 	store := newTestStore(t)
-	object := []byte("VDNS encrypted object bytes")
+	object := []byte("VPass encrypted object bytes")
 
 	first, err := store.PutIfAbsent(context.Background(), object)
 	if err != nil {

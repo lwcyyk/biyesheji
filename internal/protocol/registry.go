@@ -1,6 +1,6 @@
 package protocol
 
-// OperationType is the VDNS-PM/2 wire enum. Database and JSON names are
+// OperationType is the VPass v2 frozen wire enum. Database and JSON names are
 // projections; signed deterministic CBOR carries these integer values.
 type OperationType uint16
 
@@ -24,7 +24,7 @@ const (
 	OperationRemediationCommit OperationType = 17
 )
 
-// Valid reports whether operation belongs to VDNS-PM/2.
+// Valid reports whether operation belongs to the VPass v2 registry.
 func (operation OperationType) Valid() bool {
 	return operation >= OperationCreate && operation <= OperationRemediationCommit
 }
@@ -141,7 +141,7 @@ const allCapabilities = CapabilityRead | CapabilityAutofill |
 	CapabilityAuditAnalyze
 
 // Valid reports whether a non-empty capability set contains only registered
-// VDNS-PM/2 bits.
+// VPass v2 frozen wire bits.
 func (capability Capability) Valid() bool {
 	return capability != 0 && capability&^allCapabilities == 0
 }
@@ -164,7 +164,7 @@ const (
 	ScopeSingleCredential CredentialScopeType = 4
 )
 
-// Valid reports whether the scope belongs to VDNS-PM/2.
+// Valid reports whether the scope belongs to the VPass v2 registry.
 func (scope CredentialScopeType) Valid() bool {
 	return scope >= ScopeNamespaceAll && scope <= ScopeSingleCredential
 }
@@ -213,7 +213,7 @@ const (
 	EvidenceUserSignedConfirmation      EvidenceLevel = 5
 )
 
-// Valid reports whether evidence belongs to VDNS-PM/2.
+// Valid reports whether evidence belongs to the VPass v2 registry.
 func (evidence EvidenceLevel) Valid() bool {
 	return evidence <= EvidenceUserSignedConfirmation
 }
@@ -301,7 +301,7 @@ const (
 	LifecycleConflicted         LifecycleStatus = 7
 )
 
-// Valid reports whether status belongs to the VDNS-PM/2 registry.
+// Valid reports whether status belongs to the VPass v2 registry.
 func (status LifecycleStatus) Valid() bool {
 	return status >= LifecycleActive && status <= LifecycleConflicted
 }
@@ -326,7 +326,7 @@ const (
 	VerdictRejectObject       Verdict = 12
 )
 
-// Valid reports whether verdict belongs to the VDNS-PM/2 registry.
+// Valid reports whether verdict belongs to the VPass v2 registry.
 func (verdict Verdict) Valid() bool {
 	return verdict >= VerdictAccept && verdict <= VerdictRejectObject
 }

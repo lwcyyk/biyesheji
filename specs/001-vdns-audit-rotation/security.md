@@ -1,21 +1,22 @@
-# VDNS-PM v2 安全规范与威胁模型
+# VPass Spec 2.1.0 安全规范与威胁模型
 
 | 属性 | 值 |
 |---|---|
 | 版本 | `2.1.0` |
-| 协议 | `VDNS-PM/2` |
-| 密码套件 | `VDNS-PM-CP-2` |
+| 当前展示协议 | `VPass/2` |
+| legacy wire协议 | `VDNS-PM/2` |
+| legacy wire密码套件 | `VDNS-PM-CP-2` |
 | 威胁建模 | STRIDE + 资产/信任边界分析 |
-| 规范依据 | Spec 001 v2.1.0、ADR-002～005、ADR-011～017 |
+| 规范依据 | Spec 001 v2.1.0、ADR-002～005、ADR-011～019 |
 
-本文规定实现必须满足的安全边界。不得以“使用了加密、VDNS 或区块链”替代逐项威胁分析。
+本文规定实现必须满足的安全边界。不得以“使用了加密、可验证状态控制层或区块链”替代逐项威胁分析。
 
 ## 1. 安全目标与优先级
 
-1. **字段机密性**：云、日志、VDNS 和公告层不能得到 Origin、账号、密码、TOTP、恢复码和备注明文；
-2. **本地解锁安全**：主密码不离开设备，云端 RootCapsule 单独不足以验证主密码猜测；
+1. **字段机密性**：同步存储层、日志、可验证状态控制层和公告层不能得到 Origin、账号、密码、TOTP、恢复码和备注明文；
+2. **本地解锁安全**：主密码不离开设备，同步存储中的 RootCapsule 单独不足以验证主密码猜测；
 3. **授权完整性**：只有当时具有相应能力且未撤销的设备可以产生可接受操作；
-4. **版本新鲜性**：持有可信检查点的设备拒绝云端回滚、替换和冲突伪装；
+4. **版本新鲜性**：持有可信检查点的设备拒绝同步存储回滚、替换和冲突伪装；
 5. **Origin 完整性**：页面不能请求或填充其他 Origin/账号的凭据；
 6. **失败安全**：网站确认、持久化或证明不明确时，不猜测、不返回部分明文、不静默推进；
 7. **历史可审计性**：分叉、回滚、同版本双状态和撤销后操作可被发现；
@@ -27,16 +28,16 @@
 [Untrusted Web Page]
        │ Origin/form messages
        ▼
-[Browser Extension] -- authenticated local channel --> [Local Agent]
+[Browser Extension] -- authenticated local channel --> [Local Secure Client]
                                                          │ plaintext boundary
                                     ┌────────────────────┼───────────────────┐
                                     ▼                    ▼                   ▼
-                              [Local DB/Object]   [Untrusted Cloud]   [VDNS/Log/Anchor]
+                              [Local DB/Object]   [Untrusted Storage] [State/Log/Anchor]
                                     │ encrypted          │ encrypted          │ public proofs
                                     └────────────────────┴───────────────────┘
 ```
 
-浏览器页面始终不可信。扩展是受限客户端，不是安全裁判。本地代理必须独立获取/验证 top-frame Origin、安装令牌、短期 nonce、vault session、Credential route 和 Capability。云、VDNS 响应、日志证明和链上数据都需在本地验证后采信。
+浏览器页面始终不可信。扩展是受限客户端，不是安全裁判。本地安全客户端必须独立获取/验证 top-frame Origin、安装令牌、短期 nonce、vault session、Credential route 和 Capability。同步存储响应、状态解析响应、日志证明和链上数据都需在本地验证后采信。
 
 ## 3. 资产分类
 
@@ -58,13 +59,13 @@ CredentialID 是随机值并不意味着可以无条件公开；访问模式仍�
 - 控制网络并观察时间、大小、频率元数据；
 - 运行恶意网页、iframe 或扩展消息发送者；
 - 持有已撤销设备及其撤销前取得的历史秘密；
-- 提供错误 VDNS 响应、Merkle 路径、树头或旧检查点；
+- 提供错误状态解析响应、Merkle 路径、树头或旧检查点；
 - 触发并发更新、崩溃、超时、重试和幂等键冲突；
 - 读取公开公告层并对低熵密码进行离线字典尝试。
 
 ### 4.2 不覆盖的能力
 
-- 完全控制解锁后的本地代理/内核并实时读取明文；
+- 完全控制解锁后的本地安全客户端/内核并实时读取明文；
 - 破坏标准原语的安全假设；
 - 强制真实网站提供可验证改密 API；
 - 远程抹除撤销设备已经复制的历史明文。
@@ -138,7 +139,7 @@ Krotation = Derive(Rᵤ[g], "ROTATION")
 
 只允许 `https` 和明确的loopback `http`开发例外；远程HTTP、opaque origin、含用户信息URL、无效IDN、非法端口和未解析主机必须拒绝。CanonicalOrigin由小写scheme、小写IDNA ASCII/Punycode host和可选非默认端口构成。默认80/443端口省略，非默认端口保留。path、query和fragment不属于Origin；作为Origin输入携带这些部分时拒绝，不得静默截断。
 
-子域名精确隔离，不按eTLD+1自动共享。iframe默认禁止，只有策略允许且top-frame与target精确同源时例外。每次重定向后重新计算top-level CanonicalOrigin、重新RouteMap/VDNS/OriginBinding验证；旧secret handle不得跨Origin使用。HTTPS降级到HTTP永不自动携带秘密。
+子域名精确隔离，不按eTLD+1自动共享。iframe默认禁止，只有策略允许且top-frame与target精确同源时例外。每次重定向后重新计算top-level CanonicalOrigin、重新RouteMap/可信状态/OriginBinding验证；旧secret handle不得跨Origin使用。HTTPS降级到HTTP永不自动携带秘密。
 
 ```text
 OriginBinding = HMAC-SHA-256(
@@ -147,7 +148,7 @@ OriginBinding = HMAC-SHA-256(
               CanonicalOrigin, AccountID))
 ```
 
-RouteMap 本地加密保存真实映射；OriginBinding 可进入字段 AAD/加密 descriptor，但不得作为稳定公共日志键。扩展自报的 CredentialID 仅是提示，本地代理必须重新路由并做常量时间比较。
+RouteMap 本地加密保存真实映射；OriginBinding 可进入字段 AAD/加密 descriptor，但不得作为稳定公共日志键。扩展自报的 CredentialID 仅是提示，本地安全客户端必须重新路由并做常量时间比较。
 
 ### 5.6 字段加密
 
@@ -198,7 +199,7 @@ ACTIVE(v1) 前必须满足：字段对象耐久、RouteMap 事务成功、CREATE
 
 ### 7.2 读取和自动填充
 
-顺序不可颠倒：路由 → VDNS current state → L1～L5 → 对象 hash/version/policy → 字段解密 → OriginBinding 重验 → 单次 secret handle。日志、锚定或云离线时只可在明确缓存策略内读取已接受版本；不能因此接受新版本。
+顺序不可颠倒：路由 → 可信当前状态 → L1～L5 → 对象 hash/version/policy → 字段解密 → OriginBinding 重验 → 单次 secret handle。日志、锚定或同步存储离线时只可在明确缓存策略内读取已接受版本；不能因此接受新版本。
 
 secret handle 必须绑定 vault session、extension installation、top-frame Origin、CredentialID、FieldType、到期时间和单次使用计数。不得通过 URL、命令行、环境变量或可持久化前端存储传递密码。
 
@@ -226,9 +227,9 @@ Mock Site回执只具有研究夹具语义，不能外推为真实网站证明�
 
 该CAS只约束一个本地数据库。两设备可以分别产生有效`v2-A/v2-B`。发现相同base的不同候选或同版本不同摘要时必须保留分支并进入CONFLICTED。云顺序、墙钟和先到先得不能裁决；用户授权的CONFLICT_RESOLVE事件与FinalOrderReceipt共同形成最终选择。
 
-## 8. VDNS、日志和检查点
+## 8. 可验证状态、日志和检查点
 
-VDNS是可验证凭据状态解析控制平面，不是传统DNS。名称空间根集中治理设备授权；设备、Resolver、Verifier、Monitor和见证者分布式验证。Resolver返回ProofBundle不等于可信，本地Verifier始终是采信点。
+可验证状态控制层继承VDNS可验证私有名称状态的信任模型，不是传统DNS。名称空间根集中治理设备授权；设备、State Resolver、Local State Verifier、Monitor和见证者分布式验证。State Resolver返回ProofBundle不等于可信，Local State Verifier始终是采信点。
 
 Final Order Authority是`finalSequence`的唯一逻辑生产者。透明日志只追加带排序回执的对象。回执进入受信透明日志检查点前为provisional；达到L5要求后才作为最终安全顺序。Stage 2已实现可持久化的`ResearchSingleNodeFinalOrderAuthority`及签名回执/研究检查点，部署标签为`RESEARCH_ADAPTER`。它没有实现多节点共识或拜占庭容错，单机日志、模拟器和Anvil同样只能作为研究适配器。
 
@@ -244,19 +245,19 @@ L1～L5 必须逐层返回机器可读原因，不能把“签名有效”当成
 
 日志叶必须是最小公开投影，禁止 Origin、账号、密码、字段 ciphertext、wrapped DEK、稳定审计见证和完整 CredentialID。Merkle 哈希使用独立 leaf/node prefix，树头签名绑定 tree size、root、timestamp/sequence、log ID 和 suite。
 
-公告层只锚定周期根和策略 hash。普通自动填充不得执行链交易、等待区块确认或请求 VRF。模拟器和 Anvil adapter 必须在 Provider 字段中标识，不得被描述为生产共识。新设备的可信初始检查点必须由已有设备、恢复承诺或带外核对引入；云端TOFU不得授权高风险写。
+公告层只锚定周期根和策略 hash。普通自动填充不得执行链交易、等待区块确认或请求 VRF。模拟器和 Anvil adapter 必须在 Provider 字段中标识，不得被描述为生产共识。新设备的可信初始检查点必须由已有设备、恢复承诺或带外核对引入；同步存储TOFU不得授权高风险写。
 
-Stage 2的网络同步实现固定标记`RESEARCH_HTTP_SYNC_ADAPTER`。它提供localhost真实HTTP、内容hash、manifest、cursor、幂等、超时/重试和请求体限制，也能模拟对象替换、旧manifest和隐藏分支。该适配器没有生产身份认证、租户隔离、服务发现、公网TLS运维或高可用，不能称为生产云。任何HTTP响应仍是不可信输入，只有与VDNS最终/冲突状态和完整对象验证一致后才可更新本地accepted pointer。
+Stage 2的网络同步实现固定标记`RESEARCH_HTTP_SYNC_ADAPTER`。它提供localhost真实HTTP、内容hash、manifest、cursor、幂等、超时/重试和请求体限制，也能模拟对象替换、旧manifest和隐藏分支。该适配器没有生产身份认证、租户隔离、服务发现、公网TLS运维或高可用，不能称为生产同步存储。任何HTTP响应仍是不可信输入，只有与可验证最终/冲突状态和完整对象验证一致后才可更新本地accepted pointer。
 
 Monitor 必须持久化相互冲突的签名树头、验证路径和来源摘要；告警不能包含秘密。双视图、同大小异根、无法从可信树头一致扩展、旧锚定覆盖和同版本双 descriptor 均为 finding。
 
 ## 9. 同步与恢复安全
 
-同步云没有 current-version 权限。pull 返回对象前后，设备都以 VDNS descriptor 验证 CredentialID、version、envelope hash、policy hash 和对象 digest。`returnedVersion < currentVersion`、同版本 hash 不同或对象缺失均 fail closed。
+同步存储层没有 current-version 权限。pull 返回对象前后，设备都以可信状态 descriptor 验证 CredentialID、version、envelope hash、policy hash 和对象 digest。`returnedVersion < currentVersion`、同版本 hash 不同或对象缺失均 fail closed。
 
 新设备加入要求一次性挑战、短码/二维码人工核对、DEVICE_ENROLL 能力、HPKE 接收 key 所有权证明和新设备凭证发布。一次性挑战消费必须原子化并设短时有效期。
 
-备份必须包含加密 Root/Recovery capsule、RouteMap、对象引用、版本历史、可信检查点和恢复策略；恢复后不得跳过 VDNS 验证。备份完整性不等于可用性，恢复演练必须实际解锁、路由、验证和填充 Mock Site。
+备份必须包含加密 Root/Recovery capsule、RouteMap、对象引用、版本历史、可信检查点和恢复策略；恢复后不得跳过五层可信状态验证。备份完整性不等于可用性，恢复演练必须实际解锁、路由、验证和填充 Mock Site。
 
 ## 10. 隐私审计和可选响应
 
@@ -264,6 +265,8 @@ Monitor 必须持久化相互冲突的签名树头、验证路径和来源摘要
 Kaudit,e = HKDF(Rᵤ[g], "VDNS-PM/2/AUDIT" || e || VRFMaterial)
 Witness  = HMAC(Kaudit,e, H(ExactEncode(password)))
 ```
+
+本文出现的 `VDNS-PM/2/*` 是冻结 legacy KDF/AAD 域字节，仅为保持旧密文、签名和SQLite数据可读而保留。命名迁移不改变它们。
 
 Witness 只放入加密事件。公共层不得保存可跨 Epoch 稳定关联同密码的标签。分析需要 AUDIT_ANALYZE 能力、相应代际秘密、已验证 ProofBundle 和一次性 secret handle。分析结果保存风险类别和证据引用，不保存密码或稳定标签。
 
@@ -278,7 +281,7 @@ SCOPE-ZK 是可选插件。禁用或不可用时返回 OPTIONAL_FEATURE_UNAVAILA
 | ID | 类别 | 威胁 | 风险 | 控制 | 残余风险 |
 |---|---|---|---:|---|---|
 | T-01 | S/I/E | 根或设备私钥泄露 | 20 | OS key store、独立 key、撤销、新代际、恢复根 | 历史明文无法收回 |
-| T-02 | I | 云替换/回滚对象 | 20 | VDNS version/hash、检查点、CAS | 缓存全丢时可用性下降 |
+| T-02 | I | 同步存储替换/回滚对象 | 20 | 可验证version/hash、检查点、CAS | 缓存全丢时可用性下降 |
 | T-03 | S/E | 恶意页面跨站请求 | 20 | top-frame Origin、RouteMap、OriginBinding、单次 handle | 本地端点完全控制不覆盖 |
 | T-04 | T/R | 网站确认伪造 | 16 | 证据分级、可信 Connector、用户签名、UNKNOWN | 网站缺少强回执 |
 | T-05 | T | 同版本并发覆盖 | 16 | expectedVersion、descriptor hash、counter、CAS | 需要人工解冲突 |

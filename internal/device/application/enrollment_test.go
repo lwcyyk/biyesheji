@@ -9,9 +9,9 @@ import (
 	"sync"
 	"testing"
 
-	"vdns.local/vdns/internal/cryptokit"
-	devicedomain "vdns.local/vdns/internal/device/domain"
-	"vdns.local/vdns/internal/protocol"
+	"vpass.local/vpass/internal/cryptokit"
+	devicedomain "vpass.local/vpass/internal/device/domain"
+	"vpass.local/vpass/internal/protocol"
 )
 
 func TestEnrollmentCoordinatorRequiresPairingAndRejectsConsumeReplay(t *testing.T) {

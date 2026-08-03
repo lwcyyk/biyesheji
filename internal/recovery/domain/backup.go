@@ -9,15 +9,15 @@ import (
 	"errors"
 	"sort"
 
-	"vdns.local/vdns/internal/platform"
-	"vdns.local/vdns/internal/protocol"
+	"vpass.local/vpass/internal/platform"
+	"vpass.local/vpass/internal/protocol"
 )
 
 var (
 	ErrInvalidBackup      = errors.New("invalid backup snapshot")
 	ErrRecoveryTransition = errors.New("invalid recovery transition")
 	ErrRecoveryObjects    = errors.New("recovery object set is incomplete")
-	ErrRecoveryVDNS       = errors.New("recovery VDNS checkpoint is not trusted")
+	ErrRecoveryState      = errors.New("recovery state checkpoint is not trusted")
 )
 
 const MaxBackupObjects = 100_000
@@ -79,7 +79,7 @@ const (
 	RecoveryPrepared RecoveryStatus = iota + 1
 	RecoveryRootRecovered
 	RecoveryObjectsVerified
-	RecoveryVDNSVerified
+	RecoveryStateVerified
 	RecoveryCompleted
 	RecoveryFailed
 )
@@ -136,10 +136,10 @@ func (session *RecoverySession) VerifyObjects(
 	return nil
 }
 
-// VerifyVDNS is called only after the normal VDNS verifier accepts a proof
+// VerifyTrustedState is called only after the Local State Verifier accepts a proof
 // bundle. The checkpoint must equal the backup's accepted checkpoint; backup
 // metadata itself cannot authorize an older or different state.
-func (session *RecoverySession) VerifyVDNS(
+func (session *RecoverySession) VerifyTrustedState(
 	receiverTrustedCheckpoint [sha256.Size]byte,
 	proofAccepted bool,
 ) error {
@@ -148,11 +148,11 @@ func (session *RecoverySession) VerifyVDNS(
 	}
 	if !proofAccepted ||
 		receiverTrustedCheckpoint != session.snapshot.AcceptedCheckpoint {
-		return ErrRecoveryVDNS
+		return ErrRecoveryState
 	}
 	value := receiverTrustedCheckpoint
 	session.verifiedCheckpoint = &value
-	session.status = RecoveryVDNSVerified
+	session.status = RecoveryStateVerified
 	return nil
 }
 
@@ -160,7 +160,7 @@ func (session *RecoverySession) Complete(
 	restoredRouteMapRoot [sha256.Size]byte,
 	restoredCredentialStateRoot [sha256.Size]byte,
 ) error {
-	if session == nil || session.status != RecoveryVDNSVerified ||
+	if session == nil || session.status != RecoveryStateVerified ||
 		session.verifiedCheckpoint == nil ||
 		restoredRouteMapRoot != session.snapshot.RouteMapRoot ||
 		restoredCredentialStateRoot != session.snapshot.CredentialStateRoot {

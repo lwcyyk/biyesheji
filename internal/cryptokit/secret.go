@@ -10,7 +10,7 @@ import (
 	"runtime"
 	"sync"
 
-	"vdns.local/vdns/internal/protocol"
+	"vpass.local/vpass/internal/protocol"
 )
 
 const redactedSecret = "[REDACTED]"
@@ -34,7 +34,7 @@ type secretState struct {
 }
 
 // NewSecret copies material into a new owned mutable buffer. Empty secrets are
-// rejected because every VDNS secret input has a non-zero protocol length.
+// rejected because every VPass secret input has a non-zero protocol length.
 func NewSecret(material []byte) (*Secret, error) {
 	if len(material) == 0 {
 		return nil, ErrInvalidInput
@@ -166,7 +166,7 @@ func (Secret) MarshalText() ([]byte, error) {
 // LogValue prevents structured slog handlers from reflecting private state.
 func (Secret) LogValue() slog.Value { return slog.StringValue(redactedSecret) }
 
-// Key is a fixed-length secret used by VDNS symmetric primitives. Its material
+// Key is a fixed-length secret used by VPass symmetric primitives. Its material
 // is private so generic formatters and serializers cannot enumerate it.
 // Copies are thin handles to the same state, so destruction is observed by
 // every copy.

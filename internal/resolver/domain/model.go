@@ -1,14 +1,14 @@
-// Package domain contains VDNS resolution decisions without HTTP, SQL, cloud
+// Package domain contains verifiable state resolution decisions without HTTP, SQL, storage
 // storage or chain dependencies.
 package domain
 
 import (
 	"crypto/sha256"
 
-	credentialdomain "vdns.local/vdns/internal/credential/domain"
-	operationdomain "vdns.local/vdns/internal/operation/domain"
-	"vdns.local/vdns/internal/protocol"
-	transparencydomain "vdns.local/vdns/internal/transparency/domain"
+	credentialdomain "vpass.local/vpass/internal/credential/domain"
+	operationdomain "vpass.local/vpass/internal/operation/domain"
+	"vpass.local/vpass/internal/protocol"
+	transparencydomain "vpass.local/vpass/internal/transparency/domain"
 )
 
 // Layer identifies the five ordered verification layers.
@@ -89,7 +89,7 @@ type AuditProof struct {
 	ProofBytes     uint64
 }
 
-// Resolution is the complete VDNS current-state answer. Cloud object ordering
+// Resolution is the complete current-state answer. Sync-object ordering
 // is intentionally absent and therefore cannot select CurrentVersion.
 type Resolution struct {
 	State          credentialdomain.StateDescriptorPayload

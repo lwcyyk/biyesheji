@@ -1,8 +1,8 @@
-# 基于 VDNS 的可验证密码生命周期管理与隐私审计方法研究
+# VPass：可验证密码生命周期管理系统的设计与实现
 
-英文题目：**Verifiable Password Lifecycle Management and Privacy-Preserving Audit over VDNS**
+英文题目：**VPass: Design and Implementation of a Verifiable Password Lifecycle Management System**
 
-系统名称：**VDNS-PM: Verifiable Password Lifecycle Management over VDNS**
+系统名称：**VPass: Verifiable Password Lifecycle Management System**
 
 论文类型：专业学位研究生毕业设计  
 版本：2.1.0  
@@ -15,19 +15,19 @@
 
 ## 摘要
 
-密码管理器通过“用户只记一个主密码、系统保存各站点复杂密码”的方式降低认知负担，但在多设备和云同步场景中仍面临两类相互独立的问题：其一，云端泄露可能暴露可供离线猜测的密码库材料；其二，即使凭据密文没有被解开，恶意或故障云端仍可返回旧版本、错误对象或冲突状态，诱导设备使用非当前密码。现有方案常把安全重点放在密文机密性上，对“谁在何时有权创建、更新、撤销和同步凭据，以及当前版本如何被独立确认”的控制过程缺少统一验证。
+密码管理器通过“用户只记一个主密码、系统保存各站点复杂密码”的方式降低认知负担，但在多设备和同步存储场景中仍面临两类相互独立的问题：其一，存储层泄露可能暴露可供离线猜测的密码库材料；其二，即使凭据密文没有被解开，恶意或故障同步存储层仍可返回旧版本、错误对象或冲突状态，诱导设备使用非当前密码。现有方案常把安全重点放在密文机密性上，对“谁在何时有权创建、更新、撤销和同步凭据，以及当前版本如何被独立确认”的控制过程缺少统一验证。
 
-本文设计VDNS-PM并实现其G6本地研究原型。系统面向多设备和不可信云环境，以随机高熵名称空间根为密码库根，主密码与设备秘密共同解锁设备专属根胶囊；Origin、用户名、密码、TOTP、恢复码和备注使用独立数据加密密钥实施字段级信封加密。云端只保存内容寻址密文对象，不负责裁定当前状态。VDNS控制平面把凭据名称解析扩展为状态、主体、授权、版本、审计检查点和证明包，并以L1主体真实性、L2操作资格、L3动态状态、L4透明历史和L5本地策略五层验证决定设备是否接受一次生命周期转换。
+本文设计VPass并实现其G6本地研究原型。系统面向多设备和不可信同步存储环境，以随机高熵名称空间根为密码库根，主密码与设备秘密共同解锁设备专属根胶囊；Origin、用户名、密码、TOTP、恢复码和备注使用独立数据加密密钥实施字段级信封加密。同步存储层只保存内容寻址密文对象，无权裁定当前状态。可验证状态控制层把凭据名称解析扩展为状态、主体、授权、版本、审计检查点和证明包，并以L1主体真实性、L2操作资格、L3动态状态、L4透明历史和L5本地策略五层验证决定设备是否接受一次生命周期转换。
 
-本文进一步提出名称空间授权的凭据操作主体和与网站证据绑定的版本状态机。设备签名只能说明消息来自某私钥，根签发的细粒度能力凭证进一步约束操作类型、凭据范围、有效序和秘密代际。密码更新采用耐久候选和分级确认流程；E0填充、E1提交和E2页面提示不能激活，E3新密码重登录仅在严格策略下激活，E4站点签名回执和E5用户签名确认按各自语义处理。网站结果不明时进入`UNKNOWN/REVIEW_REQUIRED`。多设备接收方以VDNS状态、对象摘要、因果前序和日志证明拒绝云端回滚与替换；跨设备并发候选进入冲突状态，等待可验证最终序和显式裁决。
+本文进一步提出名称空间授权的凭据操作主体和与网站证据绑定的版本状态机。设备签名只能说明消息来自某私钥，根签发的细粒度能力凭证进一步约束操作类型、凭据范围、有效序和秘密代际。密码更新采用耐久候选和分级确认流程；E0填充、E1提交和E2页面提示不能激活，E3新密码重登录仅在严格策略下激活，E4站点签名回执和E5用户签名确认按各自语义处理。网站结果不明时进入`UNKNOWN/REVIEW_REQUIRED`。多设备接收方以可信状态、对象摘要、因果前序和日志证明拒绝存储层回滚与替换；跨设备并发候选进入冲突状态，等待可验证最终序和显式裁决。
 
 在日常主线之外，系统提供周期不可链接的隐私使用审计。Epoch 密钥生成的隐藏密码见证只进入加密事件，公开透明叶不包含密码、Origin、CredentialID、DeviceID 或稳定复用标签。SCOPE-ZK 被定义为事故分析时的可选 provider；当前实现未配置该 provider，并明确返回 `OPTIONAL_FEATURE_UNAVAILABLE`，不伪造证明时间或大小。
 
-原型使用Go、SQLite、浏览器扩展、本地Agent、透明Merkle日志和研究适配器实现。历史汇总证据采用固定seed `20260723`和30次测量：Argon2id根胶囊解锁P95为392.85 ms；10,000和100,000条RouteMap查询P95分别为0.402 ms和0.299 ms；单字段解密P95为0.331 ms；10,000对象按100×100分批完成本地manifest构造、签名和验证的P95为614.70 ms；百万叶Merkle包含证明验证P95为16.79 μs；100,000条审计记录本地扫描为563.62 ms。这些文件未保存每轮原始时延，统计复算保持`UNVERIFIED`。八项本地适配器/协议故障回归和七项自动恢复测试通过。H1～H6由完整机制可执行回归和弱化方案决策模型组成，不代表六组弱化生产实现。
+原型使用Go、SQLite、浏览器扩展、本地安全客户端、透明Merkle日志和研究适配器实现。历史汇总证据采用固定seed `20260723`和30次测量：Argon2id根胶囊解锁P95为392.85 ms；10,000和100,000条RouteMap查询P95分别为0.402 ms和0.299 ms；单字段解密P95为0.331 ms；10,000对象按100×100分批完成本地manifest构造、签名和验证的P95为614.70 ms；百万叶Merkle包含证明验证P95为16.79 μs；100,000条审计记录本地扫描为563.62 ms。这些文件未保存每轮原始时延，统计复算保持`UNVERIFIED`。八项本地适配器/协议故障回归和七项自动恢复测试通过。H1～H6由完整机制可执行回归和弱化方案决策模型组成，不代表六组弱化生产实现。
 
-结果支持把密码内容机密性和密码控制过程完整性分别建模：AEAD保护密码内容，VDNS保护密码生命周期控制。当前代码证明本地研究机制可运行，G7冻结仍受最终序权威、跨设备终局、证据等级迁移、真实网络同步和原始实验样本阻断。
+结果支持把密码内容机密性和密码控制过程完整性分别建模：AEAD保护密码内容，可验证状态控制层保证凭据版本和生命周期状态可信。当前代码证明本地研究机制可运行，G7冻结仍受多进程组合、生产多节点/BFT、真实公网同步存储、真实E4、平台安全存储和最终实验证据阻断。
 
-**关键词：** 密码管理器；多设备同步；VDNS；可验证生命周期；透明日志；隐私审计
+**关键词：** VPass；密码管理器；多设备同步；可验证状态；可验证生命周期；透明日志；隐私审计
 
 ---
 
@@ -35,15 +35,15 @@
 
 Password managers reduce users' cognitive burden by letting them remember one master password while the system manages strong, site-specific credentials. In multi-device deployments, however, confidentiality and control-plane integrity are distinct problems. Even when ciphertext remains confidential, a faulty or malicious synchronization service may return a stale version, substitute another encrypted object, or present conflicting state as current.
 
-This thesis presents VDNS-PM, a verifiable password lifecycle management system for multi-device environments with untrusted cloud storage. A randomly generated namespace root anchors the vault. A device-specific root capsule is unlocked by combining a master-password-derived key with a high-entropy device secret. Credential fields are encrypted independently using random data-encryption keys. The cloud stores content-addressed encrypted objects but does not determine the current credential state.
+This thesis presents VPass, a verifiable password lifecycle management system for multi-device environments with untrusted synchronization storage. A randomly generated namespace root anchors the vault. A device-specific root capsule is unlocked by combining a master-password-derived key with a high-entropy device secret. Credential fields are encrypted independently using random data-encryption keys. The storage layer keeps and distributes content-addressed encrypted objects but has no authority to determine the current credential state.
 
-VDNS-PM extends name resolution to return credential state, operation principal, authorization, version, audit checkpoint, and proof material. Each accepted transition passes five layers: principal authenticity, capability authorization, dynamic revocation and causal state, transparency-log verification, and local policy. Device signatures are combined with namespace-issued, fine-grained operation credentials. Password changes use durable candidates and require strong website or explicit user confirmation before activating a new version. Ambiguous outcomes remain in `UNKNOWN` or `REVIEW_REQUIRED`.
+The Verifiable State Control Layer resolves a private credential name to credential state, operation principal, authorization, version, audit checkpoint, and proof material. Each accepted transition passes five layers: principal authenticity, capability authorization, dynamic revocation and causal state, transparency-log verification, and local policy. Device signatures are combined with namespace-issued, fine-grained operation credentials. Password changes use durable candidates and require strong website or explicit user confirmation before activating a new version. Ambiguous outcomes remain in `UNKNOWN` or `REVIEW_REQUIRED`.
 
 The system also supports privacy-preserving usage audits through epoch-separated encrypted witnesses. Incident response and SCOPE-ZK are optional and remain outside the daily unlock, lookup, autofill, and synchronization path. The current prototype explicitly marks unavailable proof providers and reports no fabricated proof metrics.
 
 Historical aggregate measurements report a P95 root-capsule unlock latency of 392.85 ms, 10k and 100k RouteMap lookup latencies of 0.402 ms and 0.299 ms, a 614.70 ms local manifest construction/sign/verify workload for 10k references, and a 16.79 μs one-million-leaf Merkle inclusion verification. Per-repetition latency samples were not preserved, so independent statistical recomputation remains unverified. Eight local adapter/protocol fault regressions and seven automated recovery tests pass. Weakened H1-H6 variants are decision models, not deployed implementations. The current G6 prototype does not implement a final-order authority, production multi-node consensus, networked 10k synchronization, or SCOPE-ZK.
 
-**Keywords:** password manager; multi-device synchronization; VDNS; verifiable lifecycle; transparency log; privacy-preserving audit
+**Keywords:** VPass; password manager; multi-device synchronization; verifiable state; verifiable lifecycle; transparency log; privacy-preserving audit
 
 ---
 
@@ -59,7 +59,8 @@ Historical aggregate measurements report a P95 root-capsule unlock latency of 39
 | DEK | 字段数据加密 key |
 | AEAD | 带关联数据的认证加密 |
 | HPKE | 混合公钥加密 |
-| VDNS | 可验证名称解析控制平面 |
+| VPass | 可验证密码生命周期管理系统 |
+| legacy wire ID | 冻结签名域、KDF/AAD和旧数据使用的历史机器标识 |
 | CAS | Compare-and-Swap，并发条件写 |
 | STH | Signed Tree Head，签名树头 |
 | AAD | AEAD 关联数据 |
@@ -76,7 +77,7 @@ Historical aggregate measurements report a P95 root-capsule unlock latency of 39
 
 现代密码管理器通常还提供云同步，使手机、桌面和浏览器可以共享同一密码库。同步同时扩大了攻击面：服务器泄露会暴露整库密文和 KDF 参数；恶意服务器可以删除对象、返回旧快照、制造冲突；丢失但尚能签名的设备可能继续提交更新；浏览器页面可能诱导扩展填充错误站点；网站改密请求的结果可能因网络中断而无法确认。
 
-这些问题不能只用“云端看不到明文”回答。密文机密性不等于状态完整性。一个合法旧密文仍然可以通过 AEAD 验证，却不一定是当前应该使用的密码。系统需要回答：
+这些问题不能只用“同步存储层看不到明文”回答。密文机密性不等于状态完整性。一个合法旧密文仍然可以通过 AEAD 验证，却不一定是当前应该使用的密码。系统需要回答：
 
 1. 返回对象是否属于当前名称空间和凭据；
 2. 对象是否为当前版本；
@@ -97,13 +98,13 @@ Historical aggregate measurements report a P95 root-capsule unlock latency of 39
 
 第三类关注透明日志、密钥透明度和多设备一致性。追加型 Merkle 日志可以提供包含证明和一致性证明，使观察者发现分叉或回滚。本文借鉴该思路，但不把密码或完整生命周期事件公开；日志只保存最小伪名和对象摘要，周期公告层只锚定状态根。
 
-现有工程产品通常把云快照、服务器版本号或最后写入值作为同步裁判。本文的差异在于：云只分发加密对象；设备依据独立可验证的控制面解析结果决定当前版本。VDNS 在本文中不是传统域名系统的替代物，也不是“把密码写入区块链”，而是面向私有随机凭据名称的状态、权限和证明解析层。
+现有工程产品通常把存储快照、服务器版本号或最后写入值作为同步裁判。本文的差异在于：同步存储层只分发加密对象；设备依据独立可验证的控制面解析结果决定当前版本。可验证状态控制层是面向私有随机凭据名称的状态、权限和证明解析层，不是传统DNS或DNSSEC的替代物，也不把密码写入区块链。
 
 ## 1.3 研究问题
 
 本文研究问题定义为：
 
-> 在多设备和不可信云同步环境中，如何构建一种可验证的密码生命周期管理机制，使用户仅凭一个主密码即可管理多个网站的复杂凭据，同时让每台设备独立验证凭据当前版本、操作来源、授权状态、撤销状态和历史完整性，并避免向云端、VDNS 节点或公告层暴露密码、网站和账号关系。
+> 在多设备和不可信同步存储环境中，如何构建一种可验证的密码生命周期管理机制，使用户仅凭一个主密码即可管理多个网站的复杂凭据，同时让每台设备独立验证凭据当前版本、操作来源、授权状态、撤销状态和历史完整性，并避免向同步存储层、可验证状态节点或公告层暴露密码、网站和账号关系。
 
 研究问题分解为：
 
@@ -119,7 +120,7 @@ Historical aggregate measurements report a P95 root-capsule unlock latency of 39
 
 1. 实现初始化、解锁、生成、保存、查询、自动填充、更新和多设备同步闭环；
 2. 提出名称空间授权的凭据操作主体；
-3. 提出 VDNS 五层可验证生命周期解析；
+3. 提出五层可信状态生命周期解析；
 4. 将新密码激活与网站真实确认绑定；
 5. 实现透明历史、周期检查点和本地独立采信；
 6. 实现隐私审计和可选泄露响应边界；
@@ -140,14 +141,14 @@ Historical aggregate measurements report a P95 root-capsule unlock latency of 39
 
 1. **可验证密码生命周期解析。** 将私有凭据名称解析为 `State + Principal + Authorization + Version + Audit + Proof`，由设备本地执行 L1～L5 验证。
 2. **名称空间授权的操作主体。** 设备签名与根签 capability 共同证明“谁在当时有权执行何种操作”。
-3. **不可信云下的接收方验证同步。** 当前版本不由云端决定，回滚、替换和冲突由接收设备独立发现。
+3. **不可信同步存储下的接收方验证。** 当前版本不由存储层决定，回滚、替换和冲突由接收设备独立发现。
 4. **与网站确认绑定的耐久改密。** 先保存候选，再请求网站，只有强确认才激活；不明结果进入显式恢复状态。
 5. **周期隔离的隐私审计。** 隐藏见证只进入加密事件，公开投影不形成稳定密码复用索引。
 6. **可选事故响应的一致性边界。** 把 SCOPE-ZK 限定为事故增强，不让其重塑密码管理主线或产生虚假能力声明。
 
 ## 1.6 论文结构
 
-第二章定义需求与威胁模型；第三章给出总体架构；第四章讨论密码学存储、多设备和恢复；第五章给出生命周期与 VDNS 协议；第六章讨论隐私审计和可选响应；第七章分析安全性质；第八章说明实现、实验、局限与后续工作。
+第二章定义需求与威胁模型；第三章给出总体架构；第四章讨论密码学存储、多设备和恢复；第五章给出生命周期与可信状态协议；第六章讨论隐私审计和可选响应；第七章分析安全性质；第八章说明实现、实验、局限与后续工作。
 
 ---
 
@@ -159,10 +160,10 @@ Historical aggregate measurements report a P95 root-capsule unlock latency of 39
 
 - 用户：记忆主密码并确认高风险操作；
 - 浏览器扩展：识别 Origin、展示账号、请求自动填充和改密辅助；
-- 本地 Agent：处理根秘密、字段明文、状态机和验证；
+- 本地安全客户端：处理根秘密、字段明文、状态机和验证；
 - 合法设备：持有独立签名/HPKE key 和 capability；
-- 同步云：保存密文对象，但按恶意服务建模；
-- VDNS、日志和 Monitor：提供可验证状态与异常证据；
+- 同步存储层：保存密文对象，但按恶意服务建模；
+- 可验证状态控制层、日志和 Monitor：提供可验证状态与异常证据；
 - 公告层：周期固定少量状态根；
 - 可选证明 provider：只在显式事故活动中被调用。
 
@@ -175,7 +176,7 @@ Historical aggregate measurements report a P95 root-capsule unlock latency of 39
 | 根、解锁与恢复 | FR-001～008 | 设备绑定 RootCapsule、高熵恢复、新设备加入 |
 | 日常密码库 | FR-009～018 | 生成、字段加密、RouteMap、查询、自动填充 |
 | 生命周期与同步 | FR-019～027 | 版本、CAS、网站确认、冲突和恢复 |
-| VDNS 与透明历史 | FR-028～035 | L1～L5、日志、Monitor 和周期锚定 |
+| 可验证状态与透明历史 | FR-028～035 | L1～L5、日志、Monitor 和周期锚定 |
 | 隐私审计与响应 | FR-036～043 | Epoch 见证、安全检查、Affected/Rotation root |
 
 21 项验收条件 AC-001～AC-021 贯穿功能、安全、性能、可用性和声明准确性。机器证据映射保存在 `experiments/g7/ac-evidence-map.json`。
@@ -192,11 +193,11 @@ Historical aggregate measurements report a P95 root-capsule unlock latency of 39
 
 ## 2.4 信任边界与攻击能力
 
-![图 2-1 VDNS-PM 信任边界](../diagrams/trust-boundary/rendered.svg){width=95%}
+![图 2-1 VPass 信任边界](../diagrams/trust-boundary/rendered.svg){width=95%}
 
 攻击者可以：
 
-- 获取全部云端对象；
+- 获取全部同步存储对象；
 - 控制网络并重放、删除、重排或替换响应；
 - 返回合法旧密文和旧 RootCapsule；
 - 控制已撤销但仍持有私钥的设备；
@@ -211,7 +212,7 @@ Historical aggregate measurements report a P95 root-capsule unlock latency of 39
 
 ### 2.5.1 机密性
 
-云、VDNS、日志和公告层不能得到主密码、站点密码、Origin、用户名、TOTP、恢复码或真实账户关系。
+同步存储层、可验证状态节点、日志和公告层不能得到主密码、站点密码、Origin、用户名、TOTP、恢复码或真实账户关系。
 
 ### 2.5.2 完整性
 
@@ -219,14 +220,14 @@ Historical aggregate measurements report a P95 root-capsule unlock latency of 39
 
 ### 2.5.3 新鲜性
 
-云端返回版本必须等于 VDNS 当前版本且对象摘要一致：
+同步存储层返回版本必须等于可信当前版本且对象摘要一致：
 
 \[
-v_{return}<v_{VDNS}\Rightarrow Reject
+v_{return}<v_{trusted}\Rightarrow Reject
 \]
 
 \[
-H(Envelope_{return})\ne H(Envelope_{VDNS})\Rightarrow Reject
+H(Envelope_{return})\ne H(Envelope_{trusted})\Rightarrow Reject
 \]
 
 ### 2.5.4 最小变化
@@ -243,21 +244,21 @@ H(Envelope_{return})\ne H(Envelope_{VDNS})\Rightarrow Reject
 
 ---
 
-# 第三章 VDNS-PM 总体架构
+# 第三章 VPass 总体架构
 
 ## 3.1 设计原则
 
 系统遵循五项原则：
 
-1. **内容与控制分离：** AEAD 保护内容，VDNS 验证控制；
-2. **接收方验证：** 云返回值不能自证“当前”；
+1. **内容与控制分离：** AEAD 保护内容，可验证状态控制层验证控制；
+2. **接收方验证：** 同步存储返回值不能自证“当前”；
 3. **日常路径轻量：** 登录不等待链、VRF 或零知识证明；
 4. **失败状态显式：** 不确定不等于成功；
 5. **公开字段最小化：** 可验证性不以公开账户关系为代价。
 
 ## 3.2 六平面架构
 
-![图 3-1 VDNS-PM 六平面架构](../diagrams/six-plane-architecture/rendered.svg){width=90%}
+![图 3-1 VPass 六平面架构](../diagrams/six-plane-architecture/rendered.svg){width=90%}
 
 前五个平面承担日常功能。第六平面只在安全检查、已知泄露、批量轮换或审计活动时启动。
 
@@ -271,7 +272,7 @@ H(Envelope_{return})\ne H(Envelope_{VDNS})\Rightarrow Reject
 internal/cryptokit       密码学原语与秘密类型
 internal/credential      凭据、RouteMap、版本和会话
 internal/device          设备加入、撤销和代际
-internal/sync            manifest 与不可信云接收
+internal/sync            manifest 与不可信同步存储接收
 internal/resolver        L1～L5 解析
 internal/transparency    Merkle 日志和证明
 internal/monitoring      分叉、回滚和冲突检测
@@ -284,17 +285,17 @@ internal/remediation     修复规划和 RotationRoot
 
 ### 3.4.1 自动填充
 
-![图 3-2 VDNS-PM 日常自动填充时序](../diagrams/autofill-sequence/rendered.svg){width=95%}
+![图 3-2 VPass 日常自动填充时序](../diagrams/autofill-sequence/rendered.svg){width=95%}
 
 链和可选证明 provider 不在该序列中。
 
 ### 3.4.2 多设备同步
 
-设备 A 将签名事件、对象集合根和密文对象上传。设备 B 先解析 VDNS 当前状态，再获取相应对象并验证。云端返回的 manifest 本身不决定 current version。
+设备 A 将签名事件、对象集合根和密文对象上传。设备 B 先解析可信当前状态，再获取相应对象并验证。同步存储层返回的 manifest 本身不决定 current version。
 
 ## 3.5 数据存储
 
-SQLite 保存本地加密状态、RouteMap 索引、幂等请求、生命周期候选、outbox、可信检查点和恢复元数据。对象库使用内容寻址和原子临时文件替换，检测损坏、路径逃逸和危险 symlink。云只保存密文对象。
+SQLite 保存本地加密状态、RouteMap 索引、幂等请求、生命周期候选、outbox、可信检查点和恢复元数据。对象库使用内容寻址和原子临时文件替换，检测损坏、路径逃逸和危险 symlink。同步存储层只保存密文对象。
 
 ## 3.6 公告层定位
 
@@ -313,11 +314,11 @@ VRFOutputHash（可选）
 
 它不保存密码、凭据密文、域名、用户名或每次填充事件。链上锚定是历史一致性增强，不是密码管理数据库。
 
-## 3.7 VDNS部署与信任模型
+## 3.7 可验证状态部署与信任模型
 
-VDNS在本文中指可验证凭据状态解析控制平面，不是传统DNS或DNSSEC替代。名称空间根负责单用户范围的设备授权和恢复治理，授权设备发布候选事件与状态，Resolver收集状态和证明，本地Verifier执行L1～L5后决定是否采信。透明日志提供追加历史，Monitor比较树头，公告或区块链Provider只周期锚定根。
+可验证状态控制层是凭据状态解析与验证平面，不是传统DNS或DNSSEC替代。名称空间根负责单用户范围的设备授权和恢复治理，授权设备发布候选事件与状态，State Resolver收集状态和证明，Local State Verifier执行L1～L5后决定是否采信。透明日志提供追加历史，Monitor比较树头，公告或区块链Provider只周期锚定根。
 
-目标协议要求Final Order Authority对竞争事件签发排序回执。检查点前的位置属于provisional，达到本地策略要求的受信检查点后才可称final。当前仓库只有单进程研究日志、模拟公告和Anvil研究适配器，没有多节点共识；`finalSequence`生产者仍为P0未实现项。新设备的初始检查点必须来自已有设备、恢复承诺或带外核对，普通云端TOFU不能授权高风险写。
+检查点前的位置属于provisional，达到本地策略要求的受信检查点后才可称final。当前的`ResearchSingleNodeFinalOrderAuthority`已作为`finalSequence`生产者完成研究范围内闭环，支持冲突集合、显式裁决、签名回执、检查点和SQLite恢复。它是`RESEARCH_ADAPTER`，没有多节点共识、BFT或生产级最终性。新设备的初始检查点必须来自已有设备、恢复承诺或带外核对，普通同步存储TOFU不能授权高风险写。
 
 ---
 
@@ -384,6 +385,8 @@ K_{relation}=HKDF(R_u[g],\text{"VDNS-PM/RELATION"})
 K_{rotation}=HKDF(R_u[g],\text{"VDNS-PM/ROTATION"})
 \]
 
+上述 `VDNS-PM-*` 字符串是 Spec 2.1.0 冻结的 legacy KDF/AAD 域字节。为保持旧密文、SQLite数据和测试向量可读，VPass 不在原协议版本中改写这些字节。
+
 实现中的 `KeyPurpose` 类型阻止把某用途 key 直接传给另一原语。测试同时验证域字符串差异和 API 类型检查，避免“文档写了分离、实现仍使用裸字节”的问题。
 
 ## 4.3 私有名称与 RouteMap
@@ -401,9 +404,9 @@ OriginBinding=HMAC_{K_{name}}(
 ExactEncode(CanonicalOrigin,AccountID))
 \]
 
-自动填充时 Agent 根据当前顶层 Origin 重新计算绑定，而不是信任扩展传入的任意 CredentialID。
+自动填充时本地安全客户端根据当前顶层 Origin 重新计算绑定，不信任扩展传入的任意 CredentialID。
 
-CanonicalOrigin由小写scheme、小写IDNA/Punycode hostname和非默认端口组成。HTTPS默认允许；远程HTTP拒绝，loopback HTTP只作显式开发例外。默认端口省略，非默认端口保留，子域精确隔离。iframe默认禁止。每次重定向后重新计算顶层Origin并重新执行RouteMap、VDNS与OriginBinding验证，重定向前的secret handle不能跨Origin使用。
+CanonicalOrigin由小写scheme、小写IDNA/Punycode hostname和非默认端口组成。HTTPS默认允许；远程HTTP拒绝，loopback HTTP只作显式开发例外。默认端口省略，非默认端口保留，子域精确隔离。iframe默认禁止。每次重定向后重新计算顶层Origin并重新执行RouteMap、可信状态与OriginBinding验证，重定向前的secret handle不能跨Origin使用。
 
 ## 4.4 字段级信封加密
 
@@ -459,9 +462,9 @@ DeviceOperationCredential {
 4. 旧设备通过 HPKE 传输 RootSecretBundle；
 5. 新设备生成自己的 `D_i` 和 RootCapsule；
 6. 根签发新设备 capability；
-7. 新设备从已有设备、恢复承诺或带外核对取得可信初始检查点，再从VDNS当前状态同步。
+7. 新设备从已有设备、恢复承诺或带外核对取得可信初始检查点，再从可信当前状态同步。
 
-只凭主密码和云端对象不能完成加入。
+只凭主密码和同步存储对象不能完成加入。
 
 ## 4.7 备份和恢复
 
@@ -471,7 +474,7 @@ DeviceOperationCredential {
 RecoveryCapsule=AEAD.Enc(KDF(RecoverySecret),RootSecretBundle,AAD_r)
 \]
 
-恢复必须同时验证恢复胶囊、内容对象、VDNS 当前版本、根身份和可信检查点。测试证明错误恢复秘密、缺失对象、回滚状态和绕过 VDNS 均失败。
+恢复必须同时验证恢复胶囊、内容对象、可信当前版本、根身份和可信检查点。测试证明错误恢复秘密、缺失对象、回滚状态和绕过可信状态验证均失败。
 
 ## 4.8 同步 manifest
 
@@ -566,11 +569,11 @@ capability_reference
 signature
 ```
 
-同一base出现不同候选或同版本出现两个合法descriptor时，状态进入`CONFLICTED`，两个分支均保留。具有冲突裁决能力的用户主体引用全部候选并根据网站实际状态显式选择，Final Order Authority签发排序回执后才能形成终局；云端、墙钟、到达时间和last-write-wins均无裁决权。
+同一base出现不同候选或同版本出现两个合法descriptor时，状态进入`CONFLICTED`，两个分支均保留。具有冲突裁决能力的用户主体引用全部候选并根据网站实际状态显式选择，Final Order Authority签发排序回执后才能形成终局；同步存储层、墙钟、到达时间和last-write-wins均无裁决权。
 
-## 5.4 VDNS 解析语义
+## 5.4 可信状态解析语义
 
-传统云查询返回：
+传统同步存储查询返回：
 
 \[
 CredentialID\rightarrow EncryptedCredential
@@ -656,7 +659,7 @@ event.finalSequence\ge revoke.finalSequence
 
 ## 5.9 离线降级
 
-云、日志或锚定不可用时，设备可以在本地策略规定的缓存年龄内使用已验证当前凭据，并输出 `DEGRADED`。系统不得宣称完成远程登录、同步或高风险更新。该策略使日常读取不把区块链放入关键路径，同时不把不可用性伪装成新鲜验证。
+同步存储、日志或锚定不可用时，设备可以在本地策略规定的缓存年龄内使用已验证当前凭据，并输出 `DEGRADED`。系统不得宣称完成远程登录、同步或高风险更新。该策略使日常读取不把区块链放入关键路径，同时不把不可用性伪装成新鲜验证。
 
 ---
 
@@ -672,6 +675,8 @@ event.finalSequence\ge revoke.finalSequence
 K^{audit}_e=HKDF(R_u[g],
 \text{"VDNS-PM-AUDIT"}\parallel e\parallel VRF_e)
 \]
+
+`VDNS-PM-AUDIT` 是冻结 legacy KDF 域字节，仅为保持已有审计对象可读而保留。
 
 隐藏密码见证：
 
@@ -784,7 +789,7 @@ Epoch 隔离只能避免协议公开字段中出现稳定密码标签，不能�
 
 ## 7.1 根胶囊机密性
 
-假设 AEAD 机密性/完整性、HKDF 伪随机性和设备秘密高熵成立，只获取云端 RootCapsule 和公开 KDF 参数不足以验证主密码猜测，因为 `Kunlock,i` 还依赖未上传的 `D_i`。
+假设 AEAD 机密性/完整性、HKDF 伪随机性和设备秘密高熵成立，只获取同步存储层 RootCapsule 和公开 KDF 参数不足以验证主密码猜测，因为 `Kunlock,i` 还依赖未上传的 `D_i`。
 
 边界：若攻击者获得设备秘密和胶囊，主密码猜测重新成为可能。Argon2id 提高成本但不能把低熵秘密变成高熵秘密。
 
@@ -792,9 +797,9 @@ Epoch 隔离只能避免协议公开字段中出现稳定密码标签，不能�
 
 每个字段使用独立 DEK，AAD 绑定凭据、版本、字段和 OriginBinding。将字段密文替换到另一凭据、版本或 Origin 会导致 AEAD 认证失败。更新密码无需重加密其他字段，降低写放大和无关泄漏面。
 
-## 7.3 云回滚安全
+## 7.3 同步存储回滚安全
 
-合法旧对象的 AEAD 和历史签名可能都有效，因此只验证对象真实性不足以判断当前性。设备还要求对象版本和摘要匹配 VDNS 当前 descriptor。若 VDNS 响应也被回滚，本地已见检查点和日志一致性验证阻止接受更旧树头。
+合法旧对象的 AEAD 和历史签名可能都有效，因此只验证对象真实性不足以判断当前性。设备还要求对象版本和摘要匹配可信当前 descriptor。若状态解析响应也被回滚，本地已见检查点和日志一致性验证阻止接受更旧树头。
 
 安全性依赖至少一个可获得的一致历史视图或本地可信检查点。若所有外部服务永久拒绝服务，系统只能使用策略允许的已验证缓存，不能产生新鲜更新。
 
@@ -822,7 +827,7 @@ Merkle 包含证明说明对象属于某树头，一致性证明说明新树扩�
 
 | 假设 | 完整机制 | 弱化变体 | 证伪条件 |
 |---|---|---|---|
-| H1 | VDNS current state + L1～L5 | 云版本索引/仅对象 hash | 旧或替换对象进入填充 |
+| H1 | trusted current state + L1～L5 | 存储版本索引/仅对象 hash | 旧或替换对象进入填充 |
 | H2 | capability + final sequence | 仅签名/墙钟撤销 | 撤销后操作被接受 |
 | H3 | 耐久候选 + 网站确认 | 直接覆盖/非耐久两阶段 | 激活错误值或丢失唯一新值 |
 | H4 | 字段级更新 | 整包重加密 | 无关字段发生变化 |
@@ -862,7 +867,7 @@ Spoofing 由签名、capability 和 OriginBinding 缓解；Tampering 由 AEAD、
 
 E1～E8使用固定TEST_ONLY生成规则，不导入真实用户数据。历史汇总报告P50、P95、P99、均值、标准差和bootstrap 95%区间，并记录分配、进程CPU和最大RSS。runner在内存中计算逐轮duration后只写汇总值，没有把每轮原始时延写入证据文件，因此置信区间和分位数无法从仓库独立复算，相关统计保持`UNVERIFIED`。性能结果是单机研究测量，不外推为移动设备或公网SLA。
 
-## 8.3 E1～E5 日常与 VDNS 性能
+## 8.3 E1～E5 日常与可信状态验证性能
 
 | 实验 | 指标 | P50 | P95 | P99 | 目标 |
 |---|---|---:|---:|---:|---:|
@@ -882,7 +887,7 @@ E1使用Argon2id 64 MiB、3次迭代和单lane，历史峰值RSS约199.7 MiB。E
 
 本地适配器与协议故障回归覆盖：
 
-1. 云回滚、替换、缺对象和不完整对象；
+1. 同步存储回滚、替换、缺对象和不完整对象；
 2. 日志 proof 变异、分叉、旧 root 和错误一致性；
 3. 锚定 provider 类型不匹配；
 4. 网络中断和离线；
@@ -969,23 +974,23 @@ SCOPE-ZK 和通用 zkVM 均未配置，状态为 `UNAVAILABLE`，proof 指标为
 
 ## 8.12 本章小结
 
-历史汇总和当前回归说明本地研究机制在固定环境中满足现有测试阈值，并能在预置云、日志、网络、磁盘、进程、Mock Site和撤销测试下保持失败安全。它们没有证明生产多节点系统或真实网站的端到端性质。10k单manifest不可行、逐样本数据缺失、可选零知识provider不可用、浏览器矩阵未实测均属于未关闭项。
+历史汇总和当前回归说明本地研究机制在固定环境中满足现有测试阈值，并能在预置存储、日志、网络、磁盘、进程、Mock Site和撤销测试下保持失败安全。它们没有证明生产多节点系统或真实网站的端到端性质。10k单manifest不可行、逐样本数据缺失、可选零知识provider不可用、浏览器矩阵未实测均属于未关闭项。
 
 ---
 
 # 结论
 
-本文围绕完整密码管理器提出VDNS-PM的设计，并实现G6本地研究原型。系统以主密码和设备秘密解锁本地高熵根，以字段级AEAD保护密码内容，以VDNS五层解析验证密码控制过程，以耐久候选和分级确认维护生命周期，并以透明日志机制检测回滚和冲突。最终序权威尚未实现，当前代码不能证明生产多设备终局。
+本文围绕完整密码管理器提出VPass的设计，并实现G6本地研究原型。系统以主密码和设备秘密解锁本地高熵根，以字段级AEAD保护密码内容，以五层可信状态解析验证密码控制过程，以耐久候选和分级确认维护生命周期，并以透明日志机制检测回滚和冲突。单节点研究型最终顺序模块已完成研究范围闭环，当前代码不能证明生产多节点或BFT终局。
 
-研究表明，密码管理器安全不能只问“云能否解开密文”，还必须问“设备为何相信这是当前密码”。把当前状态裁判从同步云移到可独立验证的控制面，是本文的核心贡献。隐私审计和可选泄露响应建立在该生命周期之上，不改变系统的日常定位。
+研究表明，密码管理器安全不能只问“存储层能否解开密文”，还必须问“设备为何相信这是当前密码”。把当前状态裁判从同步存储层移到可独立验证的控制面，是本文的核心贡献。隐私审计和可选泄露响应建立在该生命周期之上，不改变系统的日常定位。
 
-因此，VDNS-PM 可以概括为：
+因此，VPass 可以概括为：
 
 \[
-\boxed{\text{AEAD 保护密码内容，VDNS 保护密码控制过程。}}
+\boxed{\text{AEAD保护密码内容，可验证状态控制层保证凭据版本和生命周期状态可信。}}
 \]
 
-当前成果支持继续开展研究原型开发，不应被描述为已经达到G7冻结、生产部署、真实共识、硬件安全认证或零知识provider。下一阶段优先实现最终序权威、跨设备冲突终局、E0～E5迁移和可信初始检查点，再补真实网络同步、逐样本实验和外部安全审计。
+当前成果支持继续开展研究原型开发，不应被描述为已经达到G7冻结、生产部署、真实共识、硬件安全认证或零知识provider。下一阶段优先完成多进程冲突组合、可信初始检查点产品流程、设备撤销与外部修复编排，再补真实公网同步存储、逐样本实验和外部安全审计。
 
 ---
 
@@ -1054,7 +1059,7 @@ test-results/g7/evidence-manifest.json
 允许的表述：
 
 - 完整密码管理器研究原型；
-- 不可信云下的本地同步协议与接收验证研究原型；
+- 不可信同步存储下的本地同步协议与接收验证研究原型；
 - L1～L5 在本地验证；
 - 研究/模拟/可选 provider 均明确分类；
 - 2026-07-22数据库快照中的可达漏洞为0，当前状态待重跑。

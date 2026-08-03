@@ -9,10 +9,10 @@ import (
 	"sync"
 	"testing"
 
-	"vdns.local/vdns/internal/adapters/outbound/mocksite"
-	"vdns.local/vdns/internal/cryptokit"
-	"vdns.local/vdns/internal/protocol"
-	sitedomain "vdns.local/vdns/internal/site/domain"
+	"vpass.local/vpass/internal/adapters/outbound/mocksite"
+	"vpass.local/vpass/internal/cryptokit"
+	"vpass.local/vpass/internal/protocol"
+	sitedomain "vpass.local/vpass/internal/site/domain"
 )
 
 func TestCoordinatorRequiresSeparateStrongConfirmation(t *testing.T) {

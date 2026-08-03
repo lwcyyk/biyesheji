@@ -55,7 +55,7 @@ func (site *Site) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	writer.Header().Set("Cache-Control", "no-store")
 	if request.Method == http.MethodGet && request.URL.Path == "/" {
 		writer.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = io.WriteString(writer, `<!doctype html><title>VDNS Mock Site</title><form><input autocomplete="username"><input type="password" autocomplete="current-password"><input type="password" autocomplete="new-password"></form>`)
+		_, _ = io.WriteString(writer, `<!doctype html><title>VPass Mock Site</title><form><input autocomplete="username"><input type="password" autocomplete="current-password"><input type="password" autocomplete="new-password"></form>`)
 		return
 	}
 	if request.Method != http.MethodPost {

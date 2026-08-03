@@ -7,7 +7,7 @@ import (
 	"crypto/sha256"
 	"errors"
 
-	exposuredomain "vdns.local/vdns/internal/exposure/domain"
+	exposuredomain "vpass.local/vpass/internal/exposure/domain"
 )
 
 var ErrOptionalFeatureUnavailable = errors.New("OPTIONAL_FEATURE_UNAVAILABLE")

@@ -28,9 +28,9 @@ jq -n \
   --argjson scorecardExit "$SCORECARD_EXIT" \
   '{
     schemaVersion: "1.0.0",
-    contract: "VDNS-PM /api/v2",
-    frozenVersion: "2.0.0",
-    operations: 22,
+    contract: "VPass /api/v2",
+    frozenVersion: "2.1.0",
+    operations: 23,
     projectRefAwareLint: "PASSED",
     implementationInventoryMatch: "PASSED",
     breakingChangeBaselineDigest: "PASSED",
@@ -51,7 +51,7 @@ jq -n \
     },
     releaseDecision: "PASS_WITH_DOCUMENTATION_DEBT",
     openFindings: [
-      "22 operations have summary but no long-form description in the frozen contract.",
+      "23 operations have summary but no long-form description in the current contract.",
       "SyncManifest supports 10k references by type but the common signed-payload limit requires practical batching."
     ]
   }' >"$EVIDENCE_DIR/api-review-scorecard.json"

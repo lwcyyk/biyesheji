@@ -65,8 +65,8 @@ env -u GOPATH go test ./tests/performance \
   >"$EVIDENCE_DIR/autofill-benchmark.txt"
 
 BUILD_DIR=$(mktemp -d)
-env -u GOPATH go build -trimpath -o "$BUILD_DIR/vdns-local-agent" ./cmd/vdns-local-agent
-test -x "$BUILD_DIR/vdns-local-agent"
+env -u GOPATH go build -trimpath -o "$BUILD_DIR/vpass-local-client" ./cmd/vpass-local-client
+test -x "$BUILD_DIR/vpass-local-client"
 
 "$SCRIPT_DIR/demo-g5-daily.sh" >"$EVIDENCE_DIR/daily-demo.txt"
 

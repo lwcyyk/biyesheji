@@ -80,7 +80,7 @@ func main() {
 			},
 		},
 		{
-			ID: "FI-NETWORK-001", Component: "browser-extension/local-agent/mock-site",
+			ID: "FI-NETWORK-001", Component: "browser-extension/local-secure-client/mock-site",
 			Fault:    "Mock Site becomes unreachable after a verified local version is cached",
 			Expected: "bounded offline read works; remote login and high-risk completion are not claimed",
 			Command: []string{
@@ -98,7 +98,7 @@ func main() {
 			},
 		},
 		{
-			ID: "FI-PROCESS-001", Component: "local-agent/sqlite",
+			ID: "FI-PROCESS-001", Component: "local-secure-client/sqlite",
 			Fault:    "handler or process restarts with durable idempotency/outbox state",
 			Expected: "same request replays original result; pending and unknown are retained",
 			Command: []string{

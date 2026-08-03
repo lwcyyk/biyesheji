@@ -10,9 +10,9 @@ import (
 	"strconv"
 	"testing"
 
-	"vdns.local/vdns/internal/credential/domain"
-	"vdns.local/vdns/internal/cryptokit"
-	"vdns.local/vdns/internal/protocol"
+	"vpass.local/vpass/internal/credential/domain"
+	"vpass.local/vpass/internal/cryptokit"
+	"vpass.local/vpass/internal/protocol"
 )
 
 func TestRouteRepositorySameOriginAccountsRestartAndRemoval(t *testing.T) {

@@ -1,6 +1,6 @@
-# VDNS 架构决策记录
+# VPass 架构决策记录
 
-本目录是 Spec 001 v2.1.0 的协议决策基线。当前实现阶段为 G6，G7 冻结尚未达成。编号一经发布不复用；决策变化必须新增 ADR，并在旧记录中标记 `Superseded by ADR-xxx`，不得静默改写协议字节或安全结论。ADR-011 将产品主线重定向为完整密码生命周期管理；ADR-012～017 冻结第一阶段审计发现的信任、排序、确认、撤销、Origin 和证据边界；ADR-018补正第二阶段研究型最终序回执线格式。
+本目录是 Spec 001 v2.1.0 的协议决策基线。当前实现阶段为 G6，G7 冻结尚未达成。编号一经发布不复用；决策变化必须新增 ADR，不得静默改写协议字节或安全结论。ADR-011～018保留当时的旧名和历史事实；ADR-019 冻结 VPass 展示命名、当前代码名和 legacy wire 兼容边界。
 
 | ADR | 主题 | 状态 |
 |---|---|---|
@@ -14,7 +14,7 @@
 | [ADR-008](ADR-008-rfc9381-provider.md) | RFC 9381 Provider 与显式模拟器 | Accepted with Gate |
 | [ADR-009](ADR-009-simulator-first.md) | Event Simulator/Mock Site 优先 | Accepted |
 | [ADR-010](ADR-010-g0-1-protocol-registry-amendment.md) | G0.1 协议注册表与持久引用修订 | Accepted |
-| [ADR-011](ADR-011-vdns-pm-product-rebaseline.md) | VDNS-PM 产品主线与协议 v2 重基线 | Accepted |
+| [ADR-011](ADR-011-vdns-pm-product-rebaseline.md) | VDNS-PM 产品主线与协议 v2 重基线（历史命名） | Accepted |
 | [ADR-012](ADR-012-vdns-deployment-trust-model.md) | VDNS 部署与信任模型 | Accepted |
 | [ADR-013](ADR-013-cross-device-conflict-final-order.md) | 跨设备冲突与最终顺序 | Accepted |
 | [ADR-014](ADR-014-site-confirmation-evidence-levels.md) | 网站确认证据等级 | Accepted |
@@ -22,3 +22,4 @@
 | [ADR-016](ADR-016-canonical-origin.md) | CanonicalOrigin 规则 | Accepted |
 | [ADR-017](ADR-017-experiment-claims-evidence.md) | 实验声明与证据要求 | Accepted |
 | [ADR-018](ADR-018-stage2-research-final-order-wire.md) | 第二阶段研究型最终序回执线格式 | Accepted |
+| [ADR-019](ADR-019-vpass-naming-and-legacy-wire-compatibility.md) | VPass 命名与 legacy wire 兼容 | Accepted |

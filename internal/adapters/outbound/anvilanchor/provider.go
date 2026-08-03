@@ -8,7 +8,7 @@ import (
 	"errors"
 	"strings"
 
-	anchordomain "vdns.local/vdns/internal/anchor/domain"
+	anchordomain "vpass.local/vpass/internal/anchor/domain"
 )
 
 var ErrAnvilPublication = errors.New("Anvil checkpoint publication failed")

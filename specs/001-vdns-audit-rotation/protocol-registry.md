@@ -1,11 +1,13 @@
-# VDNS-PM/2 协议注册表
+# VPass Spec 2.1.0 协议注册表
+
+> 当前展示协议标签为 `VPass/2`。本注册表中的 `VDNS-PM`、`VDNS-PM-CP-2` 和相关domain字符串已经进入签名、KDF/AAD、SQLite和固定向量，因此按ADR-019作为deprecated legacy wire identifiers冻结保留。它们不再是产品展示名。
 
 | 属性 | 值 |
 |---|---|
 | 注册表版本 | `2.1.0` |
-| Protocol ID | `VDNS-PM` |
+| Protocol ID | `VDNS-PM`（legacy wire） |
 | Protocol version | `2` |
-| Suite ID | `VDNS-PM-CP-2` |
+| Suite ID | `VDNS-PM-CP-2`（legacy wire） |
 | 编码 | RFC 8949 Deterministic CBOR |
 | 哈希/HMAC/HKDF | SHA-256 / HMAC-SHA-256 / HKDF-SHA-256 |
 | 签名 | Ed25519 |

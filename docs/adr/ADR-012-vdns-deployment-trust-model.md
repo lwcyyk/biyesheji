@@ -1,5 +1,7 @@
 # ADR-012：VDNS 部署与信任模型
 
+> 历史命名提示：当前组件展示名为可验证状态控制层、State Resolver和Local State Verifier；本ADR中旧术语用于保留决策历史。
+
 - 状态：Accepted
 - 日期：2026-07-31
 - 追踪：FR-028～035；AC-009～010、AC-016、AC-021
@@ -48,4 +50,3 @@ NO_MULTI_NODE_CONSENSUS
 - 论文和UI不得把当前原型写成生产共识、生产链最终性或多节点VDNS网络。
 - 第二阶段需实现 Final Order Authority 端口和签名回执；生产共识仍可保持后续工作。
 - Resolver返回结果不自动可信，本地Verifier始终执行L1～L5。
-

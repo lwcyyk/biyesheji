@@ -11,12 +11,12 @@ import (
 	"strconv"
 	"strings"
 
-	auditdomain "vdns.local/vdns/internal/audit/domain"
-	"vdns.local/vdns/internal/cryptokit"
-	operationdomain "vdns.local/vdns/internal/operation/domain"
-	"vdns.local/vdns/internal/protocol"
-	resolverdomain "vdns.local/vdns/internal/resolver/domain"
-	transparencydomain "vdns.local/vdns/internal/transparency/domain"
+	auditdomain "vpass.local/vpass/internal/audit/domain"
+	"vpass.local/vpass/internal/cryptokit"
+	operationdomain "vpass.local/vpass/internal/operation/domain"
+	"vpass.local/vpass/internal/protocol"
+	resolverdomain "vpass.local/vpass/internal/resolver/domain"
+	transparencydomain "vpass.local/vpass/internal/transparency/domain"
 )
 
 var (

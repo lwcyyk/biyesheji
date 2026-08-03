@@ -1,4 +1,4 @@
-# VDNS-PM 运行与恢复手册
+# VPass 运行与恢复手册
 
 | 属性 | 内容 |
 |---|---|
@@ -37,10 +37,10 @@ env -u GOPATH go mod verify
 
 ```bash
 demo_dir="$(mktemp -d)"
-./scripts/demo-vdns-pm.sh --data-dir "${demo_dir}"
+./scripts/demo-vpass.sh --data-dir "${demo_dir}"
 ```
 
-完成标志为 `demo-vdns-pm-ok`。演示覆盖初始化、凭据创建、自动填充、多设备同步、网站确认更新、撤销、离线、VDNS、审计和可选响应边界。
+完成标志为 `vpass-demo-ok`。演示覆盖初始化、凭据创建、自动填充、多设备同步、网站确认更新、撤销、离线、可信状态、审计和可选响应边界。
 
 失败判定：
 
@@ -72,7 +72,7 @@ g7-recovery-drill-ok
 
 ## 4. 标准停止与秘密处理
 
-1. 关闭浏览器扩展演示页面和本地 Agent；
+1. 关闭浏览器扩展演示页面和本地安全客户端；
 2. 触发密码库锁定，确认活动 session 与 secret handle 失效；
 3. 删除仅用于演示的临时目录；若需要论文取证，只保留无秘密 JSON/CSV 和测试日志；
 4. 不复制 SQLite 演示库、RootCapsule、恢复秘密或浏览器本地存储到公开材料。
@@ -86,25 +86,25 @@ g7-recovery-drill-ok
 1. 停止新的生命周期写入和设备加入；
 2. 记录故障发生时间、当前检查点、设备和凭据伪名；
 3. 区分内容故障与控制面故障：
-   - 云对象缺失、损坏或回滚；
-   - VDNS/log/checkpoint 不一致；
+   - 同步存储对象缺失、损坏或回滚；
+   - state/log/checkpoint 不一致；
    - 本地数据库或进程故障；
    - 设备丢失或能力凭证泄露；
    - 网站改密状态不明；
 4. 不把“自动填充完成”或“表单已提交”当成网站确认。
 
-### 5.2 云、日志和检查点异常
+### 5.2 同步存储、日志和检查点异常
 
 ```bash
 env -u GOPATH go test ./tests/integration \
   -run 'Test.*(Rollback|Transparency|Checkpoint|Monitor)' -count=1
 ```
 
-期望设备输出 `REJECT`、`REVIEW_REQUIRED` 或安全降级，不能接受低于 VDNS 当前版本的对象。保留对象 digest、ProofBundle、检查点和 monitor 证据，不记录明文字段。
+期望设备输出 `REJECT`、`REVIEW_REQUIRED` 或安全降级，不能接受低于可信当前版本的对象。保留对象 digest、ProofBundle、检查点和 monitor 证据，不记录明文字段。
 
 恢复条件：
 
-- 对象哈希与 VDNS 描述一致；
+- 对象哈希与可信状态描述一致；
 - 包含证明和一致性证明通过；
 - 当前检查点不低于本地已见检查点；
 - 本地策略重新输出可接受 verdict。
@@ -136,11 +136,11 @@ ACTIVE(v) + durable candidate(v+1) + UNKNOWN/REVIEW_REQUIRED
 
 - RootCapsule 和高熵恢复秘密；
 - 内容寻址对象完整；
-- VDNS 当前状态与版本；
+- 可信当前状态与版本；
 - 根身份一致；
 - RouteMap 和凭据对象引用可达。
 
-缺少任何一项时失败关闭，不得只凭主密码和云端对象重建根秘密。
+缺少任何一项时失败关闭，不得只凭主密码和同步存储对象重建根秘密。
 
 ## 6. 冲突人工处理
 
@@ -171,7 +171,7 @@ jq '.summary, .drills[] | {id, status, expectedOutcome}' \
 - `go.mod`、密码策略或协议注册表；
 - `migrations/*.sql`；
 - `.github/workflows/*`；
-- VDNS、日志、恢复或设备代际代码；
+- 可信状态、日志、恢复或设备代际代码；
 - 浏览器扩展 CSP 和 Native Messaging 边界。
 
 ## 8. 升级与回滚
@@ -191,7 +191,7 @@ jq '.summary, .drills[] | {id, status, expectedOutcome}' \
 - 数据库迁移无法在备份副本恢复；
 - 任何秘密进入日志、OpenAPI JSON 或公开叶。
 
-协议或数据库已产生新版本对象后，不得只回滚二进制而忽略数据版本。应暂停写入、恢复兼容构建，并通过迁移 checksum、对象版本和 VDNS 当前状态共同确认。
+协议或数据库已产生新版本对象后，不得只回滚二进制而忽略数据版本。应暂停写入、恢复兼容构建，并通过迁移 checksum、对象版本和可信当前状态共同确认。
 
 ## 9. 证据与事后复盘
 

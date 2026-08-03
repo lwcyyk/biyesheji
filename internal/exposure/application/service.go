@@ -6,8 +6,8 @@ import (
 	"crypto/sha256"
 	"errors"
 
-	exposuredomain "vdns.local/vdns/internal/exposure/domain"
-	exposureports "vdns.local/vdns/internal/exposure/ports"
+	exposuredomain "vpass.local/vpass/internal/exposure/domain"
+	exposureports "vpass.local/vpass/internal/exposure/ports"
 )
 
 var ErrExposureAnalysis = errors.New("exposure analysis failed")

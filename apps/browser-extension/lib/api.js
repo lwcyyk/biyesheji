@@ -18,21 +18,21 @@ function nonce() {
 function idempotencyKey() {
   const bytes = new Uint8Array(24);
   crypto.getRandomValues(bytes);
-  return `vdns-${base64url(bytes)}`;
+  return `vpass-${base64url(bytes)}`;
 }
 
-export class LocalAgentError extends Error {
+export class LocalClientError extends Error {
   constructor(code, message, requestId, details = undefined, status = 0) {
-    super(message || code || "LOCAL_AGENT_ERROR");
-    this.name = "LocalAgentError";
-    this.code = code || "LOCAL_AGENT_ERROR";
+    super(message || code || "LOCAL_CLIENT_ERROR");
+    this.name = "LocalClientError";
+    this.code = code || "LOCAL_CLIENT_ERROR";
     this.requestId = requestId;
     this.details = details;
     this.status = status;
   }
 }
 
-export class LocalAgentClient {
+export class LocalSecureClient {
   #baseURL;
   #installToken;
   #vaultSession;
@@ -81,9 +81,9 @@ export class LocalAgentClient {
     if (body !== undefined) headers["Content-Type"] = "application/json";
     if (sessionRequired) {
       if (!this.#vaultSession) throw new Error("VAULT_SESSION_REQUIRED");
-      headers["X-VDNS-Vault-Session"] = this.#vaultSession;
+      headers["X-VPass-Vault-Session"] = this.#vaultSession;
     }
-    if (nonceRequired) headers["X-VDNS-Request-Nonce"] = nonce();
+    if (nonceRequired) headers["X-VPass-Request-Nonce"] = nonce();
     if (mutation) headers["Idempotency-Key"] = idempotency || idempotencyKey();
     const response = await fetch(`${this.#baseURL}${API_PREFIX}${path}`, {
       method,
@@ -97,10 +97,10 @@ export class LocalAgentClient {
     if (response.status === 204) return null;
     const value = await response.json().catch(() => ({
       code: "MALFORMED_LOCAL_RESPONSE",
-      message: "本地代理返回了无法解析的响应。"
+      message: "本地安全客户端返回了无法解析的响应。"
     }));
     if (!response.ok) {
-      throw new LocalAgentError(value.code, value.message, value.requestId, value.details, response.status);
+      throw new LocalClientError(value.code, value.message, value.requestId, value.details, response.status);
     }
     return value;
   }

@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-const modulePath = "vdns.local/vdns"
+const modulePath = "vpass.local/vpass"
 
 type listedPackage struct {
 	ImportPath  string

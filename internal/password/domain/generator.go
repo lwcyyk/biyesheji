@@ -6,7 +6,7 @@ import (
 	"io"
 	"strings"
 
-	"vdns.local/vdns/internal/cryptokit"
+	"vpass.local/vpass/internal/cryptokit"
 )
 
 var ErrPasswordGeneration = errors.New("password generation failed")

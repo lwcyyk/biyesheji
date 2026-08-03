@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail when the frozen VDNS requirements lose traceability.
+"""Fail when the frozen VPass requirements lose traceability.
 
 This gate intentionally reads the human-owned Markdown sources instead of a
 second generated manifest.  A missing or malformed ID therefore fails at the
@@ -16,7 +16,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SPEC = ROOT / "specs/001-vdns-audit-rotation/spec.md"
 TASKS = ROOT / "specs/001-vdns-audit-rotation/tasks.md"
-REPORT = ROOT / "docs/VDNS研究生毕业设计开发报告.md"
+REPORT = ROOT / "docs/VPass研究生毕业设计开发报告.md"
 
 
 def fail(message: str) -> None:

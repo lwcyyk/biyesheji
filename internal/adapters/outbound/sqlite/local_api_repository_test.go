@@ -6,7 +6,7 @@ import (
 	"errors"
 	"testing"
 
-	localports "vdns.local/vdns/internal/localapi/ports"
+	localports "vpass.local/vpass/internal/localapi/ports"
 )
 
 func TestLocalAPIRepositoryHashesKeysAndSurvivesRestart(t *testing.T) {

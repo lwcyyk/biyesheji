@@ -15,7 +15,7 @@ import (
 	"sync"
 	"unicode/utf8"
 
-	"vdns.local/vdns/internal/protocol"
+	"vpass.local/vpass/internal/protocol"
 )
 
 const (

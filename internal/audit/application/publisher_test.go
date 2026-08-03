@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	credentialdomain "vdns.local/vdns/internal/credential/domain"
-	"vdns.local/vdns/internal/cryptokit"
-	"vdns.local/vdns/internal/protocol"
+	credentialdomain "vpass.local/vpass/internal/credential/domain"
+	"vpass.local/vpass/internal/cryptokit"
+	"vpass.local/vpass/internal/protocol"
 )
 
 type memoryAuditOutbox struct {

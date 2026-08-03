@@ -1,10 +1,10 @@
-# VDNS-PM `/api/v2` 设计评审
+# VPass `/api/v2` 设计评审
 
 | 属性 | 值 |
 |---|---|
 | 合同 | `contracts/openapi.json` v2.1.0 |
 | 日期 | 2026-07-31 |
-| 结论 | Stage 2合同对齐完成；22项均已核对，13 COMPLETE、7 PARTIAL、2 NOT_IMPLEMENTED |
+| 结论 | 当前23项均已核对，13 COMPLETE、8 PARTIAL（含1个legacy路径）、2 NOT_IMPLEMENTED |
 | 设计评分 | 91/100（Stage 1人工设计评分，不代表实现完成度） |
 
 ## 1. 结论
@@ -17,11 +17,11 @@ vault session
   → credential create/read/autofill
   → version candidate / site confirmation
   → sync / device / recovery
-  → VDNS / audit
+  → trusted state / audit
   → optional exposure/remediation
 ```
 
-合同满足 `/api/v2` 版本隔离、资源名词、camelCase、统一错误、cursor 分页、幂等写、版本 CAS、受认证本地通道和可选模块边界。它不把密码、主密码或恢复秘密定义成普通 JSON 字段。机器可读覆盖报告由`scripts/generate_api_coverage.py`生成；当前不能宣称22项全部完成。
+合同满足 `/api/v2` 版本隔离、资源名词、camelCase、统一错误、cursor 分页、幂等写、版本 CAS、受认证本地通道和可选模块边界。它不把密码、主密码或恢复秘密定义成普通 JSON 字段。机器可读覆盖报告由`scripts/generate_api_coverage.py`生成；当前不能宣称23项全部完成。
 
 ## 2. 评分卡
 
@@ -34,7 +34,7 @@ vault session
 | 幂等与并发 | 15 | 14 | 所有写要求 Idempotency-Key，版本写带 expectedVersion/descriptor hash |
 | 错误与可观测性 | 10 | 9 | 稳定 Error；实现需维护完整 error-code registry |
 | 分页与资源限制 | 5 | 5 | cursor、limit 上限、proof/object 仍需 server hard limit |
-| 研究目标一致性 | 10 | 7 | VDNS layer results 可观测；证明下载/Monitor 查询可在实现阶段补充只读资源 |
+| 研究目标一致性 | 10 | 7 | trusted-state layer results 可观测；证明下载/Monitor 查询可在实现阶段补充只读资源 |
 | **合计** | **100** | **91** | 可进入实现 |
 
 ## 3. 关键设计决定
@@ -51,7 +51,7 @@ vault session
 
 1. vault session/nonce/install token；
 2. 本地 RouteMap 与当前 Origin；
-3. VDNS current descriptor 与 L1～L5；
+3. 可信当前descriptor与 L1～L5；
 4. Envelope version/hash/policy；
 5. 字段解密与 OriginBinding 重验；
 6. 创建单次 secret handle。
@@ -64,9 +64,9 @@ vault session
 
 明确失败、MFA、策略拒绝和 UNKNOWN 是正常业务结果，不应全部折叠为 500。CAS 或 descriptor 冲突使用 409；当前版本可通过冲突安全 details 返回，但不能泄露未授权凭据是否存在。
 
-### 3.4 云同步不返回可信 current
+### 3.4 同步存储层不返回可信 current
 
-`sync-publications` 和 `sync-pulls` 是异步 operation。pull 中的云 cursor 只用于分页；接受对象时仍调用 VDNS resolution。响应 202 只表示任务已排队，不表示全局同步、日志包含或检查点锚定已经完成。
+`sync-publications` 和 `sync-pulls` 是异步 operation。pull 中的存储 cursor 只用于分页；接受对象时仍调用 trusted-state resolution。响应 202 只表示任务已排队，不表示全局同步、日志包含或检查点锚定已经完成。
 
 ### 3.5 可选增强隔离
 
@@ -80,10 +80,10 @@ vault session
 | password-generations | unlocked vault | 幂等 | CSPRNG；只返 secret handle |
 | credential-route-resolutions | READ | 只读 | Origin 规范化和本地映射 |
 | credentials | CREATE/READ | create 幂等 | 六字段加密，列表不返明文 |
-| autofill-authorizations | AUTOFILL | 幂等短时 | VDNS+对象+Origin 三重门禁 |
+| autofill-authorizations | AUTOFILL | 幂等短时 | 可信状态+对象+Origin 三重门禁 |
 | credential versions | UPDATE | expectedVersion + previous hash | 候选先耐久，不直接 ACTIVE |
 | site-confirmations | UPDATE | expected/candidate version | 证据等级和 UNKNOWN |
-| sync publications/pulls | UPDATE/READ | operation 幂等 | 云 current 不可信 |
+| sync publications/pulls | UPDATE/READ | operation 幂等 | 存储层 current 不可信 |
 | device enrollments | DEVICE_ENROLL | challenge 一次性 | 短码、HPKE、scope |
 | device revocations | REVOKE | issuance counter | final sequence、新代际 |
 | recovery-sessions | RecoverySecret policy | 严格限速 | 只凭主密码不可恢复 |
@@ -137,7 +137,7 @@ OpenAPI 描述 loopback 形态，生产实现优先 Native Messaging 或 Unix do
 
 - 仅绑定 127.0.0.1/::1 的明确地址，不绑定所有接口；
 - 随机端口和高熵 InstallToken 存入受限文件或 OS key store；
-- 校验 Host、Origin、extension ID 和一次性 `X-VDNS-Request-Nonce`；
+- 校验 Host、Origin、extension ID 和一次性 `X-VPass-Request-Nonce`；服务端对legacy `X-VDNS-Request-Nonce`执行相同校验；
 - CORS 使用精确 allowlist，拒绝 `*` 和 null origin；
 - 限制 body、数组、proof、对象和批次尺寸；
 - unlock/recovery/analysis 分别限速；
@@ -153,10 +153,10 @@ OpenAPI 描述 loopback 形态，生产实现优先 Native Messaging 或 Unix do
 这是有意的 major break：
 
 - base path `/api/v1` → `/api/v2`；
-- Protocol `VDNS-CREDENTIAL-AUDIT/1` → `VDNS-PM/2`；
+- 历史Protocol `VDNS-CREDENTIAL-AUDIT/1` → legacy wire `VDNS-PM/2`；当前展示标签为`VPass/2`；
 - CredentialID 16 B → 32 B；
 - API 主资源从 audit/exposure/rotation 转为 vault/credential/autofill/sync；
-- 新增 RootCapsule、RouteMap、password generation、site confirmation、recovery 和 VDNS resolution；
+- 新增 RootCapsule、RouteMap、password generation、site confirmation、recovery 和 trusted-state resolution；
 - 旧 CP-1 ciphertext/AAD/枚举不能直接由 v2 API 接受；
 - secret 明文输入替换为 secure-input secret handles；
 - SCOPE-ZK 改为显式可选 501 边界。
@@ -170,7 +170,7 @@ OpenAPI 描述 loopback 形态，生产实现优先 Native Messaging 或 Unix do
 | 状态 | 数量 | 说明 |
 |---|---:|---|
 | COMPLETE | 13 | 本地研究实现、handler和测试标记均存在 |
-| PARTIAL | 7 | sync/device/recovery/audit为排队或组合边界；VDNS需注入真实L1～L5 verifier |
+| PARTIAL | 8 | sync/device/recovery/audit为排队或组合边界；state resolution需注入真实L1～L5 verifier；另含1个deprecated legacy路径 |
 | NOT_IMPLEMENTED | 2 | SCOPE-ZK exposure和remediation显式返回501 |
 
 接口存在不等于后端生产能力完成。仍需：
@@ -192,7 +192,7 @@ OpenAPI 描述 loopback 形态，生产实现优先 Native Messaging 或 Unix do
 - 所有列表 cursor 分页且有上限；
 - 所有秘密输入都是 local handle/ref，不是 password/recovery 明文 schema；
 - 401/403/409/422/429/5xx 使用统一 Error；
-- VDNS Verdict 和业务 operation state 不混用；
+- state Verdict 和业务 operation state 不混用；
 - SCOPE-ZK 关闭时日常 API 合同测试仍全通过；
 - 实现、OpenAPI、Spec、注册表和 UI 枚举一致；
 - secret scan、fuzz、race 和端到端 Origin 攻击用例通过。

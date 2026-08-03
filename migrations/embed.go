@@ -12,7 +12,8 @@ import _ "embed"
 //go:embed 0001_initial.sql
 var LegacyInitialSQL string
 
-// InitialSQL is the CP-2 schema for new VDNS-PM/2 installations.
+// InitialSQL is the CP-2 schema for VPass installations. The embedded SQL
+// retains frozen legacy wire identifiers for database compatibility.
 //
 //go:embed 0002_v2_initial.sql
 var InitialSQL string
@@ -29,8 +30,8 @@ var G2CoreSQL string
 //go:embed 0004_g3_lifecycle_sync.sql
 var G3LifecycleSyncSQL string
 
-// G4VDNSTransparencySQL adds CP-2 VDNS decisions, proof bundles, public
-// checkpoints, announcement receipts and monitor evidence.
+// G4VDNSTransparencySQL retains the published legacy migration identifier and
+// embeds state decisions, proof bundles, checkpoints and monitor evidence.
 //
 //go:embed 0005_g4_vdns_transparency.sql
 var G4VDNSTransparencySQL string

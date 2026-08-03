@@ -1,5 +1,7 @@
 # ADR-011：VDNS-PM 产品主线与协议 v2 重基线
 
+> 历史命名提示：本ADR记录当时决策，其中VDNS-PM为VPass旧名；当前展示名和legacy wire边界由ADR-019规定。
+
 | 属性 | 值 |
 |---|---|
 | 状态 | Accepted |

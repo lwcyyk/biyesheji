@@ -8,7 +8,7 @@ import (
 	"errors"
 	"testing"
 
-	"vdns.local/vdns/internal/protocol"
+	"vpass.local/vpass/internal/protocol"
 )
 
 func TestStateDescriptorV2SignVerifyRoundTripAndKAT(t *testing.T) {

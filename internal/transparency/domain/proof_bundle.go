@@ -6,7 +6,7 @@ import (
 	"crypto/subtle"
 	"errors"
 
-	"vdns.local/vdns/internal/protocol"
+	"vpass.local/vpass/internal/protocol"
 )
 
 const (

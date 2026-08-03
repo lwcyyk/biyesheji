@@ -8,13 +8,13 @@ import (
 	"errors"
 	"sort"
 
-	"vdns.local/vdns/internal/cryptokit"
-	"vdns.local/vdns/internal/protocol"
+	"vpass.local/vpass/internal/cryptokit"
+	"vpass.local/vpass/internal/protocol"
 )
 
 const (
 	// DeviceOperationCredentialVersion is the schema version inside the
-	// VDNS-PM/2 signed payload. It is distinct from ProtocolVersion and from a
+	// VPass v2 signed payload. It is distinct from ProtocolVersion and from a
 	// password credential's lifecycle version.
 	DeviceOperationCredentialVersion = uint64(1)
 	MaxDeviceScopeItems              = 4096
@@ -274,7 +274,7 @@ func ParseAndVerifyDeviceOperationCredential(
 }
 
 // DeviceAuthorizationContext contains the receiver's final-sequence state.
-// Every value must be loaded from trusted local/VDNS state, never the event.
+// Every value must be loaded from trusted local/verifiable state, never the event.
 type DeviceAuthorizationContext struct {
 	NamespaceID             protocol.NamespaceID
 	DeviceID                protocol.DeviceID
@@ -462,7 +462,7 @@ func (scope CredentialScope) allows(
 }
 
 // Allows evaluates one receiver-supplied target against the private scope.
-// It is exported for the VDNS L2 verifier; callers must still verify the
+// It is exported for the Local State Verifier L2 layer; callers must still verify the
 // root-signed credential and current status reference before using the result.
 func (scope CredentialScope) Allows(
 	credentialID *protocol.CredentialID,

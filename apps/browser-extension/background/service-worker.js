@@ -1,4 +1,4 @@
-import { LocalAgentClient, LocalAgentError } from "../lib/api.js";
+import { LocalSecureClient, LocalClientError } from "../lib/api.js";
 import { canonicalOrigin, isTopFrame } from "../lib/origin.js";
 import {
   authorizeCandidateField,
@@ -15,7 +15,7 @@ let client = null;
 let vaultSession = null;
 
 async function ensureClient() {
-  if (!client) client = new LocalAgentClient(await connectionInfo());
+  if (!client) client = new LocalSecureClient(await connectionInfo());
   if (vaultSession) client.setVaultSession(vaultSession.sessionId);
   return client;
 }
@@ -37,7 +37,7 @@ async function fillOneField(api, tab, origin, route, fieldType) {
   );
   if (authorization.verdict !== "ACCEPT" &&
       !authorization.verdict.startsWith("DEGRADED_")) {
-    throw new Error("VDNS_VERDICT_REJECTED");
+    throw new Error("STATE_VERDICT_REJECTED");
   }
   if (!authorization.originVerified || authorization.credentialId !== route.credentialId) {
     throw new Error("AUTOFILL_BINDING_REJECTED");
@@ -47,7 +47,7 @@ async function fillOneField(api, tab, origin, route, fieldType) {
   );
   try {
     const response = await chrome.tabs.sendMessage(tab.id, {
-      type: "VDNS_FILL", origin, fieldType, secretValue: native.secretValue
+      type: "VPASS_FILL", origin, fieldType, secretValue: native.secretValue
     }, { frameId: 0 });
     if (!response?.ok) throw new Error(response?.code || "FILL_REJECTED");
   } finally {
@@ -79,7 +79,7 @@ async function handleMessage(message, sender) {
     return { unlocked: false };
   case "discover": {
     const { tab, origin } = await activeTopFrame();
-    return chrome.tabs.sendMessage(tab.id, { type: "VDNS_DISCOVER", origin }, { frameId: 0 });
+    return chrome.tabs.sendMessage(tab.id, { type: "VPASS_DISCOVER", origin }, { frameId: 0 });
   }
   case "generate": {
     const { origin } = await activeTopFrame();
@@ -105,9 +105,9 @@ async function handleMessage(message, sender) {
     const credential = await api.credential(resolved.credentialId);
     const route = { ...resolved, activeVersion: credential.activeVersion };
     const discovered = await chrome.tabs.sendMessage(
-      tab.id, { type: "VDNS_DISCOVER", origin }, { frameId: 0 }
+      tab.id, { type: "VPASS_DISCOVER", origin }, { frameId: 0 }
     );
-    // Resolve + VDNS verdict/object hash in the local agent + exact Origin are
+    // Resolve + trusted-state verdict/object hash in the Local Secure Client + exact Origin are
     // all complete before the first field is sent to the page.
     if (discovered.hasUsername) await fillOneField(api, tab, origin, route, "USERNAME");
     if (discovered.hasPassword) await fillOneField(api, tab, origin, route, "PASSWORD");
@@ -137,7 +137,7 @@ async function handleMessage(message, sender) {
     );
     try {
       const response = await chrome.tabs.sendMessage(tab.id, {
-        type: "VDNS_FILL_NEW_PASSWORD", origin, secretValue: native.secretValue
+        type: "VPASS_FILL_NEW_PASSWORD", origin, secretValue: native.secretValue
       }, { frameId: 0 });
       if (!response?.ok) throw new Error(response?.code || "CHANGE_FILL_REJECTED");
     } finally {
@@ -189,9 +189,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     .then((result) => sendResponse({ ok: true, result }))
     .catch((error) => sendResponse({
       ok: false,
-      code: error instanceof LocalAgentError ? error.code : error.message,
-      message: error instanceof LocalAgentError ? error.message : "操作未完成",
-      details: error instanceof LocalAgentError ? error.details : undefined
+      code: error instanceof LocalClientError ? error.code : error.message,
+      message: error instanceof LocalClientError ? error.message : "操作未完成",
+      details: error instanceof LocalClientError ? error.details : undefined
     }));
   return true;
 });

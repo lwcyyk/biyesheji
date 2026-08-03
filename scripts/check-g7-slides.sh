@@ -8,7 +8,7 @@ mkdir -p "${result_dir}"
 
 (
   cd "${deck_dir}"
-  node vdns-pm-defense.js
+  node vpass-defense.js
 ) >"${result_dir}/generation.txt" 2>&1
 
 if rg -n '❌|exceeds slide bounds|Found [1-9]' "${result_dir}/generation.txt"; then
@@ -16,7 +16,7 @@ if rg -n '❌|exceeds slide bounds|Found [1-9]' "${result_dir}/generation.txt"; 
   exit 1
 fi
 
-deck="${deck_dir}/VDNS-PM答辩演示.pptx"
+deck="${deck_dir}/VPass答辩演示.pptx"
 unzip -t "${deck}" >"${result_dir}/ooxml-integrity.txt"
 slide_count="$(
   unzip -Z1 "${deck}" |
@@ -48,7 +48,7 @@ if command -v soffice >/dev/null 2>&1; then
 fi
 
 deck_digest="$(sha256sum "${deck}" | awk '{print $1}')"
-source_digest="$(sha256sum "${deck_dir}/vdns-pm-defense.js" | awk '{print $1}')"
+source_digest="$(sha256sum "${deck_dir}/vpass-defense.js" | awk '{print $1}')"
 deck_bytes="$(stat -c '%s' "${deck}")"
 
 jq -n \
@@ -56,8 +56,8 @@ jq -n \
   --arg result "PASSED" \
   --arg validationMode "${validation_mode}" \
   --arg renderStatus "${render_status}" \
-  --arg deck "docs/答辩/VDNS-PM答辩演示.pptx" \
-  --arg source "docs/答辩/vdns-pm-defense.js" \
+  --arg deck "docs/答辩/VPass答辩演示.pptx" \
+  --arg source "docs/答辩/vpass-defense.js" \
   --arg deckSha256 "${deck_digest}" \
   --arg sourceSha256 "${source_digest}" \
   --argjson deckBytes "${deck_bytes}" \

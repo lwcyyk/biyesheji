@@ -6,11 +6,11 @@ import (
 	"errors"
 	"testing"
 
-	"vdns.local/vdns/internal/platform"
-	"vdns.local/vdns/internal/protocol"
+	"vpass.local/vpass/internal/platform"
+	"vpass.local/vpass/internal/protocol"
 )
 
-func TestRecoveryRequiresCapsuleObjectsVDNSAndRootConsistency(t *testing.T) {
+func TestRecoveryRequiresCapsuleObjectsTrustedStateAndRootConsistency(t *testing.T) {
 	t.Parallel()
 	snapshot, objects := backupFixture(t)
 	session, err := NewRecoverySession(snapshot)
@@ -26,7 +26,7 @@ func TestRecoveryRequiresCapsuleObjectsVDNSAndRootConsistency(t *testing.T) {
 	if err := session.VerifyObjects(reordered); err != nil {
 		t.Fatal(err)
 	}
-	if err := session.VerifyVDNS(snapshot.AcceptedCheckpoint, true); err != nil {
+	if err := session.VerifyTrustedState(snapshot.AcceptedCheckpoint, true); err != nil {
 		t.Fatal(err)
 	}
 	if err := session.Complete(
@@ -64,13 +64,13 @@ func TestRecoveryRejectsMissingObjectsRollbackAndBypass(t *testing.T) {
 		)
 		_ = session.VerifyObjects(objects)
 		old := sha256.Sum256([]byte("old-checkpoint"))
-		if err := session.VerifyVDNS(old, true); !errors.Is(err, ErrRecoveryVDNS) {
+		if err := session.VerifyTrustedState(old, true); !errors.Is(err, ErrRecoveryState) {
 			t.Fatalf("rollback error=%v", err)
 		}
 		if err := session.Complete(
 			snapshot.RouteMapRoot, snapshot.CredentialStateRoot,
 		); !errors.Is(err, ErrRecoveryTransition) {
-			t.Fatalf("VDNS bypass error=%v", err)
+			t.Fatalf("trusted state bypass error=%v", err)
 		}
 	})
 }

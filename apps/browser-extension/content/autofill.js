@@ -1,6 +1,6 @@
 (() => {
-  if (window.top !== window || globalThis.__VDNS_PM_CONTENT_READY__) return;
-  globalThis.__VDNS_PM_CONTENT_READY__ = true;
+  if (window.top !== window || globalThis.__VPASS_CONTENT_READY__) return;
+  globalThis.__VPASS_CONTENT_READY__ = true;
 
   function visible(input) {
     const style = getComputedStyle(input);
@@ -64,12 +64,12 @@
       return false;
     }
     try {
-      if (message.type === "VDNS_DISCOVER") {
+      if (message.type === "VPASS_DISCOVER") {
         sendResponse({ ok: true, ...discover() });
-      } else if (message.type === "VDNS_FILL") {
+      } else if (message.type === "VPASS_FILL") {
         fillField(message.fieldType, message.secretValue);
         sendResponse({ ok: true });
-      } else if (message.type === "VDNS_FILL_NEW_PASSWORD") {
+      } else if (message.type === "VPASS_FILL_NEW_PASSWORD") {
         fillNewPassword(message.secretValue);
         sendResponse({ ok: true });
       } else {

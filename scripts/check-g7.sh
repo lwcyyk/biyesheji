@@ -49,7 +49,7 @@ stage fuzz ./scripts/fuzz-g7.sh
 stage experiments ./scripts/run-g7-experiments.sh
 
 demo_workspace="$(mktemp -d)"
-stage demo ./scripts/demo-vdns-pm.sh --data-dir "${demo_workspace}"
+stage demo ./scripts/demo-vpass.sh --data-dir "${demo_workspace}"
 mkdir -p "${evidence_dir}/demo"
 cp "${demo_workspace}/evidence/demo-summary.json" "${evidence_dir}/demo/demo-summary.json"
 cp "${demo_workspace}/evidence/demo-steps.csv" "${evidence_dir}/demo/demo-steps.csv"

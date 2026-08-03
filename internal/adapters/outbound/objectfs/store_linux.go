@@ -18,7 +18,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"vdns.local/vdns/internal/platform"
+	"vpass.local/vpass/internal/platform"
 )
 
 const (

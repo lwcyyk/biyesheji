@@ -11,7 +11,7 @@ import (
 
 	"github.com/cloudflare/circl/hpke"
 
-	"vdns.local/vdns/internal/protocol"
+	"vpass.local/vpass/internal/protocol"
 )
 
 func TestHPKERoundTripAndContextBinding(t *testing.T) {

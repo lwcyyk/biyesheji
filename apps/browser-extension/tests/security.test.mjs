@@ -53,9 +53,9 @@ test("autofill content gate binds top frame and exact Origin", async () => {
 
 test("HTTP client sends handles and security headers but exposes no secret-value route", async () => {
   const source = await readFile(join(root, "lib", "api.js"), "utf8");
-  assert.match(source, /X-VDNS-Request-Nonce/);
+  assert.match(source, /X-VPass-Request-Nonce/);
   assert.match(source, /Idempotency-Key/);
-  assert.match(source, /X-VDNS-Vault-Session/);
+  assert.match(source, /X-VPass-Vault-Session/);
   assert.match(source, /credentials: "omit"/);
   assert.doesNotMatch(source, /masterPassword\s*:/);
   assert.doesNotMatch(source, /secretValue\s*:/);

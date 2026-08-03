@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 
-	monitoringdomain "vdns.local/vdns/internal/monitoring/domain"
-	"vdns.local/vdns/internal/protocol"
+	monitoringdomain "vpass.local/vpass/internal/monitoring/domain"
+	"vpass.local/vpass/internal/protocol"
 )
 
 var ErrMonitorEvidenceConflict = errors.New("monitor evidence persistence conflict")

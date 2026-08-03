@@ -7,8 +7,8 @@ import (
 	"crypto/sha256"
 	"testing"
 
-	anchordomain "vdns.local/vdns/internal/anchor/domain"
-	"vdns.local/vdns/internal/protocol"
+	anchordomain "vpass.local/vpass/internal/anchor/domain"
+	"vpass.local/vpass/internal/protocol"
 )
 
 type fakeClient struct {

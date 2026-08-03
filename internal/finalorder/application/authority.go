@@ -12,9 +12,9 @@ import (
 	"sort"
 	"sync"
 
-	finalorderdomain "vdns.local/vdns/internal/finalorder/domain"
-	"vdns.local/vdns/internal/finalorder/ports"
-	"vdns.local/vdns/internal/protocol"
+	finalorderdomain "vpass.local/vpass/internal/finalorder/domain"
+	"vpass.local/vpass/internal/finalorder/ports"
+	"vpass.local/vpass/internal/protocol"
 )
 
 var ErrInvalidAuthority = errors.New("invalid research final-order authority")
