@@ -1,0 +1,577 @@
+"""R11 internal read adapter: scoped, secret-free staging; no import-time I/O.
+
+The host authenticates and authorizes before binding a context. This library is
+not an authentication service. R12 exercises synthetic reader/lock doubles only.
+"""
+from dataclasses import dataclass
+import hashlib
+import json
+import re
+import time
+
+from .protocol import canonical, digest, normalized_request
+
+
+SCHEMA = "dsat-authority-read/1"
+MODE = "AUTHORITY_READONLY_STAGING"
+MAX_REVISION = (1 << 63) - 1
+ORIGIN = ("grant_id", "caller", "task", "account", "audience", "generation")
+SCOPE_FIELDS = ("account", "audience", "tasks", "callers", "generations")
+PHASES = {"QUEUED", "CANCELLED", "DISPATCHED_UNKNOWN", "RESULT_AVAILABLE", "QUARANTINED", "DISPOSED"}
+BASE_GAPS = (
+    "TYPED_O_NOT_IMPLEMENTED", "O_REVISION_NOT_IMPLEMENTED", "SOURCE_OR_REFINEMENT_GAP",
+    "INSTANCE_UNBOUND", "SOURCE_COMPLETENESS_UNPROVEN", "SCOPE_UNIVERSE_INCOMPLETE",
+    "CAPACITY_UNPROVEN", "BIRTH_OR_HISTORY_GAP", "SUSTAINED_INACTIVITY_UNPROVEN",
+    "NATIVE_CURRENTNESS_UNPROVEN", "CURRENTNESS_UNPROVEN", "FRONTIER_UNPROVEN",
+    "REAL_S1_ENTRY_UNAVAILABLE", "S1_V1_REDACTION_CONTRACT_GAP", "PROVIDER_HISTORY_EXPORT_REQUIRED",
+    "LEGACY_SCOPE_INCOMPLETE",
+)
+ERRORS = {
+    "READ_CONTEXT_REQUIRED", "READ_SCOPE_DENIED", "UNSUPPORTED_READ_REQUEST", "READ_SOURCE_UNAVAILABLE",
+    "READ_BUDGET_DENIED", "SNAPSHOT_INCOMPLETE", "SOURCE_BINDING_CONFLICT", "INVALID_FIELD_TYPE",
+    "RESOURCE_LIMIT", "BUDGET_SOURCE_CONFLICT", "UNSUPPORTED_SOURCE_SCHEMA",
+}
+PUBLIC_FIELDS = (
+    "schema", "mode", "status", "source", "scope", "authority_revision", "obligation_revision",
+    "grants", "requests", "disposals", "windows", "request_verifications", "legacy_obligations",
+    "conservative_O_view", "typed_obligation_status", "missing_obligation_coverage", "open_frontiers",
+    "partial_math", "field_provenance", "compatibility", "read_clock", "costs", "gap_codes",
+    "math_input", "math_ready", "native_admission", "current_native_eligible", "global_complete",
+    "authority_write_action", "snapshot_digest",
+)
+
+
+class ReadError(ValueError):
+    """Only fixed codes may cross the read boundary."""
+    def __init__(self, code):
+        self.code = code if code in ERRORS else "SNAPSHOT_INCOMPLETE"
+        super().__init__(self.code)
+
+
+def _id(value, maximum=80):
+    if type(value) is not str or re.fullmatch(r"[A-Za-z0-9_.:-]{1,%d}" % maximum, value) is None:
+        raise ReadError("INVALID_FIELD_TYPE")
+    return value
+
+
+def _number(value, maximum=MAX_REVISION):
+    if type(value) is not int or not 0 <= value <= maximum:
+        raise ReadError("INVALID_FIELD_TYPE")
+    return value
+
+
+def _bool(value):
+    if type(value) is not bool:
+        raise ReadError("INVALID_FIELD_TYPE")
+    return value
+
+
+def _hash(domain, value):
+    return hashlib.sha256(domain.encode("ascii") + b"\x00" + canonical(value)).hexdigest()
+
+
+def _copy(value):
+    # Called only on newly built public values, never on the raw Authority state.
+    return json.loads(canonical(value))
+
+
+@dataclass(frozen=True)
+class ReadLimits:
+    output_bytes: int = 1048576
+    scoped_records: int = 4096
+    write_headroom: int = 6
+
+    def __post_init__(self):
+        if type(self.output_bytes) is not int or not 4096 <= self.output_bytes <= 1048576:
+            raise ReadError("RESOURCE_LIMIT")
+        if type(self.scoped_records) is not int or not 1 <= self.scoped_records <= 4096:
+            raise ReadError("RESOURCE_LIMIT")
+        if type(self.write_headroom) is not int or not 6 <= self.write_headroom <= 1000000:
+            raise ReadError("RESOURCE_LIMIT")
+
+
+@dataclass(frozen=True)
+class ReadScope:
+    account: str
+    audience: str
+    tasks: tuple
+    callers: tuple
+    generations: tuple
+
+    def __post_init__(self):
+        _id(self.account); _id(self.audience)
+        for name in ("tasks", "callers", "generations"):
+            items = getattr(self, name)
+            if type(items) is not tuple or not 1 <= len(items) <= 4096 or len(set(items)) != len(items):
+                raise ReadError("UNSUPPORTED_READ_REQUEST")
+            for value in items:
+                _id(value)
+
+    def to_dict(self):
+        return {"account": self.account, "audience": self.audience,
+                "tasks": list(self.tasks), "callers": list(self.callers), "generations": list(self.generations)}
+
+    @classmethod
+    def parse(cls, value):
+        if type(value) is cls:
+            return value
+        if type(value) is not dict or set(value) != set(SCOPE_FIELDS):
+            raise ReadError("UNSUPPORTED_READ_REQUEST")
+        if any(type(value[k]) is not list for k in ("tasks", "callers", "generations")):
+            raise ReadError("UNSUPPORTED_READ_REQUEST")
+        return cls(value["account"], value["audience"], tuple(value["tasks"]), tuple(value["callers"]), tuple(value["generations"]))
+
+    def contains(self, requested):
+        return self.account == requested.account and self.audience == requested.audience and all(
+            set(getattr(requested, k)) <= set(getattr(self, k)) for k in ("tasks", "callers", "generations"))
+
+    def matches(self, origin):
+        return (type(origin) is dict and origin.get("account") == self.account
+                and origin.get("audience") == self.audience and origin.get("task") in self.tasks
+                and origin.get("caller") in self.callers and origin.get("generation") in self.generations)
+
+
+class TrustedReadContext:
+    """Host-only policy binding, outside serialized requests. Not a new credential.
+
+    from_host requires a previously authorized host caller. Python code in that
+    trusted process remains trusted; type tags do not authenticate a remote AI.
+    """
+    __slots__ = ("_reader", "_scope", "_principal", "_producer", "_locator", "_clock_epoch", "_source_kind")
+
+    def __init__(self, *args, **kwargs):
+        raise ReadError("READ_CONTEXT_REQUIRED")
+
+    @classmethod
+    def from_host(cls, reader, permitted_scope, *, principal_ref, producer_ref, authority_locator_ref,
+                  clock_epoch_ref, source_kind):
+        scope = ReadScope.parse(permitted_scope)
+        for value in (principal_ref, producer_ref, authority_locator_ref, clock_epoch_ref):
+            _id(value, 160)
+        if source_kind not in {"SYNTHETIC_ONLY", "LOCAL_AUTHORITY_HOST"}:
+            raise ReadError("READ_CONTEXT_REQUIRED")
+        value = object.__new__(cls)
+        value._reader = reader
+        value._scope = scope
+        value._principal, value._producer = principal_ref, producer_ref
+        value._locator, value._clock_epoch = authority_locator_ref, clock_epoch_ref
+        value._source_kind = source_kind
+        return value
+
+    def __repr__(self):
+        return "<TrustedReadContext redacted>"
+
+    def __reduce_ex__(self, protocol):
+        raise TypeError("READ_CONTEXT_NOT_SERIALIZABLE")
+
+
+class StagingSnapshot:
+    __slots__ = ("_public",)
+
+    def __init__(self, public):
+        if set(public) != set(PUBLIC_FIELDS) or public["schema"] != SCHEMA or public["mode"] != MODE:
+            raise ReadError("UNSUPPORTED_SOURCE_SCHEMA")
+        if (public["global_complete"] is not False or public["math_ready"] is not False
+                or public["current_native_eligible"] is not False or public["math_input"] is not None
+                or public["obligation_revision"] is not None or public["authority_write_action"] != "NONE"
+                or public["native_admission"] != "SOURCE_OR_REFINEMENT_GAP"):
+            raise ReadError("UNSUPPORTED_READ_REQUEST")
+        expected = _hash("dsat-authority-read/1:snapshot", {k: v for k, v in public.items() if k != "snapshot_digest"})
+        if public["snapshot_digest"] != expected:
+            raise ReadError("SOURCE_BINDING_CONFLICT")
+        _validate_schema(public, staging_schema())
+        self._public = _copy(public)
+
+    def to_dict(self):
+        return _copy(self._public)
+
+    def to_json(self):
+        return canonical(self._public)
+
+    def __repr__(self):
+        return "<StagingSnapshot schema=dsat-authority-read/1 status=" + self._public["status"] + ">"
+
+
+def _envelope(status, gaps, reads=0, read_ns=0, projection_ns=0):
+    result = {k: None for k in PUBLIC_FIELDS}
+    result.update(schema=SCHEMA, mode=MODE, status=status, obligation_revision=None,
+                  typed_obligation_status="TYPED_O_NOT_IMPLEMENTED", gap_codes=sorted(set(gaps)),
+                  missing_obligation_coverage=sorted(set(gaps)), math_input=None, math_ready=False,
+                  native_admission="SOURCE_OR_REFINEMENT_GAP", current_native_eligible=False,
+                  global_complete=False, authority_write_action="NONE",
+                  costs={"source_reads": reads, "read_ns": read_ns, "projection_ns": projection_ns,
+                         "source_operation_delta": None, "telemetry_may_change": True})
+    return result
+
+
+def _finish(public):
+    public["snapshot_digest"] = _hash("dsat-authority-read/1:snapshot", {k: v for k, v in public.items() if k != "snapshot_digest"})
+    return StagingSnapshot(public)
+
+
+def _origin(value):
+    if type(value) is not dict or set(value) != set(ORIGIN):
+        raise ReadError("SOURCE_BINDING_CONFLICT")
+    return {k: _id(value[k]) for k in ORIGIN}
+
+
+def _scope_origin(grant):
+    return {k: grant[k] for k in ORIGIN}
+
+
+def _project(a, state, scope, context, limits):
+    _number(a)
+    if type(state) is not dict or any(type(state.get(k)) is not dict for k in ("grants", "requests")):
+        raise ReadError("SNAPSHOT_INCOMPLETE")
+    if "schema" in state and state["schema"] != "legacy-authority-state/1":
+        raise ReadError("UNSUPPORTED_SOURCE_SCHEMA")
+    gaps = set(BASE_GAPS)
+    grants, raw_grants = [], {}
+    for gid, value in state["grants"].items():
+        if type(value) is not dict or not scope.matches(value):
+            continue
+        origin = _origin(_scope_origin(value))
+        if _id(gid) != origin["grant_id"]:
+            raise ReadError("SOURCE_BINDING_CONFLICT")
+        ops = value["operations"]
+        if type(ops) is not list or not ops or len(ops) > 4096 or len(set(ops)) != len(ops):
+            raise ReadError("INVALID_FIELD_TYPE")
+        operations = [_id(x) for x in ops]
+        limit, reserved, spent = [_number(value[k], 1000000) for k in ("limit", "reserved", "spent")]
+        if reserved + spent > limit:
+            raise ReadError("BUDGET_SOURCE_CONFLICT")
+        grants.append({"origin": origin, "active": _bool(value["active"]), "operations": operations,
+                       "limit": limit, "reserved": reserved, "spent": spent})
+        raw_grants[gid] = value
+        if len(grants) > limits.scoped_records:
+            raise ReadError("RESOURCE_LIMIT")
+    requests, selected_raw, verifications = [], {}, []
+    for rid, raw in state["requests"].items():
+        if type(raw) is not dict or not scope.matches(raw.get("origin")):
+            continue
+        origin = _origin(raw["origin"])
+        if _id(rid) != _id(raw["rid"]) or origin["grant_id"] not in raw_grants:
+            raise ReadError("SOURCE_BINDING_CONFLICT")
+        grant = raw_grants[origin["grant_id"]]
+        if origin != _scope_origin(grant):
+            raise ReadError("SOURCE_BINDING_CONFLICT")
+        original = raw.get("request")
+        if type(original) is not dict:
+            raise ReadError("SNAPSHOT_INCOMPLETE")
+        try:
+            normalized = normalized_request(original)
+        except Exception:
+            raise ReadError("SOURCE_BINDING_CONFLICT") from None
+        expected = digest({"caller": origin["caller"], "request": normalized})
+        if (raw.get("digest") != expected or normalized["rid"] != rid
+                or normalized["handle"] != grant.get("handle")
+                or any(normalized[k] != origin[k] for k in ("task", "account", "audience", "generation"))):
+            raise ReadError("SOURCE_BINDING_CONFLICT")
+        phase = raw["phase"]
+        if type(phase) is not str or phase not in PHASES:
+            raise ReadError("INVALID_FIELD_TYPE")
+        aid, release = raw["attempt_id"], raw["release_version"]
+        if phase in {"QUEUED", "CANCELLED"}:
+            if aid is not None or release is not None:
+                raise ReadError("SOURCE_BINDING_CONFLICT")
+        else:
+            if aid is None or release is None:
+                raise ReadError("SOURCE_BINDING_CONFLICT")
+            _id(aid); _number(release)
+            if release > a:
+                raise ReadError("SOURCE_BINDING_CONFLICT")
+        source_rid = normalized["payload"].get("source_rid")
+        source_status = "NOT_APPLICABLE"
+        if normalized["operation"] in {"refresh", "userinfo"}:
+            parent = state["requests"].get(source_rid)
+            if type(parent) is dict and parent.get("origin") == origin and scope.matches(parent.get("origin")):
+                source_status = "BOUND_LOCAL_REFERENCE"
+            else:
+                source_rid = None
+                source_status = "MISSING_OR_OUTSIDE_SCOPE"
+                gaps.add("SOURCE_REFERENCE_UNAVAILABLE")
+        material = raw.get("result_material")
+        material_present = material is not None
+        kind = material.get("kind") if type(material) is dict else "legacy" if type(material) is str else None
+        if kind not in {"casdoor_login", "casdoor_oauth", "legacy", None}:
+            kind = "UNVERIFIED"
+        binding = {"rid": rid, "request_digest": expected, "origin": origin,
+                   "attempt_id": aid, "release_version": release}
+        reference = _hash("dsat-authority-read/1:request-check", {"a": a, "locator": context._locator, **binding})
+        requests.append({**binding, "operation": normalized["operation"], "source_rid": source_rid,
+                         "source_link_status": source_status, "phase": phase,
+                         "material_present": material_present, "material_kind": kind,
+                         "result_ref": "result:" + _hash("dsat-authority-read/1:result", {"locator": context._locator, **binding}) if material_present else None,
+                         "verification_ref": reference})
+        verifications.append({"rid": rid, "authority_revision": a, "request_digest": expected,
+                              "tuple_digest": _hash("dsat-authority-read/1:tuple", binding),
+                              "verification_ref": reference, "outcome": "MATCHED_AT_TRUSTED_SOURCE",
+                              "producer_ref": context._producer})
+        selected_raw[rid] = raw
+        if len(grants) + len(requests) > limits.scoped_records:
+            raise ReadError("RESOURCE_LIMIT")
+    if len(grants) + len(requests) > limits.scoped_records:
+        raise ReadError("RESOURCE_LIMIT")
+    observations, windows = [], []
+    for did, item in state.get("disposals", {}).items():
+        if type(item) is not dict or item.get("rid") not in selected_raw:
+            continue
+        raw = selected_raw[item["rid"]]
+        if item.get("origin") != raw["origin"]:
+            raise ReadError("SOURCE_BINDING_CONFLICT")
+        phase = item["phase"]
+        if phase not in {"DISPOSAL_UNKNOWN", "NATIVE_REVOKE_RESPONDED", "KNOWN_UNIT_INACTIVE"}:
+            raise ReadError("INVALID_FIELD_TYPE")
+        obs = item.get("observations", {})
+        clean = {}
+        for k in ("userinfo_http", "userinfo_accepted", "introspection_active"):
+            v = obs.get(k)
+            if v is not None:
+                if k.endswith("http"):
+                    _number(v, 599)
+                    if v < 100:
+                        raise ReadError("INVALID_FIELD_TYPE")
+                else:
+                    _bool(v)
+            clean[k] = v
+        done = item.get("completed_version")
+        if done is not None and _number(done) > a:
+            raise ReadError("SOURCE_BINDING_CONFLICT")
+        observations.append({"disposal_ref": _id(did), "rid": item["rid"], "phase": phase,
+                             "completed_version": done, "point_observations": clean,
+                             "observation_guarantee": "POINT_ONLY_UNVERIFIED_FOR_NATIVE_FRAME"})
+    for account, item in state.get("reconciliation_windows", {}).items():
+        if account != scope.account or type(item) is not dict or item.get("target_rid") not in selected_raw:
+            continue
+        receipt = item.get("receipt", {})
+        claim = receipt.get("claim") if type(receipt) is dict else None
+        if claim not in {"CLOSED", "UNKNOWN", None}:
+            claim = "UNVERIFIED"
+        creators = item.get("unknown_creators_at_open", [])
+        if type(creators) is not list:
+            raise ReadError("INVALID_FIELD_TYPE")
+        windows.append({"window_id": _id(item["window_id"]), "target_rid": item["target_rid"],
+                        "active": _bool(item["active"]), "opened_version": _number(item["opened_version"]),
+                        "scoped_creators": [_id(x) for x in creators if x in selected_raw],
+                        "source_scope_complete": False,
+                        "legacy_receipt_summary": {"schema": "native-attempt-closure/1" if receipt.get("schema") == "native-attempt-closure/1" else None,
+                                                   "claim": claim, "scope": "ONE_ATTEMPT_HISTORY_ONLY"}})
+    if len(grants) + len(requests) + len(observations) + len(windows) > limits.scoped_records:
+        raise ReadError("RESOURCE_LIMIT")
+    legacy = {x["rid"] for x in requests if x["phase"] in {"DISPATCHED_UNKNOWN", "QUARANTINED"}}
+    for window in windows:
+        if window["legacy_receipt_summary"]["claim"] != "CLOSED":
+            legacy.add(window["target_rid"])
+    view = {}
+    def hold(kind, ref):
+        oid = kind + ":" + ref
+        view[oid] = {"id": oid, "kind": kind, "refs": [ref], "strict": True}
+    hold("source_hold", scope.account)
+    frontiers, attempts = [], []
+    for grant in grants:
+        if grant["active"] and set(grant["operations"]) & {"issue", "refresh"} and grant["limit"] > grant["spent"] + grant["reserved"]:
+            ref = grant["origin"]["grant_id"]; hold("grant_frontier", ref); frontiers.append("grant_frontier:" + ref)
+    for req in requests:
+        if req["operation"] in {"issue", "refresh"}:
+            if req["phase"] == "QUEUED":
+                hold("queued_creator", req["rid"]); frontiers.append("queued_creator:" + req["rid"])
+                gaps.add("QUEUED_CREATOR_FRONTIER")
+            if req["attempt_id"] is not None:
+                attempts.append(req["attempt_id"]); hold("await_terminal", req["rid"])
+            if req["phase"] == "DISPATCHED_UNKNOWN":
+                hold("settle", req["rid"])
+        elif req["phase"] == "DISPATCHED_UNKNOWN":
+            hold("exec", req["rid"])
+        if req["material_present"]:
+            hold("close", req["rid"])
+    for window in windows:
+        hold("window_review", window["target_rid"])
+    result = _envelope("STAGING_READY_WITH_GAPS", gaps)
+    result.update(source={"authority_locator_ref": context._locator, "producer_ref": context._producer,
+                          "principal_ref": context._principal,
+                          "authority_instance": None, "sql_schema_version": None,
+                          "source_contract": "legacy-authority-state/1", "source_kind": context._source_kind,
+                          "authentication_basis": "HOST_AUTHORIZED_CONTEXT_OUT_OF_BAND"},
+                  scope=scope.to_dict(), authority_revision=a,
+                  grants=sorted(grants, key=lambda x: x["origin"]["grant_id"]), requests=sorted(requests, key=lambda x: x["rid"]),
+                  disposals=sorted(observations, key=lambda x: x["disposal_ref"]), windows=windows,
+                  request_verifications=sorted(verifications, key=lambda x: x["rid"]),
+                  legacy_obligations=sorted(legacy), conservative_O_view=[view[k] for k in sorted(view)],
+                  open_frontiers=sorted(frontiers),
+                  partial_math={"local_creator_attempts": sorted(attempts), "target_candidates": sorted(attempts),
+                                "c_known": {}, "capacity_unknown": sorted(attempts), "U": None, "E": None, "D_P": None,
+                                "interpretation": "LOCAL_METADATA_ONLY_NOT_D_FIN"},
+                  field_provenance={"authority_revision": {"category": "DIRECT_FIELD", "source": "authority_state.version"},
+                                    "request_metadata": {"category": "DERIVED_WITH_TRUSTED_BINDING", "source": "request_verifications"},
+                                    "legacy_obligations": {"category": "LEGACY_PROJECTION", "source": "scoped_phase_and_window"},
+                                    "test_source": {"category": "SYNTHETIC_ONLY" if context._source_kind == "SYNTHETIC_ONLY" else "UNVERIFIED", "source": "host_context"},
+                                    "instance_o": {"category": "UNAVAILABLE", "source": "no_legacy_field"},
+                                    "native_frame": {"category": "UNVERIFIED", "source": "external_evidence_required"}},
+                  compatibility={"S1": {"direct_input": False, "reason": "S1_V1_REDACTION_CONTRACT_GAP"},
+                                 "S2": {"direct_input": False, "reason": "FINITE_MATH_INPUT_UNAVAILABLE"},
+                                 "S3A": {"direct_input": False, "reason": "SYNTHETIC_REGISTRY_AND_REAL_BASE_GAP"},
+                                 "legacy": {"scope": "ONE_ATTEMPT_HISTORY_ONLY", "global_complete": False}})
+    return result
+
+
+def read_dsat_authority_snapshot(reader, scope, trusted_read_context, limits=ReadLimits()):
+    """Read once under the host lock, then return an immutable-owned public value.
+
+    Existing read_state telemetry/quota effects are permitted by the source
+    contract; world mutations, old call dispatch and source constructors are absent.
+    """
+    reads, read_ns, project_ns = 0, 0, 0
+    try:
+        if type(trusted_read_context) is not TrustedReadContext or trusted_read_context._reader is not reader:
+            raise ReadError("READ_CONTEXT_REQUIRED")
+        context = trusted_read_context
+        requested = ReadScope.parse(scope)
+        if not context._scope.contains(requested):
+            raise ReadError("READ_SCOPE_DENIED")
+        if type(limits) is not ReadLimits:
+            raise ReadError("RESOURCE_LIMIT")
+        with reader.lock:
+            operation_limit = getattr(reader, "operation_limit", None)
+            operations = getattr(reader, "operations", None)
+            if operation_limit is not None:
+                _number(operation_limit); _number(operations)
+                if operations + 1 + limits.write_headroom > operation_limit:
+                    raise ReadError("READ_BUDGET_DENIED")
+            before = operations
+            started = time.monotonic_ns(); reads = 1
+            try:
+                a, state = reader.read_state()
+            finally:
+                observed = time.monotonic_ns(); read_ns = observed - started
+            try:
+                public = _project(a, state, requested, context, limits)
+            finally:
+                project_ns = time.monotonic_ns() - observed
+            after = getattr(reader, "operations", None)
+            public["read_clock"] = {"domain": "monotonic_ns", "epoch_ref": context._clock_epoch,
+                                    "lower": started, "upper": observed, "native_validity": "UNESTABLISHED"}
+            public["costs"] = {"source_reads": 1, "read_ns": read_ns, "projection_ns": project_ns,
+                               "source_operation_delta": after - before if type(after) is int and type(before) is int else None,
+                               "telemetry_may_change": True}
+            result = _finish(public)
+            if len(result.to_json()) > limits.output_bytes:
+                raise ReadError("RESOURCE_LIMIT")
+            return result
+    except ReadError as exc:
+        return _finish(_envelope(exc.code, (*BASE_GAPS, exc.code), reads, read_ns, project_ns))
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return _finish(_envelope("SNAPSHOT_INCOMPLETE", (*BASE_GAPS, "SNAPSHOT_INCOMPLETE"), reads, read_ns, project_ns))
+    except Exception:
+        # Never include exception strings, locals, raw state, reader repr or causes.
+        return _finish(_envelope("READ_SOURCE_UNAVAILABLE", (*BASE_GAPS, "READ_SOURCE_UNAVAILABLE"), reads, read_ns, project_ns))
+
+
+def staging_schema():
+    """Machine-readable public contract; semantic checks stay in the adapter."""
+    text = {"type": "string"}
+    integer = {"type": "integer", "minimum": 0, "maximum": MAX_REVISION}
+    boolean = {"type": "boolean"}
+    def nullable(schema):
+        return {**schema, "type": [schema["type"], "null"]}
+    def obj(props):
+        return {"type": "object", "additionalProperties": False, "required": list(props), "properties": props}
+    def array(item):
+        return {"type": "array", "items": item, "maxItems": 16384}
+    origin = obj({k: text for k in ORIGIN})
+    obligation_schema = obj({"id": text, "kind": text, "refs": array(text), "strict": {"const": True}})
+    request = obj({"rid": text, "request_digest": text, "origin": origin,
+                   "attempt_id": nullable(text), "release_version": nullable(integer),
+                   "operation": text, "source_rid": nullable(text), "source_link_status": text,
+                   "phase": {"enum": sorted(PHASES)}, "material_present": boolean,
+                   "material_kind": nullable(text), "result_ref": nullable(text), "verification_ref": text})
+    grant = obj({"origin": origin, "active": boolean, "operations": array(text),
+                 "limit": integer, "reserved": integer, "spent": integer})
+    provenance = obj({"category": {"enum": ["DIRECT_FIELD", "DERIVED_WITH_TRUSTED_BINDING", "LEGACY_PROJECTION",
+                                            "SYNTHETIC_ONLY", "UNAVAILABLE", "UNVERIFIED"]}, "source": text})
+    properties = {
+        "source": nullable(obj({"authority_locator_ref": text, "producer_ref": text, "principal_ref": text,
+                                "authority_instance": {"type": "null"}, "sql_schema_version": {"type": "null"},
+                                "source_contract": {"const": "legacy-authority-state/1"}, "source_kind": text,
+                                "authentication_basis": {"const": "HOST_AUTHORIZED_CONTEXT_OUT_OF_BAND"}})),
+        "scope": nullable(obj({"account": text, "audience": text, "tasks": array(text),
+                               "callers": array(text), "generations": array(text)})),
+        "grants": nullable(array(grant)), "requests": nullable(array(request)),
+        "disposals": nullable(array(obj({"disposal_ref": text, "rid": text, "phase": text,
+            "completed_version": nullable(integer), "observation_guarantee": text,
+            "point_observations": obj({"userinfo_http": nullable(integer), "userinfo_accepted": nullable(boolean),
+                                       "introspection_active": nullable(boolean)})}))),
+        "windows": nullable(array(obj({"window_id": text, "target_rid": text, "active": boolean,
+            "opened_version": integer, "scoped_creators": array(text), "source_scope_complete": {"const": False},
+            "legacy_receipt_summary": obj({"schema": nullable(text), "claim": nullable(text),
+                                            "scope": {"const": "ONE_ATTEMPT_HISTORY_ONLY"}})}))),
+        "request_verifications": nullable(array(obj({"rid": text, "authority_revision": integer,
+            "request_digest": text, "tuple_digest": text, "verification_ref": text,
+            "outcome": {"const": "MATCHED_AT_TRUSTED_SOURCE"}, "producer_ref": text}))),
+        "legacy_obligations": nullable(array(text)), "conservative_O_view": nullable(array(obligation_schema)),
+        "missing_obligation_coverage": array(text), "gap_codes": array(text), "open_frontiers": nullable(array(text)),
+        "partial_math": nullable(obj({"local_creator_attempts": array(text), "target_candidates": array(text),
+            "c_known": obj({}), "capacity_unknown": array(text), "U": {"type": "null"}, "E": {"type": "null"},
+            "D_P": {"type": "null"}, "interpretation": {"const": "LOCAL_METADATA_ONLY_NOT_D_FIN"}})),
+        "field_provenance": nullable(obj({k: provenance for k in ("authority_revision", "request_metadata",
+            "legacy_obligations", "test_source", "instance_o", "native_frame")})),
+        "compatibility": nullable(obj({"S1": obj({"direct_input": {"const": False}, "reason": text}),
+            "S2": obj({"direct_input": {"const": False}, "reason": text}),
+            "S3A": obj({"direct_input": {"const": False}, "reason": text}),
+            "legacy": obj({"scope": {"const": "ONE_ATTEMPT_HISTORY_ONLY"}, "global_complete": {"const": False}})})),
+        "read_clock": nullable(obj({"domain": {"const": "monotonic_ns"}, "epoch_ref": text,
+            "lower": integer, "upper": integer, "native_validity": {"const": "UNESTABLISHED"}})),
+        "costs": obj({"source_reads": integer, "read_ns": integer, "projection_ns": integer,
+                      "source_operation_delta": nullable(integer), "telemetry_may_change": {"const": True}}),
+    }
+    properties.update(schema={"const": SCHEMA}, mode={"const": MODE},
+                      status={"enum": ["STAGING_READY_WITH_GAPS", *sorted(ERRORS)]},
+                      authority_revision={"type": ["integer", "null"], "minimum": 0, "maximum": MAX_REVISION},
+                      obligation_revision={"type": "null"}, math_input={"type": "null"},
+                      math_ready={"const": False}, global_complete={"const": False},
+                      current_native_eligible={"const": False}, authority_write_action={"const": "NONE"},
+                      native_admission={"const": "SOURCE_OR_REFINEMENT_GAP"},
+                      typed_obligation_status={"const": "TYPED_O_NOT_IMPLEMENTED"},
+                      snapshot_digest={"type": "string", "pattern": "^[0-9a-f]{64}$"})
+    return {"$schema": "https://json-schema.org/draft/2020-12/schema", "title": SCHEMA,
+            "type": "object", "additionalProperties": False, "required": list(PUBLIC_FIELDS),
+            "properties": properties, "x-invariants": ["source-side original digest checked without exporting handle",
+            "trusted host auth remains outside payload", "typed O and o absent, all native qualification unverified",
+            "one source read under existing lock; no application writes; output deeply detached"]}
+
+
+def _validate_schema(value, schema, depth=0):
+    """Small closed-schema validator for this fixed contract, not a general oracle."""
+    if depth > 32:
+        raise ReadError("RESOURCE_LIMIT")
+    if "const" in schema and (type(value) is not type(schema["const"]) or value != schema["const"]):
+        raise ReadError("INVALID_FIELD_TYPE")
+    if "enum" in schema and value not in schema["enum"]:
+        raise ReadError("INVALID_FIELD_TYPE")
+    expected = schema.get("type")
+    types = expected if type(expected) is list else [expected] if expected is not None else []
+    actual = {dict: "object", list: "array", str: "string", int: "integer", bool: "boolean", type(None): "null"}.get(type(value))
+    if types and actual not in types:
+        raise ReadError("INVALID_FIELD_TYPE")
+    if value is None:
+        return
+    if actual == "object":
+        if not set(schema.get("required", [])) <= set(value):
+            raise ReadError("INVALID_FIELD_TYPE")
+        props = schema.get("properties", {})
+        if schema.get("additionalProperties") is False and not set(value) <= set(props):
+            raise ReadError("INVALID_FIELD_TYPE")
+        for k, v in value.items():
+            _validate_schema(v, props.get(k, {}), depth + 1)
+    elif actual == "array":
+        if len(value) > schema.get("maxItems", 16384):
+            raise ReadError("RESOURCE_LIMIT")
+        for item in value:
+            _validate_schema(item, schema.get("items", {}), depth + 1)
+    elif actual == "integer":
+        if not schema.get("minimum", 0) <= value <= schema.get("maximum", MAX_REVISION):
+            raise ReadError("INVALID_FIELD_TYPE")
+    elif actual == "string":
+        if any(0xD800 <= ord(c) <= 0xDFFF for c in value):
+            raise ReadError("INVALID_FIELD_TYPE")
+        if "pattern" in schema and re.fullmatch(schema["pattern"], value) is None:
+            raise ReadError("INVALID_FIELD_TYPE")

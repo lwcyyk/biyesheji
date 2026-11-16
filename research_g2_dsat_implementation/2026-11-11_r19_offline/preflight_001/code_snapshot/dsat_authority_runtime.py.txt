@@ -1,0 +1,401 @@
+"""D1-A runtime bridge. Pure configuration/seed logic and offline lifecycle.
+
+No import-time I/O, service imports, key files, sockets, or live process probes.
+The only issued context is offline. Live D1-B/P1/P2 admission remains closed.
+"""
+from dataclasses import dataclass
+import hashlib
+import json
+import ntpath
+import re
+import threading
+import time
+import weakref
+from pathlib import Path
+
+from .protocol import canonical, digest, normalized_request
+
+
+ENVIRONMENT = "h2-authority-synth-001"
+ROOT = r"D:\毕业设计\h2_test_runtime\h2-authority-synth-001"
+PYTHON = r"C:\Users\a1887\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe"
+SOURCE_BASIS = "31546e9683ae5b5dffffad330a984e4002e26e56f40c9ada38f29e80631890d5"
+META_SCHEMA = "dsat-authority-runtime-metadata/1"
+P1B_STATEMENTS = ("PRAGMA user_version", "PRAGMA journal_mode")
+GAPS = ("H2_RUNTIME_NOT_VERIFIED", "SOURCE_OR_REFINEMENT_GAP", "TYPED_O_NOT_IMPLEMENTED",
+        "O_REVISION_NOT_IMPLEMENTED", "P1_NOT_AUTHORIZED", "P2_NOT_AUTHORIZED")
+DOC_KEYS = set("schema_version date_china deployment_option environment_id environment_type environment_owner approval_owner runtime_identity deployment_root python_executable python_version source_revision source_digest code_location database_path key_reference log_root runtime_root evidence_root all_candidate_paths all_candidate_paths_exist_or_created database_schema state_codec synthetic_data_source synthetic_data_scope network_mode bind_address port port_policy allowed_callers max_session_reads deployment_authorization p1_authorization p2_authorization environment_fully_locked actual_PID actual_epoch actual_database_instance real_operations_status revision parameter_confirmation".split())
+SCOPE = {"management_identity": "h2_metadata_reader_001", "caller": "h2_agent_001", "account": "h2_account_001",
+         "task": "h2_task_001", "audience": "h2_audience_001", "generation": "h2_gen_001",
+         "grant_alias": "h2_grant_001", "rid": "h2_issue_001", "operation": "issue", "phase": "QUEUED"}
+SCOPE_KEYS = set("data_origin copy_real_credentials copy_R16_values_or_spy_ciphertext management_identity caller account task audience generation grant_alias actual_grant_id rid operation phase counts grant_budget request_attempt_id request_release_version result_material handle_and_material state_and_TLS_keys request_digest legacy_O typed_O o source_fixtures excluded seeding_authorization".split())
+PATHS = {"config_path": "config/deployment.json", "database_path": "authority/authority.db",
+    "state_key_path": "secure/authority.key", "TLS_private_key_path": "secure/server.key",
+    "TLS_certificate_path": "secure/server.crt", "authority_role_config": "secure/authority.json",
+    "source_snapshot_root": "artifacts/src", "source_manifest": "artifacts/source_manifest.json",
+    "log_root": "logs", "authority_logs": "authority", "runtime_root": "runtime",
+    "runtime_metadata": "runtime/authority_metadata.json", "evidence_root": "evidence",
+    "temporary_root": "tmp", "marker": "authority/initialized",
+    "storage_configuration": "authority/storage_configuration.json", "legacy_ready": "control/authority_ready.json"}
+_CONTEXTS = weakref.WeakKeyDictionary()
+
+
+class RuntimeRefusal(ValueError):
+    def __init__(self, code):
+        allowed = {"CONFIG_INVALID", "PATH_DENIED", "PARAMETERS_UNCONFIRMED", "SOURCE_MISMATCH",
+            "DEPENDENCY_RUNTIME_GAP", "D1B_NOT_AUTHORIZED", "P1_NOT_AUTHORIZED", "P2_NOT_AUTHORIZED",
+            "CONTEXT_REQUIRED", "CONTEXT_CLOSED", "CONTEXT_ALREADY_BOUND", "METADATA_INVALID",
+            "TARGET_MISMATCH", "PORT_CONFLICT", "OFFLINE_ADAPTER_FAILED", "UNSUPPORTED_ARGUMENTS"}
+        self.code = code if code in allowed else "OFFLINE_ADAPTER_FAILED"
+        super().__init__(self.code)
+
+
+def _require(value, code="CONFIG_INVALID"):
+    if not value:
+        raise RuntimeRefusal(code)
+
+
+def _id(value):
+    _require(type(value) is str and re.fullmatch(r"[A-Za-z0-9_.:-]{1,160}", value) is not None)
+    return value
+
+
+def _path(value):
+    _require(type(value) is str and "\x00" not in value, "PATH_DENIED")
+    _require(re.match(r"^[A-Za-z]:[\\/]", value) is not None and not value.startswith(("\\\\", "//")), "PATH_DENIED")
+    _require(":" not in value[2:] and "%" not in value, "PATH_DENIED")
+    _require(not any(p in {".", ".."} or p.endswith((".", " ")) for p in re.split(r"[\\/]", value)[1:]), "PATH_DENIED")
+    return ntpath.normcase(ntpath.normpath(value))
+
+
+def _approved(doc, name):
+    entry = doc.get(name)
+    _require(type(entry) is dict and entry.get("status") == "CONFIRMED"
+             and entry.get("approval_status") == "CONFIRMED_PARAMETER_ONLY"
+             and entry.get("approved_value") is not None, "PARAMETERS_UNCONFIRMED")
+    return entry["approved_value"]
+
+
+def read_offline_json(path_value):
+    """Read only the confirmed input or approved offline fixture/result trees."""
+    value = str(path_value)
+    norm = _path(value)
+    confirmed = _path(r"D:\毕业设计\research_g2_dsat_implementation\2026-11-11_r18_parameter_confirmation\H2_ENVIRONMENT_CONFIG_CONFIRMED.json")
+    roots = [_path(r"D:\毕业设计\auth-lifecycle\tests\fixtures\dsat_authority_runtime"),
+             _path(r"D:\毕业设计\research_g2_dsat_implementation\2026-11-11_r19_offline")]
+    _require(norm == confirmed or any(norm.startswith(root + "\\") for root in roots), "PATH_DENIED")
+    _require(ntpath.splitext(norm)[1] == ".json", "PATH_DENIED")
+    path = Path(value)
+    for part in (path, *path.parents):
+        if part.exists():
+            _require(not part.is_symlink() and not (getattr(part.lstat(), "st_file_attributes", 0) & 0x400), "PATH_DENIED")
+    _require(path.stat().st_size <= 1048576, "CONFIG_INVALID")
+    from .protocol import strict_json
+    return strict_json(path.read_bytes())
+
+
+@dataclass(frozen=True)
+class RuntimeConfig:
+    environment_id: str
+    deployment_root: str
+    python_executable: str
+    source_basis: str
+    config_digest: str
+
+    @classmethod
+    def from_confirmed(cls, doc):
+        _require(type(doc) is dict and set(doc) == DOC_KEYS)
+        _require(doc["schema_version"] == "h2-environment-config/1" and doc["revision"] == "R18_PARAMETER_CONFIRMATION_1")
+        _require(doc["parameter_confirmation"].get("status") == "CONFIRMED", "PARAMETERS_UNCONFIRMED")
+        owner = _approved(doc, "environment_owner")
+        _require(type(owner) is dict and owner.get("actual_OS_identity") is None and owner.get("actual_name") is None)
+        _require(set(owner) == set("research_owner approval_owner deployment_executor logs_and_data_custodian runtime_identity_candidate actual_OS_identity actual_name".split()))
+        root, python = _approved(doc, "deployment_root"), _approved(doc, "python_executable")
+        _require(_path(root) == _path(ROOT) and _path(python) == _path(PYTHON), "PATH_DENIED")
+        _require(doc["environment_id"].get("approved_value") == ENVIRONMENT)
+        scope, port = _approved(doc, "synthetic_data_scope"), _approved(doc, "port_policy")
+        _require(type(scope) is dict and set(scope) == SCOPE_KEYS and all(scope.get(k) == v for k, v in SCOPE.items()))
+        _require(scope["data_origin"] == "FRESH_SYNTHETIC_ONLY" and scope["typed_O"] == "NOT_IMPLEMENTED"
+             and all(scope[k] is None for k in ("o", "request_attempt_id", "request_release_version", "result_material")))
+        _require(scope.get("counts") == {"management_identities": 1, "accounts": 1, "tasks": 1, "grants": 1,
+             "requests": 1, "native_dispatches": 0, "disposals": 0, "windows": 0})
+        _require(scope.get("grant_budget") == {"limit": 1, "reserved": 1, "spent": 0})
+        _require(all(type(v) is int for v in scope["counts"].values())
+             and all(type(v) is int for v in scope["grant_budget"].values()))
+        _require(scope.get("copy_real_credentials") is False and scope.get("copy_R16_values_or_spy_ciphertext") is False)
+        _require(port == {"policy": "FIXED_SINGLE_PORT_NO_FALLBACK", "address": "127.0.0.1", "port": 27443,
+             "availability": "NOT_QUERIED", "public_access": False, "auto_mapping": False})
+        _require(doc["bind_address"].get("approved_value") == "127.0.0.1" and type(doc["port"].get("approved_value")) is int
+             and doc["port"]["approved_value"] == 27443)
+        _require(doc["source_digest"].get("current_static_basis_sha256") == SOURCE_BASIS, "SOURCE_MISMATCH")
+        _require(doc["max_session_reads"] == {"proposed_value": 1, "approved_P2_reads": 0,
+             "source": "R16 process-local session gate; actual source/epoch later"})
+        _require(type(doc["max_session_reads"]["proposed_value"]) is int
+             and type(doc["max_session_reads"]["approved_P2_reads"]) is int)
+        _require(doc["deployment_authorization"] == {"status": "PENDING", "D1_A": False, "D1_B": False}
+             and doc["p1_authorization"] == {"P1a": False, "P1b": False} and doc["p2_authorization"] == {"approved": False})
+        _require(all(doc[k] is None for k in ("actual_PID", "actual_epoch", "actual_database_instance")))
+        _require(doc["environment_fully_locked"] is False and doc["real_operations_status"] == "NOT_RUN")
+        actual_paths = doc["all_candidate_paths"]
+        _require(type(actual_paths) is dict and set(actual_paths) == set(PATHS), "PATH_DENIED")
+        for key, rel in PATHS.items():
+            _require(_path(actual_paths[key]) == _path(ntpath.join(ROOT, rel)), "PATH_DENIED")
+        normalized = {"environment_id": ENVIRONMENT, "root": ROOT, "python": PYTHON,
+            "source_basis": SOURCE_BASIS, "scope": SCOPE, "port": port, "max_session_reads": 1}
+        return cls(ENVIRONMENT, ROOT, PYTHON, SOURCE_BASIS, digest(normalized))
+
+    def plan(self):
+        return {"schema": "d1a-bootstrap-plan/1", "status": "DEPLOYMENT_PREPARED_OFFLINE",
+            "environment_id": self.environment_id, "config_digest": self.config_digest,
+            "root": self.deployment_root, "python": self.python_executable,
+            "bind_address": "127.0.0.1", "port": 27443, "TLS_REQUIRED": True,
+            "dormant": True, "max_session_reads": 1, "approved_reads": 0,
+            "D1B_authorized": False, "P1_authorized": False, "P2_authorized": False,
+            "INSTANCE_RUNNING": False, "runtime_verification": "PENDING"}
+
+
+def validate_path_facts(config, facts):
+    """Trusted offline/provisioner facts, never inferred from request booleans."""
+    _require(type(facts) is dict and set(facts) == {"root", "root_exists", "ancestor_reparse", "source_isolation", "producer"}, "PATH_DENIED")
+    _require(_path(facts["root"]) == _path(config.deployment_root) and facts["root_exists"] is False
+         and facts["ancestor_reparse"] is False and facts["source_isolation"] is True
+         and facts["producer"] == "OFFLINE_PATH_PROVIDER", "PATH_DENIED")
+
+
+def check_dependency_facts(facts):
+    _require(type(facts) is dict and set(facts) == {"python", "architecture", "crypto", "sqlite", "imported"}, "DEPENDENCY_RUNTIME_GAP")
+    _require(facts["python"] == "3.12.14" and facts["architecture"] == "AMD64"
+        and facts["crypto"] == "50.0.2" and type(facts["imported"]) is bool, "DEPENDENCY_RUNTIME_GAP")
+    try:
+        version = tuple(int(x) for x in facts["sqlite"].split("."))
+    except Exception:
+        raise RuntimeRefusal("DEPENDENCY_RUNTIME_GAP") from None
+    _require(version >= (3, 16, 0), "DEPENDENCY_RUNTIME_GAP")
+    return {**facts, "status": "PACKAGE_IMPORTABLE" if facts["imported"] else "METADATA_PRESENT",
+            "Authority_runtime_compatible": False}
+
+
+def probe_offline_dependencies():
+    import sys
+    import struct
+    import sqlite3
+    import cryptography
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    _require(callable(AESGCM), "DEPENDENCY_RUNTIME_GAP")
+    return check_dependency_facts({"python": ".".join(map(str, sys.version_info[:3])),
+        "architecture": "AMD64" if struct.calcsize("P") == 8 else "OTHER",
+        "crypto": cryptography.__version__, "sqlite": sqlite3.sqlite_version, "imported": True})
+
+
+def build_synthetic_seed(config, *, grant_id, handle, material):
+    _id(grant_id); _id(handle)
+    _require(type(material) is str and material.startswith("synthetic_") and 1 <= len(material) <= 4096)
+    scope = dict(SCOPE)
+    origin = {"grant_id": grant_id, **{k: scope[k] for k in ("caller", "task", "account", "audience", "generation")}}
+    approval = {"approval_op": "h2_approval_001", **{k: scope[k] for k in ("caller", "task", "account", "audience", "generation")},
+                "operations": ["issue"], "budget": 1, "material": material}
+    grant = {**origin, "operations": ["issue"], "handle": handle, "material": material,
+             "active": True, "limit": 1, "reserved": 1, "spent": 0}
+    request = normalized_request({"rid": scope["rid"], "handle": handle,
+        **{k: scope[k] for k in ("task", "account", "audience", "generation")}, "operation": "issue", "payload": {}})
+    saved = {"rid": scope["rid"], "digest": digest({"caller": scope["caller"], "request": request}),
+             "origin": origin, "request": request, "phase": "QUEUED", "attempt_id": None,
+             "release_version": None, "result_digest": None, "result_material": None}
+    state = {"grants": {grant_id: grant}, "requests": {scope["rid"]: saved},
+        "grant_ops": {"h2_approval_001": {"digest": digest(approval), "grant_id": grant_id}},
+        "revoke_ops": {}, "disposals": {}, "reconciliation_windows": {}}
+    return {"state": state, "version": 2, "history": [{"version": 1, "operation": "synthetic_grant_prepare"},
+        {"version": 2, "operation": "synthetic_admit_prepare"}], "provenance": "NEW_SYNTHETIC_PROVISIONING_NOT_AS_HISTORY"}
+
+
+def encrypt_public_test_seed(seed, key, nonce):
+    """Offline public vector only. No key generation/loading/persistence."""
+    _require(type(key) is bytes and len(key) == 32 and type(nonce) is bytes and len(nonce) == 12)
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    return nonce + AESGCM(key).encrypt(nonce, canonical(seed["state"]), b"auth-lifecycle/online-state/schema-1")
+
+
+def public_test_seed_roundtrip(blob, key):
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+    try:
+        return json.loads(AESGCM(key).decrypt(blob[:12], blob[12:], b"auth-lifecycle/online-state/schema-1"))
+    except Exception:
+        raise RuntimeRefusal("CONFIG_INVALID") from None
+
+
+class RuntimeContext:
+    __slots__ = ("__weakref__",)
+
+    def __init__(self, *args, **kwargs):
+        raise RuntimeRefusal("CONTEXT_REQUIRED")
+
+    @classmethod
+    def from_offline_host(cls, config, *, process, source_digest):
+        _require(type(config) is RuntimeConfig and type(process) is dict and set(process) == {"pid", "created_at", "epoch", "python", "source_kind"})
+        _require(type(process["pid"]) is int and 1 <= process["pid"] <= 2147483647
+             and process["source_kind"] == "OFFLINE_SIMULATION" and _path(process["python"]) == _path(PYTHON))
+        _id(process["created_at"]); _id(process["epoch"])
+        _require(type(source_digest) is str and re.fullmatch(r"[0-9a-f]{64}", source_digest) is not None, "SOURCE_MISMATCH")
+        context = object.__new__(cls)
+        _CONTEXTS[context] = {"config": config, "process": dict(process), "source_digest": source_digest,
+            "store": None, "connection": None, "lock": None, "server": None,
+            "closed": False, "bound": False, "events": [], "registrations": 0}
+        return context
+
+    def _record(self):
+        rec = _CONTEXTS.get(self)
+        _require(rec is not None, "CONTEXT_REQUIRED")
+        _require(not rec["closed"], "CONTEXT_CLOSED")
+        return rec
+
+    def validate_service_entry(self, role, root, ticket=None):
+        self._record()
+        # No live context issuer is provided in D1-A. Fail before config I/O.
+        raise RuntimeRefusal("D1B_NOT_AUTHORIZED")
+
+    def bind_store(self, store):
+        rec = self._record()
+        _require(not rec["bound"], "CONTEXT_ALREADY_BOUND")
+        rec.update(store=store, connection=store.connection, lock=store.lock, bound=True)
+        rec["registrations"] += 1
+        rec["events"].append("dormant_bind")
+
+    def _bound(self, store=None):
+        rec = self._record()
+        _require(rec["bound"] and (store is None or store is rec["store"]), "SOURCE_MISMATCH")
+        _require(rec["store"].connection is rec["connection"] and rec["store"].lock is rec["lock"], "SOURCE_MISMATCH")
+        return rec
+
+    def on_listener_ready(self, server, store):
+        rec = self._bound(store)
+        _require(server.server_address == ("127.0.0.1", 27443) and server.TLS_REQUIRED is True, "PORT_CONFLICT")
+        rec["server"] = server
+        rec["events"].append("listener_simulated")
+
+    def metadata(self):
+        rec = self._bound()
+        return {"schema": META_SCHEMA, "environment_id": ENVIRONMENT, "service_role": "authority",
+            "source_kind": "OFFLINE_SIMULATION", "process": dict(rec["process"]),
+            "source_digest": rec["source_digest"], "config_digest": rec["config"].config_digest,
+            "endpoint": {"address": "127.0.0.1", "port": 27443, "TLS_REQUIRED": True},
+            "references": {"DB": "authority/authority.db", "key": "secure/authority.key", "key_type": "NEW_TEST_STATE_KEY"},
+            "mount_state": "DORMANT_SOURCE_BOUND", "P2_read_enabled": False, "permits_issued": 0,
+            "session_reads": 0, "registrations": rec["registrations"], "missing_fields": list(GAPS),
+            "INSTANCE_RUNNING": False}
+
+    def issue_permit(self):
+        self._record()
+        raise RuntimeRefusal("P2_NOT_AUTHORIZED")
+
+    read_state = issue_permit
+
+    def close_owned(self):
+        rec = _CONTEXTS.get(self)
+        _require(rec is not None, "CONTEXT_REQUIRED")
+        if rec["closed"]:
+            return
+        rec["closed"] = True
+        failed = False
+        try:
+            if rec["server"] is not None:
+                try:
+                    rec["server"].shutdown()
+                except Exception:
+                    failed = True
+                finally:
+                    try:
+                        rec["server"].server_close()
+                    except Exception:
+                        failed = True
+        finally:
+            if rec["connection"] is not None:
+                try:
+                    rec["connection"].close()
+                except Exception:
+                    failed = True
+        if failed:
+            raise RuntimeRefusal("OFFLINE_ADAPTER_FAILED") from None
+
+    def counters(self):
+        rec = _CONTEXTS.get(self)
+        _require(rec is not None, "CONTEXT_REQUIRED")
+        return {"registrations": rec["registrations"], "closed": rec["closed"],
+                "permits": 0, "session_reads": 0, "events": list(rec["events"])}
+
+    def __repr__(self):
+        return "<AuthorityRuntimeContext redacted>"
+
+    def __reduce_ex__(self, protocol):
+        raise TypeError("RUNTIME_CONTEXT_NOT_SERIALIZABLE")
+
+
+def validate_runtime_context(context, role, root, ticket=None):
+    _require(type(context) is RuntimeContext, "CONTEXT_REQUIRED")
+    return context.validate_service_entry(role, root, ticket)
+
+
+def simulate_bootstrap(config, context, adapters):
+    _require(type(config) is RuntimeConfig and type(context) is RuntimeContext, "CONTEXT_REQUIRED")
+    rec = context._record()
+    _require(rec["config"] == config, "SOURCE_MISMATCH")
+    validate_path_facts(config, adapters.path_facts(config))
+    check_dependency_facts(adapters.dependency_facts())
+    rec["events"].extend(["config_preflight", "dependency_preflight"])
+    try:
+        store = adapters.construct_store(config)
+        rec["events"].append("store_constructed")
+        context.bind_store(store)
+        try:
+            server = adapters.prepare_listener("127.0.0.1", 27443, TLS_REQUIRED=True)
+        except Exception:
+            raise RuntimeRefusal("PORT_CONFLICT") from None
+        context.on_listener_ready(server, store)
+        return context.metadata()
+    except RuntimeRefusal:
+        raise
+    except Exception:
+        raise RuntimeRefusal("OFFLINE_ADAPTER_FAILED") from None
+    finally:
+        context.close_owned()
+
+
+def validate_metadata(value):
+    fields = {"schema", "environment_id", "service_role", "source_kind", "process", "source_digest", "config_digest",
+        "endpoint", "references", "mount_state", "P2_read_enabled", "permits_issued", "session_reads",
+        "registrations", "missing_fields", "INSTANCE_RUNNING"}
+    _require(type(value) is dict and set(value) == fields and value["schema"] == META_SCHEMA, "METADATA_INVALID")
+    _require(value["environment_id"] == ENVIRONMENT and value["service_role"] == "authority"
+        and value["source_kind"] == "OFFLINE_SIMULATION" and value["P2_read_enabled"] is False
+        and value["INSTANCE_RUNNING"] is False and value["permits_issued"] == 0 and value["session_reads"] == 0
+        and value["registrations"] == 1 and value["mount_state"] == "DORMANT_SOURCE_BOUND", "METADATA_INVALID")
+    _require(all(type(value[k]) is int for k in ("permits_issued", "session_reads", "registrations")), "METADATA_INVALID")
+    _require(value["endpoint"] == {"address": "127.0.0.1", "port": 27443, "TLS_REQUIRED": True}, "METADATA_INVALID")
+    _require(value["references"] == {"DB": "authority/authority.db", "key": "secure/authority.key", "key_type": "NEW_TEST_STATE_KEY"}, "METADATA_INVALID")
+    p = value["process"]
+    _require(type(p) is dict and set(p) == {"pid", "created_at", "epoch", "python", "source_kind"}
+        and type(p["pid"]) is int and p["pid"] > 0 and p["source_kind"] == "OFFLINE_SIMULATION"
+        and _path(p["python"]) == _path(PYTHON), "METADATA_INVALID")
+    _id(p["created_at"]); _id(p["epoch"])
+    _require(value["missing_fields"] == list(GAPS), "METADATA_INVALID")
+    _require(all(type(value[k]) is str and re.fullmatch(r"[0-9a-f]{64}", value[k]) for k in ("source_digest", "config_digest")), "METADATA_INVALID")
+    _require(len(canonical(value)) <= 16384, "METADATA_INVALID")
+    return json.loads(canonical(value))
+
+
+def inspect_offline_metadata(request, provider):
+    _require(type(request) is dict and set(request) == {"environment_id", "pid", "created_at", "epoch", "source_digest", "config_digest"}, "TARGET_MISMATCH")
+    _require(request["environment_id"] == ENVIRONMENT and type(request["pid"]) is int, "TARGET_MISMATCH")
+    try:
+        observed = provider.read_one(request["pid"])
+    except Exception:
+        raise RuntimeRefusal("METADATA_INVALID") from None
+    value = validate_metadata(observed)
+    p = value["process"]
+    _require(all(request[k] == p[k] for k in ("pid", "created_at", "epoch"))
+        and all(request[k] == value[k] for k in ("source_digest", "config_digest")), "TARGET_MISMATCH")
+    return value
+
+
+def p1b_static_contract():
+    return {"statements": list(P1B_STATEMENTS), "maximum": 2, "mode": "ro", "immutable": False,
+            "world_SELECT": 0, "key": 0, "decrypt": 0, "authorized": False, "executed": False}

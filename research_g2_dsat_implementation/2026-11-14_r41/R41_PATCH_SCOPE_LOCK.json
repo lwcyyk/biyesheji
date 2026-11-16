@@ -1,0 +1,71 @@
+{
+  "schema": "r41-patch-scope-lock/1",
+  "authorization_request": {
+    "path": "C:\\Users\\a1887\\.codex\\attachments\\c5a324b8-d720-4c15-89cc-95790815ab09\\已粘贴的文本.txt",
+    "sha256": "aab8b5f27cc43575f154116f795bebccfa4e28314dccbd58fd0754270dac79cb"
+  },
+  "allowed_file": "D:\\毕业设计\\auth-lifecycle\\scripts\\run_dsat_current_build_regressions.py",
+  "old_sha256": "33276c053116537db4c8921410f860968dc966fbc99cc42b798fdf836c9c601e",
+  "allowed_functions": [
+    {
+      "function": "State.commit_case_record",
+      "before_line_range": [
+        653,
+        672
+      ],
+      "before_raw_sha256": "d60ecc018ebd61504f334fca9d1bd0fced607a91d4eb852295dc92770bde5f7a",
+      "before_ast_sha256": "b40ee9ee9775c76ced384e8d3a127facb051af8ba6d9754b09eb02ba1fff5096",
+      "before_bytes": 1316,
+      "summary": "def commit_case_record(self, record, stage):\r\n        # A record receives at most one attempt;an acknowledgement is immutable.\r\n        if record[\"persistence_state\"] != \"RESULT_OBSERVED_IN_MEMORY\":\r\n            return record[\"persistence_state\"] == \"RESULT_CHECKPOINT_COMMITTED\"\r\n        record.update(persistence_state=\"RESULT_PERSISTENCE_UNKNOWN\", RESULT_DURABLE=\"UNKNOWN\")\r\n        key = RUN_ID + \"/EARLY_FAILURE.json\"\r\n        before = self.byte_ledger.get(key, {}).get(\"WRITE_ATTEMPTED_BYTES\", 0)\r\n        try:\r\n            reference = self.checkpoint(stage, record[\"observed\"])\r\n        except BaseException as error:\r\n            attempted = self.byte_ledger.get(key, {}).get(\"WRITE_ATTEMPTED_BYTES\", 0) > before\r\n            record.update(persistence_state=\"RESULT_PERSISTENCE_UNKNOWN\" if attempted else \"RESULT_PERSISTENCE_FAILED\",\r\n                RESULT_DURABLE=\"UNKNOWN\" if attempted else False)\r\n            self.persistence_ok = False\r\n            self.incomplete(\"CASE_CHECKPOINT_UNCONFIRMED\")\r\n            if key in self.byte_ledger: self.byte_ledger[key][\"poisoned\"] = True\r\n            self.failure(\"PERSIST_\" + stage, error)\r\n            return False\r\n        record.update(checkpoint_ref=reference, persistence_state=\"RESULT_CHECKPOINT_COMMITTED\", RESULT_DURABLE=True)\r\n        return True"
+    },
+    {
+      "function": "State.checkpoint",
+      "before_line_range": [
+        829,
+        862
+      ],
+      "before_raw_sha256": "7908ba1ee50ad0274f8cf14f0cf4af1da44f4e53571ea19fccc21788be40e183",
+      "before_ast_sha256": "01b5ebec736cde31037f0cbb07ffd4531b9eb532db73d231f8fca037f1f7c2a1",
+      "before_bytes": 2207,
+      "summary": "def checkpoint(self, stage, value):\r\n        \"\"\"Append-only, precharged FileIO; only fsynced lines advance the head.\"\"\"\r\n        path = checked(RUN / \"EARLY_FAILURE.json\", output=True)\r\n        with self.io_lock:\r\n            require(not self.journal_closed, \"JOURNAL_ALREADY_CLOSED\")\r\n            require(self.checkpoint_attempts < MAX_CHECKPOINT_ATTEMPTS, \"CHECKPOINT_ATTEMPT_LIMIT\")\r\n            self.checkpoint_attempts += 1\r\n            event = {\"schema\": \"r35-checkpoint-jsonl/1\", \"seq\": self.journal_sequence + 1,\r\n                \"previous_sha256\": self.journal_head, \"stage\": self.evidence_text(stage, 256),\r\n                \"phase\": self.phase, \"test_id\": self.current,\r\n                \"utc\": datetime.datetime.now(datetime.timezone.utc).isoformat(),\r\n                \"value\": self.encoded_payload(value)}\r\n            raw = bounded_canonical(event, EVIDENCE_CAPS[RUN_ID + \"/EARLY_FAILURE.json\"],\r\n                text_limit=2 * MAX_RAW_JSON_BYTES)\r\n            digest = hashlib.sha256(raw).hexdigest()\r\n            data = bounded_canonical({**event, \"sha256\": digest},\r\n                EVIDENCE_CAPS[RUN_ID + \"/EARLY_FAILURE.json\"] - 1,\r\n                text_limit=2 * MAX_RAW_JSON_BYTES) + b\"\\n\"\r\n            require(all(v.encode() not in data for v in self.secrets), \"PUBLIC_SINK_REFUSED\")\r\n            self.reserve_bytes(len(data), path)\r\n            if self.journal is None:\r\n                self.journal = self.open_owned(path)\r\n                stat = descriptor_metadata(self.journal, path, \"fstat\")\r\n                self.journal_identity = (stat.st_dev, stat.st_ino)\r\n            stat = metadata(path, \"stat\")\r\n            require((stat.st_dev, stat.st_ino) == self.journal_identity\r\n                and stat.st_size == self.journal_bytes\r\n                and descriptor_metadata(self.journal, path, \"tell\") == self.journal_bytes, \"JOURNAL_IDENTITY_CHANGED\")\r\n            self.io_write(self.journal, path, data)\r\n            self.journal_sequence += 1\r\n            self.journal_head = digest\r\n            self.journal_bytes += len(data)\r\n            return {\"seq\": self.journal_sequence, \"sha256\": digest,\r\n                \"stage\": stage, \"test_id\": self.current, \"path\": str(path)}"
+    },
+    {
+      "function": "State.safe_checkpoint",
+      "before_line_range": [
+        892,
+        901
+      ],
+      "before_raw_sha256": "32281d9f5b39880a164409d008ffdedc98164bc264f64dab29a570654ececcd5",
+      "before_ast_sha256": "fb367018a55709b9d284e8413863792257bb7729eaf33930d94ffbc778ff59b3",
+      "before_bytes": 423,
+      "summary": "def safe_checkpoint(self, stage, value):\r\n        try:\r\n            self.checkpoint(stage, value)\r\n            return True\r\n        except BaseException as error:\r\n            self.persistence_ok = False\r\n            key = RUN_ID + \"/EARLY_FAILURE.json\"\r\n            if key in self.byte_ledger: self.byte_ledger[key][\"poisoned\"] = True\r\n            self.failure(\"CHECKPOINT_\" + stage, error)\r\n            return False"
+    },
+    {
+      "function": "State.reserve_bytes",
+      "before_line_range": [
+        970,
+        1001
+      ],
+      "before_raw_sha256": "ba3ed9eedacbfa7c11f558ac81d8fae8baec54fe5730dbae67b3ab0ea1f04984",
+      "before_ast_sha256": "6d680ef989068b8f0088c45f4e754e8c764798bb59e015072bffb76f8ba3d4a2",
+      "before_bytes": 2053,
+      "summary": "def reserve_bytes(self, size, path):\r\n        \"\"\"Debit BEFORE I/O. Failed, short and uncertain attempts are never refunded.\"\"\"\r\n        cutoff = self.terminal_deadline if self.terminal else self.work_deadline\r\n        if time.perf_counter() >= cutoff:\r\n            self.finalization_incomplete = True\r\n            raise Refusal(\"FINALIZATION_INCOMPLETE\" if self.terminal else \"WORK_DEADLINE_OR_STOP\")\r\n        p = checked(path, output=True)\r\n        key = p.relative_to(OUTPUT).as_posix()\r\n        require(key in EVIDENCE_CAPS and key != APPROVAL.name, \"OUTPUT_PATH_DENIED\")\r\n        if self.terminal:\r\n            require(self.terminal_attempts < TERMINAL_WRITE_ATTEMPTS, \"TERMINAL_ATTEMPT_LIMIT\")\r\n            self.terminal_attempts += 1\r\n        row = self.byte_ledger.setdefault(key, {\"RESERVED_BYTES\": EVIDENCE_CAPS[key],\r\n            \"SERIALIZED_BYTES\": 0, \"BUFFERED_BYTES\": 0, \"WRITE_ATTEMPTED_BYTES\": 0,\r\n            \"WRITE_RETURNED_BYTES\": 0, \"CONFIRMED_PERSISTED_BYTES\": 0,\r\n            \"PERSISTENCE_UNCERTAIN_BYTES\": 0, \"charged_bytes\": 0,\r\n            \"write_attempts\": 0, \"close_attempts\": 0, \"closed_confirmed\": False,\r\n            \"state\": \"RESERVED\", \"poisoned\": False})\r\n        require(not row[\"poisoned\"], \"EVIDENCE_STREAM_POISONED\")\r\n        cap = EVIDENCE_CAPS[key]\r\n        if p.name == \"EARLY_FAILURE.json\" and not self.terminal: cap -= TERMINAL_JOURNAL_BYTES\r\n        require(type(size) is int and size >= 0 and row[\"charged_bytes\"] + size <= cap,\r\n            \"EVIDENCE_BUDGET_INSUFFICIENT\")\r\n        # External mutation is a failed ownership contract, never free space.\r\n        visible = metadata(p, \"stat\").st_size if metadata(p, \"exists\") else 0\r\n        require(visible <= row[\"charged_bytes\"], \"UNACCOUNTED_EVIDENCE_BYTES\")\r\n        row[\"SERIALIZED_BYTES\"] += size\r\n        row[\"charged_bytes\"] += size\r\n        row[\"state\"] = \"SERIALIZED\"\r\n        require(sum(x[\"charged_bytes\"] for x in self.byte_ledger.values())\r\n            + EVIDENCE_CAPS[APPROVAL.name] <= 2097152, \"RESOURCE_OUTPUT_BYTES\")\r\n        return row"
+    },
+    {
+      "function": "State.io_write",
+      "before_line_range": [
+        1003,
+        1029
+      ],
+      "before_raw_sha256": "d330d4f0a7126ad776cf6cd06e4927cbc675fac1d620fb4e5abb7c2dcb0d1925",
+      "before_ast_sha256": "75244123b20026c68a1a0bb1a3442562d35dc60e058c682e761e8cb9904ae7a7",
+      "before_bytes": 1466,
+      "summary": "def io_write(self, stream, path, data):\r\n        row = self.byte_ledger[path.relative_to(OUTPUT).as_posix()]\r\n        row[\"state\"] = \"WRITE_STARTED\"\r\n        try:\r\n            cutoff = self.terminal_deadline if self.terminal else self.work_deadline\r\n            require(time.perf_counter() < cutoff, \"FINALIZATION_INCOMPLETE\")\r\n            row[\"WRITE_ATTEMPTED_BYTES\"] += len(data)\r\n            row[\"write_attempts\"] += 1\r\n            count = stream.write(data)\r\n            if type(count) is int and 0 <= count <= len(data): row[\"WRITE_RETURNED_BYTES\"] += count\r\n            require(count == len(data), \"EVIDENCE_SHORT_WRITE\")\r\n            # FileIO has no Python pending write buffer. flush is still checked.\r\n            require(time.perf_counter() < cutoff, \"FINALIZATION_INCOMPLETE\")\r\n            stream.flush()\r\n            row[\"state\"] = \"FLUSHED\"\r\n            require(time.perf_counter() < cutoff, \"FINALIZATION_INCOMPLETE\")\r\n            os.fsync(stream.fileno())\r\n            row[\"CONFIRMED_PERSISTED_BYTES\"] = row[\"WRITE_RETURNED_BYTES\"]\r\n            row[\"state\"] = \"PUBLISHED\"\r\n        except BaseException:\r\n            row[\"poisoned\"] = True\r\n            row[\"state\"] = \"PERSISTENCE_UNCERTAIN\"\r\n            row[\"PERSISTENCE_UNCERTAIN_BYTES\"] = row[\"charged_bytes\"] - row[\"CONFIRMED_PERSISTED_BYTES\"]\r\n            self.persistence_ok = False\r\n            self.stop_requested = True\r\n            self.finalization_incomplete = True\r\n            raise"
+    }
+  ],
+  "optional_helper_max": 1,
+  "original_copy": "D:\\毕业设计\\research_g2_dsat_implementation\\2026-11-14_r41\\sources\\RUNNER_BEFORE.py.txt",
+  "dynamic_tests_allowed": 0,
+  "execution_authorized": false,
+  "maintenance_only": true
+}

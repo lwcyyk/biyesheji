@@ -1,0 +1,88 @@
+{
+  "schema": "r44-source-observability-findings/1",
+  "driver_sha256": "28e9ccf96f20a634b274f5350e8044da87b33f0c73905448664a68a3c41c67fd",
+  "findings": [
+    {
+      "id": "F01",
+      "claim": "audit.events per-event list is not an emitted artifact; RESOURCE_LEDGER counts are aggregate owner/realm/phase/op",
+      "basis": "execute stores end snapshots and event_index; main emits suite.witnesses and audit.counts, not audit.events",
+      "impact": "T20 interval cannot be independently reconstructed from persisted native/model trace solely by future supervisor"
+    },
+    {
+      "id": "F02",
+      "claim": "observer event precheck can fail before append at an already-entered adapter method",
+      "basis": "ObservedFileIO.write calls audit.event, whose check/limits run before counts/events append",
+      "impact": "zero recorded entries requires successful observation-chain premise; on observation failure count is incomplete/UNKNOWN, not proved0"
+    },
+    {
+      "id": "F03",
+      "claim": "933888 applies to eight explicit native artifact writes only",
+      "basis": "one-shot emit names/caps; implicit stdio/import/native activity and future observer overhead have no such total proof",
+      "impact": "full-process payload/IO upper stays null"
+    },
+    {
+      "id": "F04",
+      "claim": "external observer must not precreate child verification_runs",
+      "basis": "driver admission checks both output and output.parent absent",
+      "impact": "parent witness needs distinct owned route and its own jointly approved files/dirs/bytes"
+    },
+    {
+      "id": "F05",
+      "claim": "case outcomes and invocation progress are memory-only until the late output producers",
+      "basis": "main runs all ordered methods before emittingSTATE_WITNESS/RESULTS; no persistent prelaunch claim or per-case progress in this source",
+      "impact": "a killed child may leave no durable completed-case prefix; parent must preserve launch identity and keep unconfirmed case knowledge UNKNOWN"
+    }
+  ],
+  "source_refs": [
+    {
+      "definition": "event",
+      "line_range": [
+        95,
+        110
+      ],
+      "text": "def event(self, owner, op, realm=\"MODEL\", requested=0):\n        self.check()\n        key = owner + \"/\" + realm + \"/\" + self.phase + \"/\" + op\n        if self.limits is not None:\n            if len(self.events) >= self.limits[\"observation_events\"]:\n                raise RuntimeError(\"OBSERVATION_BUDGET_EXCEEDED\")\n            api = sum(v for k, v in self.counts.items() if (\"/\" + realm + \"/\") in k)\n            name = \"model_api_calls\" if realm == \"MODEL\" else \"native_api_calls\"\n            if api >= self.limits[name]:\n                raise RuntimeError(\"API_BUDGET_EXCEEDED\")\n        self.counts[key] = self.counts.get(key, 0) + 1\n        row = {\"owner\": owner, \"realm\": realm, \"phase\": self.phase, \"op\": op,\n               \"test_id\": self.test_id, \"variant\": self.variant,\n               \"requested\": requested, \"accepted\": None, \"outcome\": \"ENTERED\"}\n        self.events.append(row)\n        return row"
+    },
+    {
+      "definition": "write",
+      "line_range": [
+        149,
+        163
+      ],
+      "text": "def write(self, data):\n        assert_case_invariants(not self.closed and not self.reader, \"INVALID_MODEL_WRITE\")\n        ev = self.ctx.audit.event(\"SUT_IO\", \"write\", requested=len(data))\n        self.ctx.audit.fire(\"write_enter\", self.ctx)\n        if self.mode == \"raise_after_accept\":\n            self.ctx.files[str(self.path)].extend(data[:1])\n            self.cursor += 1\n            ev.update(accepted=1, outcome=\"RAISED_AFTER_ACCEPT\")\n            raise OSError(22, \"SYNTHETIC_ACCEPT_THEN_ERROR\")\n        count = 0 if self.mode == \"zero\" else 1 if self.mode == \"partial\" else len(data)\n        self.ctx.files[str(self.path)].extend(data[:count])\n        self.cursor += count\n        ev.update(accepted=count, outcome=\"RETURNED\", returned=count)\n        self.ctx.audit.fire(\"write_return\", self.ctx)\n        return count"
+    },
+    {
+      "definition": "execute",
+      "line_range": [
+        551,
+        571
+      ],
+      "text": "def execute(self, test_id):\n        spec = next(x for x in self.inputs[\"manifest\"][\"rows\"] if x[\"test_id\"] == test_id)\n        for variant in spec[\"variants\"]:\n            self.audit.test_id, self.audit.variant = test_id, variant[\"tag\"]\n            self.audit.phase = \"SETUP\"\n            c = IsolatedTargetContext(self.target, self.audit, self.inputs)\n            arm_start = len(self.audit.arms)\n            entered = False\n            try:\n                c.enter()\n                entered = True\n                self.audit.phase = \"PRIMARY\"\n                self.execute_variant(int(test_id[-2:]), variant[\"tag\"], c)\n                self.audit.assert_consumed(arm_start)\n                after = snapshot_observations(c)\n                self.witnesses.append({\"test_id\": test_id, \"variant\": variant[\"tag\"],\n                    \"prefix_sha256\": hashlib.sha256(after.pop(\"contents\")).hexdigest(),\n                    \"state\": after, \"actual_measurement_scope\": \"MODEL_PYTHON_API_ONLY\"})\n            finally:\n                self.audit.phase = \"CLEANUP\"\n                if c.saved: c.exit()"
+    },
+    {
+      "definition": "reserve_owned_output",
+      "line_range": [
+        979,
+        986
+      ],
+      "text": "def reserve_owned_output(inputs, audit):\n    root = inputs[\"output_root\"]\n    assert_case_invariants(audit.limits[\"new_directories\"] >= 2, \"DIRECTORY_BUDGET\")\n    for path in (root.parent, root):\n        assert_case_invariants(not path.exists() and not path.is_symlink(), \"EXCLUSIVE_OUTPUT_SCOPE\")\n        ev = audit.event(\"EVIDENCE_IO\", \"mkdir\", \"NATIVE\")\n        path.mkdir(exist_ok=False); ev[\"outcome\"] = \"RETURNED\"\n    inputs[\"output_claims\"], inputs[\"output_charged\"], inputs[\"native_handles\"] = set(), {}, []"
+    },
+    {
+      "definition": "emit_owned_evidence",
+      "line_range": [
+        989,
+        1014
+      ],
+      "text": "def emit_owned_evidence(inputs, audit, name, value):\n    assert_case_invariants(name in EVIDENCE_CAPS and name not in inputs[\"output_claims\"], \"OUTPUT_ONCE_SCOPE\")\n    inputs[\"output_claims\"].add(name)\n    data = json.dumps(value, sort_keys=True, separators=(\",\", \":\"), ensure_ascii=True,\n                      allow_nan=False).encode(\"utf-8\") + b\"\\n\"\n    assert_case_invariants(len(data) <= EVIDENCE_CAPS[name], \"COMPLETE_ARTIFACT_DOES_NOT_FIT\")\n    total = sum(inputs[\"output_charged\"].values()) + len(data)\n    assert_case_invariants(total <= min(EVIDENCE_BYTES, audit.limits[\"cumulative_native_payload_bytes\"]),\n                           \"EVIDENCE_BYTES_EXCEEDED\")\n    inputs[\"output_charged\"][name] = len(data)  # no refund, including failed writes\n    path = inputs[\"output_root\"] / name\n    ev = audit.event(\"EVIDENCE_IO\", \"open/create\", \"NATIVE\")\n    stream = path.open(\"xb\", buffering=0); ev[\"outcome\"] = \"RETURNED\"\n    inputs[\"native_handles\"].append({\"stream\": stream, \"path\": str(path), \"close_attempted\": False})\n    try:\n        ev = audit.event(\"EVIDENCE_IO\", \"write\", \"NATIVE\", len(data))\n        count = stream.write(data)\n        ev.update(outcome=\"RETURNED\", accepted=count)\n        assert_case_invariants(count == len(data), \"EVIDENCE_SHORT_WRITE\")\n        ev = audit.event(\"EVIDENCE_IO\", \"flush\", \"NATIVE\")\n        stream.flush(); ev[\"outcome\"] = \"RETURNED\"\n        ev = audit.event(\"EVIDENCE_IO\", \"fsync\", \"NATIVE\")\n        os.fsync(stream.fileno()); ev[\"outcome\"] = \"RETURNED\"\n    finally:\n        close_owned_resources(inputs, audit)\n    return hashlib.sha256(data).hexdigest()"
+    },
+    {
+      "definition": "main",
+      "line_range": [
+        1035,
+        1095
+      ],
+      "text": "def main():\n    global json, hashlib, time, types, datetime, binascii, zlib, base64, threading\n    global importlib, sys, os, traceback, ctypes, Path, PureWindowsPath\n    import argparse\n    import json, hashlib, time, types, datetime, binascii, zlib, base64, threading\n    import importlib.util, importlib.machinery\n    import sys, os, traceback, ctypes\n    from pathlib import Path, PureWindowsPath\n    parser = argparse.ArgumentParser(add_help=False)\n    parser.add_argument(\"--execution-lock\", required=True)\n    args = parser.parse_args()\n    audit = FaultSchedule()\n    # No target import, test fixture, directory or Journal exists before this gate.\n    packet, inputs = verify_source_and_approval_inputs(Path(args.execution_lock), audit)\n    reserve_owned_output(inputs, audit)\n    results = [{\"test_id\": x, \"status\": \"NOT_RUN\"} for x in TEST_IDS]\n    failure = None\n    try:\n        target = load_frozen_target(inputs)\n        suite, ordered = build_ordered_suite(target, audit, inputs)\n        for result, (test_id, call) in zip(results, ordered):\n            result[\"status\"] = \"RUNNING\"\n            try:\n                call()\n            except Exception as error:\n                result.update(status=\"ERROR\", failure=record_bounded_failure(error))\n                failure = result[\"failure\"]\n                break\n            result[\"status\"] = \"PASS\"\n        audit.phase, audit.test_id, audit.variant = \"EVIDENCE_OUTPUT\", None, None\n        emit_owned_evidence(inputs, audit, \"STATE_WITNESS.json\", {\"variants\": suite.witnesses})\n        emit_owned_evidence(inputs, audit, \"TEST_MANIFEST.json\", {\"test_IDs\": list(TEST_IDS),\n            \"input_manifest_sha256\": MANIFEST_SHA256, \"source\": SUT_SHA256})\n        emit_owned_evidence(inputs, audit, \"SOURCE_LOCK.json\", {\"input_pins\": inputs[\"input_pins\"],\n            \"approval_packet\": inputs[\"approved_packet_path\"]})\n    except Exception as error:\n        failure = record_bounded_failure(error)\n    finally:\n        close_owned_resources(inputs, audit)\n    if failure is not None:\n        emit_owned_evidence(inputs, audit, \"EARLY_FAILURE.json\", failure)\n    ledger = {\"observed_python_API_counts_before_ledger_write\": dict(audit.counts),\n        \"fault_arms\": len(audit.arms), \"faults_fired\": len(audit.fired),\n        \"fixture_total\": audit.fixtures, \"lock_total\": audit.locks,\n        \"source_output_charges_before_ledger_write\": dict(inputs[\"output_charged\"]),\n        \"FULL_IO_COUNT_UNPROVEN\": True, \"system_calls\": \"UNKNOWN\",\n        \"physical_disk_operations\": \"UNKNOWN\", \"whole_process_peak_working_set\": audit.rss_peak,\n        \"peak_measurement_status\": \"NOT_MEASURED\" if audit.rss_peak is None else \"OS_REPORTED_PEAK\",\n        \"unobserved_boundaries\": [\"bootstrap imports\", \"import loader native IO\", \"implicit native metadata\", \"interpreter shutdown\"],\n        \"observation_scope\": \"owner/realm/phase; shared evidence counted once at suite level\"}\n    emit_owned_evidence(inputs, audit, \"RESOURCE_LEDGER.json\", ledger)\n    emit_owned_evidence(inputs, audit, \"stdout.log\", {\"counts\": {\n        key: sum(x[\"status\"] == key for x in results) for key in (\"PASS\", \"ERROR\", \"NOT_RUN\")}})\n    emit_owned_evidence(inputs, audit, \"stderr.log\", {\"failure_present\": failure is not None})\n    passed = failure is None and all(x[\"status\"] == \"PASS\" for x in results)\n    emit_owned_evidence(inputs, audit, \"RESULTS.json\", {\"cases\": results, \"passed\": passed,\n        \"actual_exit_observed\": \"NOT_MEASURED\", \"required_exit\": 0 if passed else 1,\n        \"complete_L0_capacity_proved\": False, \"native_durability_proved\": False,\n        \"IO_count_scope\": \"primary/recovery traces, observed model/native Python APIs; syscall totalsUNKNOWN\"})\n    close_owned_resources(inputs, audit)\n    return 0 if passed else 1"
+    }
+  ],
+  "current_measurements": "NOT_MEASURED",
+  "code_modifications": 0
+}

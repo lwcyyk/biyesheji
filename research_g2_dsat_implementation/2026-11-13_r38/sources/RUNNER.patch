@@ -1,0 +1,724 @@
+--- R37_frozen_Runner_before
++++ R38_single_Runner_static_patch
+@@ -97,6 +97,8 @@
+ HARD_SECONDS = 120
+ TERMINAL_JOURNAL_BYTES = 65536
+ TERMINAL_WRITE_ATTEMPTS = 32
++MAX_CASE_RESULT_EVENTS = 2  # frozen cases have no subTest/addCleanup callbacks
++MAX_TERMINAL_READ_HANDLES = 32
+ 
+ 
+ class Refusal(RuntimeError):
+@@ -109,7 +111,31 @@
+ 
+ 
+ def sha(path):
++    if ENTRY_STATE is not None and ENTRY_STATE.terminal:
++        return ENTRY_STATE.hash_owned_file(Path(path))
+     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
++
++
++def read_gate(path, operation):
++    if ENTRY_STATE is not None and ENTRY_STATE.terminal:
++        ENTRY_STATE.terminal_read_gate(Path(path), operation)
++
++
++def metadata(path, operation):
++    require(operation in {"stat", "lstat", "exists", "is_file", "is_dir", "is_symlink"},
++        "METADATA_OPERATION_REFUSED")
++    read_gate(path, "metadata")
++    value = getattr(path, operation)()
++    read_gate(path, "metadata_return")
++    return value
++
++
++def descriptor_metadata(stream, path, operation):
++    read_gate(path, "metadata")
++    require(operation in {"fstat", "tell"}, "METADATA_OPERATION_REFUSED")
++    value = os.fstat(stream.fileno()) if operation == "fstat" else stream.tell()
++    read_gate(path, "metadata_return")
++    return value
+ 
+ 
+ def canonical(value):
+@@ -202,10 +228,10 @@
+         require(p == OUTPUT or p == RUN or (p.is_relative_to(OUTPUT)
+             and p.relative_to(OUTPUT).as_posix() in WRITE_NAMES), "OUTPUT_PATH_DENIED")
+     for part in (p, *p.parents):
+-        require(not part.is_symlink() and not (part.exists()
+-            and getattr(part.lstat(), "st_file_attributes", 0) & 0x400), "REPARSE_DENIED")
+-    if p.is_file():
+-        require(p.stat().st_nlink == 1 or (historical_read and not output
++        require(not metadata(part, "is_symlink") and not (metadata(part, "exists")
++            and getattr(metadata(part, "lstat"), "st_file_attributes", 0) & 0x400), "REPARSE_DENIED")
++    if metadata(p, "is_file"):
++        require(metadata(p, "stat").st_nlink == 1 or (historical_read and not output
+             and p in HISTORICAL_READ_ONLY_LINKS), "HARDLINK_DENIED")
+     return p
+ 
+@@ -259,6 +285,7 @@
+         self.started = started
+         self.work_deadline = self.started + WORK_SECONDS
+         self.terminal_deadline = self.started + WORK_SECONDS + TERMINAL_SECONDS
++        self.terminal_read_deadline = self.terminal_deadline
+         self.deadline = self.started + HARD_SECONDS
+         self.terminal = False
+         self.terminal_attempts = 0
+@@ -276,12 +303,22 @@
+         self.streams = []
+         self.codec = None
+         self.work_audits = {"integrity": False, "provenance": False, "memory": {"status": "NOT_MEASURED"}}
++        self.read_handles = []
++        self.read_audit = {"admitted_terminal_checks": 0, "denied_terminal_checks": 0,
++            "confirmed_closed_read_handles": 0, "last_denial": None, "late_return_observations": 0}
+         self.started_utc = started_utc
+         self.command_digest = sha(RECORD / "R35_REGRESSION_COMMAND_LOCK.json")
+         self.approval_digest = sha(APPROVAL)
+         self.phase, self.current = "PREFLIGHT", None
+         self.connecting, self.d24_active = False, False
+         self.connections, self.rows, self.details, self.origins = [], {}, [], []
++        self.spec_by_id = {x["test_id"]: x for x in self.manifest["tests"]}
++        self.case_lifecycle = {tid: "NOT_RUN" for tid in self.spec_by_id}
++        self.case_statuses = {tid: [None, None] for tid in self.spec_by_id}
++        self.case_callback_counts = {tid: 0 for tid in self.spec_by_id}
++        self.case_overflow = {tid: False for tid in self.spec_by_id}
++        self.detail_cursors = {}
++        self.detail_refs = {}
+         self.errors, self.projections, self.exec_files = [], [], set()
+         self.origin_records, self.origin_raw = {}, set()
+         self.origin_failures = []
+@@ -363,6 +400,115 @@
+         self.phase = "TERMINAL"
+         if time.perf_counter() >= self.terminal_deadline:
+             self.finalization_incomplete = True
++
++    def terminal_read_gate(self, path, operation):
++        require(self.terminal, "TERMINAL_READ_PHASE_REQUIRED")
++        if time.perf_counter() >= min(self.terminal_read_deadline, self.deadline):
++            self.read_audit["denied_terminal_checks"] += 1
++            self.read_audit["last_denial"] = "TERMINAL_READ_DEADLINE"
++            if operation.endswith("return"): self.read_audit["late_return_observations"] += 1
++            self.finalization_incomplete = True
++            self.incomplete("TERMINAL_READ_DEADLINE")
++            raise Refusal("TERMINAL_READ_DEADLINE")
++        path = Path(path)
++        owned_file = path.is_absolute() and path.is_relative_to(OUTPUT) and (
++            path.relative_to(OUTPUT).as_posix() in WRITE_NAMES)
++        directory = path in (OUTPUT, RUN)
++        ancestor_metadata = operation in {"metadata", "metadata_return"} and OUTPUT.is_relative_to(path)
++        if operation.startswith("directory_"):
++            allowed = directory
++        elif operation.startswith("metadata"):
++            allowed = owned_file or directory or ancestor_metadata
++        else:
++            allowed = owned_file
++        if not allowed:
++            self.read_audit["denied_terminal_checks"] += 1
++            self.read_audit["last_denial"] = "TERMINAL_READ_SCOPE_REFUSED"
++            self.finalization_incomplete = True
++            self.incomplete("TERMINAL_READ_SCOPE_REFUSED")
++            raise Refusal("TERMINAL_READ_SCOPE_REFUSED")
++        self.read_audit["admitted_terminal_checks"] += 1
++
++    def hash_owned_file(self, path):
++        read_gate(path, "content_open")
++        path = checked(path, output=True)
++        require(len(self.read_handles) < MAX_TERMINAL_READ_HANDLES, "TERMINAL_READ_HANDLE_LIMIT")
++        item = {"path": path, "stream": None, "close_attempted": False}
++        self.read_handles.append(item)
++        digest = hashlib.sha256()
++        total = 0
++        failed = False
++        try:
++            read_gate(path, "content_open")
++            item["stream"] = path.open("rb", buffering=0)
++            # Opening can block:admit each subsequent read separately.
++            read_gate(path, "content_return")
++            cap = EVIDENCE_CAPS[path.relative_to(OUTPUT).as_posix()]
++            while True:
++                read_gate(path, "content_read")
++                data = item["stream"].read(65536)
++                read_gate(path, "content_return")
++                if not data: break
++                total += len(data)
++                require(total <= cap, "OWNED_READ_EXTENT_LIMIT")
++                digest.update(data)
++            read_gate(path, "hash_return")
++            return digest.hexdigest()
++        except BaseException:
++            failed = True
++            self.finalization_incomplete = True
++            self.incomplete("TERMINAL_READ_INCOMPLETE")
++            raise
++        finally:
++            try: self.close_read_handles(item)
++            except BaseException as error:
++                self.failure("CLEANUP_READ_HANDLE", error)
++                if not failed: raise
++
++    def close_read_handles(self, only=None):
++        for item in self.read_handles if only is None else [only]:
++            stream = item["stream"]
++            if stream is None or stream.closed or item["close_attempted"]: continue
++            if time.perf_counter() >= self.deadline:
++                self.finalization_incomplete = True
++                self.incomplete("READ_HANDLE_CLOSE_UNCONFIRMED")
++                continue
++            item["close_attempted"] = True
++            try:
++                stream.close()
++                require(stream.closed, "READ_HANDLE_CLOSE_UNCONFIRMED")
++                self.read_audit["confirmed_closed_read_handles"] += 1
++                if time.perf_counter() >= self.deadline:
++                    self.finalization_incomplete = True
++                    self.incomplete("LATE_READ_CLOSE_COMPLETION")
++            except BaseException:
++                self.finalization_incomplete = True
++                self.persistence_ok = False
++                self.incomplete("READ_HANDLE_CLOSE_UNCONFIRMED")
++                raise
++
++    def output_files(self):
++        files = []
++        directories = [OUTPUT]
++        for directory in directories:
++            read_gate(directory, "directory_open")
++            names = os.listdir(directory)
++            read_gate(directory, "directory_return")
++            require(len(names) <= 14, "RESOURCE_FILE_COUNT")
++            for name in sorted(names):
++                read_gate(directory, "directory_next")
++                path = directory / name
++                if path == RUN:
++                    require(directory == OUTPUT and metadata(checked(path, output=True), "is_dir"),
++                        "OUTPUT_DIRECTORY_IDENTITY")
++                    directories.append(RUN)
++                    continue
++                require(path.relative_to(OUTPUT).as_posix() in WRITE_NAMES, "OUTPUT_PATH_DENIED")
++                path = checked(path, output=True)
++                require(metadata(path, "is_file"), "OUTPUT_FILE_IDENTITY")
++                files.append(path)
++                require(len(files) <= 13, "RESOURCE_FILE_COUNT")
++        return files
+ 
+     def evidence_text(self, value, maximum=MAX_METADATA_JSON_BYTES):
+         require(type(value) is str, "EVIDENCE_TYPE_LIMIT")
+@@ -471,6 +617,209 @@
+             "raw_sha256": hashlib.sha256(raw).hexdigest(),
+             "data": binascii.b2a_base64(compressed, newline=False).decode("ascii")}
+ 
++    def case_error_header(self, error):
++        if error is None: return None
++        header = {"exception_type": "UNKNOWN", "exception_module": "UNKNOWN",
++            "errno": "NOT_APPLICABLE", "winerror": "NOT_APPLICABLE",
++            "known_refusal_code": None, "header_complete": True}
++        for key, attribute in (("exception_type", "__name__"), ("exception_module", "__module__")):
++            try: header[key] = self.evidence_text(builtin_type_field(error, attribute), 256)
++            except BaseException:
++                header["header_complete"] = False
++                self.incomplete("RESULT_HEADER_INCOMPLETE")
++        if isinstance(error, OSError):
++            for key in ("errno", "winerror"):
++                try:
++                    descriptor = OSError.__dict__.get(key)
++                    value = descriptor.__get__(error, type(error)) if descriptor is not None else None
++                    require(value is None or (type(value) is int and value.bit_length() <= 64),
++                        "RESULT_HEADER_INTEGER")
++                    header[key] = value
++                except BaseException:
++                    header[key] = "UNKNOWN"
++                    header["header_complete"] = False
++                    self.incomplete("RESULT_HEADER_INCOMPLETE")
++        if type(error) is Refusal:
++            args = BaseException.__dict__["args"].__get__(error, type(error))
++            try:
++                require(len(args) == 1 and type(args[0]) is str, "RESULT_HEADER_CODE")
++                header["known_refusal_code"] = self.evidence_text(args[0], 256)
++            except BaseException:
++                header["known_refusal_code"] = "UNKNOWN"
++                header["header_complete"] = False
++                self.incomplete("RESULT_HEADER_INCOMPLETE")
++        return header
++
++    def commit_case_record(self, record, stage):
++        # A record receives at most one attempt;an acknowledgement is immutable.
++        if record["persistence_state"] != "RESULT_OBSERVED_IN_MEMORY":
++            return record["persistence_state"] == "RESULT_CHECKPOINT_COMMITTED"
++        record.update(persistence_state="RESULT_PERSISTENCE_UNKNOWN", RESULT_DURABLE="UNKNOWN")
++        key = RUN_ID + "/EARLY_FAILURE.json"
++        before = self.byte_ledger.get(key, {}).get("WRITE_ATTEMPTED_BYTES", 0)
++        try:
++            reference = self.checkpoint(stage, record["observed"])
++        except BaseException as error:
++            attempted = self.byte_ledger.get(key, {}).get("WRITE_ATTEMPTED_BYTES", 0) > before
++            record.update(persistence_state="RESULT_PERSISTENCE_UNKNOWN" if attempted else "RESULT_PERSISTENCE_FAILED",
++                RESULT_DURABLE="UNKNOWN" if attempted else False)
++            self.persistence_ok = False
++            self.incomplete("CASE_CHECKPOINT_UNCONFIRMED")
++            if key in self.byte_ledger: self.byte_ledger[key]["poisoned"] = True
++            self.failure("PERSIST_" + stage, error)
++            return False
++        record.update(checkpoint_ref=reference, persistence_state="RESULT_CHECKPOINT_COMMITTED", RESULT_DURABLE=True)
++        return True
++
++    def begin_case(self, tid):
++        self.check_work()
++        spec = self.spec_by_id[tid]
++        require(spec["test_source"] == self.phase and self.case_lifecycle[tid] == "NOT_RUN",
++            "CASE_START_IDENTITY")
++        # Preallocated lifecycle survives a later allocation/diagnostic failure.
++        self.case_lifecycle[tid] = "RUNNING"
++        row = {"id": tid, "group": spec["test_source"], "status": "RUNNING", "executed": True,
++            "start_boundary": "RESULT_STARTTEST_ENTERED",
++            "trusted_execution_phase": self.phase, "source_hash": spec["source_hash"],
++            "runner_sha256": self.command["runner_sha256"], "original_expected": spec["original_expected"],
++            "events": [], "detail": None, "diagnostic_status": "NOT_APPLICABLE",
++            "details_status": "NOT_CAPTURED",
++            "detail_indices": [], "case_call_completed": False, "case_interrupted": False}
++        self.rows[tid] = row
++        record = {"observed": {"schema": "r38-case-start/1", "id": tid,
++            "group": row["group"], "status": "RUNNING", "source_hash": row["source_hash"],
++            "runner_sha256": row["runner_sha256"], "trusted_execution_phase": self.phase},
++            "persistence_state": "RESULT_OBSERVED_IN_MEMORY", "RESULT_DURABLE": False,
++            "checkpoint_ref": None}
++        row["start_record"] = record
++        require(self.commit_case_record(record, "TEST_CASE_STARTED"), "CASE_START_CHECKPOINT_FAILED")
++
++    def observe_result(self, tid, status, elapsed_ns, error=None):
++        require(tid in self.rows and status in {"PASS", "FAIL", "ERROR", "SKIP"}, "CASE_RESULT_IDENTITY")
++        index = self.case_callback_counts[tid]
++        if index >= MAX_CASE_RESULT_EVENTS:
++            self.case_overflow[tid] = True
++            self.incomplete("CASE_OUTCOME_COUNT_EXCEEDED")
++            raise Refusal("CASE_OUTCOME_COUNT_EXCEEDED")
++        # Preserve the original callback status BEFORE header/JSON/log work.
++        self.case_statuses[tid][index] = status
++        self.case_callback_counts[tid] = index + 1
++        self.case_lifecycle[tid] = "OUTCOME_OBSERVED"
++        row = self.rows[tid]
++        row["status"] = status if index == 0 else "UNKNOWN"
++        if status != "PASS": row["diagnostic_status"] = "ORIGINAL_DIAGNOSTIC_UNCONFIRMED"
++        if index:
++            self.incomplete("MULTIPLE_ORIGINAL_CASE_OUTCOMES")
++        observed = {"schema": "r38-result-observation/1", "id": tid,
++            "event_id": tid + ":" + str(index + 1), "status": status,
++            "group": row["group"], "source_hash": row["source_hash"],
++            "runner_sha256": row["runner_sha256"], "original_expected": row["original_expected"],
++            "trusted_execution_phase": row["trusted_execution_phase"], "elapsed_ns": elapsed_ns,
++            "exception_category": "ORIGINAL_ASSERTION_FAILURE" if status == "FAIL" else
++                "ORIGINAL_TEST_ERROR" if status == "ERROR" else "NOT_APPLICABLE",
++            "error_header": self.case_error_header(error)}
++        record = {"observed": observed, "persistence_state": "RESULT_OBSERVED_IN_MEMORY",
++            "RESULT_DURABLE": False, "checkpoint_ref": None}
++        row["events"].append(record)
++        require(self.commit_case_record(record, "TEST_ASSERTION"), "RESULT_CHECKPOINT_UNCONFIRMED")
++        return record
++
++    def capture_case_details(self, tid, module, test, interrupted):
++        row = self.rows[tid]
++        values = module_dictionary(module).get("DETAILS")
++        require(type(values) is list and len(values) <= 68, "TEST_DETAIL_COUNT_LIMIT")
++        group = row["group"]
++        cursor = self.detail_cursors.get(group, 0)
++        require(cursor <= len(values), "DETAIL_SOURCE_REWOUND")
++        new_details = []
++        while cursor < len(values):
++            value = values[cursor]
++            # Exact JSON copy of cached public primitive data;no test method calls.
++            frozen = json.loads(bounded_canonical(value, 65536))
++            require(type(frozen) is dict and frozen.get("id") in self.rows, "DETAIL_CASE_IDENTITY")
++            detail_tid = frozen["id"]
++            require(self.rows[detail_tid]["group"] == group and len(self.details) < 68,
++                "DETAIL_GROUP_IDENTITY")
++            detail_index = len(self.details)
++            self.details.append(frozen)
++            self.rows[detail_tid]["detail_indices"].append(detail_index)
++            self.rows[detail_tid]["details_status"] = "CAPTURED_IN_MEMORY"
++            new_details.append({"index": detail_index, "id": detail_tid,
++                "raw_sha256": hashlib.sha256(canonical(frozen)).hexdigest(), "value": frozen})
++            cursor += 1
++            # Advance immediately after memory capture;never duplicate on failure.
++            self.detail_cursors[group] = cursor
++        partial_checks = None
++        if not row["detail_indices"]:
++            row["details_status"] = "MISSING_OR_INTERRUPTED"
++            self.incomplete("CASE_DETAILS_INCOMPLETE")
++            test_data = object.__getattribute__(test, "__dict__")
++            checks = test_data.get("checks")
++            if type(checks) is list:
++                partial_checks = json.loads(bounded_canonical(checks, 65536))
++                row["partial_checks"] = partial_checks
++        return new_details, partial_checks
++
++    def end_case(self, tid, module, test, interrupted):
++        if self.case_lifecycle[tid] == "NOT_RUN": return
++        self.case_lifecycle[tid] = "INTERRUPTED" if interrupted else "COMPLETED"
++        if tid not in self.rows:
++            self.incomplete("CASE_ROW_ALLOCATION_INCOMPLETE")
++            return
++        row = self.rows[tid]
++        row["case_call_completed"] = not interrupted
++        row["case_interrupted"] = interrupted
++        if not self.case_callback_counts[tid]:
++            row["status"] = "RUNNING_INTERRUPTED" if interrupted else "UNKNOWN"
++            self.incomplete("CASE_TERMINAL_RESULT_UNKNOWN")
++        new_details, partial_checks = self.capture_case_details(tid, module, test, interrupted)
++        record = {"observed": {"schema": "r38-case-evidence/1", "id": tid,
++            "group": row["group"], "source_hash": row["source_hash"],
++            "case_call_completed": row["case_call_completed"], "case_interrupted": interrupted,
++            "observed_callback_statuses": [x for x in self.case_statuses[tid] if x is not None],
++            "callback_overflow": self.case_overflow[tid],
++            "outcome_records": row["events"], "details_status": row["details_status"],
++            "new_details": new_details, "partial_checks": partial_checks,
++            "diagnostic_display": row["detail"], "diagnostic_status": row["diagnostic_status"]},
++            "persistence_state": "RESULT_OBSERVED_IN_MEMORY", "RESULT_DURABLE": False,
++            "checkpoint_ref": None}
++        # The final case row holds the acknowledgement,not another copy of
++        # original DETAILS. Full values remain in self.details and the journal.
++        row["end_record"] = {"id": tid, "persistence_state": "RESULT_OBSERVED_IN_MEMORY",
++            "RESULT_DURABLE": False, "checkpoint_ref": None}
++        try:
++            committed = self.commit_case_record(record, "TEST_CASE_EVIDENCE")
++        finally:
++            row["end_record"].update({key: record[key] for key in
++                ("persistence_state", "RESULT_DURABLE", "checkpoint_ref")})
++        if committed:
++            for detail in new_details:
++                self.detail_refs[str(detail["index"])] = record["checkpoint_ref"]
++                self.rows[detail["id"]]["details_status"] = "DETAILS_CHECKPOINT_COMMITTED"
++        require(committed, "CASE_EVIDENCE_CHECKPOINT_UNCONFIRMED")
++
++    def case_partition(self):
++        rows = self.assertion_rows()
++        known = {x["id"] for x in rows if len(x["observed_statuses"]) == 1
++            and not self.case_overflow[x["id"]]}
++        return {"denominator": 68,
++            "completion_basis": "original callback outcome;case-call return and persistence are separate",
++            "case_counting_basis": "one frozen ID per case;multiple original outcomes remain UNKNOWN in case counts",
++            "observed_original_callback_counts": {status: sum(
++                value == status for slots in self.case_statuses.values() for value in slots)
++                for status in ("PASS", "FAIL", "ERROR", "SKIP")},
++            "confirmed_result_set": [x["id"] for x in rows if x["id"] in known],
++            "begun_result_unconfirmed_set": [x["id"] for x in rows if x["executed"] and x["id"] not in known],
++            "not_started": [x["id"] for x in rows if not x["executed"]],
++            "started_without_outcome": [x["id"] for x in rows if x["executed"] and not x["observed_statuses"]],
++            "outcomes_observed": [x["id"] for x in rows if x["observed_statuses"]],
++            "outcome_unknown_or_multiple": [x["id"] for x in rows if x["status"] == "UNKNOWN"],
++            "case_calls_completed": [x["id"] for x in rows if x.get("case_call_completed") is True],
++            "case_calls_interrupted": [x["id"] for x in rows if x.get("case_interrupted") is True],
++            "durable_outcomes": [x["id"] for x in rows if x["RESULT_DURABLE"] is True],
++            "memory_only_or_uncertain_outcomes": [x["id"] for x in rows
++                if x["observed_statuses"] and x["RESULT_DURABLE"] is not True]}
++
+     def capture_details(self, values):
+         require(type(values) is list and len(self.details) + len(values) <= 68,
+             "TEST_DETAIL_COUNT_LIMIT")
+@@ -499,16 +848,18 @@
+             self.reserve_bytes(len(data), path)
+             if self.journal is None:
+                 self.journal = self.open_owned(path)
+-                stat = os.fstat(self.journal.fileno())
++                stat = descriptor_metadata(self.journal, path, "fstat")
+                 self.journal_identity = (stat.st_dev, stat.st_ino)
+-            stat = path.stat()
++            stat = metadata(path, "stat")
+             require((stat.st_dev, stat.st_ino) == self.journal_identity
+                 and stat.st_size == self.journal_bytes
+-                and self.journal.tell() == self.journal_bytes, "JOURNAL_IDENTITY_CHANGED")
++                and descriptor_metadata(self.journal, path, "tell") == self.journal_bytes, "JOURNAL_IDENTITY_CHANGED")
+             self.io_write(self.journal, path, data)
+             self.journal_sequence += 1
+             self.journal_head = digest
+             self.journal_bytes += len(data)
++            return {"seq": self.journal_sequence, "sha256": digest,
++                "stage": stage, "test_id": self.current, "path": str(path)}
+ 
+     def failure(self, stage, error):
+         code = "UNKNOWN_EXCEPTION"
+@@ -550,18 +901,36 @@
+             return False
+ 
+     def assertion_rows(self):
+-        return [{**{k: x[k] for k in ("test_source", "test_callable", "original_expected", "source_hash")},
+-                 **self.rows.get(x["test_id"], {"id": x["test_id"], "status": "NOT_RUN", "executed": False})}
+-                for x in self.manifest["tests"]]
++        rows = []
++        for spec in self.manifest["tests"]:
++            tid = spec["test_id"]
++            started = self.case_lifecycle[tid] != "NOT_RUN"
++            statuses = [x for x in self.case_statuses[tid] if x is not None]
++            status = ("UNKNOWN" if len(statuses) > 1 or self.case_overflow[tid] else statuses[0]) if statuses else (
++                "RUNNING_INTERRUPTED" if self.case_lifecycle[tid] == "INTERRUPTED" else
++                "UNKNOWN" if self.case_lifecycle[tid] == "COMPLETED" else "RUNNING" if started else "NOT_RUN")
++            row = {**{k: spec[k] for k in ("test_source", "test_callable", "original_expected", "source_hash")},
++                **self.rows.get(tid, {"id": tid, "group": spec["test_source"]}), "status": status, "executed": started,
++                "case_call_completed": self.case_lifecycle[tid] == "COMPLETED",
++                "case_interrupted": self.case_lifecycle[tid] == "INTERRUPTED",
++                "observed_statuses": statuses}
++            records = row.get("events", [])
++            row["RESULT_DURABLE"] = bool(records) and len(records) == len(statuses) and all(
++                x["RESULT_DURABLE"] is True for x in records)
++            if records and any(x["RESULT_DURABLE"] == "UNKNOWN" for x in records):
++                row["RESULT_DURABLE"] = "UNKNOWN"
++            if statuses and not records: row["RESULT_DURABLE"] = "UNKNOWN"
++            rows.append(row)
++        return rows
+ 
+     def assertion_counts(self):
+         rows = self.assertion_rows()
+-        return {key: sum(x["status"] == key for x in rows)
+-            for key in ("PASS", "FAIL", "ERROR", "SKIP", "BLOCKED", "NOT_RUN")}
++        return {key: sum(x["status"] == key for x in rows) for key in
++            ("PASS", "FAIL", "ERROR", "SKIP", "BLOCKED", "NOT_RUN", "RUNNING", "RUNNING_INTERRUPTED", "UNKNOWN")}
+ 
+     def finish_assertions(self):
+         if not self.tests_finished:
+-            self.checkpoint("TESTS_FINISHED", {"counts": self.assertion_counts(),
++            self.checkpoint("TESTS_FINISHED", {"counts": self.assertion_counts(), "case_partition": self.case_partition(),
+                 "cases": self.assertion_rows(), "executed_order": list(self.rows),
+                 "details": self.details, "projections": self.projections, "finalized": False})
+             self.tests_finished = True
+@@ -596,9 +965,7 @@
+         return text
+ 
+     def sizes(self):
+-        files = [checked(p, output=True) for p in OUTPUT.rglob("*") if p.is_file()]
+-        require(len(files) <= 13, "RESOURCE_FILE_COUNT")
+-        return sum(p.stat().st_size for p in files)
++        return sum(metadata(p, "stat").st_size for p in self.output_files())
+ 
+     def reserve_bytes(self, size, path):
+         """Debit BEFORE I/O. Failed, short and uncertain attempts are never refunded."""
+@@ -624,7 +991,7 @@
+         require(type(size) is int and size >= 0 and row["charged_bytes"] + size <= cap,
+             "EVIDENCE_BUDGET_INSUFFICIENT")
+         # External mutation is a failed ownership contract, never free space.
+-        visible = p.stat().st_size if p.exists() else 0
++        visible = metadata(p, "stat").st_size if metadata(p, "exists") else 0
+         require(visible <= row["charged_bytes"], "UNACCOUNTED_EVIDENCE_BYTES")
+         row["SERIALIZED_BYTES"] += size
+         row["charged_bytes"] += size
+@@ -779,6 +1146,8 @@
+         raise PermissionError(errno.EACCES, "PINNED_SOURCE_CACHE_POLICY", str(path))
+ 
+     def audit(self, event, args):
++        if self.terminal and event in {"os.listdir", "os.scandir"}:
++            self.terminal_read_gate(Path(args[0]), "directory_open")
+         if self.terminal and event in {"import", "exec", "sqlite3.connect"}:
+             self.refuse("TERMINAL_WORK_REFUSED")
+         if event == "import":
+@@ -823,8 +1192,9 @@
+                 require(p == self.opening_output, "UNMETERED_OUTPUT_OPEN_REFUSED")
+                 if p.name in {x[0] for x in ALLOWED_D24_INPUTS}:
+                     require(self.d24_active and self.current == "D24", "PATH_PROJECTION_REJECTED")
+-            elif self.terminal and not p.is_relative_to(OUTPUT):
+-                self.refuse("TERMINAL_SOURCE_READ_REFUSED")
++            elif self.terminal:
++                self.terminal_read_gate(p, "content_open")
++                checked(p, output=True)
+             elif not self.terminal and time.perf_counter() >= self.work_deadline:
+                 self.refuse("WORK_DEADLINE_OR_STOP")
+             elif p.suffix.lower() == ".pyc":
+@@ -1313,29 +1683,39 @@
+ 
+     def startTest(self, test):
+         self.started = time.perf_counter_ns()
++        tid = test._testMethodName.split("_")[1]
++        self.state.begin_case(tid)
+         super().startTest(test)
+ 
+     def _exc_info_to_string(self, error, test):
+         descriptor = self.state.exception_record(error[1])
+         raw = bounded_canonical(descriptor, MAX_EXCEPTION_JSON_BYTES).decode("ascii")
+-        try: return self.state.evidence_text(raw, MAX_TEXT_JSON_BYTES)
++        try: text = self.state.evidence_text(raw, MAX_TEXT_JSON_BYTES)
+         except Refusal:
+-            return "EVIDENCE_CONTRACT_UNSATISFIED: bounded exception descriptor exceeds test text field"
+-
+-    def record(self, test, status, detail=None):
++            text = "EVIDENCE_CONTRACT_UNSATISFIED: bounded exception descriptor exceeds test text field"
+         tid = test._testMethodName.split("_")[1]
+-        require(tid not in self.state.rows, "DUPLICATE_TEST_RESULT")
+-        self.state.rows[tid] = {"id": tid, "status": status, "executed": True,
+-            "elapsed_ns": time.perf_counter_ns() - self.started,
+-            "detail": None if detail is None else self.state.evidence_text(detail, MAX_TEXT_JSON_BYTES)}
+-        self.state.checkpoint("TEST_ASSERTION", self.state.rows[tid])
+-
+-    def addSuccess(self, test): super().addSuccess(test); self.record(test, "PASS")
++        if tid in self.state.rows:
++            self.state.rows[tid]["detail"] = text
++            self.state.rows[tid]["diagnostic_status"] = "INCOMPLETE_ORIGINAL_FULL_TEXT_NOT_PRESERVED"
++        return text
++
++    def record(self, test, status, error=None):
++        tid = test._testMethodName.split("_")[1]
++        return self.state.observe_result(tid, status, time.perf_counter_ns() - self.started, error)
++
++    def addSuccess(self, test):
++        self.record(test, "PASS")
++        super().addSuccess(test)
+     def addFailure(self, test, error):
+-        super().addFailure(test, error); self.record(test, "FAIL", self._exc_info_to_string(error, test))
++        self.record(test, "FAIL", error[1])
++        super().addFailure(test, error)
+     def addError(self, test, error):
+-        super().addError(test, error); self.record(test, "ERROR", self._exc_info_to_string(error, test))
+-    def addSkip(self, test, reason): super().addSkip(test, reason); self.record(test, "SKIP", reason)
++        self.record(test, "ERROR", error[1])
++        super().addError(test, error)
++    def addSkip(self, test, reason):
++        self.record(test, "SKIP")
++        self.state.rows[test._testMethodName.split("_")[1]]["detail"] = self.state.evidence_text(reason, MAX_TEXT_JSON_BYTES)
++        super().addSkip(test, reason)
+ 
+ 
+ class OrderedSuite(unittest.TestSuite):
+@@ -1346,11 +1726,25 @@
+         for test in self:
+             self.state.check_work()
+             if result.shouldStop: break
+-            self.state.current = test._testMethodName.split("_")[1]
+-            if self.state.current == "D24":
+-                with D24Projection(self.state, self.module): test(result)
+-            else:
+-                test(result)
++            tid = test._testMethodName.split("_")[1]
++            self.state.current = tid
++            escaped = False
++            try:
++                if tid == "D24":
++                    with D24Projection(self.state, self.module): test(result)
++                else:
++                    test(result)
++            except BaseException:
++                escaped = True
++                self.state.begin_terminal()
++                raise
++            finally:
++                try:
++                    self.state.end_case(tid, self.module, test, escaped)
++                except BaseException as error:
++                    self.state.incomplete("CASE_EVIDENCE_FINALIZATION_FAILED")
++                    self.state.failure("CASE_EVIDENCE_FINALIZATION", error)
++                    if not escaped: raise
+             if result.skipped: result.stop()
+         self.state.current = None
+         return result
+@@ -1447,7 +1841,10 @@
+     except BaseException as error:
+         state.safe_checkpoint("FAILED", state.failure("RESOURCE_AUDIT", error))
+     counts, rows = state.assertion_counts(), state.assertion_rows()
+-    assertion_ok = counts == {"PASS": 68, "FAIL": 0, "ERROR": 0, "SKIP": 0, "BLOCKED": 0, "NOT_RUN": 0}
++    assertion_ok = len(rows) == 68 and all(x["status"] == "PASS" for x in rows)
++    case_evidence_ok = all(x["RESULT_DURABLE"] is True
++        and x.get("end_record", {}).get("RESULT_DURABLE") is True
++        and x.get("details_status") == "DETAILS_CHECKPOINT_COMMITTED" for x in rows)
+     provenance_ok = state.work_audits["provenance"] and bool(state.origins) and not state.origin_failures and all(
+         x["status"] == "VERIFIED_WITHIN_DECLARED_SCOPE" for x in state.origins)
+     state.safe_checkpoint("RESOURCE_AUDIT", {"meter": state.meter, "memory": memory,
+@@ -1461,26 +1858,29 @@
+         "fixtures": [{"module_name": "NOT_APPLICABLE", "classification": "TRUSTED_FROZEN_FIXTURE" if integrity else "UNKNOWN",
+             **x} for x in state.manifest["fixture_files"]]}
+     origins_written = state.publish("MODULE_ORIGINS.json", origins)
+-    ledger = {"schema": "r33-resource-ledger/1", "meter": state.meter, "memory": memory,
++    ledger = {"schema": "r38-resource-ledger/1", "meter": state.meter, "memory": memory,
+         "elapsed_seconds_at_resource_audit": elapsed, "history_integrity_verified": integrity,
+         "resource_audit_passed": resource_ok, "output_isolation": "fixed13 paths;exclusive creation;owned append-only checkpoint",
+         "current_engineering_source_matches_lock": state.build_verified,
+         "native_VFS_and_thread_peak": "UNKNOWN", "RAM_hard_limit": "UNASSIGNED",
+         "real_P1_P2_DB_key_service": 0, "errors": list(state.errors),
+         "output_bytes_at_resource_audit": state.sizes(), "byte_accounting": state.byte_ledger,
++        "case_partition": state.case_partition(), "detail_checkpoint_refs": state.detail_refs,
++        "terminal_read_audit": state.read_audit,
+         "evidence_complete": state.evidence_complete, "evidence_issues": sorted(state.evidence_issues),
+         "finalization_incomplete": state.finalization_incomplete,
+         "terminal_write_attempts": state.terminal_attempts,
+         "accounting_snapshot": "at ledger serialization;later writes retained in memory/receipt when available"}
+     ledger_written = state.publish("RESOURCE_LEDGER.json", ledger)
+-    eligible = (assertion_ok and provenance_ok and resource_ok and integrity and primary is None
++    eligible = (assertion_ok and case_evidence_ok and provenance_ok and resource_ok and integrity and primary is None
+         and not state.errors and not state.meter["denials"] and state.persistence_ok
+         and origins_written and ledger_written and state.evidence_complete
+         and not state.finalization_incomplete)
+     if not state.safe_checkpoint("FINALIZATION_READY", {"counts": counts, "eligible": eligible,
+         "errors": state.errors, "artifacts": state.artifacts}): eligible = False
+-    final = {"schema": "r33-current-build-regression68/1", "suite": "regression68", "counts": counts,
++    final = {"schema": "r38-current-build-regression68/1", "suite": "regression68", "counts": counts,
+         "cases": rows, "details": state.details, "passed": eligible,
++        "case_partition": state.case_partition(), "case_evidence_complete": case_evidence_ok,
+         "TEST_ASSERTIONS": {"counts": counts, "all_68_passed": assertion_ok},
+         "DEPENDENCY_PROVENANCE": {"verified": provenance_ok, "failures": state.origin_failures},
+         "RESOURCE_AND_INTEGRITY": {"resource_ok": resource_ok, "integrity_ok": integrity},
+@@ -1570,11 +1970,10 @@
+                         module, suite = load_group(state, phase, cls)
+                         result = unittest.TextTestRunner(stream=log, verbosity=2, failfast=True,
+                             resultclass=lambda *a, **kw: Results(*a, state=state, **kw)).run(suite)
+-                        state.capture_details(module.DETAILS)
+                         state.checkpoint("PHASE_ASSERTIONS_FINISHED", {"phase": phase,
+                             "counts": state.assertion_counts(), "meter": state.meter,
+                             "details": module.DETAILS, "projection": state.projections})
+-                        if len(state.rows) == 68 or not result.wasSuccessful() or result.skipped:
++                        if all(x != "NOT_RUN" for x in state.case_lifecycle.values()) or not result.wasSuccessful() or result.skipped:
+                             state.finish_assertions()
+                         state.origins_snapshot(phase + "_finished")
+                         state.close_connections()
+@@ -1608,16 +2007,16 @@
+             print(json.dumps({"counts": counts, "eligible_pending_commit": passed, "results": str(RUN / "RESULTS.json")}))
+     # All redirected streams are closed/fsynced before this logical commit.
+     artifacts = dict(state.artifacts)
+-    for path in sorted(OUTPUT.rglob("*")):
+-        if path.is_file():
+-            checked(path, output=True)
+-            artifacts[path.relative_to(OUTPUT).as_posix()] = {"path": str(path), "sha256": sha(path)}
+-    receipt_ok = state.publish("TEST_RUNS.json", {"schema": "r33-run-commit/1", "status": "FINALIZED" if passed else "FAILED",
++    for path in state.output_files():
++        artifacts[path.relative_to(OUTPUT).as_posix()] = {"path": str(path), "sha256": sha(path)}
++    receipt_ok = state.publish("TEST_RUNS.json", {"schema": "r38-run-commit/1", "status": "FINALIZED" if passed else "FAILED",
+         "FULL_CONTRACT_ACCEPTED": passed, "artifacts": artifacts, "journal_head": state.journal_head,
+         "journal_events": state.journal_sequence, "errors": list(state.errors),
+         "runs": [{"path": str(RUN / "RESULTS.json"), "sha256": state.artifacts.get("RESULTS.json", {}).get("sha256", "UNKNOWN"),
+             "counts": counts, "passed": passed}], "native_exit_required": 0 if passed else 1,
+         "byte_accounting_before_receipt": state.byte_ledger,
++        "case_partition": state.case_partition(), "terminal_read_audit": state.read_audit,
++        "native_exit_observed": "UNKNOWN",
+         "evidence_complete": state.evidence_complete, "evidence_issues": sorted(state.evidence_issues),
+         "FINALIZATION_INCOMPLETE": state.finalization_incomplete})
+     try: state.close_journal()
+@@ -1625,7 +2024,9 @@
+         state.failure("PERSIST_JOURNAL_CLOSE", error)
+         passed = False
+     timely = time.perf_counter() < state.terminal_deadline
+-    handles_closed = all(stream.closed for stream in state.owned_handles.values())
++    state.close_read_handles()
++    handles_closed = all(stream.closed for stream in state.owned_handles.values()) and all(
++        item["stream"] is None or item["stream"].closed for item in state.read_handles)
+     return 0 if (passed and receipt_ok and timely and handles_closed and state.persistence_ok
+         and not state.finalization_incomplete) else 1
+ 
+@@ -1640,14 +2041,15 @@
+             state.finalization_incomplete = True
+             row = state.failure("HARNESS_FINALIZATION_ERROR", error)
+             try:
+-                if RUN.is_dir() and not state.journal_closed:
++                if metadata(RUN, "is_dir") and not state.journal_closed:
+                     state.safe_checkpoint("RECOVERY_REQUIRED", {"error": row,
+                         "counts": state.assertion_counts(), "recorded_test_ids": list(state.rows),
+                         "run_incomplete": True})
+                 if "TEST_RUNS.json" not in state.write_attempted_paths:
+-                    state.publish("TEST_RUNS.json", {"schema": "r35-run-commit/1", "status": "FAILED",
++                    state.publish("TEST_RUNS.json", {"schema": "r38-run-commit/1", "status": "FAILED",
+                         "FULL_CONTRACT_ACCEPTED": False, "FINALIZATION_INCOMPLETE": True,
+                         "counts": state.assertion_counts(), "error": row,
++                        "case_partition": state.case_partition(), "native_exit_observed": "UNKNOWN",
+                         "journal_head": state.journal_head, "journal_events": state.journal_sequence,
+                         "native_exit_required": 1})
+             except BaseException as evidence_error:
+@@ -1658,6 +2060,8 @@
+                     except BaseException: state.persistence_ok = False
+                 try: state.close_journal()
+                 except BaseException: state.persistence_ok = False
++                try: state.close_read_handles()
++                except BaseException: state.persistence_ok = False
+                 for path, stream in state.owned_handles.items():
+                     try: state.close_owned(stream, path)
+                     except BaseException: state.persistence_ok = False

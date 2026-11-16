@@ -1,0 +1,382 @@
+"""Owned synthetic SQLite only. Mature transactions; no AuthorityStore linkage."""
+import hashlib
+import os
+import sqlite3
+import time
+import uuid
+from pathlib import Path
+
+from .dsat_commit_types import (
+    Actor, CommitError, DB_ROOT, Limits, MAX_REVISION, MODE, NATIVE_GAP, RUN_ROOT,
+    Proposal, canonical, clone, digest, ident, integer, object_digest,
+    obligation, O_digest, strict_load, validate_world,
+)
+from .dsat_commit import artifact_path, base_digests, ValidateDSatCommit
+
+
+APPLICATION_ID = 0x44534133
+TABLES = ("s3a_state", "s3a_events", "s3a_proposals", "s3a_objects")
+DDL = (
+    "CREATE TABLE s3a_state(id INTEGER PRIMARY KEY CHECK(id=1), version INTEGER NOT NULL CHECK(typeof(version)='integer' AND version>=0), payload BLOB NOT NULL)",
+    "CREATE TABLE s3a_events(version INTEGER PRIMARY KEY, event_id TEXT NOT NULL UNIQUE, operation TEXT NOT NULL, projection BLOB NOT NULL, event_digest TEXT NOT NULL)",
+    "CREATE TABLE s3a_proposals(authority_instance TEXT NOT NULL, proposal_id TEXT NOT NULL, owner TEXT NOT NULL, proposal_digest TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('ACCEPTED','REJECTED')), receipt BLOB NOT NULL, receipt_digest TEXT NOT NULL, PRIMARY KEY(authority_instance,proposal_id))",
+    "CREATE TABLE s3a_objects(object_digest TEXT PRIMARY KEY, kind TEXT NOT NULL, canonical_bytes BLOB NOT NULL, byte_count INTEGER NOT NULL)",
+)
+
+
+def _file_identity(path):
+    stat = path.stat()
+    return [stat.st_dev, stat.st_ino]
+
+
+class SyntheticStore:
+    """Trusted, single-host test root; multiple owned SQLite connections allowed."""
+    def __init__(self, path, limits=Limits()):
+        self.path = artifact_path(path)
+        try:
+            self.path.relative_to(DB_ROOT)
+        except ValueError as exc:
+            raise CommitError("DB_PATH_DENIED") from exc
+        if self.path.parent != DB_ROOT or not self.path.match("dsat_s3a_*.sqlite3"):
+            raise CommitError("DB_PATH_DENIED")
+        self.ticket = self.path.with_suffix(".ticket.json")
+        self.limits = limits
+        self.metrics = []
+
+    def _ticket(self):
+        artifact_path(self.path); artifact_path(self.ticket)
+        if not self.path.is_file() or not self.ticket.is_file():
+            raise CommitError("DB_IDENTITY_MISMATCH")
+        t = strict_load(self.ticket.read_bytes(), 16384)
+        if t["path"] != str(self.path) or t["identity"] != _file_identity(self.path) or t["status"] != "READY":
+            raise CommitError("DB_IDENTITY_MISMATCH")
+        if t["mode"] != MODE or t["application_id"] != APPLICATION_ID:
+            raise CommitError("DB_IDENTITY_MISMATCH")
+        return t
+
+    def _configure(self, conn):
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA temp_store=MEMORY")
+        conn.execute("PRAGMA synchronous=FULL")
+        conn.execute("PRAGMA busy_timeout=" + str(self.limits.busy_ms))
+        conn.execute("PRAGMA max_page_count=" + str(self.limits.db_pages))
+
+    def _connect(self):
+        ticket = self._ticket()  # Refuse unknown existing paths before sqlite3.connect.
+        conn = sqlite3.connect(self.path.as_uri() + "?mode=rw", uri=True, isolation_level=None,
+                               timeout=self.limits.busy_ms / 1000)
+        try:
+            if conn.execute("PRAGMA application_id").fetchone()[0] != APPLICATION_ID:
+                raise CommitError("DB_IDENTITY_MISMATCH")
+            if conn.execute("PRAGMA user_version").fetchone()[0] != 1:
+                raise CommitError("UNSUPPORTED_SCHEMA")
+            if conn.execute("PRAGMA journal_mode").fetchone()[0].lower() != "wal":
+                raise CommitError("DB_IDENTITY_MISMATCH")
+            _, world = self._state(conn)
+            if world["authority_instance"] != ticket["instance"]:
+                raise CommitError("DB_IDENTITY_MISMATCH")
+            self._configure(conn)
+            return conn
+        except BaseException:
+            conn.close()
+            raise
+
+    def create(self, seed):
+        validate_world(seed["world"], self.limits); integer(seed["a"])
+        if seed["world"]["genesis_revision"] != seed["a"]:
+            raise CommitError("DB_IDENTITY_MISMATCH")
+        artifact_path(DB_ROOT).mkdir(parents=True, exist_ok=True)
+        if self.path.exists() or self.ticket.exists():
+            raise CommitError("DB_IDENTITY_MISMATCH")
+        fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        os.close(fd)
+        t = {"path": str(self.path), "identity": _file_identity(self.path),
+             "instance": seed["world"]["authority_instance"], "nonce": uuid.uuid4().hex,
+             "mode": MODE, "application_id": APPLICATION_ID, "schema": 1,
+             "status": "INITIALIZING", "genesis_digest": digest("state", seed["world"])}
+        with self.ticket.open("xb") as handle:
+            handle.write(canonical(t)); handle.flush(); os.fsync(handle.fileno())
+        conn = sqlite3.connect(self.path.as_uri() + "?mode=rw", uri=True, isolation_level=None)
+        try:
+            conn.execute("PRAGMA page_size=4096")
+            conn.execute("PRAGMA journal_mode=WAL")
+            self._configure(conn)
+            conn.execute("BEGIN IMMEDIATE")
+            for statement in DDL:
+                conn.execute(statement)
+            for table in TABLES[1:]:
+                for operation in ("UPDATE", "DELETE"):
+                    conn.execute(f"CREATE TRIGGER immutable_{table}_{operation} BEFORE {operation} ON {table} BEGIN SELECT RAISE(ABORT,'IMMUTABLE'); END")
+            conn.execute("PRAGMA application_id=" + str(APPLICATION_ID))
+            conn.execute("PRAGMA user_version=1")
+            conn.execute("INSERT INTO s3a_state VALUES(1,?,?)", (seed["a"], canonical(seed["world"])))
+            conn.execute("COMMIT")
+        except BaseException:
+            if conn.in_transaction:
+                conn.rollback()
+            raise
+        finally:
+            conn.close()
+        t["status"] = "READY"
+        temp = self.ticket.with_suffix(".ready.json")
+        with temp.open("xb") as handle:
+            handle.write(canonical(t)); handle.flush(); os.fsync(handle.fileno())
+        os.replace(temp, self.ticket)
+        return self
+
+    def _state(self, conn):
+        row = conn.execute("SELECT version,payload FROM s3a_state WHERE id=1").fetchone()
+        if row is None:
+            raise CommitError("DB_IDENTITY_MISMATCH")
+        integer(row[0]); world = strict_load(bytes(row[1]), self.limits.world_bytes)
+        validate_world(world, self.limits)
+        return row[0], world
+
+    def read(self):
+        start = time.perf_counter_ns(); conn = self._connect()
+        try:
+            a, world = self._state(conn)
+            return {"a": a, "world": world}
+        finally:
+            conn.close(); self.metrics.append({"operation": "read", "read_ns": time.perf_counter_ns() - start})
+
+    def recover(self):
+        start = time.perf_counter_ns(); conn = self._connect()
+        try:
+            a, world = self._state(conn)
+            previous = world["genesis_revision"]
+            last = None
+            for version, projection, event_hash in conn.execute("SELECT version,projection,event_digest FROM s3a_events ORDER BY version"):
+                data = strict_load(bytes(projection), self.limits.event_bytes)
+                if version != previous + 1 or digest("event", data) != event_hash:
+                    raise CommitError("DB_IDENTITY_MISMATCH")
+                previous, last = version, data
+            if previous != a or (last is not None and last["world_digest"] != digest("state", world)):
+                raise CommitError("DB_IDENTITY_MISMATCH")
+            if last is None and digest("state", world) != self._ticket()["genesis_digest"]:
+                raise CommitError("DB_IDENTITY_MISMATCH")
+            objects = {}
+            for ref, kind, data, size in conn.execute("SELECT * FROM s3a_objects"):
+                value = strict_load(bytes(data))
+                if len(data) != size or object_digest(kind, value) != ref:
+                    raise CommitError("DB_IDENTITY_MISMATCH")
+                objects[ref] = (kind, value)
+            refs = world["dsat"]["accepted_proof_refs"] + world["dsat"]["history_refs"] + list(world["dsat"]["work_index"].values())
+            for item in world["dsat"]["O"]:
+                if item["retained"] is not None:
+                    refs.append(object_digest("risk", item["retained"]))
+            if any(ref not in objects for ref in refs):
+                raise CommitError("DB_IDENTITY_MISMATCH")
+            for receipt, receipt_hash in conn.execute("SELECT receipt,receipt_digest FROM s3a_proposals"):
+                rec = strict_load(bytes(receipt), self.limits.receipt_bytes)
+                if digest("receipt", rec) != receipt_hash or any(ref not in objects for ref in rec["object_refs"]):
+                    raise CommitError("DB_IDENTITY_MISMATCH")
+            return {"a": a, "world": world}
+        except sqlite3.DatabaseError as exc:
+            raise CommitError("DB_IDENTITY_MISMATCH") from exc
+        finally:
+            conn.close(); self.metrics.append({"operation": "recover", "recovery_ns": time.perf_counter_ns() - start})
+
+    def _resource_guard(self):
+        for suffix, cap in (("-wal", self.limits.wal_bytes), ("-shm", self.limits.shm_bytes)):
+            side = Path(str(self.path) + suffix)
+            if side.exists() and side.stat().st_size >= cap:
+                raise CommitError("UNKNOWN_RESOURCE_LIMIT")
+        size = 0
+        for root, dirs, files in os.walk(RUN_ROOT, followlinks=False):
+            for name in dirs:
+                artifact_path(Path(root) / name)
+            for name in files:
+                file = artifact_path(Path(root) / name)
+                size += file.stat().st_size
+                if size >= self.limits.run_bytes:
+                    raise CommitError("UNKNOWN_RESOURCE_LIMIT")
+
+    @staticmethod
+    def _access(world, actor, right):
+        return world["permissions"].get(actor.name, {}).get(right) is True
+
+    def _receipt(self, body, a, old, new, result, accepted, refs=None):
+        return {"authority_instance": old["authority_instance"], "proposal_id": body["proposal_id"],
+                "owner": body["actor"], "proposal_digest": body["proposal_digest"],
+                "status": "ACCEPTED" if accepted else "REJECTED", "result": result,
+                "base_a": body["base_authority_revision"], "base_o": body["base_obligation_revision"],
+                "a": a, "o": new["dsat"]["obligation_revision"],
+                "base_O_digest": O_digest(old["dsat"]["O"]),
+                "projection_O_digest": body["projection_O_digest"],
+                "proof_context_O_digest": body["proof_context_O_digest"],
+                "O_after_digest": O_digest(new["dsat"]["O"]),
+                "object_refs": refs or [], "event_ref": a if accepted else None,
+                "work_refs": list(new["dsat"]["work_index"].values()) if accepted else [],
+                "scope": body["request_scope_digest"], "current_use": "INPUT_TIME_HISTORY_ONLY",
+                "native_admission": NATIVE_GAP, "global_complete": False}
+
+    def _insert_receipt(self, conn, body, receipt):
+        encoded = canonical(receipt)
+        if len(encoded) > self.limits.receipt_bytes:
+            raise CommitError("UNKNOWN_RESOURCE_LIMIT")
+        conn.execute("INSERT INTO s3a_proposals VALUES(?,?,?,?,?,?,?)", (
+            body["authority_instance"], body["proposal_id"], body["actor"], body["proposal_digest"],
+            receipt["status"], encoded, digest("receipt", receipt)))
+
+    def commit(self, proposal, actor, registry, now=100, hook=None):
+        start = time.perf_counter_ns(); timing = {"operation": "commit"}; conn = None
+        commit_attempted = False
+        hook = hook or (lambda stage, connection: None)
+        try:
+            body = Proposal.parse(proposal, self.limits).body
+            if not isinstance(actor, Actor) or body["actor"] != actor.name:
+                raise CommitError("REJECT_UNAUTHORIZED")
+            conn = self._connect(); hook("before_begin", conn)
+            begin = time.perf_counter_ns(); conn.execute("BEGIN IMMEDIATE")
+            timing["lock_wait_ns"] = time.perf_counter_ns() - begin
+            read_start = time.perf_counter_ns(); a, world = self._state(conn)
+            timing["read_ns"] = time.perf_counter_ns() - read_start
+            hook("after_read", conn)
+            if body["authority_instance"] != world["authority_instance"]:
+                raise CommitError("DB_IDENTITY_MISMATCH")
+            row = conn.execute("SELECT owner,proposal_digest,receipt FROM s3a_proposals WHERE authority_instance=? AND proposal_id=?",
+                               (world["authority_instance"], body["proposal_id"])).fetchone()
+            if row is not None:
+                if row[0] != actor.name or not self._access(world, actor, "read"):
+                    raise CommitError("REJECT_UNAUTHORIZED")
+                if row[1] != body["proposal_digest"]:
+                    raise CommitError("CONFLICT_PROPOSAL_BODY")
+                conn.rollback()
+                return {"status": "REPLAY_HISTORICAL_RECEIPT", "receipt": strict_load(bytes(row[2])),
+                        "replayed": True, "current_use": "HISTORICAL_ONLY"}
+            if not self._access(world, actor, "write"):
+                raise CommitError("REJECT_UNAUTHORIZED")
+            if conn.execute("SELECT count(*) FROM s3a_proposals").fetchone()[0] >= self.limits.proposal_ids:
+                raise CommitError("UNKNOWN_RESOURCE_LIMIT")
+            self._resource_guard()
+            cas = time.perf_counter_ns()
+            rejection = None
+            if (a, world["dsat"]["obligation_revision"]) != (body["base_authority_revision"], body["base_obligation_revision"]):
+                rejection = "REJECTED_REVISION"
+            elif any(body[k] != v for k, v in base_digests(world).items()) or body["policy_epoch"] != world["policy_epoch"]:
+                rejection = "REJECTED_BASE_DIGEST"
+            timing["CAS_ns"] = time.perf_counter_ns() - cas
+            if rejection is None:
+                try:
+                    if a == MAX_REVISION:
+                        raise CommitError("REVISION_EXHAUSTED")
+                    plan = ValidateDSatCommit(body, {"a": a, "world": world}, registry, now, self.limits)
+                    timing["O_transform_ns"] = plan["O_transform_ns"]
+                except CommitError as exc:
+                    rejection = exc.code
+            if rejection is not None:
+                receipt = self._receipt(body, a, world, world, rejection, False)
+                self._insert_receipt(conn, body, receipt)
+            else:
+                new = plan["world"]; refs = []
+                obj_start = time.perf_counter_ns()
+                for kind, value in plan["objects"]:
+                    data = canonical(value); ref = object_digest(kind, value); refs.append(ref)
+                    existing = conn.execute("SELECT kind,canonical_bytes FROM s3a_objects WHERE object_digest=?", (ref,)).fetchone()
+                    if existing is None:
+                        conn.execute("INSERT INTO s3a_objects VALUES(?,?,?,?)", (ref, kind, data, len(data)))
+                    elif existing != (kind, data):
+                        raise CommitError("REJECTED_PROOF_BINDING")
+                timing["objects_write_ns"] = time.perf_counter_ns() - obj_start
+                hook("after_objects", conn)
+                ser = time.perf_counter_ns(); encoded = canonical(new)
+                timing["serialization_ns"] = time.perf_counter_ns() - ser
+                cursor = conn.execute("UPDATE s3a_state SET version=?,payload=? WHERE id=1 AND version=?", (a+1, encoded, a))
+                if cursor.rowcount != 1:
+                    raise CommitError("DB_IDENTITY_MISMATCH")
+                hook("after_state", conn)
+                event = {"a": a+1, "o": new["dsat"]["obligation_revision"], "world_digest": digest("state", new),
+                         "object_refs": sorted(set(refs)), "input_digest": body["proposal_digest"]}
+                if len(canonical(event)) > self.limits.event_bytes:
+                    raise CommitError("UNKNOWN_RESOURCE_LIMIT")
+                conn.execute("INSERT INTO s3a_events VALUES(?,?,?,?,?)", (a+1, "proposal:"+body["proposal_id"], "proposal", canonical(event), digest("event", event)))
+                receipt = self._receipt(body, a+1, world, new, plan["result"], True, sorted(set(refs)))
+                rr = time.perf_counter_ns(); self._insert_receipt(conn, body, receipt)
+                timing["receipt_write_ns"] = time.perf_counter_ns() - rr
+                hook("after_event_receipt", conn)
+            hook("before_commit", conn)
+            commit_attempted = True; stamp = time.perf_counter_ns(); conn.execute("COMMIT")
+            timing["COMMIT_ns"] = time.perf_counter_ns() - stamp
+            hook("after_commit", conn)
+            return {"status": receipt["result"], "receipt": receipt, "replayed": False,
+                    "current_use": "INPUT_TIME_HISTORY_ONLY"}
+        except CommitError as exc:
+            if conn is not None and conn.in_transaction:
+                conn.rollback()
+            return {"status": exc.code, "receipt": None, "persistent_binding": False}
+        except sqlite3.DatabaseError as exc:
+            if conn is not None and conn.in_transaction:
+                conn.rollback()
+            code = "UNKNOWN_COMMIT_OUTCOME" if commit_attempted else "UNKNOWN_STORAGE_BUSY" if "locked" in str(exc).lower() else "REJECTION_NOT_PERSISTED"
+            return {"status": code, "receipt": None, "persistent_binding": "UNKNOWN" if commit_attempted else False}
+        finally:
+            if conn is not None:
+                conn.close()
+            timing["elapsed_ns"] = time.perf_counter_ns() - start
+            self.metrics.append(timing)
+
+    def domain_event(self, event, actor=Actor("syn:system")):
+        """Explicit trusted test-world writer; never an exposed service route."""
+        if actor.name != "syn:system":
+            raise CommitError("REJECT_UNAUTHORIZED")
+        allowed = {"id", "kind", "add", "manager_write", "manager_read", "target_active", "source_changed"}
+        if set(event) - allowed or event.get("kind") not in {"revoke", "late", "third_grant", "O_only", "permission", "policy", "B_release", "B_result"}:
+            raise CommitError()
+        ident(event["id"]); conn = self._connect()
+        try:
+            conn.execute("BEGIN IMMEDIATE"); a, world = self._state(conn)
+            event_id = "domain:" + event["id"]
+            existing = conn.execute("SELECT projection FROM s3a_events WHERE event_id=?", (event_id,)).fetchone()
+            if existing:
+                data = strict_load(bytes(existing[0])); conn.rollback()
+                if data["input_digest"] != digest("domain", event):
+                    raise CommitError("CONFLICT_PROPOSAL_BODY")
+                return self.read()
+            self._resource_guard()
+            if a == MAX_REVISION:
+                raise CommitError("REVISION_EXHAUSTED")
+            new = clone(world)
+            for key, right in (("manager_write", "write"), ("manager_read", "read")):
+                if key in event:
+                    if type(event[key]) is not bool:
+                        raise CommitError()
+                    new["permissions"]["syn:manager"][right] = event[key]
+            if "target_active" in event:
+                if type(event["target_active"]) is not bool:
+                    raise CommitError()
+                new["simulation"]["target_active"] = event["target_active"]
+            if event.get("source_changed", True):
+                new["source"]["epoch"] += 1
+                new["source"]["events"].append(event["id"])
+            entries = {x["id"]: x for x in new["dsat"]["O"]}
+            for raw in event.get("add", []):
+                item = obligation(raw, digest("scope", world["scope"]))
+                if item["id"] in entries and entries[item["id"]]["descriptor"] != item["descriptor"]:
+                    raise CommitError("REJECTED_ORIGIN_SCOPE")
+                entries[item["id"]] = item
+            for item in entries.values():
+                item["dependency_epoch"] = new["source"]["epoch"]
+            new["dsat"]["O"] = sorted(entries.values(), key=lambda x: x["id"])
+            if O_digest(new["dsat"]["O"]) != O_digest(world["dsat"]["O"]):
+                if new["dsat"]["obligation_revision"] == MAX_REVISION:
+                    raise CommitError("REVISION_EXHAUSTED")
+                new["dsat"]["obligation_revision"] += 1
+            validate_world(new, self.limits)
+            conn.execute("UPDATE s3a_state SET version=?,payload=? WHERE version=?", (a+1, canonical(new), a))
+            projection = {"a": a+1, "o": new["dsat"]["obligation_revision"], "world_digest": digest("state", new),
+                          "object_refs": [], "input_digest": digest("domain", event)}
+            conn.execute("INSERT INTO s3a_events VALUES(?,?,?,?,?)", (a+1, event_id, event["kind"], canonical(projection), digest("event", projection)))
+            conn.execute("COMMIT")
+            return {"a": a+1, "world": new}
+        finally:
+            if conn.in_transaction:
+                conn.rollback()
+            conn.close()
+
+    def checkpoint(self):
+        conn = self._connect()
+        try:
+            return list(conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone())
+        finally:
+            conn.close()

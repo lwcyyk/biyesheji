@@ -1,0 +1,326 @@
+--- R40-frozen/run_dsat_current_build_regressions.py
++++ R41/run_dsat_current_build_regressions.py
+@@ -656,17 +656,22 @@
+             return record["persistence_state"] == "RESULT_CHECKPOINT_COMMITTED"
+         record.update(persistence_state="RESULT_PERSISTENCE_UNKNOWN", RESULT_DURABLE="UNKNOWN")
+         key = RUN_ID + "/EARLY_FAILURE.json"
+-        before = self.byte_ledger.get(key, {}).get("WRITE_ATTEMPTED_BYTES", 0)
++        attempt = {}
+         try:
+-            reference = self.checkpoint(stage, record["observed"])
++            reference = self.checkpoint(stage, record["observed"], _attempt=attempt)
+         except BaseException as error:
+-            attempted = self.byte_ledger.get(key, {}).get("WRITE_ATTEMPTED_BYTES", 0) > before
+-            record.update(persistence_state="RESULT_PERSISTENCE_UNKNOWN" if attempted else "RESULT_PERSISTENCE_FAILED",
+-                RESULT_DURABLE="UNKNOWN" if attempted else False)
++            matched = attempt.get("_failed_error_id") == id(error)
++            no_write = matched and attempt.get("_known_no_write") is True
++            safe = matched and attempt.get("_prewrite_safe") is True
++            record.update(persistence_state="RESULT_PERSISTENCE_FAILED" if no_write else "RESULT_PERSISTENCE_UNKNOWN",
++                RESULT_DURABLE=False if no_write else "UNKNOWN")
+             self.persistence_ok = False
+             self.incomplete("CASE_CHECKPOINT_UNCONFIRMED")
+-            if key in self.byte_ledger: self.byte_ledger[key]["poisoned"] = True
+-            self.failure("PERSIST_" + stage, error)
++            if not safe and key in self.byte_ledger: self.byte_ledger[key]["poisoned"] = True
++            failure = self.failure("PERSIST_" + stage, error)
++            if matched:
++                record["checkpoint_attempt"] = attempt["_evidence"]
++                failure["checkpoint_attempt"] = attempt["_evidence"]
+             return False
+         record.update(checkpoint_ref=reference, persistence_state="RESULT_CHECKPOINT_COMMITTED", RESULT_DURABLE=True)
+         return True
+@@ -826,40 +831,136 @@
+         for value in values: json_size(value, 65536)
+         self.details.extend(values)
+ 
+-    def checkpoint(self, stage, value):
++    def checkpoint(self, stage, value, *, _attempt=None):
+         """Append-only, precharged FileIO; only fsynced lines advance the head."""
+-        path = checked(RUN / "EARLY_FAILURE.json", output=True)
++        path = RUN / "EARLY_FAILURE.json"
++        key = RUN_ID + "/EARLY_FAILURE.json"
++        attempt = {} if _attempt is None else _attempt
+         with self.io_lock:
+-            require(not self.journal_closed, "JOURNAL_ALREADY_CLOSED")
+-            require(self.checkpoint_attempts < MAX_CHECKPOINT_ATTEMPTS, "CHECKPOINT_ATTEMPT_LIMIT")
+-            self.checkpoint_attempts += 1
+-            event = {"schema": "r35-checkpoint-jsonl/1", "seq": self.journal_sequence + 1,
+-                "previous_sha256": self.journal_head, "stage": self.evidence_text(stage, 256),
+-                "phase": self.phase, "test_id": self.current,
+-                "utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+-                "value": self.encoded_payload(value)}
+-            raw = bounded_canonical(event, EVIDENCE_CAPS[RUN_ID + "/EARLY_FAILURE.json"],
+-                text_limit=2 * MAX_RAW_JSON_BYTES)
+-            digest = hashlib.sha256(raw).hexdigest()
+-            data = bounded_canonical({**event, "sha256": digest},
+-                EVIDENCE_CAPS[RUN_ID + "/EARLY_FAILURE.json"] - 1,
+-                text_limit=2 * MAX_RAW_JSON_BYTES) + b"\n"
+-            require(all(v.encode() not in data for v in self.secrets), "PUBLIC_SINK_REFUSED")
+-            self.reserve_bytes(len(data), path)
+-            if self.journal is None:
+-                self.journal = self.open_owned(path)
+-                stat = descriptor_metadata(self.journal, path, "fstat")
+-                self.journal_identity = (stat.st_dev, stat.st_ino)
+-            stat = metadata(path, "stat")
+-            require((stat.st_dev, stat.st_ino) == self.journal_identity
+-                and stat.st_size == self.journal_bytes
+-                and descriptor_metadata(self.journal, path, "tell") == self.journal_bytes, "JOURNAL_IDENTITY_CHANGED")
+-            self.io_write(self.journal, path, data)
+-            self.journal_sequence += 1
+-            self.journal_head = digest
+-            self.journal_bytes += len(data)
+-            return {"seq": self.journal_sequence, "sha256": digest,
+-                "stage": stage, "test_id": self.current, "path": str(path)}
++            bound = False
++            try:
++                require(type(attempt) is dict and not attempt, "CHECKPOINT_ATTEMPT_STATE")
++                row = self.byte_ledger.get(key)
++                healthy = (row is not None and not row["poisoned"] and self.journal is not None
++                    and not self.journal_closed and not self.journal.closed
++                    and self.owned_handles.get(path) is self.journal and path not in self.close_attempted
++                    and self.journal_identity is not None and self.journal_sequence > 0
++                    and row["BUFFERED_BYTES"] == 0
++                    and row["charged_bytes"] >= row["CONFIRMED_PERSISTED_BYTES"]
++                    and row["WRITE_RETURNED_BYTES"] == row["CONFIRMED_PERSISTED_BYTES"] == self.journal_bytes)
++                attempt.update(_owner=self, _active=True, _stream=self.journal, _row=row, _healthy=healthy,
++                    _prefix=(self.journal_sequence, self.journal_head, self.journal_bytes, self.journal_identity),
++                    _phase="PATH_CHECK", _write_possible=False, _charge_phase="NONE",
++                    _charged_before=0 if row is None else row["charged_bytes"],
++                    _attempted_before=0 if row is None else row["WRITE_ATTEMPTED_BYTES"],
++                    _confirmed_before=0 if row is None else row["CONFIRMED_PERSISTED_BYTES"],
++                    _returned_before=0 if row is None else row["WRITE_RETURNED_BYTES"],
++                    _attempt_no=self.checkpoint_attempts + 1)
++                bound = True
++                path = checked(path, output=True)
++                attempt["_phase"] = "GUARDS"
++                if self.journal_closed:
++                    raise self._checkpoint_rejection(attempt, Refusal("JOURNAL_ALREADY_CLOSED"), "JOURNAL_CLOSED")
++                if self.checkpoint_attempts >= MAX_CHECKPOINT_ATTEMPTS:
++                    raise self._checkpoint_rejection(attempt, Refusal("CHECKPOINT_ATTEMPT_LIMIT"), "ATTEMPT_LIMIT")
++                self.checkpoint_attempts += 1
++                attempt["_phase"] = "SERIALIZE"
++                try:
++                    public_stage = self.evidence_text(stage, 256)
++                    attempt["_public_stage"] = public_stage
++                    event = {"schema": "r35-checkpoint-jsonl/1", "seq": self.journal_sequence + 1,
++                        "previous_sha256": self.journal_head, "stage": public_stage,
++                        "phase": self.phase, "test_id": self.current,
++                        "utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
++                        "value": self.encoded_payload(value)}
++                    raw = bounded_canonical(event, EVIDENCE_CAPS[key], text_limit=2 * MAX_RAW_JSON_BYTES)
++                    digest = hashlib.sha256(raw).hexdigest()
++                    data = bounded_canonical({**event, "sha256": digest}, EVIDENCE_CAPS[key] - 1,
++                        text_limit=2 * MAX_RAW_JSON_BYTES) + b"\n"
++                    require(all(v.encode() not in data for v in self.secrets), "PUBLIC_SINK_REFUSED")
++                except Refusal as error:
++                    self._checkpoint_rejection(attempt, error, "SERIALIZATION_GUARD")
++                    raise
++                attempt["_phase"] = "RESERVE"
++                self.reserve_bytes(len(data), path, _attempt=attempt)
++                if self.journal is None:
++                    attempt["_phase"] = "CREATE"
++                    self.journal = self.open_owned(path)
++                    stat = descriptor_metadata(self.journal, path, "fstat")
++                    self.journal_identity = (stat.st_dev, stat.st_ino)
++                attempt["_phase"] = "IDENTITY"
++                stat = metadata(path, "stat")
++                require((stat.st_dev, stat.st_ino) == self.journal_identity
++                    and stat.st_size == self.journal_bytes
++                    and descriptor_metadata(self.journal, path, "tell") == self.journal_bytes,
++                    "JOURNAL_IDENTITY_CHANGED")
++                attempt["_phase"] = "IO_PRECHECK"
++                self.io_write(self.journal, path, data, _attempt=attempt)
++                attempt["_phase"] = "HEAD_PUBLICATION"
++                self.journal_sequence += 1
++                self.journal_head = digest
++                self.journal_bytes += len(data)
++                reference = {"seq": self.journal_sequence, "sha256": digest,
++                    "stage": stage, "test_id": self.current, "path": str(path)}
++                attempt["_phase"] = "COMMITTED"
++                attempt["_active"] = False
++                return reference
++            except BaseException as error:
++                row = self.byte_ledger.get(key)
++                safe = False
++                try:
++                    safe = (bound and attempt.get("_owner") is self and attempt.get("_active") is True
++                        and attempt.get("_rejection_id") == id(error)
++                        and attempt["_healthy"] and not attempt["_write_possible"]
++                        and attempt["_phase"] in {"GUARDS", "SERIALIZE", "RESERVE", "IO_PRECHECK"}
++                        and attempt["_charge_phase"] in {"NONE", "DEBIT_COMPLETE"}
++                        and row is attempt["_row"] and not row["poisoned"]
++                        and row["BUFFERED_BYTES"] == 0 and self.journal is attempt["_stream"]
++                        and not self.journal_closed and not self.journal.closed
++                        and self.owned_handles.get(path) is self.journal and path not in self.close_attempted
++                        and (self.journal_sequence, self.journal_head, self.journal_bytes, self.journal_identity)
++                            == attempt["_prefix"]
++                        and row["WRITE_ATTEMPTED_BYTES"] == attempt["_attempted_before"]
++                        and row["WRITE_RETURNED_BYTES"] == attempt["_returned_before"]
++                        and row["CONFIRMED_PERSISTED_BYTES"] == attempt["_confirmed_before"])
++                finally:
++                    if not safe and row is not None: row["poisoned"] = True
++                self.persistence_ok = False
++                self.incomplete("CHECKPOINT_UNCONFIRMED")
++                no_write = bound and not attempt["_write_possible"]
++                if row is not None and safe: row["state"] = "PREWRITE_REJECTED"
++                evidence = {"schema": "r41-checkpoint-attempt/1", "attempt": attempt["_attempt_no"] if bound else None,
++                    "stage": attempt.get("_public_stage", "UNVALIDATED_STAGE") if bound else "UNBOUND_STAGE",
++                    "test_id": self.current, "prefix": {"seq": attempt["_prefix"][0],
++                        "sha256": attempt["_prefix"][1], "bytes": attempt["_prefix"][2]} if bound else None,
++                    "failure_phase": attempt["_phase"] if bound else "UNBOUND",
++                    "rejection_site": attempt.get("_rejection_site") if bound else None,
++                    "io_state": "PREWRITE_REJECTED" if no_write else "PERSISTENCE_UNCERTAIN",
++                    "prewrite_safe": bool(safe), "entry_healthy": bool(bound and attempt["_healthy"]),
++                    "charged_before": attempt["_charged_before"] if bound else None,
++                    "charged_after": row["charged_bytes"] if row is not None else 0,
++                    "attempted_before": attempt["_attempted_before"] if bound else None,
++                    "attempted_after": row["WRITE_ATTEMPTED_BYTES"] if row is not None else 0,
++                    "confirmed_before": attempt["_confirmed_before"] if bound else None,
++                    "confirmed_after": row["CONFIRMED_PERSISTED_BYTES"] if row is not None else 0,
++                    "buffered_bytes": row["BUFFERED_BYTES"] if row is not None else 0,
++                    "unconfirmed_allocation_upper": row["charged_bytes"] - row["CONFIRMED_PERSISTED_BYTES"]
++                        if row is not None else 0,
++                    "new_payload_uncertain_bytes": 0 if no_write else "UNKNOWN",
++                    "terminal_reservation": TERMINAL_JOURNAL_BYTES, "terminal_attempts": self.terminal_attempts}
++                if row is not None: row["last_checkpoint_failure"] = evidence
++                if bound:
++                    attempt.update(_evidence=evidence, _known_no_write=bool(no_write), _prewrite_safe=bool(safe))
++                    attempt["_failed_error_id"] = id(error)
++                    attempt["_active"] = False
++                if _attempt is None:
++                    try:
++                        failure = self.failure("CHECKPOINT_" + stage, error)
++                        failure["checkpoint_attempt"] = evidence
++                    except BaseException:
++                        if row is not None: row["poisoned"] = True
++                        self.incomplete("CHECKPOINT_CLASSIFICATION_AUDIT_FAILED")
++                raise
+ 
+     def failure(self, stage, error):
+         code = "UNKNOWN_EXCEPTION"
+@@ -890,15 +991,26 @@
+         return row
+ 
+     def safe_checkpoint(self, stage, value):
++        attempt = {}
+         try:
+-            self.checkpoint(stage, value)
++            self.checkpoint(stage, value, _attempt=attempt)
+             return True
+         except BaseException as error:
+             self.persistence_ok = False
+             key = RUN_ID + "/EARLY_FAILURE.json"
+-            if key in self.byte_ledger: self.byte_ledger[key]["poisoned"] = True
+-            self.failure("CHECKPOINT_" + stage, error)
++            matched = attempt.get("_failed_error_id") == id(error)
++            safe = matched and attempt.get("_prewrite_safe") is True
++            if not safe and key in self.byte_ledger: self.byte_ledger[key]["poisoned"] = True
++            failure = self.failure("CHECKPOINT_" + stage, error)
++            if matched: failure["checkpoint_attempt"] = attempt["_evidence"]
+             return False
++
++    def _checkpoint_rejection(self, attempt, error, site):
++        """Bind a synchronous prewrite predicate to its exact exception object."""
++        if type(attempt) is dict and attempt.get("_owner") is self and attempt.get("_active") is True:
++            attempt["_rejection_site"] = site
++            attempt["_rejection_id"] = id(error)
++        return error
+ 
+     def assertion_rows(self):
+         rows = []
+@@ -967,17 +1079,20 @@
+     def sizes(self):
+         return sum(metadata(p, "stat").st_size for p in self.output_files())
+ 
+-    def reserve_bytes(self, size, path):
++    def reserve_bytes(self, size, path, *, _attempt=None):
+         """Debit BEFORE I/O. Failed, short and uncertain attempts are never refunded."""
+         cutoff = self.terminal_deadline if self.terminal else self.work_deadline
+-        if time.perf_counter() >= cutoff:
++        if time.perf_counter() >= cutoff or (not self.terminal and self.stop_requested):
+             self.finalization_incomplete = True
+-            raise Refusal("FINALIZATION_INCOMPLETE" if self.terminal else "WORK_DEADLINE_OR_STOP")
++            raise self._checkpoint_rejection(_attempt,
++                Refusal("FINALIZATION_INCOMPLETE" if self.terminal else "WORK_DEADLINE_OR_STOP"), "RESERVE_DEADLINE_OR_STOP")
+         p = checked(path, output=True)
+         key = p.relative_to(OUTPUT).as_posix()
+-        require(key in EVIDENCE_CAPS and key != APPROVAL.name, "OUTPUT_PATH_DENIED")
++        if key not in EVIDENCE_CAPS or key == APPROVAL.name:
++            raise self._checkpoint_rejection(_attempt, Refusal("OUTPUT_PATH_DENIED"), "RESERVE_PATH")
+         if self.terminal:
+-            require(self.terminal_attempts < TERMINAL_WRITE_ATTEMPTS, "TERMINAL_ATTEMPT_LIMIT")
++            if self.terminal_attempts >= TERMINAL_WRITE_ATTEMPTS:
++                raise self._checkpoint_rejection(_attempt, Refusal("TERMINAL_ATTEMPT_LIMIT"), "TERMINAL_ATTEMPT_LIMIT")
+             self.terminal_attempts += 1
+         row = self.byte_ledger.setdefault(key, {"RESERVED_BYTES": EVIDENCE_CAPS[key],
+             "SERIALIZED_BYTES": 0, "BUFFERED_BYTES": 0, "WRITE_ATTEMPTED_BYTES": 0,
+@@ -988,24 +1103,30 @@
+         require(not row["poisoned"], "EVIDENCE_STREAM_POISONED")
+         cap = EVIDENCE_CAPS[key]
+         if p.name == "EARLY_FAILURE.json" and not self.terminal: cap -= TERMINAL_JOURNAL_BYTES
+-        require(type(size) is int and size >= 0 and row["charged_bytes"] + size <= cap,
+-            "EVIDENCE_BUDGET_INSUFFICIENT")
++        if not (type(size) is int and size >= 0 and row["charged_bytes"] + size <= cap):
++            raise self._checkpoint_rejection(_attempt, Refusal("EVIDENCE_BUDGET_INSUFFICIENT"), "RESERVE_CAPACITY")
+         # External mutation is a failed ownership contract, never free space.
+         visible = metadata(p, "stat").st_size if metadata(p, "exists") else 0
+         require(visible <= row["charged_bytes"], "UNACCOUNTED_EVIDENCE_BYTES")
++        if _attempt is not None: _attempt["_charge_phase"] = "DEBIT_MUTATING"
+         row["SERIALIZED_BYTES"] += size
+         row["charged_bytes"] += size
+         row["state"] = "SERIALIZED"
+         require(sum(x["charged_bytes"] for x in self.byte_ledger.values())
+             + EVIDENCE_CAPS[APPROVAL.name] <= 2097152, "RESOURCE_OUTPUT_BYTES")
++        if _attempt is not None: _attempt["_charge_phase"] = "DEBIT_COMPLETE"
+         return row
+ 
+-    def io_write(self, stream, path, data):
++    def io_write(self, stream, path, data, *, _attempt=None):
+         row = self.byte_ledger[path.relative_to(OUTPUT).as_posix()]
+-        row["state"] = "WRITE_STARTED"
+         try:
+             cutoff = self.terminal_deadline if self.terminal else self.work_deadline
+-            require(time.perf_counter() < cutoff, "FINALIZATION_INCOMPLETE")
++            if time.perf_counter() >= cutoff:
++                raise self._checkpoint_rejection(_attempt, Refusal("FINALIZATION_INCOMPLETE"), "IO_PREWRITE_DEADLINE")
++            if _attempt is not None:
++                _attempt["_write_possible"] = True
++                _attempt["_phase"] = "WRITE_ATTEMPTED"
++            row["state"] = "WRITE_STARTED"
+             row["WRITE_ATTEMPTED_BYTES"] += len(data)
+             row["write_attempts"] += 1
+             count = stream.write(data)
+@@ -1013,16 +1134,28 @@
+             require(count == len(data), "EVIDENCE_SHORT_WRITE")
+             # FileIO has no Python pending write buffer. flush is still checked.
+             require(time.perf_counter() < cutoff, "FINALIZATION_INCOMPLETE")
++            if _attempt is not None: _attempt["_phase"] = "FLUSH"
+             stream.flush()
+             row["state"] = "FLUSHED"
+             require(time.perf_counter() < cutoff, "FINALIZATION_INCOMPLETE")
++            if _attempt is not None: _attempt["_phase"] = "FSYNC"
+             os.fsync(stream.fileno())
+             row["CONFIRMED_PERSISTED_BYTES"] = row["WRITE_RETURNED_BYTES"]
+             row["state"] = "PUBLISHED"
+-        except BaseException:
+-            row["poisoned"] = True
+-            row["state"] = "PERSISTENCE_UNCERTAIN"
+-            row["PERSISTENCE_UNCERTAIN_BYTES"] = row["charged_bytes"] - row["CONFIRMED_PERSISTED_BYTES"]
++        except BaseException as error:
++            safe = (type(_attempt) is dict and _attempt.get("_owner") is self
++                and _attempt.get("_active") is True
++                and _attempt.get("_rejection_id") == id(error) and _attempt.get("_healthy") is True
++                and _attempt.get("_write_possible") is False and _attempt.get("_phase") == "IO_PRECHECK"
++                and _attempt.get("_charge_phase") == "DEBIT_COMPLETE"
++                and _attempt.get("_row") is row and _attempt.get("_stream") is stream
++                and not row["poisoned"] and row["BUFFERED_BYTES"] == 0)
++            if safe:
++                row["state"] = "PREWRITE_REJECTED"
++            else:
++                row["poisoned"] = True
++                row["state"] = "PERSISTENCE_UNCERTAIN"
++                row["PERSISTENCE_UNCERTAIN_BYTES"] = row["charged_bytes"] - row["CONFIRMED_PERSISTED_BYTES"]
+             self.persistence_ok = False
+             self.stop_requested = True
+             self.finalization_incomplete = True

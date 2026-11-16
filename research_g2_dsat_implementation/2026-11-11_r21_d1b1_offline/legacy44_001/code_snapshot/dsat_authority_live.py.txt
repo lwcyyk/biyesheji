@@ -1,0 +1,180 @@
+"""Typed R21 offline admission, stable source binding and dormant host ownership.
+
+Deployment admission and H2 activation remain separate closed gates. The
+capabilities below only exist after actual owned Windows test facts are checked.
+"""
+import hashlib
+import json
+from pathlib import Path
+import secrets
+import threading
+import weakref
+
+from .dsat_windows_runtime import (SafetyError, require, TestScope, validate_host_evidence,
+                                  validate_lease)
+
+
+_ISSUERS, _CONTEXTS = weakref.WeakKeyDictionary(), weakref.WeakKeyDictionary()
+_NAMESPACE_LOCK = threading.RLock()
+_LIFECYCLE_NAMESPACES = {}
+ENVIRONMENT = "h2-authority-synth-001"
+SCOPE = {"account": "h2_account_001", "audience": "h2_audience_001", "tasks": ["h2_task_001"],
+         "callers": ["h2_agent_001"], "generations": ["h2_gen_001"]}
+GAPS = ["SOURCE_OR_REFINEMENT_GAP", "TYPED_O_NOT_IMPLEMENTED", "O_REVISION_NOT_IMPLEMENTED",
+        "P1_NOT_AUTHORIZED", "P2_NOT_AUTHORIZED", "REAL_DEPLOYMENT_NOT_RUN"]
+
+
+def digest(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False).encode()).hexdigest()
+
+
+def effective_config_digest(scope, root):
+    require(type(scope) is TestScope)
+    return digest({"environment_id": ENVIRONMENT, "root": str(scope.path(root)), "source": scope.source_digest,
+                   "scope": SCOPE, "P2": False, "port": 27443, "TLS": True})
+
+
+class _Capability:
+    __slots__ = ("__weakref__",)
+
+    def __init__(self, *args, **kwargs):
+        raise SafetyError("CONTEXT_REQUIRED")
+
+    def __repr__(self):
+        return "<DormantAuthorityCapability redacted>"
+
+    def __reduce_ex__(self, protocol):
+        raise TypeError("LIVE_CAPABILITY_NOT_SERIALIZABLE")
+
+
+class LiveDeploymentIssuer(_Capability):
+    @classmethod
+    def for_owned_test(cls, scope, evidence, *, expected_source_digest=None, expected_SID=None):
+        require(type(scope) is TestScope)
+        facts = validate_host_evidence(evidence, scope)
+        if expected_source_digest is not None:
+            require(expected_source_digest == scope.source_digest, "SOURCE_MISMATCH")
+        if expected_SID is not None:
+            require(expected_SID == facts["SID"], "IDENTITY_MISMATCH")
+        obj = object.__new__(cls)
+        _ISSUERS[obj] = {"scope": scope, "facts": facts, "retired": False}
+        return obj
+
+    def bind_instance(self, root, lease, instance_record, *, authorization_id):
+        rec = _ISSUERS.get(self)
+        require(rec is not None and not rec["retired"])
+        require(type(authorization_id) is str and 1 <= len(authorization_id) <= 160)
+        scope = rec["scope"]
+        facts = validate_lease(lease, scope, root)
+        require(type(instance_record) is dict and set(instance_record) == {"schema", "environment_id", "instance_id", "root_facts", "source_digest", "config_digest", "approved_scope"}, "IDENTITY_MISMATCH")
+        require(instance_record["schema"] == "r21-owned-instance/1" and instance_record["environment_id"] == ENVIRONMENT
+            and instance_record["root_facts"] == facts["root_facts"] and instance_record["source_digest"] == scope.source_digest
+            and instance_record["approved_scope"] == SCOPE, "IDENTITY_MISMATCH")
+        require(type(instance_record["instance_id"]) is str and len(instance_record["instance_id"]) == 64
+            and type(instance_record["config_digest"]) is str and len(instance_record["config_digest"]) == 64, "IDENTITY_MISMATCH")
+        require(instance_record["config_digest"] == effective_config_digest(scope, root), "SOURCE_MISMATCH")
+        # Keep physical root identity and authorization identity, independent of
+        # issuer objects and display/source aliases. A closed namespace stays used.
+        key = (facts["root_facts"]["volume"], facts["root_facts"]["file_id"], authorization_id)
+        with _NAMESPACE_LOCK:
+            require(key not in _LIFECYCLE_NAMESPACES, "REPLAY")
+            require(len(_LIFECYCLE_NAMESPACES) < 4096, "RESOURCE_LIMIT")
+            obj = object.__new__(LiveAuthorityContext)
+            epoch = secrets.token_hex(32)
+            _CONTEXTS[obj] = {"issuer": self, "scope": scope, "root": Path(root), "lease": lease,
+                "lease_facts": facts, "instance": json.loads(json.dumps(instance_record)), "authorization_id": authorization_id,
+                "epoch": epoch, "facts": dict(rec["facts"]), "store": None, "connection": None, "lock": None,
+                "DB_facts": None, "closed": False, "bound": False, "registrations": 0,
+                "source_reads": 0, "permits": 0, "start_claimed": False}
+            _LIFECYCLE_NAMESPACES[key] = obj
+            return obj
+
+    def retire(self):
+        rec = _ISSUERS.get(self)
+        require(rec is not None)
+        rec["retired"] = True
+
+
+class LiveAuthorityContext(_Capability):
+    def _record(self):
+        rec = _CONTEXTS.get(self)
+        require(rec is not None)
+        require(not rec["closed"], "STALE_EPOCH")
+        require(not _ISSUERS[rec["issuer"]]["retired"], "STALE_EPOCH")
+        rec["scope"].sources()
+        require(validate_lease(rec["lease"], rec["scope"], rec["root"]) == rec["lease_facts"], "OWNERSHIP_UNPROVEN")
+        return rec
+
+    @property
+    def epoch(self):
+        return self._record()["epoch"]
+
+    @property
+    def scope(self):
+        return self._record()["scope"]
+
+    @property
+    def root(self):
+        return self._record()["root"]
+
+    def claim_start(self, expected_epoch):
+        rec = self._record()
+        with _NAMESPACE_LOCK:
+            require(expected_epoch == rec["epoch"], "STALE_EPOCH")
+            require(not rec["start_claimed"], "REPLAY")
+            rec["start_claimed"] = True
+
+    def bind_dormant_store(self, store, expected_store, DB_path=None):
+        rec = self._record()
+        require(rec["start_claimed"] and not rec["bound"], "REPLAY")
+        require(store is expected_store and hasattr(store, "connection") and hasattr(store, "lock"), "IDENTITY_MISMATCH")
+        if DB_path is not None:
+            rec["DB_facts"] = rec["scope"].file_facts(DB_path)
+        rec.update(store=store, connection=store.connection, lock=store.lock, bound=True, registrations=1)
+
+    def check_store(self, store):
+        rec = self._record()
+        require(rec["bound"] and store is rec["store"] and store.connection is rec["connection"]
+                and store.lock is rec["lock"], "IDENTITY_MISMATCH")
+        return True
+
+    def check_epoch(self, epoch):
+        require(epoch == self._record()["epoch"], "STALE_EPOCH")
+
+    def validate_service_entry(self, role, root):
+        self._record()
+        # No D1-B2 issuer or production process admission is shipped in R21.
+        raise SafetyError("OFFLINE_ONLY")
+
+    def issue_permit(self):
+        self._record()
+        raise SafetyError("P2_NOT_AUTHORIZED")
+
+    read_state = issue_permit
+
+    def retire(self):
+        rec = _CONTEXTS.get(self)
+        require(rec is not None)
+        rec["closed"] = True
+
+    def metadata(self):
+        rec = self._record()
+        if rec["bound"]:
+            self.check_store(rec["store"])
+        return {"schema": "r21-dormant-context/1", "source_kind": "OWNED_OFFLINE_TEST",
+            "environment_id": ENVIRONMENT, "instance_id": rec["instance"]["instance_id"],
+            "source_digest": rec["scope"].source_digest, "config_digest": rec["instance"]["config_digest"],
+            "process": dict(rec["facts"]), "process_epoch": rec["epoch"], "authorization_id": rec["authorization_id"],
+            "scope": json.loads(json.dumps(SCOPE)), "registrations": rec["registrations"], "start_claimed": rec["start_claimed"],
+            "P2_enabled": False, "source_reads": 0, "permits": 0, "MAX_SESSION_TOTAL_READS": 1,
+            "INSTANCE_RUNNING": False, "math_ready": False, "global_complete": False, "missing_fields": list(GAPS)}
+
+
+def validate_live_entry(context, role, root):
+    require(type(context) is LiveAuthorityContext and context in _CONTEXTS)
+    return context.validate_service_entry(role, root)
+
+
+def bind_dormant_store(context, store, expected_store, DB_path=None):
+    require(type(context) is LiveAuthorityContext and context in _CONTEXTS)
+    return context.bind_dormant_store(store, expected_store, DB_path)

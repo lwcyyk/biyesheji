@@ -1,0 +1,513 @@
+--- D:\毕业设计\research_g2_dsat_implementation\2026-11-12_r24\sources\original\run_dsat_authority_live_lifecycle_tests.py.txt
++++ D:\毕业设计\auth-lifecycle\scripts\run_dsat_authority_live_lifecycle_tests.py
+@@ -1,4 +1,4 @@
+-"""R21 three isolated suites and finite owned Windows workers. No services/network."""
++"""R24 one separately approved new54 run and finite owned offline workers."""
+ import argparse
+ import ast
+ import _thread
+@@ -22,7 +22,9 @@
+ PROJECT = Path(__file__).absolute().parents[1]
+ BASE = PROJECT.parent / "research_g2_dsat_implementation"
+ RECORD, R20 = BASE / "2026-11-11_r22", BASE / "2026-11-11_r20"
+-OUTPUT = BASE / "2026-11-11_r22_d1b1_closure_offline"
++PATCH_RECORD = BASE / "2026-11-12_r24"
++OUTPUT = PATCH_RECORD / "verification_runs"
++RUN_ID = "r24_new54_001"
+ DEPLOY = PROJECT.parent / "h2_test_runtime/h2-authority-synth-001"
+ PHASE, CURRENT_ID, RUN = "PREFLIGHT", None, None
+ AUDIT = {"file_SQLite_connections": 0, "memory_SQLite_connections": 0, "SQLite_by_case": {},
+@@ -40,16 +42,54 @@
+ 
+ 
+ def target(path):
+-    p = Path(path).absolute()
++    p = Path(path)
++    if (not p.is_absolute() or str(p).startswith("\\\\") or ":" in str(p)[2:]
++            or any(v in {".", ".."} or v.endswith((".", " ")) for v in p.parts[1:])):
++        raise RuntimeError("OUTPUT_PATH_DENIED")
++    p = p.absolute()
+     if not p.is_relative_to(OUTPUT): raise RuntimeError("OUTPUT_PATH_DENIED")
+     for part in (p, *p.parents):
+-        if part.exists() and (part.is_symlink() or getattr(part.lstat(), "st_file_attributes", 0) & 0x400):
++        if part.is_symlink() or (part.exists() and getattr(part.lstat(), "st_file_attributes", 0) & 0x400):
+             raise RuntimeError("OUTPUT_REPARSE_DENIED")
++    if p.is_file() and p.stat().st_nlink != 1: raise RuntimeError("OUTPUT_HARDLINK_DENIED")
+     return p
+ 
+ 
+ def write(path, value):
+-    target(path).write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
++    with target(path).open("x", encoding="utf-8") as stream:
++        stream.write(json.dumps(value, ensure_ascii=False, indent=2) + "\n")
++        stream.flush(); os.fsync(stream.fileno())
++
++
++def run_approval(output_root):
++    """Read-only admission; an R24 static patch approval never starts a suite."""
++    if output_root is None or Path(output_root) != OUTPUT:
++        raise RuntimeError("R24_EXPLICIT_OUTPUT_REQUIRED")
++    target(OUTPUT)
++    admission_path = PATCH_RECORD / "R24_VERIFICATION_ADMISSION.json"
++    approval_path = PATCH_RECORD / "RUN_APPROVAL_RECEIPT.json"
++    admission, approval = load(admission_path), load(approval_path)
++    if (admission.get("schema") != "r24-verification-admission/1"
++            or admission.get("STATIC_ADMISSION_READY") is not True
++            or approval.get("schema") != "r24-run-approval/1"
++            or approval.get("approved") is not True
++            or approval.get("admission_sha256") != sha(admission_path)
++            or approval.get("suite") != "new54" or approval.get("max_runs") != 1
++            or approval.get("automatic_reruns") != 0
++            or approval.get("output_root") != str(OUTPUT)
++            or approval.get("run_id") != RUN_ID
++            or sha(approval["response_path"]) != approval.get("response_sha256")
++            or approval.get("base_python") != sys.executable
++            or approval.get("python_sha256") != sha(sys.executable)
++            or any(approval.get(k) is not False for k in ("D1B2", "P1", "P2", "S3B2", "S5"))):
++        raise RuntimeError("R24_INDEPENDENT_RUN_APPROVAL_REQUIRED")
++    if approval.get("resource_caps") != admission.get("resource_caps"):
++        raise RuntimeError("R24_RESOURCE_SCOPE_MISMATCH")
++    if sha(PATCH_RECORD / "sources/R24_FILE_LOCK.json") != admission.get("file_lock_sha256"):
++        raise RuntimeError("R24_FILE_LOCK_CHANGED")
++    if sha(RECORD / "R22_TEST_PLAN.json") != admission.get("frozen_plan_sha256"):
++        raise RuntimeError("R24_TEST_PLAN_CHANGED")
++    return admission, approval
+ 
+ 
+ def redact(value):
+@@ -72,7 +112,8 @@
+         command = args[1]
+         runner = PROJECT / "scripts/run_dsat_authority_live_lifecycle_tests.py"
+         candidates = [] if RUN is None else [
+-            [sys.executable, "-B", str(runner), "--worker", "--input", str(p)] for p in RUN.glob("worker_*.json")]
++            [sys.executable, "-B", str(runner), "--output-root", str(OUTPUT),
++             "--worker", "--input", str(p)] for p in RUN.glob("worker_*.json")]
+         allowed = allowed and any(command == candidate or command == subprocess.list2cmdline(candidate) for candidate in candidates)
+         allowed = allowed and AUDIT["child_launch_attempts"] < 8
+         if not allowed: violation("forbidden_process_attempts")
+@@ -175,12 +216,16 @@
+     for row in baseline["allowed_modifications"]:
+         if sha(RECORD / "sources/original" / (Path(row["path"]).name + ".txt")) != row["before_sha256"]:
+             raise RuntimeError("ORIGINAL_SOURCE_LOST")
+-    filelock = load(RECORD / "R22_FILE_LOCK.json")
++    filelock = load(PATCH_RECORD / "sources/R24_FILE_LOCK.json")
+     for row in filelock["executed_code"]:
+         if sha(row["path"]) != row["sha256"]: raise RuntimeError("SOURCE_CHANGED_SINCE_TEST_FREEZE")
+         ast.parse(Path(row["path"]).read_text(encoding="utf-8"))
+     for row in filelock["inputs"]:
+         if sha(row["path"]) != row["sha256"]:raise RuntimeError("FIXTURE_CHANGED_SINCE_FREEZE")
++    for row in filelock["source_closure"]:
++        if sha(row["path"]) != row["sha256"]:raise RuntimeError("SOURCE_CLOSURE_CHANGED")
++    changed = [str(PROJECT / "scripts/run_dsat_authority_live_lifecycle_tests.py"),
++               str(PROJECT / "src/auth_lifecycle/online_state/dsat_windows_runtime.py")]
+     return baseline, filelock, changed
+ 
+ 
+@@ -265,6 +310,7 @@
+     PHASE = "worker"
+     path = target(input_path)
+     data = load(path); RUN = target(data["run_root"])
++    if RUN != OUTPUT / RUN_ID: raise RuntimeError("R24_WORKER_RUN_MISMATCH")
+     if data.get("source_kind") != "R22_OWNED_STUB": raise RuntimeError("STUB_SCOPE_DENIED")
+     sys.path.insert(0, str(PROJECT / "src"))
+     from auth_lifecycle.online_state import dsat_windows_runtime as w
+@@ -408,38 +454,22 @@
+     return 0
+ 
+ 
+-def main(suite):
++def main(suite, output_root):
+     global PHASE, RUN
+     started_utc = datetime.datetime.now(datetime.timezone.utc).isoformat()
+     clock = time.perf_counter_ns()
++    if suite != "new54": raise RuntimeError("R24_ONLY_NEW54_AUTHORIZABLE")
++    admission, approval = run_approval(output_root)
+     receipt=load(RECORD/"APPROVAL_RECEIPT.json")
+     if receipt.get("approved") is not True or sha(receipt['request_path'])!=receipt['request_sha256']:
+         raise RuntimeError('R22_APPROVAL_REQUIRED')
+     target(OUTPUT).mkdir(exist_ok=True)
+-    extra_path=RECORD/'ADDITIONAL_APPROVAL_RECEIPT.json'
+-    extra=None
+-    if extra_path.is_file():
+-        candidate=load(extra_path)
+-        if (candidate.get('approved') is True and candidate.get('suite')=='new54'
+-            and candidate.get('max_direct_suite_runs')==4
+-            and candidate.get('request_sha256')==sha(RECORD/'ADDITIONAL_RUN_REQUEST.json')
+-            and sha(candidate['response_path'])==candidate['response_sha256']):
+-            extra=candidate
+-    previous=[load(p) for p in OUTPUT.glob('SUITE_INVOCATION_*.json')]
+-    if suite=='new54' and any(x['suite']=='new54' for x in previous) and extra is None:
+-        raise RuntimeError('R22_FRESH_54_DOMAIN_RESOURCES_REQUIRE_NEW_APPROVAL')
+-    slot=None
+-    for n in range(1,5 if extra is not None else 4):
+-        if n==4 and not (extra is not None and suite=='new54'):break
+-        try:
+-            claim=target(OUTPUT/("SUITE_INVOCATION_%02d.json"%n))
+-            with claim.open('x',encoding='utf-8') as stream:
+-                json.dump({'suite':suite,'slot':n,'argv':sys.orig_argv,'executable':sys.executable,'started_utc':started_utc},stream,ensure_ascii=True)
+-                stream.flush();os.fsync(stream.fileno())
+-            slot=n;break
+-        except FileExistsError:continue
+-    if slot is None:raise RuntimeError('R22_THREE_SUITE_BUDGET_EXHAUSTED')
+-    RUN = target(OUTPUT / (suite + "_%03d" % slot)); RUN.mkdir()
++    slot = 1
++    # A failed/partial first launch remains spent. No second slot or retry loop.
++    write(OUTPUT / "SUITE_INVOCATION_01.json", {"suite":suite,"slot":slot,
++        "argv":sys.orig_argv,"executable":sys.executable,"started_utc":started_utc,
++        "approval_sha256":sha(PATCH_RECORD/"RUN_APPROVAL_RECEIPT.json")})
++    RUN = target(OUTPUT / RUN_ID); RUN.mkdir()
+     try:baseline, filelock, modified = preflight(suite)
+     except BaseException:
+         write(RUN/'EARLY_FAILURE.json',{'phase':'preflight','traceback':redact(traceback.format_exc()),'invocation_slot':slot,'tests_executed':0})
+@@ -448,7 +478,9 @@
+     for row in filelock["executed_code"]:
+         (snapshot / (Path(row["path"]).name + ".txt")).write_bytes(Path(row["path"]).read_bytes())
+     write(RUN / "RUN_START.json", {"suite":suite,"argv_interpreter":sys.orig_argv,"executable":sys.executable,
+-        "python":sys.version,"started_utc":started_utc,"code":filelock["executed_code"],"main_pid":os.getpid(),"run_id":RUN.name,"invocation_slot":slot})
++        "python":sys.version,"started_utc":started_utc,"code":filelock["executed_code"],"main_pid":os.getpid(),"run_id":RUN.name,"invocation_slot":slot,
++        "output_root":str(OUTPUT),"admission_sha256":sha(PATCH_RECORD/"R24_VERIFICATION_ADMISSION.json"),
++        "run_approval_sha256":sha(PATCH_RECORD/"RUN_APPROVAL_RECEIPT.json")})
+     sqlite3.connect = guarded_connect
+     PHASE = suite
+     fixture = PROJECT / "tests/fixtures/dsat_authority_live_lifecycle"
+@@ -476,10 +508,17 @@
+             if suite=="new54":
+                 cases=module_at("r22_new54",PROJECT/"tests/test_dsat_authority_live_lifecycle.py")
+                 plan=load(RECORD/"R22_TEST_PLAN.json");cases.configure(plan,fixture,RUN)
++                def pipe_error_redactor(value):
++                    SECRETS.update(cases.CONFIG["private_values"])
++                    return redact(value)
++                cases.w._SCOPES[cases.CONFIG["scope"]]["pipe_error_redactor"]=pipe_error_redactor
+                 results=[run_class(cases.LiveLifecycleCases,[x["id"] for x in plan["new54"]],log)]
+                 for child in cases.CONFIG["children"]:
+                     if child["result"] is None:
+-                        child["result"]=cases.w.finish_owned_child(cases.CONFIG["scope"],child["process"])
++                        rec=cases.w._CHILDREN.get(child["process"],{})
++                        child["result"]=rec.get("cleanup_result")
++                        if child["result"] is None:
++                            child["result"]=cases.w.finish_owned_child(cases.CONFIG["scope"],child["process"])
+                 details=cases.DETAILS;SECRETS.update(cases.CONFIG["private_values"])
+                 scope_counts=cases.CONFIG["scope"].counts()
+                 children=[{k:v for k,v in x.items() if k!="process"} for x in cases.CONFIG["children"]]
+@@ -512,7 +551,7 @@
+         disk=sum(p.stat().st_size for p in case_files)
+         expected={"new54":54,"r19_24":24,"legacy44":44}[suite]
+         modules=[n for n in sys.modules if n in {"auth_lifecycle.online_state.services","auth_lifecycle.online_state.storage","auth_lifecycle.online_state.materials"}]
+-        result={"schema":"r22-actual-suite/1","suite":suite,"run":str(RUN),"argv_interpreter":sys.orig_argv,
++        result={"schema":"r24-actual-suite/1","suite":suite,"run":str(RUN),"argv_interpreter":sys.orig_argv,
+             "executable":sys.executable,"python":sys.version,"started_utc":started_utc,
+             "finished_utc":datetime.datetime.now(datetime.timezone.utc).isoformat(),"elapsed_ns":time.perf_counter_ns()-clock,
+             "counts":counts,"executed":len(rows),"cases":rows,"details":details,"code":filelock["executed_code"],
+@@ -524,7 +563,18 @@
+             "cryptography_imported":"cryptography" in sys.modules,"compatibility_path_projection":suite=="r19_24",
+             "production_or_deployed_service_resources":0,"D1B2_P1_P2_S3B2_S5":False,"real_deployment_cost":"NOT_MEASURED"}
+         limits_ok=len(dirs)<=64 and len(case_files)<=512 and disk<=67108864
+-        result["passed"]=counts=={"PASS":expected,"FAIL":0,"ERROR":0,"SKIP":0,"BLOCKED":0,"NOT_RUN":0} and clean and limits_ok and not AUDIT["unexpected_violations"]
++        process_integrity=[]
++        for child in children:
++            manifest=load(target(child["manifest"])); actual=child["result"] or {}
++            expected_exit=73 if manifest["mode"]=="cross_first" else manifest["exit_code"] if manifest["mode"]=="crash" else 0
++            ok=(actual.get("exit_code")==expected_exit and actual.get("pipes_closed") is True
++                and actual.get("process_handle_closed") is True and actual.get("stderr_bytes")==0
++                and actual.get("stdout_complete") is True and actual.get("stderr_complete") is True
++                and not actual.get("primary_error") and not actual.get("cleanup_errors")
++                and not actual.get("terminated_owned_stub"))
++            process_integrity.append({"mode":manifest["mode"],"pid":child["facts"]["pid"],"expected_exit":expected_exit,"passed":ok})
++        result["process_integrity"]=process_integrity
++        result["passed"]=counts=={"PASS":expected,"FAIL":0,"ERROR":0,"SKIP":0,"BLOCKED":0,"NOT_RUN":0} and clean and limits_ok and not AUDIT["unexpected_violations"] and all(x["passed"] for x in process_integrity)
+         write(RUN/"RESULTS.json",result)
+         # Individual frozen fault evidence is an index into actual case details.
+         if suite=="new54":write(RUN/"FAULT_COVERAGE.json",[{"fault_id":x["id"],"test_id":x["id"],"status":next(y["status"] for y in rows if y["id"]==x["id"]),"detail":x} for x in details if x["id"].startswith("F")])
+@@ -537,7 +587,7 @@
+             try:connection.close()
+             except Exception:pass
+     index=OUTPUT/"TEST_RUNS.json"
+-    history=load(index) if index.exists() else {"schema":"r22-runs/1","runs":[]}
++    history={"schema":"r24-runs/1","runs":[]}
+     history["runs"].append({"path":str(RUN/"RESULTS.json"),"sha256":sha(RUN/"RESULTS.json"),"suite":suite,"counts":counts,"passed":result["passed"]})
+     write(index,history)
+     print(json.dumps({"suite":suite,"counts":counts,"passed":result["passed"],"run":str(RUN)},ensure_ascii=True))
+@@ -549,10 +599,12 @@
+     parser.add_argument("--suite",choices=["new54","r19_24","legacy44"])
+     parser.add_argument("--worker",action="store_true")
+     parser.add_argument("--input")
++    parser.add_argument("--output-root",required=True)
+     args=parser.parse_args()
+     sys.addaudithook(audit)
++    if Path(args.output_root) != OUTPUT: raise SystemExit("R24_EXPLICIT_OUTPUT_REQUIRED")
+     if args.worker:
+         if args.suite is not None or args.input is None:raise SystemExit(2)
+         raise SystemExit(worker(args.input))
+     if args.suite is None or args.input is not None:raise SystemExit(2)
+-    raise SystemExit(main(args.suite))
++    raise SystemExit(main(args.suite,args.output_root))
+
+--- D:\毕业设计\research_g2_dsat_implementation\2026-11-12_r24\sources\original\dsat_windows_runtime.py.txt
++++ D:\毕业设计\auth-lifecycle\src\auth_lifecycle\online_state\dsat_windows_runtime.py
+@@ -1,4 +1,4 @@
+-"""R21 owned offline Windows primitives. No import-time native calls or I/O.
++"""Owned offline Windows primitives with R24 output and pipe-error policy.
+ 
+ The only admission factory requires the R21 receipt and its authorized output
+ tree. The confirmed D1-B2 root is never an execution target of these APIs.
+@@ -6,6 +6,7 @@
+ import ctypes as C
+ from ctypes import wintypes as W
+ import hashlib
++import errno
+ import json
+ import os
+ from pathlib import Path
+@@ -17,8 +18,10 @@
+ import weakref
+ 
+ 
+-OUTPUT = Path(r"D:\毕业设计\research_g2_dsat_implementation\2026-11-11_r22_d1b1_closure_offline")
+-RECORD = OUTPUT.parent / "2026-11-11_r22"
++OUTPUT = Path(r"D:\毕业设计\research_g2_dsat_implementation\2026-11-12_r24\verification_runs")
++# Original bootstrap approval is read-only and keeps the R22 grant protocol.
++RECORD = OUTPUT.parent.parent / "2026-11-11_r22"
++RUN_RECORD = OUTPUT.parent
+ PROJECT = Path(r"D:\毕业设计\auth-lifecycle")
+ DEPLOYMENT = Path(r"D:\毕业设计\h2_test_runtime\h2-authority-synth-001")
+ _SCOPES, _FACTS, _LEASES, _EVENTS, _CHILDREN = (weakref.WeakKeyDictionary() for _ in range(5))
+@@ -323,6 +326,19 @@
+     require(run_start_path.is_file() and not (root / "RESULTS.json").exists(), "APPROVAL_REQUIRED")
+     run_start = json.loads(run_start_path.read_text(encoding="utf-8"))
+     require(run_start.get("suite") == "new54" and run_start.get("run_id") == root.name, "APPROVAL_REQUIRED")
++    require(root == OUTPUT / "r24_new54_001" and run_start.get("output_root") == str(OUTPUT), "PATH_DENIED")
++    # This receipt admits the future test job only; the separate synthetic
++    # one-shot startup approvals keep their original R22 identity and journal.
++    run_receipt = json.loads((RUN_RECORD / "RUN_APPROVAL_RECEIPT.json").read_text(encoding="utf-8"))
++    require(run_receipt.get("schema") == "r24-run-approval/1" and run_receipt.get("approved") is True
++        and run_receipt.get("suite") == "new54" and run_receipt.get("max_runs") == 1
++        and run_receipt.get("automatic_reruns") == 0 and run_receipt.get("output_root") == str(OUTPUT)
++        and run_receipt.get("run_id") == root.name
++        and run_start.get("run_approval_sha256") == _hash(RUN_RECORD / "RUN_APPROVAL_RECEIPT.json")
++        and run_start.get("admission_sha256") == run_receipt.get("admission_sha256")
++        == _hash(RUN_RECORD / "R24_VERIFICATION_ADMISSION.json")
++        and _hash(run_receipt["response_path"]) == run_receipt.get("response_sha256")
++        and all(run_receipt.get(k) is False for k in ("D1B2", "P1", "P2", "S3B2", "S5")), "APPROVAL_REQUIRED")
+     receipt = json.loads((RECORD / "APPROVAL_RECEIPT.json").read_text(encoding="utf-8"))
+     require(receipt.get("approved") is True and receipt.get("scope") == "R22 six targets and122 offline tests only", "APPROVAL_REQUIRED")
+     require(_hash(receipt["request_path"]) == receipt["request_sha256"] and receipt["D1B2"] is False, "APPROVAL_REQUIRED")
+@@ -337,6 +353,8 @@
+     kernel, _ = _api()
+     process = _process_facts(kernel.GetCurrentProcess())
+     require(Path(process["image"]) == Path(receipt["base_python"]), "IDENTITY_MISMATCH")
++    frozen = json.loads((RUN_RECORD / "sources/R24_FILE_LOCK.json").read_text(encoding="utf-8"))
++    require(all(_hash(x["path"]) == x["sha256"] for x in frozen["source_closure"]), "SOURCE_MISMATCH")
+     obj = object.__new__(TestScope)
+     counts = _RUN_COUNTS.setdefault(str(root), {})
+     _SCOPES[obj] = {"root": root, "sources": sources, "source_digest": hashlib.sha256(_canonical(sources)).hexdigest(), "process": process,
+@@ -503,7 +521,7 @@
+     if values:
+         startup = subprocess.STARTUPINFO()
+         startup.lpAttributeList = {"handle_list": list(values)}
+-    command = [sys.executable, "-B", str(runner), "--worker", "--input", str(path)]
++    command = [sys.executable, "-B", str(runner), "--output-root", str(OUTPUT), "--worker", "--input", str(path)]
+     kernel, _ = _api()
+     windows = C.create_unicode_buffer(32768)
+     require(0 < kernel.GetWindowsDirectoryW(windows, len(windows)) < len(windows), "NATIVE_FAILURE")
+@@ -527,7 +545,10 @@
+         facts = _process_facts(int(process._handle))
+         require(facts["SID"] == scope.SID and Path(facts["image"]) == Path(sys.executable), "IDENTITY_MISMATCH")
+         _CHILDREN[process] = {"scope": scope, "facts": facts, "start": started, "number": count,
+-                              "created_command": list(command), "environment_keys": sorted(environment)}
++            "created_command": list(command), "environment_keys": sorted(environment),
++            "mode": data["mode"], "process_handle": process._handle,
++            "pipes": {name:getattr(process,name) for name in ("stdin","stdout","stderr")},
++            "pipe_fds": {name:getattr(process,name).fileno() for name in ("stdin","stdout","stderr")}}
+         _record_child(scope, {"event": "CREATED", "facts": facts, "mode": data["mode"], "run_id": scope.root.name})
+         return process, dict(facts)
+     except BaseException:
+@@ -543,54 +564,148 @@
+ 
+ 
+ def finish_owned_child(scope, process, *, data=b"stop\n"):
++    """Collect one exact owned child, retaining primary and cleanup failures.
++
++    EINVAL/CRT EPIPE are accepted only at original stdin write/flush/close
++    after poll confirms this exact process exited. Native winerror variants
++    and EBADF have no acceptance path in this review.
++    """
+     require(process in _CHILDREN and _CHILDREN[process]["scope"] is scope, "OWNERSHIP_UNPROVEN")
+     rec = _CHILDREN[process]
+-    require(not rec.get("finished"), "REPLAY")
++    require(not rec.get("finish_started") and not rec.get("finished"), "REPLAY")
++    require(process._handle is rec["process_handle"] and process.pid == rec["facts"]["pid"], "OWNERSHIP_UNPROVEN")
++    require(all(getattr(process,name) is stream for name,stream in rec["pipes"].items()), "OWNERSHIP_UNPROVEN")
++    require(data is None or (type(data) is bytes and len(data)<=16), "RESOURCE_LIMIT")
++    rec["finish_started"] = True
++    pipes = rec["pipes"]
++    operations, failures, originals = [], [], []
++    rec["exception_objects"] = originals  # Original exceptions stay available; never serialized as secrets.
++    primary = None
++    primary_tb = None
+     timeout = max(.01, 10 - (time.monotonic() - rec["start"]))
+     terminated = False
++
++    def exception_record(operation, error, expected=False):
++        originals.append(error)
++        redactor = scope._record().get("pipe_error_redactor",lambda value:"[MESSAGE_WITHHELD]")
++        return {"operation":operation,"exception_type":type(error).__module__+"."+type(error).__qualname__,
++            "errno":getattr(error,"errno",None),"winerror":getattr(error,"winerror",None),
++            "expected":expected,"original_exception_retained":True,
++            "original_exception_repr_redacted":redactor(repr(error))[:1024],
++            "pipe_identity_checked":True,"pipe_fds_at_creation":dict(rec["pipe_fds"]),
++            "exit_code":process.returncode,"stdin_closed":pipes["stdin"].closed,
++            "impact":"stdin control delivery unconfirmed" if operation.startswith("stdin.") else "cleanup/collection incomplete"}
++
++    def failed(operation, error, row=None):
++        nonlocal primary, primary_tb
++        row = exception_record(operation,error) if row is None else row
++        failures.append(row)
++        if primary is None: primary, primary_tb = error, error.__traceback__
++        return row
++
++    def attempt(operation, action, *, stdin_race=False):
++        try:
++            value = action()
++            operations.append({"operation":operation,"status":"OK"})
++            return value
++        except BaseException as error:
++            row = exception_record(operation,error)
++            # A live peer closing its pipe is deliberately insufficient.
++            exited = False
++            poll_failure = None
++            if stdin_race:
++                try:
++                    exited = process.poll() is not None
++                    operations.append({"operation":"poll_after_"+operation,"status":"OK","exit_code":process.returncode})
++                except BaseException as poll_error:
++                    poll_failure = poll_error
++            allowed_code = isinstance(error,OSError) and getattr(error,"winerror",None) is None
++            allowed_code = allowed_code and (getattr(error,"errno",None) == errno.EINVAL
++                or (isinstance(error,BrokenPipeError) and error.errno == errno.EPIPE))
++            row["exit_code"] = process.returncode
++            row["expected"] = bool(stdin_race and exited and allowed_code)
++            operations.append(row)
++            if not row["expected"]: failed(operation,error,row)
++            if poll_failure is not None: failed("poll_after_"+operation,poll_failure)
++            return None
++
++    # Each phase has its own exception decision and evidence. No blanket pass.
++    if not pipes["stdin"].closed:
++        if data is not None:
++            written = attempt("stdin.write",lambda:pipes["stdin"].write(data),stdin_race=True)
++            if written is not None and written != len(data):
++                failed("stdin.write.short",SafetyError("CLEANUP_FAILED"))
++            attempt("stdin.flush",pipes["stdin"].flush,stdin_race=True)
++        attempt("stdin.close",pipes["stdin"].close,stdin_race=True)
++    else:
++        operations.append({"operation":"stdin.close","status":"ALREADY_CLOSED"})
+     try:
+-        if process.stdin is not None and not process.stdin.closed:
++        process.wait(timeout=timeout)
++        operations.append({"operation":"wait","status":"OK","exit_code":process.returncode})
++    except BaseException as error:
++        failed("wait",error)
++        if isinstance(error,subprocess.TimeoutExpired):
+             try:
+-                if data is not None: process.stdin.write(data); process.stdin.flush()
+-            except (BrokenPipeError, OSError): pass
+-            try:
+-                process.stdin.close()
+-            except (BrokenPipeError, OSError):
+-                # A closed peer can make BufferedWriter.close flush fail. The
+-                # exact retained child must already be exited before accepting
+-                # that result; an unexplained live-peer I/O error still fails.
+-                require(process.poll() is not None, "RECOVERY_REQUIRED")
+-        process.wait(timeout=timeout)
+-    except subprocess.TimeoutExpired:
+-        verify_target_handle(scope, process, rec["facts"])
+-        # R21 authorizes termination of this exact registered test child only.
+-        process.terminate(); terminated = True
+-        process.wait(timeout=5)
+-    # Worker protocol bounds each stream to4096B, so waiting requires no reader
+-    # threads and preserves the aggregate16-thread budget for8 owned children.
+-    output = process.stdout.read(4097)
+-    error = process.stderr.read(4097)
+-    rec["finished"] = True
+-    _CHILD_SLOTS.release()
++                verify_target_handle(scope,process,rec["facts"])
++                process.terminate(); terminated = True
++                process.wait(timeout=5)
++            except BaseException as cleanup_error:
++                failed("timeout_cleanup",cleanup_error)
++    exit_code = attempt("poll_final",process.poll)
++    exited = exit_code is not None
++    output = attempt("stdout.read",lambda:pipes["stdout"].read(4097)) if exited else None
++    error_output = attempt("stderr.read",lambda:pipes["stderr"].read(4097)) if exited else None
++    complete_output = rec.get("read_stdout_prefix", b"") + (output or b"")
++    if output is None or error_output is None:
++        failed("output_incomplete",SafetyError("RECOVERY_REQUIRED"))
++    if len(complete_output)>4096 or (error_output is not None and len(error_output)>4096):
++        failed("output_limit",SafetyError("RESOURCE_LIMIT"))
++    # A failed close may already have closed BufferedWriter. Reclose only an
++    # original stream still open, with the same narrow stdin policy.
++    for name, stream in pipes.items():
++        if exited and not stream.closed:
++            attempt(name+".close",stream.close,stdin_race=name=="stdin")
++    if exited and not all(stream.closed for stream in pipes.values()):
++        failed("pipes_not_closed",SafetyError("CLEANUP_FAILED"))
++    handle_closed = False
++    if exited:
++        attempt("process_handle.close",process._handle.Close)
++        handle_closed = bool(process._handle.closed)
++        if not handle_closed: failed("process_handle_not_closed",SafetyError("CLEANUP_FAILED"))
++        attempt("child_handles_account",lambda:scope.count("owned_child_handles_closed",8))
++        _CHILD_SLOTS.release()
++        rec["finished"] = True
++        attempt("child_exit_journal",lambda:_record_child(scope,{"event":"EXITED","facts":rec["facts"],
++            "exit_code":process.returncode,"run_id":scope.root.name}))
+     elapsed = time.monotonic() - rec["start"]
+-    scope.count("child_total_milliseconds", 60000, int(elapsed * 1000))
+-    complete_output = rec.get("read_stdout_prefix", b"") + output
+-    require(len(complete_output) <= 4096 and len(error) <= 4096, "RESOURCE_LIMIT")
+-    stdout_path = scope.write_new(scope.root / ("child_%02d_stdout.log" % rec["number"]), complete_output)
+-    stderr_path = scope.write_new(scope.root / ("child_%02d_stderr.log" % rec["number"]), error)
+-    result = {"pid": rec["facts"]["pid"], "created_filetime": rec["facts"]["created_filetime"],
+-        "exit_code": process.returncode, "elapsed_seconds": elapsed, "terminated_owned_stub": terminated,
+-        "stdout": complete_output.decode("utf-8", errors="replace"), "stderr_bytes": len(error),
+-        "stdout_path": str(stdout_path), "stderr_path": str(stderr_path),
+-        "created_command": list(rec["created_command"]), "environment_keys": list(rec["environment_keys"])}
+-    for stream in (process.stdin, process.stdout, process.stderr):
+-        if stream is not None: stream.close()
+-    process._handle.Close()
+-    scope.count("owned_child_handles_closed", 8)
+-    result.update(pipes_closed=True, process_handle_closed=True)
+-    _record_child(scope, {"event": "EXITED", "facts": rec["facts"], "exit_code": process.returncode,
+-                          "run_id": scope.root.name})
+-    require(len(output) <= 4096 and len(error) <= 4096, "RESOURCE_LIMIT")
++    attempt("child_time_account",lambda:scope.count("child_total_milliseconds",60000,int(elapsed*1000)))
++    prefix = "child_%02d" % rec["number"]
++    stdout_path = attempt("stdout.persist",lambda:scope.write_new(scope.root/(prefix+"_stdout.log"),complete_output))
++    stderr_path = attempt("stderr.persist",lambda:scope.write_new(scope.root/(prefix+"_stderr.log"),error_output or b""))
++    result = {"pid":rec["facts"]["pid"],"created_filetime":rec["facts"]["created_filetime"],
++        "identity":dict(rec["facts"]),"exit_code":process.returncode,"elapsed_seconds":elapsed,
++        "terminated_owned_stub":terminated,"stdout":complete_output.decode("utf-8",errors="replace"),
++        "stderr_bytes":None if error_output is None else len(error_output),
++        "stdout_path":None if stdout_path is None else str(stdout_path),
++        "stderr_path":None if stderr_path is None else str(stderr_path),
++        "stdout_complete":output is not None and len(complete_output)<=4096,
++        "stderr_complete":error_output is not None and len(error_output)<=4096,
++        "stdin_bytes_requested":None if data is None else len(data),
++        "stdin_delivery_confirmed":not any(x.get("exception_type") for x in operations if x.get("operation","").startswith("stdin.")),
++        "created_command":list(rec["created_command"]),"environment_keys":list(rec["environment_keys"]),
++        "pipes_closed":all(s.closed for s in pipes.values()),"process_handle_closed":handle_closed,
++        "operations":operations,"primary_error":failures[0] if failures else None,
++        "cleanup_errors":failures[1:],"cleanup_state":"COMPLETE" if exited and all(s.closed for s in pipes.values()) and handle_closed and not failures else "RECOVERY_REQUIRED"}
++    rec["cleanup_result"] = result
++    # Per-child immutable evidence also survives an exception raised to unittest.
++    attempt("cleanup.persist",lambda:scope.write_new(scope.root/(prefix+"_cleanup.json"),
++        json.dumps(result,ensure_ascii=True,indent=2).encode()))
++    result["primary_error"] = failures[0] if failures else None
++    result["cleanup_errors"] = failures[1:]
++    if failures: result["cleanup_state"] = "RECOVERY_REQUIRED"
++    if primary is not None:
++        primary.add_note("Owned child cleanup evidence: "+str(scope.root/(prefix+"_cleanup.json")))
++        raise primary.with_traceback(primary_tb)
+     return result
+ 
+ 

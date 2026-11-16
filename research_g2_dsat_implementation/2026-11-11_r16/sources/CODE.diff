@@ -1,0 +1,3045 @@
+diff --git a/src/auth_lifecycle/online_state/services.py b/src/auth_lifecycle/online_state/services.py
+--- a/src/auth_lifecycle/online_state/services.py
++++ b/src/auth_lifecycle/online_state/services.py
+@@ -1,349 +1,365 @@
+-"""Authenticated local authority, controller, and synthetic provider processes."""
+-
+-import base64
+-import hmac
+-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+-import json
+-import os
+-from pathlib import Path
+-import secrets
+-import ssl
+-import threading
+-import time
+-
+-from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+-
+-from .protocol import (Client, EventLog, InvalidInput, canonical, digest,
+-                       exact_fields, identifier, normalized_request, strict_json, write_json)
+-from .storage import AuthorityStore
+-from .reconciliation import make_receipt
+-
+-
+-class SingleActive:
+-    """OS-held lock outside the rollback cache. A process exit releases it."""
+-    def __init__(self, path):
+-        self.stream = open(path, "a+b")
+-        try:
+-            if os.fstat(self.stream.fileno()).st_size == 0:
+-                self.stream.write(b"0")
+-                self.stream.flush()
+-            self.stream.seek(0)
+-            if os.name == "nt":
+-                import msvcrt
+-                msvcrt.locking(self.stream.fileno(), msvcrt.LK_NBLCK, 1)
+-            else:
+-                import fcntl
+-                fcntl.flock(self.stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+-        except OSError:
+-            self.stream.close()
+-            raise
+-
+-
+-class Controller:
+-    def __init__(self, root, config, fault=None):
+-        self.root = Path(root)
+-        self.config = config
+-        self.active_lock = SingleActive(self.root / "secure" / "controller.lock")
+-        self.log = EventLog(self.root / "controller" / "events.jsonl")
+-        self.authority = Client(config["authority_url"], config["authority_token"],
+-                                config["certificate"], self.log)
+-        self.provider = Client(config["provider_url"], config["provider_token"],
+-                               config["certificate"], self.log)
+-        self.boot = secrets.token_hex(8)
+-        self.fault = fault
+-        self.fault_used = False
+-        self.ready = False
+-        self.recover()
+-
+-    def barrier(self, point):
+-        if point != self.fault or self.fault_used:
+-            return
+-        self.fault_used = True
+-        folder = self.root / "controller" / "barriers"
+-        path = folder / (self.boot + "_" + point + ".json")
+-        write_json(path, {"point": point, "pid": os.getpid(), "boot": self.boot})
+-        self.log.emit("barrier", point=point, boot=self.boot)
+-        release = path.with_suffix(".release")
+-        while not release.exists():
+-            time.sleep(0.01)
+-
+-    def recover(self):
+-        result = self.authority.call("recover", {})
+-        self.ready = result.get("status") == "RECOVERED"
+-        if self.ready:
+-            write_json(self.root / "cache" / "view.json", {
+-                "authoritative_version": result["version"], "boot": self.boot,
+-                "approval_count": len(result["approvals"]), "display_only": True})
+-        self.log.emit("recovery", status=result.get("status"),
+-                      version=result.get("version"), boot=self.boot)
+-        return result
+-
+-    def call(self, operation, payload, identity):
+-        if operation == "recover":
+-            return self.recover()
+-        if not self.ready and self.recover().get("status") != "RECOVERED":
+-            return {"status": "UNKNOWN", "reason": "RECOVERY_INCOMPLETE"}
+-        if operation == "grant":
+-            return self.authority.call("grant", payload)
+-        if operation == "revoke":
+-            self.barrier("before_revoke")
+-            result = self.authority.call("revoke", payload)
+-            if result.get("status") == "LOCAL_REVOKE_COMMITTED":
+-                self.barrier("after_revoke_commit")
+-            return result
+-        if operation == "status":
+-            result = self.authority.call("recover", {})
+-            if result.get("status") != "RECOVERED" or identity == "user":
+-                return result
+-            result["approvals"] = [x for x in result["approvals"] if x["caller"] == identity]
+-            result["requests"] = [x for x in result["requests"] if x["origin"]["caller"] == identity]
+-            result["obligations"] = [x["rid"] for x in result["requests"]
+-                                     if x["phase"] in {"DISPATCHED_UNKNOWN", "QUARANTINED"}]
+-            return result
+-        if operation == "dispose":
+-            released = self.authority.call("prepare_disposal", payload)
+-            if not released.get("send"):
+-                return {key: value for key, value in released.items() if key != "material"}
+-            response = self.provider.call("dispose", released)
+-            if response.get("status") != "DISPOSAL_RESPONSE":
+-                return {"status": "UNKNOWN", "reason": "NATIVE_DISPOSAL_UNCERTAIN"}
+-            return self.authority.call("record_disposal", {
+-                "disposal_op": payload["disposal_op"], "rid": payload["rid"], "http": response["http"],
+-                "userinfo_http": response["userinfo_http"], "userinfo_accepted": response["userinfo_accepted"],
+-                "introspection_active": response["introspection_active"]})
+-        if operation == "begin_reconciliation":
+-            return self.authority.call("begin_reconciliation", payload)
+-        if operation == "reconcile":
+-            return self.reconcile(payload)
+-        if operation == "deliver":
+-            exact_fields(payload, ("rid",))
+-            identifier(payload["rid"])
+-            known = self.authority.call("recover", {})
+-            if known.get("status") != "RECOVERED":
+-                return known
+-            req = next((x for x in known["requests"] if x["rid"] == payload["rid"]), None)
+-            if req is None or req["attempt_id"] is None:
+-                return {"status": "UNKNOWN", "reason": "NO_KNOWN_ATTEMPT"}
+-            lookup = {key: req[key] for key in
+-                      ("rid", "digest", "origin", "attempt_id", "release_version")}
+-            result = self.provider.call("lookup", lookup)
+-            return self.record_result(result)
+-        if operation != "call":
+-            return {"status": "REJECTED", "reason": "INVALID_OPERATION"}
+-        request = normalized_request(payload)
+-        self.barrier("before_admit")
+-        admitted = self.authority.call("admit", {"caller": identity, "request": request})
+-        if admitted.get("status") not in {"ADMITTED", "DUPLICATE"}:
+-            return admitted
+-        self.barrier("after_admit")
+-        if admitted["phase"] != "QUEUED":
+-            return admitted
+-        released = self.authority.call("release", {
+-            "caller": identity, "rid": request["rid"], "digest": admitted["digest"]})
+-        if not released.get("send"):
+-            return released
+-        self.barrier("after_release")
+-        provider_request = {key: released[key] for key in
+-                            ("rid", "digest", "origin", "attempt_id", "release_version",
+-                             "material", "operation", "payload")}
+-        result = self.provider.call("perform", provider_request)
+-        self.barrier("after_effect")
+-        return self.record_result(result)
+-
+-    def record_result(self, result):
+-        if result.get("status") != "PROVIDER_RESULT":
+-            return {"status": "UNKNOWN", "reason": "EXTERNAL_RESULT_UNCERTAIN"}
+-        fields = ("rid", "digest", "origin", "attempt_id", "release_version", "material", "outcome")
+-        if not all(key in result for key in fields):
+-            return {"status": "UNKNOWN", "reason": "INVALID_PROVIDER_RESULT"}
+-        envelope = {key: result[key] for key in fields}
+-        return self.authority.call("record", envelope)
+-
+-    def reconcile(self, payload):
+-        exact_fields(payload, ("rid", "window_id", "step", "B_rid"))
+-        context = self.authority.call("reconciliation_context", {
+-            "rid": payload["rid"], "window_id": payload["window_id"], "B_rid": payload["B_rid"]})
+-        if context.get("status") != "RECONCILIATION_CONTEXT":return context
+-        window = context["window"]
+-        if window.get("receipt", {}).get("claim") == "CLOSED":
+-            return {"status": "CLOSED", "receipt": window["receipt"]}
+-        query = window.get("query_evidence", {})
+-        if payload["step"] == "discover":
+-            target = context["target"]
+-            request = {key: target[key] for key in ("rid", "digest", "origin", "attempt_id", "release_version")}
+-            if self.config.get("reconciliation_model", {}).get("evidence_origin") == "AUTHORIZED_SCOPE_ENUMERATION":
+-                request["enumeration_context"] = {"known_unit_ids": context["known_unit_ids"],
+-                    "account_grant_count": context["account_grant_count"], "account_budget_total": context["account_budget_total"],
+-                    "unknown_creators": window["unknown_creators_at_open"], "context_version": context["version"]}
+-            response = self.provider.call("reconcile_query", request)
+-            if response.get("status") == "SAFETY_FAILURE":
+-                return response
+-            query = response.get("evidence", {})
+-            if (response.get("status") == "RECONCILED_MATERIAL" and window["unknown_creators_at_open"] == [payload["rid"]]
+-                    and query.get("actual_sends") == 1 and query.get("origin_bound") is True):
+-                recorded = self.authority.call("record", response["result"])
+-                if recorded.get("status") not in {"QUARANTINED", "RESULT_DUPLICATE"}:
+-                    return recorded
+-                context = self.authority.call("reconciliation_context", {
+-                    "rid": payload["rid"], "window_id": payload["window_id"], "B_rid": payload["B_rid"]})
+-                for rid in context["known_A_rids"]:
+-                    self.call("dispose", {"disposal_op": "reconcile_" + rid, "rid": rid}, "user")
+-                context = self.authority.call("reconciliation_context", {
+-                    "rid": payload["rid"], "window_id": payload["window_id"], "B_rid": payload["B_rid"]})
+-        elif payload["step"] != "finish":
+-            return {"status": "REJECTED", "reason": "RECONCILIATION_STEP"}
+-        window = context["window"]
+-        model = self.config.get("reconciliation_model", {})
+-        facts = {key: query.get(key, False) for key in ("exact_authorized_read", "record_found", "origin_bound")}
+-        facts.update(single_unknown_creator=window["unknown_creators_at_open"] == [payload["rid"]],
+-            creation_paused=window["active"], A_revoked=context["A_revoked"],
+-            external_writers_excluded=model.get("external_writers_excluded") is True,
+-            future_retry_excluded=model.get("single_open_no_retry") is True,
+-            known_A_units_inactive=context["known_A_units_inactive"],
+-            B_preserved_after_disposal=context["B_preserved_after_disposal"],
+-            actual_sends=query.get("actual_sends", 0), per_send_effect_bound=model.get("per_send_effect_bound"),
+-            observed_distinct_effects=query.get("observed_distinct_effects", 0))
+-        target = context["target"]
+-        binding = {"rid": target["rid"], "attempt_id": target["attempt_id"], "request_digest": target["digest"], **target["origin"]}
+-        safe_context = {key: context[key] for key in ("target", "A_revoked", "known_A_rids", "known_A_units_inactive", "B_preserved_after_disposal", "disposition_versions")}
+-        safe_context["window"] = {key: window[key] for key in ("window_id", "target_rid", "active", "unknown_creators_at_open", "opened_version")}
+-        packet = {"context": safe_context, "query": query, "model": model}
+-        evidence = {"query_ref": query.get("query_ref"), "identifier_receipt_ref": query.get("identifier_receipt_ref"),
+-                    "source_lemma_ref": model.get("source_lemma_ref"), "packet": packet, "packet_ref": digest(packet),
+-                    "origin": model.get("evidence_origin", "IDENTIFIER_POINT_READ"),
+-                    "enumeration_ref": query.get("enumeration_ref"), "authorized_scope_ref": query.get("authorized_scope_ref")}
+-        receipt = make_receipt(binding, facts, evidence)
+-        return self.authority.call("save_reconciliation", {"rid": payload["rid"], "window_id": payload["window_id"],
+-                                   "receipt": receipt, "query_evidence": query, "B_rid": payload["B_rid"]})
+-
+-
+-class FakeProvider:
+-    def __init__(self, root, config):
+-        self.root = Path(root)
+-        self.key = (self.root / "secure" / "provider.key").read_bytes()
+-        self.results_path = self.root / "provider" / "encrypted_results.jsonl"
+-        self.results_path.parent.mkdir(parents=True, exist_ok=True)
+-        self.truth = EventLog(self.root / "provider" / "truth.jsonl")
+-        self.lock = threading.Lock()
+-        self.hold = False
+-        self.results = {}
+-        if self.results_path.exists():
+-            for line in self.results_path.read_bytes().splitlines():
+-                raw = base64.b64decode(line)
+-                result = json.loads(AESGCM(self.key).decrypt(raw[:12], raw[12:], b"fake-provider-v1"))
+-                self.results[result["attempt_id"]] = result
+-
+-    def call(self, operation, payload, identity):
+-        with self.lock:
+-            if operation == "hold":
+-                exact_fields(payload, ("enabled",))
+-                if type(payload["enabled"]) is not bool:
+-                    raise InvalidInput("INVALID_HOLD")
+-                self.hold = payload["enabled"]
+-                return {"status": "CONFIGURED"}
+-            if operation == "lookup":
+-                exact_fields(payload, ("rid", "digest", "origin", "attempt_id", "release_version"))
+-                result = self.results.get(payload["attempt_id"])
+-                if result is None:
+-                    return {"status": "UNKNOWN", "reason": "NO_RESULT_EVIDENCE"}
+-                if any(result[key] != payload[key] for key in payload):
+-                    return {"status": "CONFLICT", "reason": "LOOKUP_BINDING_CONFLICT"}
+-                return {"status": "PROVIDER_RESULT", **result}
+-            if operation != "perform":
+-                return {"status": "REJECTED", "reason": "INVALID_OPERATION"}
+-            fields = ("rid", "digest", "origin", "attempt_id", "release_version", "material", "operation", "payload")
+-            exact_fields(payload, fields)
+-            if not isinstance(payload["material"], str) or not payload["material"].startswith("synthetic_"):
+-                return {"status": "REJECTED", "reason": "SYNTHETIC_MATERIAL_REQUIRED"}
+-            # Each perform invocation records an effect, including accidental retries.
+-            result = {key: payload[key] for key in
+-                      ("rid", "digest", "origin", "attempt_id", "release_version")}
+-            result.update(material="synthetic_result_" + secrets.token_hex(24), outcome="OK")
+-            nonce = os.urandom(12)
+-            sealed = nonce + AESGCM(self.key).encrypt(nonce, canonical(result), b"fake-provider-v1")
+-            with self.results_path.open("ab") as stream:
+-                stream.write(base64.b64encode(sealed) + b"\n")
+-                stream.flush()
+-                os.fsync(stream.fileno())
+-            self.results[payload["attempt_id"]] = result
+-            self.truth.emit("effect", **{key: result[key] for key in
+-                                        ("rid", "digest", "origin", "attempt_id", "release_version")})
+-            if self.hold:
+-                return {"status": "PENDING"}
+-            return {"status": "PROVIDER_RESULT", **result,
+-                    "untrusted_extra": "synthetic_debug_secret_do_not_export"}
+-
+-
+-def serve(role, root, fault=None):
+-    root = Path(root)
+-    config = json.loads((root / "secure" / (role + ".json")).read_text())
+-    log = EventLog(root / role / "transport.jsonl")
+-    if role == "authority":
+-        implementation = AuthorityStore(root / "authority", root / "secure" / "authority.key",
+-                                        config.get("operation_limit"))
+-    elif role == "provider":
+-        if config.get("native_profile"):
+-            from .native_provider import CasdoorProvider
+-            implementation = CasdoorProvider(root, config)
+-        else:
+-            implementation = FakeProvider(root, config)
+-    else:
+-        implementation = Controller(root, config, fault)
+-
+-    class Handler(BaseHTTPRequestHandler):
+-        def log_message(self, *args):
+-            pass
+-
+-        def do_POST(self):
+-            started = time.monotonic_ns()
+-            request_bytes = 0
+-            operation = self.path.removeprefix("/")
+-            identity = None
+-            supplied = self.headers.get("Authorization", "")
+-            for name, token in config["identities"].items():
+-                if hmac.compare_digest(supplied, "Bearer " + token):
+-                    identity = name
+-            allowed = config["permissions"].get(identity, [])
+-            try:
+-                if operation not in allowed:
+-                    result = {"status": "REJECTED", "reason": "IDENTITY_OR_OPERATION_DENIED"}
+-                else:
+-                    length = int(self.headers.get("Content-Length", "0"))
+-                    if not 0 < length <= 65536:
+-                        raise InvalidInput("BODY_SIZE")
+-                    raw = self.rfile.read(length)
+-                    request_bytes = len(raw)
+-                    payload = strict_json(raw)
+-                    if role == "authority":
+-                        result = implementation.call(operation, payload)
+-                    else:
+-                        result = implementation.call(operation, payload, identity)
+-            except (ValueError, TypeError, KeyError, InvalidInput):
+-                result = {"status": "REJECTED", "reason": "INVALID_INPUT"}
+-            except Exception:
+-                result = {"status": "UNKNOWN", "reason": "SERVICE_UNAVAILABLE"}
+-            response = canonical(result)
+-            # The operation logged is selected from the configured whitelist.
+-            log.emit("request", operation=operation if operation in allowed else "denied",
+-                     identity=identity, request_json_bytes=request_bytes,
+-                     response_json_bytes=len(response), status=result.get("status"),
+-                     elapsed_ns=time.monotonic_ns() - started)
+-            try:
+-                self.send_response(200)
+-                self.send_header("Content-Type", "application/json")
+-                self.send_header("Content-Length", str(len(response)))
+-                self.end_headers()
+-                self.wfile.write(response)
+-            except (OSError, ssl.SSLError):
+-                pass
+-
+-    server = ThreadingHTTPServer(("127.0.0.1", config["port"]), Handler)
+-    server.daemon_threads = True
+-    tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+-    tls.minimum_version = ssl.TLSVersion.TLSv1_2
+-    tls.load_cert_chain(config["certificate"], config["tls_key"])
+-    server.socket = tls.wrap_socket(server.socket, server_side=True)
+-    write_json(root / "control" / (role + "_ready.json"),
+-               {"role": role, "pid": os.getpid(), "port": config["port"],
+-                "boot": getattr(implementation, "boot", None)})
+-    server.serve_forever(poll_interval=0.05)
++"""Authenticated local authority, controller, and synthetic provider processes."""
++
++import base64
++import hmac
++from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
++import json
++import os
++from pathlib import Path
++import secrets
++import ssl
++import threading
++import time
++
++from cryptography.hazmat.primitives.ciphers.aead import AESGCM
++
++from .protocol import (Client, EventLog, InvalidInput, canonical, digest,
++                       exact_fields, identifier, normalized_request, strict_json, write_json)
++from .storage import AuthorityStore
++from .reconciliation import make_receipt
++
++
++class SingleActive:
++    """OS-held lock outside the rollback cache. A process exit releases it."""
++    def __init__(self, path):
++        self.stream = open(path, "a+b")
++        try:
++            if os.fstat(self.stream.fileno()).st_size == 0:
++                self.stream.write(b"0")
++                self.stream.flush()
++            self.stream.seek(0)
++            if os.name == "nt":
++                import msvcrt
++                msvcrt.locking(self.stream.fileno(), msvcrt.LK_NBLCK, 1)
++            else:
++                import fcntl
++                fcntl.flock(self.stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
++        except OSError:
++            self.stream.close()
++            raise
++
++
++class Controller:
++    def __init__(self, root, config, fault=None):
++        self.root = Path(root)
++        self.config = config
++        self.active_lock = SingleActive(self.root / "secure" / "controller.lock")
++        self.log = EventLog(self.root / "controller" / "events.jsonl")
++        self.authority = Client(config["authority_url"], config["authority_token"],
++                                config["certificate"], self.log)
++        self.provider = Client(config["provider_url"], config["provider_token"],
++                               config["certificate"], self.log)
++        self.boot = secrets.token_hex(8)
++        self.fault = fault
++        self.fault_used = False
++        self.ready = False
++        self.recover()
++
++    def barrier(self, point):
++        if point != self.fault or self.fault_used:
++            return
++        self.fault_used = True
++        folder = self.root / "controller" / "barriers"
++        path = folder / (self.boot + "_" + point + ".json")
++        write_json(path, {"point": point, "pid": os.getpid(), "boot": self.boot})
++        self.log.emit("barrier", point=point, boot=self.boot)
++        release = path.with_suffix(".release")
++        while not release.exists():
++            time.sleep(0.01)
++
++    def recover(self):
++        result = self.authority.call("recover", {})
++        self.ready = result.get("status") == "RECOVERED"
++        if self.ready:
++            write_json(self.root / "cache" / "view.json", {
++                "authoritative_version": result["version"], "boot": self.boot,
++                "approval_count": len(result["approvals"]), "display_only": True})
++        self.log.emit("recovery", status=result.get("status"),
++                      version=result.get("version"), boot=self.boot)
++        return result
++
++    def call(self, operation, payload, identity):
++        if operation == "recover":
++            return self.recover()
++        if not self.ready and self.recover().get("status") != "RECOVERED":
++            return {"status": "UNKNOWN", "reason": "RECOVERY_INCOMPLETE"}
++        if operation == "grant":
++            return self.authority.call("grant", payload)
++        if operation == "revoke":
++            self.barrier("before_revoke")
++            result = self.authority.call("revoke", payload)
++            if result.get("status") == "LOCAL_REVOKE_COMMITTED":
++                self.barrier("after_revoke_commit")
++            return result
++        if operation == "status":
++            result = self.authority.call("recover", {})
++            if result.get("status") != "RECOVERED" or identity == "user":
++                return result
++            result["approvals"] = [x for x in result["approvals"] if x["caller"] == identity]
++            result["requests"] = [x for x in result["requests"] if x["origin"]["caller"] == identity]
++            result["obligations"] = [x["rid"] for x in result["requests"]
++                                     if x["phase"] in {"DISPATCHED_UNKNOWN", "QUARANTINED"}]
++            return result
++        if operation == "dispose":
++            released = self.authority.call("prepare_disposal", payload)
++            if not released.get("send"):
++                return {key: value for key, value in released.items() if key != "material"}
++            response = self.provider.call("dispose", released)
++            if response.get("status") != "DISPOSAL_RESPONSE":
++                return {"status": "UNKNOWN", "reason": "NATIVE_DISPOSAL_UNCERTAIN"}
++            return self.authority.call("record_disposal", {
++                "disposal_op": payload["disposal_op"], "rid": payload["rid"], "http": response["http"],
++                "userinfo_http": response["userinfo_http"], "userinfo_accepted": response["userinfo_accepted"],
++                "introspection_active": response["introspection_active"]})
++        if operation == "begin_reconciliation":
++            return self.authority.call("begin_reconciliation", payload)
++        if operation == "reconcile":
++            return self.reconcile(payload)
++        if operation == "deliver":
++            exact_fields(payload, ("rid",))
++            identifier(payload["rid"])
++            known = self.authority.call("recover", {})
++            if known.get("status") != "RECOVERED":
++                return known
++            req = next((x for x in known["requests"] if x["rid"] == payload["rid"]), None)
++            if req is None or req["attempt_id"] is None:
++                return {"status": "UNKNOWN", "reason": "NO_KNOWN_ATTEMPT"}
++            lookup = {key: req[key] for key in
++                      ("rid", "digest", "origin", "attempt_id", "release_version")}
++            result = self.provider.call("lookup", lookup)
++            return self.record_result(result)
++        if operation != "call":
++            return {"status": "REJECTED", "reason": "INVALID_OPERATION"}
++        request = normalized_request(payload)
++        self.barrier("before_admit")
++        admitted = self.authority.call("admit", {"caller": identity, "request": request})
++        if admitted.get("status") not in {"ADMITTED", "DUPLICATE"}:
++            return admitted
++        self.barrier("after_admit")
++        if admitted["phase"] != "QUEUED":
++            return admitted
++        released = self.authority.call("release", {
++            "caller": identity, "rid": request["rid"], "digest": admitted["digest"]})
++        if not released.get("send"):
++            return released
++        self.barrier("after_release")
++        provider_request = {key: released[key] for key in
++                            ("rid", "digest", "origin", "attempt_id", "release_version",
++                             "material", "operation", "payload")}
++        result = self.provider.call("perform", provider_request)
++        self.barrier("after_effect")
++        return self.record_result(result)
++
++    def record_result(self, result):
++        if result.get("status") != "PROVIDER_RESULT":
++            return {"status": "UNKNOWN", "reason": "EXTERNAL_RESULT_UNCERTAIN"}
++        fields = ("rid", "digest", "origin", "attempt_id", "release_version", "material", "outcome")
++        if not all(key in result for key in fields):
++            return {"status": "UNKNOWN", "reason": "INVALID_PROVIDER_RESULT"}
++        envelope = {key: result[key] for key in fields}
++        return self.authority.call("record", envelope)
++
++    def reconcile(self, payload):
++        exact_fields(payload, ("rid", "window_id", "step", "B_rid"))
++        context = self.authority.call("reconciliation_context", {
++            "rid": payload["rid"], "window_id": payload["window_id"], "B_rid": payload["B_rid"]})
++        if context.get("status") != "RECONCILIATION_CONTEXT":return context
++        window = context["window"]
++        if window.get("receipt", {}).get("claim") == "CLOSED":
++            return {"status": "CLOSED", "receipt": window["receipt"]}
++        query = window.get("query_evidence", {})
++        if payload["step"] == "discover":
++            target = context["target"]
++            request = {key: target[key] for key in ("rid", "digest", "origin", "attempt_id", "release_version")}
++            if self.config.get("reconciliation_model", {}).get("evidence_origin") == "AUTHORIZED_SCOPE_ENUMERATION":
++                request["enumeration_context"] = {"known_unit_ids": context["known_unit_ids"],
++                    "account_grant_count": context["account_grant_count"], "account_budget_total": context["account_budget_total"],
++                    "unknown_creators": window["unknown_creators_at_open"], "context_version": context["version"]}
++            response = self.provider.call("reconcile_query", request)
++            if response.get("status") == "SAFETY_FAILURE":
++                return response
++            query = response.get("evidence", {})
++            if (response.get("status") == "RECONCILED_MATERIAL" and window["unknown_creators_at_open"] == [payload["rid"]]
++                    and query.get("actual_sends") == 1 and query.get("origin_bound") is True):
++                recorded = self.authority.call("record", response["result"])
++                if recorded.get("status") not in {"QUARANTINED", "RESULT_DUPLICATE"}:
++                    return recorded
++                context = self.authority.call("reconciliation_context", {
++                    "rid": payload["rid"], "window_id": payload["window_id"], "B_rid": payload["B_rid"]})
++                for rid in context["known_A_rids"]:
++                    self.call("dispose", {"disposal_op": "reconcile_" + rid, "rid": rid}, "user")
++                context = self.authority.call("reconciliation_context", {
++                    "rid": payload["rid"], "window_id": payload["window_id"], "B_rid": payload["B_rid"]})
++        elif payload["step"] != "finish":
++            return {"status": "REJECTED", "reason": "RECONCILIATION_STEP"}
++        window = context["window"]
++        model = self.config.get("reconciliation_model", {})
++        facts = {key: query.get(key, False) for key in ("exact_authorized_read", "record_found", "origin_bound")}
++        facts.update(single_unknown_creator=window["unknown_creators_at_open"] == [payload["rid"]],
++            creation_paused=window["active"], A_revoked=context["A_revoked"],
++            external_writers_excluded=model.get("external_writers_excluded") is True,
++            future_retry_excluded=model.get("single_open_no_retry") is True,
++            known_A_units_inactive=context["known_A_units_inactive"],
++            B_preserved_after_disposal=context["B_preserved_after_disposal"],
++            actual_sends=query.get("actual_sends", 0), per_send_effect_bound=model.get("per_send_effect_bound"),
++            observed_distinct_effects=query.get("observed_distinct_effects", 0))
++        target = context["target"]
++        binding = {"rid": target["rid"], "attempt_id": target["attempt_id"], "request_digest": target["digest"], **target["origin"]}
++        safe_context = {key: context[key] for key in ("target", "A_revoked", "known_A_rids", "known_A_units_inactive", "B_preserved_after_disposal", "disposition_versions")}
++        safe_context["window"] = {key: window[key] for key in ("window_id", "target_rid", "active", "unknown_creators_at_open", "opened_version")}
++        packet = {"context": safe_context, "query": query, "model": model}
++        evidence = {"query_ref": query.get("query_ref"), "identifier_receipt_ref": query.get("identifier_receipt_ref"),
++                    "source_lemma_ref": model.get("source_lemma_ref"), "packet": packet, "packet_ref": digest(packet),
++                    "origin": model.get("evidence_origin", "IDENTIFIER_POINT_READ"),
++                    "enumeration_ref": query.get("enumeration_ref"), "authorized_scope_ref": query.get("authorized_scope_ref")}
++        receipt = make_receipt(binding, facts, evidence)
++        return self.authority.call("save_reconciliation", {"rid": payload["rid"], "window_id": payload["window_id"],
++                                   "receipt": receipt, "query_evidence": query, "B_rid": payload["B_rid"]})
++
++
++class FakeProvider:
++    def __init__(self, root, config):
++        self.root = Path(root)
++        self.key = (self.root / "secure" / "provider.key").read_bytes()
++        self.results_path = self.root / "provider" / "encrypted_results.jsonl"
++        self.results_path.parent.mkdir(parents=True, exist_ok=True)
++        self.truth = EventLog(self.root / "provider" / "truth.jsonl")
++        self.lock = threading.Lock()
++        self.hold = False
++        self.results = {}
++        if self.results_path.exists():
++            for line in self.results_path.read_bytes().splitlines():
++                raw = base64.b64decode(line)
++                result = json.loads(AESGCM(self.key).decrypt(raw[:12], raw[12:], b"fake-provider-v1"))
++                self.results[result["attempt_id"]] = result
++
++    def call(self, operation, payload, identity):
++        with self.lock:
++            if operation == "hold":
++                exact_fields(payload, ("enabled",))
++                if type(payload["enabled"]) is not bool:
++                    raise InvalidInput("INVALID_HOLD")
++                self.hold = payload["enabled"]
++                return {"status": "CONFIGURED"}
++            if operation == "lookup":
++                exact_fields(payload, ("rid", "digest", "origin", "attempt_id", "release_version"))
++                result = self.results.get(payload["attempt_id"])
++                if result is None:
++                    return {"status": "UNKNOWN", "reason": "NO_RESULT_EVIDENCE"}
++                if any(result[key] != payload[key] for key in payload):
++                    return {"status": "CONFLICT", "reason": "LOOKUP_BINDING_CONFLICT"}
++                return {"status": "PROVIDER_RESULT", **result}
++            if operation != "perform":
++                return {"status": "REJECTED", "reason": "INVALID_OPERATION"}
++            fields = ("rid", "digest", "origin", "attempt_id", "release_version", "material", "operation", "payload")
++            exact_fields(payload, fields)
++            if not isinstance(payload["material"], str) or not payload["material"].startswith("synthetic_"):
++                return {"status": "REJECTED", "reason": "SYNTHETIC_MATERIAL_REQUIRED"}
++            # Each perform invocation records an effect, including accidental retries.
++            result = {key: payload[key] for key in
++                      ("rid", "digest", "origin", "attempt_id", "release_version")}
++            result.update(material="synthetic_result_" + secrets.token_hex(24), outcome="OK")
++            nonce = os.urandom(12)
++            sealed = nonce + AESGCM(self.key).encrypt(nonce, canonical(result), b"fake-provider-v1")
++            with self.results_path.open("ab") as stream:
++                stream.write(base64.b64encode(sealed) + b"\n")
++                stream.flush()
++                os.fsync(stream.fileno())
++            self.results[payload["attempt_id"]] = result
++            self.truth.emit("effect", **{key: result[key] for key in
++                                        ("rid", "digest", "origin", "attempt_id", "release_version")})
++            if self.hold:
++                return {"status": "PENDING"}
++            return {"status": "PROVIDER_RESULT", **result,
++                    "untrusted_extra": "synthetic_debug_secret_do_not_export"}
++
++
++def serve(role, root, fault=None, *, authority_mount_ticket=None):
++    root = Path(root)
++    config = json.loads((root / "secure" / (role + ".json")).read_text())
++    log = EventLog(root / role / "transport.jsonl")
++    if role == "authority":
++        implementation = AuthorityStore(root / "authority", root / "secure" / "authority.key",
++                                        config.get("operation_limit"))
++    elif role == "provider":
++        if config.get("native_profile"):
++            from .native_provider import CasdoorProvider
++            implementation = CasdoorProvider(root, config)
++        else:
++            implementation = FakeProvider(root, config)
++    else:
++        implementation = Controller(root, config, fault)
++
++    # The default ticket is absent. Registration never constructs a second Store.
++    from .dsat_authority_host_activation import (mount_authority_host,
++        authenticate_authority_peer, dispatch_authority_read)
++    authority_read_host = (mount_authority_host(implementation, authority_mount_ticket)
++                           if role == "authority" else None)
++
++    class Handler(BaseHTTPRequestHandler):
++        def log_message(self, *args):
++            pass
++
++        def do_POST(self):
++            started = time.monotonic_ns()
++            request_bytes = 0
++            operation = self.path.removeprefix("/")
++            identity = None
++            supplied = self.headers.get("Authorization", "")
++            for name, token in config["identities"].items():
++                if hmac.compare_digest(supplied, "Bearer " + token):
++                    identity = name
++            allowed = config["permissions"].get(identity, [])
++            try:
++                if operation not in allowed:
++                    result = {"status": "REJECTED", "reason": "IDENTITY_OR_OPERATION_DENIED"}
++                else:
++                    length = int(self.headers.get("Content-Length", "0"))
++                    if not 0 < length <= 65536:
++                        raise InvalidInput("BODY_SIZE")
++                    raw = self.rfile.read(length)
++                    request_bytes = len(raw)
++                    payload = strict_json(raw)
++                    if role == "authority":
++                        if operation == "staging_read_metadata":
++                            peer = authenticate_authority_peer(authority_read_host, supplied,
++                                                               config["identities"], config["permissions"])
++                            result = dispatch_authority_read(authority_read_host, peer, payload)
++                        else:
++                            result = implementation.call(operation, payload)
++                    else:
++                        result = implementation.call(operation, payload, identity)
++            except (ValueError, TypeError, KeyError, InvalidInput):
++                result = {"status": "REJECTED", "reason": "INVALID_INPUT"}
++            except Exception:
++                result = {"status": "UNKNOWN", "reason": "SERVICE_UNAVAILABLE"}
++            response = canonical(result)
++            # The operation logged is selected from the configured whitelist.
++            try:
++                log.emit("request", operation=operation if operation in allowed else "denied",
++                         identity=identity, request_json_bytes=request_bytes,
++                         response_json_bytes=len(response), status=result.get("status"),
++                         elapsed_ns=time.monotonic_ns() - started)
++            except Exception:
++                if role != "authority" or operation != "staging_read_metadata":
++                    raise
++                response = canonical({"status": "UNKNOWN", "reason": "READ_AUDIT_UNAVAILABLE"})
++            try:
++                self.send_response(200)
++                self.send_header("Content-Type", "application/json")
++                self.send_header("Content-Length", str(len(response)))
++                self.end_headers()
++                self.wfile.write(response)
++            except (OSError, ssl.SSLError):
++                pass
++
++    server = ThreadingHTTPServer(("127.0.0.1", config["port"]), Handler)
++    server.daemon_threads = True
++    tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
++    tls.minimum_version = ssl.TLSVersion.TLSv1_2
++    tls.load_cert_chain(config["certificate"], config["tls_key"])
++    server.socket = tls.wrap_socket(server.socket, server_side=True)
++    write_json(root / "control" / (role + "_ready.json"),
++               {"role": role, "pid": os.getpid(), "port": config["port"],
++                "boot": getattr(implementation, "boot", None)})
++    server.serve_forever(poll_interval=0.05)
+diff --git a/src/auth_lifecycle/online_state/dsat_authority_read_host.py b/src/auth_lifecycle/online_state/dsat_authority_read_host.py
+--- a/src/auth_lifecycle/online_state/dsat_authority_read_host.py
++++ b/src/auth_lifecycle/online_state/dsat_authority_read_host.py
+@@ -1,473 +1,508 @@
+-"""H1 internal Authority host; offline integration, no import-time I/O.
+-
+-Authenticated facts are issued by trusted host code outside request bodies.
+-The identity registry models that boundary; deployment authentication is H2 work.
+-This module opens no storage, key, network, service, or database connection.
+-"""
+-from dataclasses import dataclass
+-import json
+-import re
+-import threading
+-import time
+-
+-from .dsat_authority_read import (
+-    BASE_GAPS, ERRORS, MAX_REVISION, ReadLimits, ReadScope, StagingSnapshot,
+-    TrustedReadContext, read_dsat_authority_snapshot,
+-)
+-from .protocol import canonical
+-
+-
+-SCHEMA = "dsat-host-read-summary/1"
+-RIGHT = "staging_read_metadata"
+-HOST_ERRORS = {
+-    "HOST_IDENTITY_REQUIRED", "HOST_PERMISSION_DENIED", "HOST_PERMIT_EXPIRED",
+-    "HOST_PERMIT_REPLAY", "HOST_SOURCE_MISMATCH", "HOST_CONNECTION_NOT_IDLE",
+-    "HOST_DEADLINE_EXCEEDED", "INCONCLUSIVE_CONCURRENT_CHANGE", "HOST_SUMMARY_REFUSED",
+-}
+-STATUSES = ERRORS | HOST_ERRORS | {"STAGING_READY_WITH_GAPS"}
+-GAPS = set(BASE_GAPS) | STATUSES | {"SOURCE_REFERENCE_UNAVAILABLE", "QUEUED_CREATOR_FRONTIER"}
+-
+-
+-class HostReadError(ValueError):
+-    def __init__(self, code):
+-        self.code = code if code in STATUSES else "HOST_SUMMARY_REFUSED"
+-        super().__init__(self.code)
+-
+-
+-def _id(value):
+-    if type(value) is not str or re.fullmatch(r"[A-Za-z0-9_.:-]{1,160}", value) is None:
+-        raise HostReadError("UNSUPPORTED_READ_REQUEST")
+-    return value
+-
+-
+-def _nat(value):
+-    if type(value) is not int or not 0 <= value <= MAX_REVISION:
+-        raise HostReadError("RESOURCE_LIMIT")
+-    return value
+-
+-
+-def _scope(value):
+-    try:
+-        scope = ReadScope.parse(value)
+-    except Exception:
+-        raise HostReadError("READ_SCOPE_DENIED") from None
+-    if any(len(getattr(scope, k)) != 1 for k in ("tasks", "callers", "generations")):
+-        raise HostReadError("READ_SCOPE_DENIED")
+-    return scope
+-
+-
+-def _scope_key(scope):
+-    return (scope.account, scope.audience, *scope.tasks, *scope.callers, *scope.generations)
+-
+-
+-class _HostCapability:
+-    __slots__ = ()
+-
+-    def __init__(self, *args, **kwargs):
+-        raise HostReadError("HOST_IDENTITY_REQUIRED")
+-
+-    def __repr__(self):
+-        return "<HostCapability redacted>"
+-
+-    def __reduce_ex__(self, protocol):
+-        raise TypeError("HOST_CAPABILITY_NOT_SERIALIZABLE")
+-
+-
+-class VerifiedLocalCaller(_HostCapability):
+-    __slots__ = ()
+-
+-
+-class HostReadPermit(_HostCapability):
+-    __slots__ = ()
+-
+-
+-class HostReadPolicy:
+-    """Host-owned registry; all issuing/updating methods are trusted internal APIs.
+-
+-    Possession of Python execution in this process remains a trust assumption.
+-    RPC authentication must happen before bind_authenticated_caller is called.
+-    """
+-    def __init__(self, epoch_ref, clock=time.monotonic_ns):
+-        self.epoch_ref = _id(epoch_ref)
+-        self.clock = clock
+-        self.lock = threading.RLock()
+-        self._identities, self._rules, self._permits = {}, {}, {}
+-        self._version = 0
+-        self._sequence = 0
+-
+-    def bind_authenticated_caller(self, *, principal_ref, actor, transport_ref, expires_ns):
+-        with self.lock:
+-            if len(self._identities) >= 4096:
+-                raise HostReadError("RESOURCE_LIMIT")
+-            fact = (_id(principal_ref), _id(actor), _id(transport_ref), _nat(expires_ns))
+-            caller = object.__new__(VerifiedLocalCaller)
+-            self._identities[caller] = fact
+-            return caller
+-
+-    def allow(self, *, principal_ref, actor, transport_ref, scope, grant_ref,
+-              scope_ref, expires_ns, rights=(RIGHT,)):
+-        with self.lock:
+-            scope = _scope(scope)
+-            rights = tuple(rights)
+-            if any(type(x) is not str or x != RIGHT for x in rights):
+-                raise HostReadError("HOST_PERMISSION_DENIED")
+-            self._version += 1
+-            self._rules[(_id(principal_ref), _scope_key(scope))] = {
+-                "actor": _id(actor), "transport": _id(transport_ref), "scope": scope,
+-                "grant": _id(grant_ref), "scope_ref": _id(scope_ref), "rights": rights,
+-                "expires": _nat(expires_ns), "version": self._version,
+-            }
+-
+-    def revoke(self, principal_ref, scope):
+-        with self.lock:
+-            self._rules.pop((principal_ref, _scope_key(_scope(scope))), None)
+-            self._version += 1
+-
+-    def revoke_identity(self, caller):
+-        with self.lock:
+-            self._identities.pop(caller, None)
+-
+-    def _resolve(self, caller, scope):
+-        if type(caller) is not VerifiedLocalCaller or caller not in self._identities:
+-            raise HostReadError("HOST_IDENTITY_REQUIRED")
+-        principal, actor, transport, expires = self._identities[caller]
+-        now = _nat(self.clock())
+-        if now >= expires:
+-            raise HostReadError("HOST_PERMIT_EXPIRED")
+-        rule = self._rules.get((principal, _scope_key(scope)))
+-        if rule is None or RIGHT not in rule["rights"]:
+-            raise HostReadError("HOST_PERMISSION_DENIED")
+-        if actor != rule["actor"] or transport != rule["transport"]:
+-            raise HostReadError("HOST_PERMISSION_DENIED")
+-        if now >= rule["expires"]:
+-            raise HostReadError("HOST_PERMIT_EXPIRED")
+-        return principal, rule
+-
+-    def __repr__(self):
+-        return "<HostReadPolicy redacted>"
+-
+-    def __reduce_ex__(self, protocol):
+-        raise TypeError("HOST_POLICY_NOT_SERIALIZABLE")
+-
+-
+-@dataclass(frozen=True)
+-class HostReadLimits:
+-    staging_bytes: int = 65536
+-    scoped_records: int = 32
+-    summary_bytes: int = 4096
+-    soft_deadline_ns: int = 10_000_000_000
+-
+-    def __post_init__(self):
+-        ReadLimits(self.staging_bytes, self.scoped_records, 6)
+-        if (type(self.summary_bytes) is not int or not 2048 <= self.summary_bytes <= 4096
+-                or type(self.scoped_records) is not int or not 1 <= self.scoped_records <= 32
+-                or type(self.soft_deadline_ns) is not int or not 1 <= self.soft_deadline_ns <= 10_000_000_000):
+-            raise HostReadError("RESOURCE_LIMIT")
+-
+-
+-def summary_schema():
+-    """Closed R13 shape; integer maxima are exact Python integers."""
+-    def obj(props):
+-        return {"type": "object", "additionalProperties": False,
+-                "required": list(props), "properties": props}
+-    ident = {"type": "string", "minLength": 1, "maxLength": 160,
+-             "pattern": r"^[A-Za-z0-9_.:-]+$"}
+-    number = {"type": ["integer", "null"], "minimum": 0, "maximum": MAX_REVISION}
+-    boolean = {"type": ["boolean", "null"]}
+-    observed = obj({"domain": {"const": "monotonic_ns"}, "epoch_ref": ident,
+-                    "lower": number, "upper": number, "native_validity": {"const": "UNESTABLISHED"}})
+-    audit = obj({
+-        "source_sql_count": {"type": "integer", "minimum": 0, "maximum": 4},
+-        "source_read_count": {"type": "integer", "minimum": 0, "maximum": 1},
+-        "source_operations_delta": number,
+-        "key_read_count": {"type": ["integer", "null"], "minimum": 0, "maximum": 1},
+-        "key_count_basis": {"enum": ["PINNED_PATH_BOUND", "MEASURED_APPROVED_TELEMETRY", "NOT_OBSERVED"]},
+-        "bound_request_count": {"type": ["integer", "null"], "minimum": 0, "maximum": 32},
+-        "world_row_unchanged": boolean, "authority_events_count_unchanged": boolean,
+-        "authority_events_max_unchanged": boolean, "connection_total_changes_unchanged": boolean,
+-        "observed_sql_schema_version": {"type": ["integer", "null"], "minimum": 0, "maximum": 2147483647},
+-        "secret_scan_status": {"enum": ["CLEAN", "REFUSED", "NOT_RUN"]},
+-        "elapsed_ns": number, "deadline_exceeded": {"type": "boolean"}, "permit_consumed": {"type": "boolean"},
+-    })
+-    return obj({
+-        "schema": {"const": SCHEMA}, "execution_ref": ident, "status": {"enum": sorted(STATUSES)},
+-        "authority_revision": number, "authority_instance": {"type": "null"},
+-        "obligation_revision": {"type": "null"},
+-        "snapshot_digest": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+-        "read_scope_ref": ident, "observed_at": {"anyOf": [{"type": "null"}, observed]},
+-        "source_contract": {"enum": ["legacy-authority-state/1", None]},
+-        "source_binding_status": {"enum": ["MATCHED", "NOT_APPLICABLE_EMPTY_SCOPE", "UNAVAILABLE"]},
+-        "missing_fields": {"type": "array", "uniqueItems": True, "maxItems": 64,
+-                           "items": {"enum": sorted(GAPS)}},
+-        "native_currentness_status": {"const": "UNPROVEN"}, "math_ready": {"const": False},
+-        "current_native_eligible": {"const": False}, "global_complete": {"const": False},
+-        "authority_write_action": {"const": "NONE"}, "audit": audit,
+-    })
+-
+-
+-def _validate(value, schema, depth=0):
+-    if depth > 20:
+-        raise HostReadError("HOST_SUMMARY_REFUSED")
+-    if "anyOf" in schema:
+-        for option in schema["anyOf"]:
+-            try:
+-                _validate(value, option, depth + 1)
+-                return
+-            except HostReadError:
+-                pass
+-        raise HostReadError("HOST_SUMMARY_REFUSED")
+-    if "const" in schema and (type(value) is not type(schema["const"]) or value != schema["const"]):
+-        raise HostReadError("HOST_SUMMARY_REFUSED")
+-    if "enum" in schema and not any(type(value) is type(x) and value == x for x in schema["enum"]):
+-        raise HostReadError("HOST_SUMMARY_REFUSED")
+-    actual = {dict: "object", list: "array", str: "string", int: "integer", bool: "boolean", type(None): "null"}.get(type(value))
+-    types = schema.get("type", [])
+-    types = [types] if type(types) is str else types
+-    if types and actual not in types:
+-        raise HostReadError("HOST_SUMMARY_REFUSED")
+-    if value is None:
+-        return
+-    if actual == "object":
+-        if set(value) != set(schema["properties"]):
+-            raise HostReadError("HOST_SUMMARY_REFUSED")
+-        for key in value:
+-            _validate(value[key], schema["properties"][key], depth + 1)
+-    elif actual == "array":
+-        if len(value) > schema.get("maxItems", 64) or (schema.get("uniqueItems") and len(value) != len(set(value))):
+-            raise HostReadError("HOST_SUMMARY_REFUSED")
+-        for item in value:
+-            _validate(item, schema["items"], depth + 1)
+-    elif actual == "integer":
+-        if not schema.get("minimum", 0) <= value <= schema.get("maximum", MAX_REVISION):
+-            raise HostReadError("HOST_SUMMARY_REFUSED")
+-    elif actual == "string":
+-        if not schema.get("minLength", 0) <= len(value) <= schema.get("maxLength", 4096):
+-            raise HostReadError("HOST_SUMMARY_REFUSED")
+-        if "pattern" in schema and re.fullmatch(schema["pattern"], value) is None:
+-            raise HostReadError("HOST_SUMMARY_REFUSED")
+-
+-
+-class HostReadSummary:
+-    __slots__ = ("_json",)
+-
+-    def __init__(self, public, maximum=4096):
+-        _validate(public, summary_schema())
+-        if (public["source_binding_status"] == "MATCHED"
+-                and (public["status"] != "STAGING_READY_WITH_GAPS" or not public["audit"]["bound_request_count"])):
+-            raise HostReadError("HOST_SUMMARY_REFUSED")
+-        raw = canonical(public)
+-        if type(maximum) is not int or not 2048 <= maximum <= 4096 or len(raw) > maximum:
+-            raise HostReadError("RESOURCE_LIMIT")
+-        self._json = raw
+-
+-    def to_dict(self):
+-        return json.loads(self._json)
+-
+-    def to_json(self):
+-        return self._json
+-
+-    def __repr__(self):
+-        return "<HostReadSummary redacted>"
+-
+-
+-def outcome_category(status):
+-    if status in {"HOST_IDENTITY_REQUIRED", "HOST_PERMISSION_DENIED", "READ_CONTEXT_REQUIRED"}:
+-        return "REJECT_UNAUTHORIZED"
+-    if status == "READ_SCOPE_DENIED":
+-        return "INSUFFICIENT_SCOPE"
+-    if status == "READ_BUDGET_DENIED":
+-        return "BUDGET_EXHAUSTED"
+-    if status in {"SOURCE_BINDING_CONFLICT", "HOST_SOURCE_MISMATCH"}:
+-        return "SOURCE_BINDING_FAILED"
+-    if status == "HOST_SUMMARY_REFUSED":
+-        return "SECRET_BOUNDARY_VIOLATION"
+-    if status == "STAGING_READY_WITH_GAPS":
+-        return "STAGING_READY_WITH_GAPS"
+-    return "UNKNOWN_PENDING"
+-
+-
+-class AuthorityReadHost:
+-    """Registered in-process reader and restricted metadata egress.
+-
+-    H1 supports SYNTHETIC_ONLY registration. H2 source admission remains closed.
+-    SQL/key counts on the public summary refer to real access, not fake decoding.
+-    Synthetic counters are measured independently by the authorized test harness.
+-    """
+-    def __init__(self, reader, policy, *, producer_ref, locator_ref, epoch_ref,
+-                 source_contract="legacy-authority-state/1", source_kind="SYNTHETIC_ONLY",
+-                 limits=HostReadLimits(), audit_sink=None):
+-        if type(policy) is not HostReadPolicy or type(limits) is not HostReadLimits:
+-            raise HostReadError("HOST_SOURCE_MISMATCH")
+-        self._reader, self._policy, self._limits = reader, policy, limits
+-        self._producer, self._locator, self._epoch = map(_id, (producer_ref, locator_ref, epoch_ref))
+-        self._contract, self._kind, self._audit_sink = source_contract, source_kind, audit_sink
+-
+-    def issue_permit(self, caller, scope):
+-        with self._policy.lock:
+-            scope = _scope(scope)
+-            principal, rule = self._policy._resolve(caller, scope)
+-            if len(self._policy._permits) >= 4096:
+-                raise HostReadError("RESOURCE_LIMIT")
+-            self._policy._sequence += 1
+-            permit = object.__new__(HostReadPermit)
+-            self._policy._permits[permit] = {
+-                "host": self, "reader": self._reader, "epoch": self._epoch,
+-                "producer": self._producer, "locator": self._locator, "caller": caller,
+-                "principal": principal, "scope": scope, "version": rule["version"],
+-                "scope_ref": rule["scope_ref"], "grant": rule["grant"], "used": False,
+-                "execution_ref": "exec:" + str(self._policy._sequence),
+-            }
+-            return permit
+-
+-    def request_for(self, permit):
+-        """Trusted RPC wrapper constructs the exact body; no raw state access."""
+-        with self._policy.lock:
+-            rec = self._policy._permits.get(permit)
+-            if rec is None or rec["host"] is not self:
+-                raise HostReadError("HOST_PERMIT_REPLAY")
+-            return {"execution_ref": rec["execution_ref"], "scope": rec["scope"].to_dict()}
+-
+-    def read_summary(self, request, caller, permit):
+-        started = time.perf_counter_ns()
+-        status, stage, rec = "HOST_IDENTITY_REQUIRED", None, None
+-        consumed, operations_delta, source_reads = False, 0, 0
+-        try:
+-            with self._policy.lock:
+-                if type(caller) is not VerifiedLocalCaller or caller not in self._policy._identities:
+-                    raise HostReadError("HOST_IDENTITY_REQUIRED")
+-                if type(permit) is not HostReadPermit or permit not in self._policy._permits:
+-                    raise HostReadError("HOST_PERMIT_REPLAY")
+-                rec = self._policy._permits[permit]
+-                if (rec["host"] is not self or rec["reader"] is not self._reader
+-                        or rec["epoch"] != self._epoch or self._epoch != self._policy.epoch_ref
+-                        or rec["producer"] != self._producer or rec["locator"] != self._locator):
+-                    raise HostReadError("HOST_SOURCE_MISMATCH")
+-                if rec["caller"] is not caller:
+-                    raise HostReadError("HOST_PERMISSION_DENIED")
+-                if rec["used"]:
+-                    raise HostReadError("HOST_PERMIT_REPLAY")
+-                if type(request) is not dict or set(request) != {"execution_ref", "scope"}:
+-                    raise HostReadError("UNSUPPORTED_READ_REQUEST")
+-                if request["execution_ref"] != rec["execution_ref"]:
+-                    raise HostReadError("UNSUPPORTED_READ_REQUEST")
+-                requested = _scope(request["scope"])
+-                if _scope_key(requested) != _scope_key(rec["scope"]):
+-                    raise HostReadError("READ_SCOPE_DENIED")
+-                principal, rule = self._policy._resolve(caller, requested)
+-                if rule["version"] != rec["version"]:
+-                    raise HostReadError("HOST_PERMISSION_DENIED")
+-                if self._contract != "legacy-authority-state/1" or self._kind != "SYNTHETIC_ONLY":
+-                    raise HostReadError("UNSUPPORTED_SOURCE_SCHEMA")
+-                with self._reader.lock:
+-                    if self._reader.connection.in_transaction is not False:
+-                        raise HostReadError("HOST_CONNECTION_NOT_IDLE")
+-                    rec["used"] = True
+-                    consumed = True
+-                    before = self._reader.operations
+-                    context = TrustedReadContext.from_host(
+-                        self._reader, requested, principal_ref=principal, producer_ref=self._producer,
+-                        authority_locator_ref=self._locator, clock_epoch_ref=self._epoch,
+-                        source_kind="SYNTHETIC_ONLY")
+-                    try:
+-                        output = read_dsat_authority_snapshot(self._reader, requested, context,
+-                                                             ReadLimits(self._limits.staging_bytes,
+-                                                                        self._limits.scoped_records, 6))
+-                    finally:
+-                        # A failure after source I/O must retain its consumed quota.
+-                        operations_delta = self._reader.operations - before
+-                        # Under this locked, pinned one-read contract a positive
+-                        # operation delta witnesses a source read attempt, even
+-                        # if the adapter cannot return its normal cost envelope.
+-                        if operations_delta > 0:
+-                            source_reads = 1
+-                    if type(output) is not StagingSnapshot:
+-                        raise HostReadError("HOST_SUMMARY_REFUSED")
+-                    data = output.to_dict()
+-                    source_reads = data["costs"]["source_reads"]
+-                    status = data["status"]
+-                    if status == "STAGING_READY_WITH_GAPS":
+-                        if (data["scope"] != requested.to_dict() or not data["grants"]
+-                                or any(g["origin"]["grant_id"] != rec["grant"] for g in data["grants"])
+-                                or any(r["origin"]["grant_id"] != rec["grant"] for r in data["requests"])):
+-                            raise HostReadError("SOURCE_BINDING_CONFLICT")
+-                        stage = data
+-                    _, final_rule = self._policy._resolve(caller, requested)
+-                    if final_rule["version"] != rec["version"]:
+-                        raise HostReadError("HOST_PERMISSION_DENIED")
+-        except HostReadError as error:
+-            status, stage = error.code, None
+-        except Exception:
+-            status, stage = "READ_SOURCE_UNAVAILABLE", None
+-        elapsed = time.perf_counter_ns() - started
+-        if elapsed > self._limits.soft_deadline_ns:
+-            status, stage = "HOST_DEADLINE_EXCEEDED", None
+-        return self._finish(status, stage, rec if consumed else None,
+-                            consumed, source_reads, operations_delta, elapsed)
+-
+-    def refusal(self, code):
+-        return self._finish(code if code in STATUSES else "HOST_SUMMARY_REFUSED", None,
+-                            None, False, 0, 0, 0)
+-
+-    def _finish(self, status, stage, rec, consumed, reads, delta, elapsed):
+-        # Every value below is fixed, host-issued, counted, or R12-sanitized.
+-        public = {
+-            "schema": SCHEMA, "execution_ref": rec["execution_ref"] if rec else "exec:unavailable",
+-            "status": status, "authority_revision": stage["authority_revision"] if stage else None,
+-            "authority_instance": None, "obligation_revision": None,
+-            "snapshot_digest": stage["snapshot_digest"] if stage else None,
+-            "read_scope_ref": rec["scope_ref"] if rec else "scope:unavailable",
+-            "observed_at": stage["read_clock"] if stage else None,
+-            "source_contract": stage["source"]["source_contract"] if stage else None,
+-            "source_binding_status": ("MATCHED" if stage["requests"] else "NOT_APPLICABLE_EMPTY_SCOPE") if stage else "UNAVAILABLE",
+-            "missing_fields": sorted(set(BASE_GAPS) | ({status} if status != "STAGING_READY_WITH_GAPS" else set())
+-                                     | (set(stage["gap_codes"]) if stage else set())),
+-            "native_currentness_status": "UNPROVEN", "math_ready": False,
+-            "current_native_eligible": False, "global_complete": False, "authority_write_action": "NONE",
+-            "audit": {"source_sql_count": 0, "source_read_count": reads,
+-                      "source_operations_delta": delta, "key_read_count": None,
+-                      "key_count_basis": "NOT_OBSERVED", "bound_request_count": len(stage["requests"]) if stage else None,
+-                      "world_row_unchanged": None, "authority_events_count_unchanged": None,
+-                      "authority_events_max_unchanged": None, "connection_total_changes_unchanged": None,
+-                      "observed_sql_schema_version": None, "secret_scan_status": "NOT_RUN",
+-                      "elapsed_ns": elapsed, "deadline_exceeded": status == "HOST_DEADLINE_EXCEEDED",
+-                      "permit_consumed": consumed},
+-        }
+-        if self._audit_sink is not None:
+-            try:
+-                self._audit_sink({"event": "host_read", "status": status,
+-                                  "identity_basis": "HOST_REGISTRY" if rec else "UNVERIFIED",
+-                                  "source_reads": reads, "operation_delta": delta})
+-            except Exception:
+-                return self._safe_refusal("READ_SOURCE_UNAVAILABLE", consumed, reads, delta, elapsed)
+-        try:
+-            return HostReadSummary(public, self._limits.summary_bytes)
+-        except Exception:
+-            return self._safe_refusal("HOST_SUMMARY_REFUSED", consumed, reads, delta, elapsed)
+-
+-    @staticmethod
+-    def _safe_refusal(status, consumed, reads, delta, elapsed):
+-        # Fixed bounded fallback; it never recursively calls an audit sink.
+-        public = {
+-            "schema": SCHEMA, "execution_ref": "exec:unavailable", "status": status,
+-            "authority_revision": None, "authority_instance": None, "obligation_revision": None,
+-            "snapshot_digest": None, "read_scope_ref": "scope:unavailable", "observed_at": None,
+-            "source_contract": None, "source_binding_status": "UNAVAILABLE",
+-            "missing_fields": sorted(set(BASE_GAPS) | {status}),
+-            "native_currentness_status": "UNPROVEN", "math_ready": False,
+-            "current_native_eligible": False, "global_complete": False, "authority_write_action": "NONE",
+-            "audit": {"source_sql_count": 0, "source_read_count": reads if type(reads) is int and 0 <= reads <= 1 else 0,
+-                      "source_operations_delta": delta if type(delta) is int and 0 <= delta <= MAX_REVISION else None,
+-                      "key_read_count": None, "key_count_basis": "NOT_OBSERVED", "bound_request_count": None,
+-                      "world_row_unchanged": None, "authority_events_count_unchanged": None,
+-                      "authority_events_max_unchanged": None, "connection_total_changes_unchanged": None,
+-                      "observed_sql_schema_version": None, "secret_scan_status": "REFUSED",
+-                      "elapsed_ns": elapsed, "deadline_exceeded": status == "HOST_DEADLINE_EXCEEDED",
+-                      "permit_consumed": consumed},
+-        }
+-        return HostReadSummary(public, 4096)
+-
+-    def __repr__(self):
+-        return "<AuthorityReadHost redacted>"
+-
+-    def __reduce_ex__(self, protocol):
+-        raise TypeError("HOST_NOT_SERIALIZABLE")
++"""H1 internal Authority host; offline integration, no import-time I/O.
++
++Authenticated facts are issued by trusted host code outside request bodies.
++The identity registry models that boundary; deployment authentication is H2 work.
++This module opens no storage, key, network, service, or database connection.
++"""
++from dataclasses import dataclass
++import json
++import re
++import threading
++import time
++
++from .dsat_authority_read import (
++    BASE_GAPS, ERRORS, MAX_REVISION, ReadLimits, ReadScope, StagingSnapshot,
++    TrustedReadContext, read_dsat_authority_snapshot,
++)
++from .protocol import canonical
++
++
++SCHEMA = "dsat-host-read-summary/1"
++RIGHT = "staging_read_metadata"
++HOST_ERRORS = {
++    "HOST_IDENTITY_REQUIRED", "HOST_PERMISSION_DENIED", "HOST_PERMIT_EXPIRED",
++    "HOST_PERMIT_REPLAY", "HOST_SOURCE_MISMATCH", "HOST_CONNECTION_NOT_IDLE",
++    "HOST_DEADLINE_EXCEEDED", "INCONCLUSIVE_CONCURRENT_CHANGE", "HOST_SUMMARY_REFUSED",
++}
++STATUSES = ERRORS | HOST_ERRORS | {"STAGING_READY_WITH_GAPS"}
++GAPS = set(BASE_GAPS) | STATUSES | {"SOURCE_REFERENCE_UNAVAILABLE", "QUEUED_CREATOR_FRONTIER"}
++
++
++class HostReadError(ValueError):
++    def __init__(self, code):
++        self.code = code if code in STATUSES else "HOST_SUMMARY_REFUSED"
++        super().__init__(self.code)
++
++
++def _id(value):
++    if type(value) is not str or re.fullmatch(r"[A-Za-z0-9_.:-]{1,160}", value) is None:
++        raise HostReadError("UNSUPPORTED_READ_REQUEST")
++    return value
++
++
++def _nat(value):
++    if type(value) is not int or not 0 <= value <= MAX_REVISION:
++        raise HostReadError("RESOURCE_LIMIT")
++    return value
++
++
++def _scope(value):
++    try:
++        scope = ReadScope.parse(value)
++    except Exception:
++        raise HostReadError("READ_SCOPE_DENIED") from None
++    if any(len(getattr(scope, k)) != 1 for k in ("tasks", "callers", "generations")):
++        raise HostReadError("READ_SCOPE_DENIED")
++    return scope
++
++
++def _scope_key(scope):
++    return (scope.account, scope.audience, *scope.tasks, *scope.callers, *scope.generations)
++
++
++class _HostCapability:
++    __slots__ = ()
++
++    def __init__(self, *args, **kwargs):
++        raise HostReadError("HOST_IDENTITY_REQUIRED")
++
++    def __repr__(self):
++        return "<HostCapability redacted>"
++
++    def __reduce_ex__(self, protocol):
++        raise TypeError("HOST_CAPABILITY_NOT_SERIALIZABLE")
++
++
++class VerifiedLocalCaller(_HostCapability):
++    __slots__ = ()
++
++
++class HostReadPermit(_HostCapability):
++    __slots__ = ()
++
++
++class HostReadPolicy:
++    """Host-owned registry; all issuing/updating methods are trusted internal APIs.
++
++    Possession of Python execution in this process remains a trust assumption.
++    RPC authentication must happen before bind_authenticated_caller is called.
++    """
++    def __init__(self, epoch_ref, clock=time.monotonic_ns):
++        self.epoch_ref = _id(epoch_ref)
++        self.clock = clock
++        self.lock = threading.RLock()
++        self._identities, self._rules, self._permits = {}, {}, {}
++        self._version = 0
++        self._sequence = 0
++
++    def bind_authenticated_caller(self, *, principal_ref, actor, transport_ref, expires_ns):
++        with self.lock:
++            if len(self._identities) >= 4096:
++                raise HostReadError("RESOURCE_LIMIT")
++            fact = (_id(principal_ref), _id(actor), _id(transport_ref), _nat(expires_ns))
++            caller = object.__new__(VerifiedLocalCaller)
++            self._identities[caller] = fact
++            return caller
++
++    def allow(self, *, principal_ref, actor, transport_ref, scope, grant_ref,
++              scope_ref, expires_ns, rights=(RIGHT,)):
++        with self.lock:
++            scope = _scope(scope)
++            rights = tuple(rights)
++            if any(type(x) is not str or x != RIGHT for x in rights):
++                raise HostReadError("HOST_PERMISSION_DENIED")
++            self._version += 1
++            self._rules[(_id(principal_ref), _scope_key(scope))] = {
++                "actor": _id(actor), "transport": _id(transport_ref), "scope": scope,
++                "grant": _id(grant_ref), "scope_ref": _id(scope_ref), "rights": rights,
++                "expires": _nat(expires_ns), "version": self._version,
++            }
++
++    def revoke(self, principal_ref, scope):
++        with self.lock:
++            self._rules.pop((principal_ref, _scope_key(_scope(scope))), None)
++            self._version += 1
++
++    def revoke_identity(self, caller):
++        with self.lock:
++            self._identities.pop(caller, None)
++
++    def _resolve(self, caller, scope):
++        if type(caller) is not VerifiedLocalCaller or caller not in self._identities:
++            raise HostReadError("HOST_IDENTITY_REQUIRED")
++        principal, actor, transport, expires = self._identities[caller]
++        now = _nat(self.clock())
++        if now >= expires:
++            raise HostReadError("HOST_PERMIT_EXPIRED")
++        rule = self._rules.get((principal, _scope_key(scope)))
++        if rule is None or RIGHT not in rule["rights"]:
++            raise HostReadError("HOST_PERMISSION_DENIED")
++        if actor != rule["actor"] or transport != rule["transport"]:
++            raise HostReadError("HOST_PERMISSION_DENIED")
++        if now >= rule["expires"]:
++            raise HostReadError("HOST_PERMIT_EXPIRED")
++        return principal, rule
++
++    def __repr__(self):
++        return "<HostReadPolicy redacted>"
++
++    def __reduce_ex__(self, protocol):
++        raise TypeError("HOST_POLICY_NOT_SERIALIZABLE")
++
++
++@dataclass(frozen=True)
++class HostReadLimits:
++    staging_bytes: int = 65536
++    scoped_records: int = 32
++    summary_bytes: int = 4096
++    soft_deadline_ns: int = 10_000_000_000
++
++    def __post_init__(self):
++        ReadLimits(self.staging_bytes, self.scoped_records, 6)
++        if (type(self.summary_bytes) is not int or not 2048 <= self.summary_bytes <= 4096
++                or type(self.scoped_records) is not int or not 1 <= self.scoped_records <= 32
++                or type(self.soft_deadline_ns) is not int or not 1 <= self.soft_deadline_ns <= 10_000_000_000):
++            raise HostReadError("RESOURCE_LIMIT")
++
++
++def summary_schema():
++    """Closed R13 shape; integer maxima are exact Python integers."""
++    def obj(props):
++        return {"type": "object", "additionalProperties": False,
++                "required": list(props), "properties": props}
++    ident = {"type": "string", "minLength": 1, "maxLength": 160,
++             "pattern": r"^[A-Za-z0-9_.:-]+$"}
++    number = {"type": ["integer", "null"], "minimum": 0, "maximum": MAX_REVISION}
++    boolean = {"type": ["boolean", "null"]}
++    observed = obj({"domain": {"const": "monotonic_ns"}, "epoch_ref": ident,
++                    "lower": number, "upper": number, "native_validity": {"const": "UNESTABLISHED"}})
++    audit = obj({
++        "source_sql_count": {"type": "integer", "minimum": 0, "maximum": 4},
++        "source_read_count": {"type": "integer", "minimum": 0, "maximum": 1},
++        "source_operations_delta": number,
++        "key_read_count": {"type": ["integer", "null"], "minimum": 0, "maximum": 1},
++        "key_count_basis": {"enum": ["PINNED_PATH_BOUND", "MEASURED_APPROVED_TELEMETRY", "NOT_OBSERVED"]},
++        "bound_request_count": {"type": ["integer", "null"], "minimum": 0, "maximum": 32},
++        "world_row_unchanged": boolean, "authority_events_count_unchanged": boolean,
++        "authority_events_max_unchanged": boolean, "connection_total_changes_unchanged": boolean,
++        "observed_sql_schema_version": {"type": ["integer", "null"], "minimum": 0, "maximum": 2147483647},
++        "secret_scan_status": {"enum": ["CLEAN", "REFUSED", "NOT_RUN"]},
++        "elapsed_ns": number, "deadline_exceeded": {"type": "boolean"}, "permit_consumed": {"type": "boolean"},
++    })
++    return obj({
++        "schema": {"const": SCHEMA}, "execution_ref": ident, "status": {"enum": sorted(STATUSES)},
++        "authority_revision": number, "authority_instance": {"type": "null"},
++        "obligation_revision": {"type": "null"},
++        "snapshot_digest": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
++        "read_scope_ref": ident, "observed_at": {"anyOf": [{"type": "null"}, observed]},
++        "source_contract": {"enum": ["legacy-authority-state/1", None]},
++        "source_binding_status": {"enum": ["MATCHED", "NOT_APPLICABLE_EMPTY_SCOPE", "UNAVAILABLE"]},
++        "missing_fields": {"type": "array", "uniqueItems": True, "maxItems": 64,
++                           "items": {"enum": sorted(GAPS)}},
++        "native_currentness_status": {"const": "UNPROVEN"}, "math_ready": {"const": False},
++        "current_native_eligible": {"const": False}, "global_complete": {"const": False},
++        "authority_write_action": {"const": "NONE"}, "audit": audit,
++    })
++
++
++def _validate(value, schema, depth=0):
++    if depth > 20:
++        raise HostReadError("HOST_SUMMARY_REFUSED")
++    if "anyOf" in schema:
++        for option in schema["anyOf"]:
++            try:
++                _validate(value, option, depth + 1)
++                return
++            except HostReadError:
++                pass
++        raise HostReadError("HOST_SUMMARY_REFUSED")
++    if "const" in schema and (type(value) is not type(schema["const"]) or value != schema["const"]):
++        raise HostReadError("HOST_SUMMARY_REFUSED")
++    if "enum" in schema and not any(type(value) is type(x) and value == x for x in schema["enum"]):
++        raise HostReadError("HOST_SUMMARY_REFUSED")
++    actual = {dict: "object", list: "array", str: "string", int: "integer", bool: "boolean", type(None): "null"}.get(type(value))
++    types = schema.get("type", [])
++    types = [types] if type(types) is str else types
++    if types and actual not in types:
++        raise HostReadError("HOST_SUMMARY_REFUSED")
++    if value is None:
++        return
++    if actual == "object":
++        if set(value) != set(schema["properties"]):
++            raise HostReadError("HOST_SUMMARY_REFUSED")
++        for key in value:
++            _validate(value[key], schema["properties"][key], depth + 1)
++    elif actual == "array":
++        if len(value) > schema.get("maxItems", 64) or (schema.get("uniqueItems") and len(value) != len(set(value))):
++            raise HostReadError("HOST_SUMMARY_REFUSED")
++        for item in value:
++            _validate(item, schema["items"], depth + 1)
++    elif actual == "integer":
++        if not schema.get("minimum", 0) <= value <= schema.get("maximum", MAX_REVISION):
++            raise HostReadError("HOST_SUMMARY_REFUSED")
++    elif actual == "string":
++        if not schema.get("minLength", 0) <= len(value) <= schema.get("maxLength", 4096):
++            raise HostReadError("HOST_SUMMARY_REFUSED")
++        if "pattern" in schema and re.fullmatch(schema["pattern"], value) is None:
++            raise HostReadError("HOST_SUMMARY_REFUSED")
++
++
++class HostReadSummary:
++    __slots__ = ("_json",)
++
++    def __init__(self, public, maximum=4096):
++        _validate(public, summary_schema())
++        if (public["source_binding_status"] == "MATCHED"
++                and (public["status"] != "STAGING_READY_WITH_GAPS" or not public["audit"]["bound_request_count"])):
++            raise HostReadError("HOST_SUMMARY_REFUSED")
++        raw = canonical(public)
++        if type(maximum) is not int or not 2048 <= maximum <= 4096 or len(raw) > maximum:
++            raise HostReadError("RESOURCE_LIMIT")
++        self._json = raw
++
++    def to_dict(self):
++        return json.loads(self._json)
++
++    def to_json(self):
++        return self._json
++
++    def __repr__(self):
++        return "<HostReadSummary redacted>"
++
++
++def outcome_category(status):
++    if status in {"HOST_IDENTITY_REQUIRED", "HOST_PERMISSION_DENIED", "READ_CONTEXT_REQUIRED"}:
++        return "REJECT_UNAUTHORIZED"
++    if status == "READ_SCOPE_DENIED":
++        return "INSUFFICIENT_SCOPE"
++    if status == "READ_BUDGET_DENIED":
++        return "BUDGET_EXHAUSTED"
++    if status in {"SOURCE_BINDING_CONFLICT", "HOST_SOURCE_MISMATCH"}:
++        return "SOURCE_BINDING_FAILED"
++    if status == "HOST_SUMMARY_REFUSED":
++        return "SECRET_BOUNDARY_VIOLATION"
++    if status == "STAGING_READY_WITH_GAPS":
++        return "STAGING_READY_WITH_GAPS"
++    return "UNKNOWN_PENDING"
++
++
++class AuthorityReadHost:
++    """Registered in-process reader and restricted metadata egress.
++
++    H1 supports SYNTHETIC_ONLY registration. H2 source admission remains closed.
++    SQL/key counts on the public summary refer to real access, not fake decoding.
++    Synthetic counters are measured independently by the authorized test harness.
++    """
++    def __init__(self, reader, policy, *, producer_ref, locator_ref, epoch_ref,
++                 source_contract="legacy-authority-state/1", source_kind="SYNTHETIC_ONLY",
++                 limits=HostReadLimits(), audit_sink=None, registration=None):
++        if type(policy) is not HostReadPolicy or type(limits) is not HostReadLimits:
++            raise HostReadError("HOST_SOURCE_MISMATCH")
++        self._reader, self._policy, self._limits = reader, policy, limits
++        self._producer, self._locator, self._epoch = map(_id, (producer_ref, locator_ref, epoch_ref))
++        self._contract, self._kind, self._audit_sink = source_contract, source_kind, audit_sink
++        self._registration = registration
++        if registration is not None:
++            from .dsat_authority_host_activation import AuthorityRegistration
++            if type(registration) is not AuthorityRegistration or source_kind != "LOCAL_AUTHORITY_HOST":
++                raise HostReadError("HOST_SOURCE_MISMATCH")
++            registration.bind_host(self, reader, policy)
++
++    def issue_permit(self, caller, scope):
++        with self._policy.lock:
++            if self._registration is not None:
++                self._registration.before_issue(self)
++            scope = _scope(scope)
++            principal, rule = self._policy._resolve(caller, scope)
++            if len(self._policy._permits) >= 4096:
++                raise HostReadError("RESOURCE_LIMIT")
++            self._policy._sequence += 1
++            permit = object.__new__(HostReadPermit)
++            self._policy._permits[permit] = {
++                "host": self, "reader": self._reader, "epoch": self._epoch,
++                "producer": self._producer, "locator": self._locator, "caller": caller,
++                "principal": principal, "scope": scope, "version": rule["version"],
++                "scope_ref": rule["scope_ref"], "grant": rule["grant"], "used": False,
++                "execution_ref": "exec:" + str(self._policy._sequence),
++            }
++            if self._registration is not None:
++                self._registration.note_permit()
++            return permit
++
++    def request_for(self, permit):
++        """Trusted RPC wrapper constructs the exact body; no raw state access."""
++        with self._policy.lock:
++            rec = self._policy._permits.get(permit)
++            if rec is None or rec["host"] is not self:
++                raise HostReadError("HOST_PERMIT_REPLAY")
++            return {"execution_ref": rec["execution_ref"], "scope": rec["scope"].to_dict()}
++
++    def read_summary(self, request, caller, permit):
++        started = time.perf_counter_ns()
++        status, stage, rec = "HOST_IDENTITY_REQUIRED", None, None
++        consumed, operations_delta, source_reads = False, 0, 0
++        try:
++            with self._policy.lock:
++                if type(caller) is not VerifiedLocalCaller or caller not in self._policy._identities:
++                    raise HostReadError("HOST_IDENTITY_REQUIRED")
++                if type(permit) is not HostReadPermit or permit not in self._policy._permits:
++                    raise HostReadError("HOST_PERMIT_REPLAY")
++                rec = self._policy._permits[permit]
++                if (rec["host"] is not self or rec["reader"] is not self._reader
++                        or rec["epoch"] != self._epoch or self._epoch != self._policy.epoch_ref
++                        or rec["producer"] != self._producer or rec["locator"] != self._locator):
++                    raise HostReadError("HOST_SOURCE_MISMATCH")
++                if rec["caller"] is not caller:
++                    raise HostReadError("HOST_PERMISSION_DENIED")
++                if rec["used"]:
++                    raise HostReadError("HOST_PERMIT_REPLAY")
++                if type(request) is not dict or set(request) != {"execution_ref", "scope"}:
++                    raise HostReadError("UNSUPPORTED_READ_REQUEST")
++                if request["execution_ref"] != rec["execution_ref"]:
++                    raise HostReadError("UNSUPPORTED_READ_REQUEST")
++                requested = _scope(request["scope"])
++                if _scope_key(requested) != _scope_key(rec["scope"]):
++                    raise HostReadError("READ_SCOPE_DENIED")
++                principal, rule = self._policy._resolve(caller, requested)
++                if rule["version"] != rec["version"]:
++                    raise HostReadError("HOST_PERMISSION_DENIED")
++                if (self._contract != "legacy-authority-state/1"
++                        or (self._registration is None and self._kind != "SYNTHETIC_ONLY")):
++                    raise HostReadError("UNSUPPORTED_SOURCE_SCHEMA")
++                with self._reader.lock:
++                    if self._reader.connection.in_transaction is not False:
++                        raise HostReadError("HOST_CONNECTION_NOT_IDLE")
++                    if self._registration is not None:
++                        self._registration.claim(self, caller, requested)
++                    rec["used"] = True
++                    consumed = True
++                    before = self._reader.operations
++                    context = TrustedReadContext.from_host(
++                        self._reader, requested, principal_ref=principal, producer_ref=self._producer,
++                        authority_locator_ref=self._locator, clock_epoch_ref=self._epoch,
++                        source_kind="LOCAL_AUTHORITY_HOST" if self._registration is not None else "SYNTHETIC_ONLY")
++                    try:
++                        output = read_dsat_authority_snapshot(self._reader, requested, context,
++                                                             ReadLimits(self._limits.staging_bytes,
++                                                                        self._limits.scoped_records, 6))
++                    finally:
++                        # A failure after source I/O must retain its consumed quota.
++                        operations_delta = self._reader.operations - before
++                        # Under this locked, pinned one-read contract a positive
++                        # operation delta witnesses a source read attempt, even
++                        # if the adapter cannot return its normal cost envelope.
++                        if operations_delta > 0:
++                            source_reads = 1
++                    if type(output) is not StagingSnapshot:
++                        raise HostReadError("HOST_SUMMARY_REFUSED")
++                    data = output.to_dict()
++                    source_reads = data["costs"]["source_reads"]
++                    status = data["status"]
++                    if status == "STAGING_READY_WITH_GAPS":
++                        if (data["scope"] != requested.to_dict() or not data["grants"]
++                                or any(g["origin"]["grant_id"] != rec["grant"] for g in data["grants"])
++                                or any(r["origin"]["grant_id"] != rec["grant"] for r in data["requests"])):
++                            raise HostReadError("SOURCE_BINDING_CONFLICT")
++                        stage = data
++                        if self._registration is not None:
++                            self._registration.validate_stage(stage)
++                    if self._registration is not None:
++                        self._registration.egress_check()
++                    _, final_rule = self._policy._resolve(caller, requested)
++                    if final_rule["version"] != rec["version"]:
++                        raise HostReadError("HOST_PERMISSION_DENIED")
++        except HostReadError as error:
++            status, stage = error.code, None
++        except Exception:
++            status, stage = "READ_SOURCE_UNAVAILABLE", None
++        finally:
++            if self._registration is not None and consumed:
++                if not self._registration.finish():
++                    status, stage = "READ_SOURCE_UNAVAILABLE", None
++        if (self._registration is not None and consumed
++                and self._registration.public_audit()["connection_total_changes_unchanged"] is False):
++            status, stage = "SOURCE_BINDING_CONFLICT", None
++        elapsed = time.perf_counter_ns() - started
++        if elapsed > self._limits.soft_deadline_ns:
++            status, stage = "HOST_DEADLINE_EXCEEDED", None
++        finish_started = time.perf_counter_ns()
++        result = self._finish(status, stage, rec if consumed else None,
++                             consumed, source_reads, operations_delta, elapsed,
++                             self._registration.public_audit() if self._registration is not None and consumed else None)
++        if self._registration is not None and consumed:
++            self._registration.note_output(time.perf_counter_ns() - finish_started)
++        return result
++
++    def refusal(self, code):
++        return self._finish(code if code in STATUSES else "HOST_SUMMARY_REFUSED", None,
++                            None, False, 0, 0, 0)
++
++    def _finish(self, status, stage, rec, consumed, reads, delta, elapsed, source_audit=None):
++        # Every value below is fixed, host-issued, counted, or R12-sanitized.
++        public = {
++            "schema": SCHEMA, "execution_ref": rec["execution_ref"] if rec else "exec:unavailable",
++            "status": status, "authority_revision": stage["authority_revision"] if stage else None,
++            "authority_instance": None, "obligation_revision": None,
++            "snapshot_digest": stage["snapshot_digest"] if stage else None,
++            "read_scope_ref": rec["scope_ref"] if rec else "scope:unavailable",
++            "observed_at": stage["read_clock"] if stage else None,
++            "source_contract": stage["source"]["source_contract"] if stage else None,
++            "source_binding_status": ("MATCHED" if stage["requests"] else "NOT_APPLICABLE_EMPTY_SCOPE") if stage else "UNAVAILABLE",
++            "missing_fields": sorted(set(BASE_GAPS) | ({status} if status != "STAGING_READY_WITH_GAPS" else set())
++                                     | (set(stage["gap_codes"]) if stage else set())),
++            "native_currentness_status": "UNPROVEN", "math_ready": False,
++            "current_native_eligible": False, "global_complete": False, "authority_write_action": "NONE",
++            "audit": {"source_sql_count": 0, "source_read_count": reads,
++                      "source_operations_delta": delta, "key_read_count": None,
++                      "key_count_basis": "NOT_OBSERVED", "bound_request_count": len(stage["requests"]) if stage else None,
++                      "world_row_unchanged": None, "authority_events_count_unchanged": None,
++                      "authority_events_max_unchanged": None, "connection_total_changes_unchanged": None,
++                      "observed_sql_schema_version": None, "secret_scan_status": "NOT_RUN",
++                      "elapsed_ns": elapsed, "deadline_exceeded": status == "HOST_DEADLINE_EXCEEDED",
++                      "permit_consumed": consumed},
++        }
++        if source_audit is not None:
++            allowed = {"source_sql_count", "key_read_count", "key_count_basis",
++                       "observed_sql_schema_version", "connection_total_changes_unchanged"}
++            if set(source_audit) != allowed:
++                return self._safe_refusal("HOST_SUMMARY_REFUSED", consumed, reads, delta, elapsed)
++            public["audit"].update(source_audit)
++        if self._audit_sink is not None:
++            try:
++                self._audit_sink({"event": "host_read", "status": status,
++                                  "identity_basis": "HOST_REGISTRY" if rec else "UNVERIFIED",
++                                  "source_reads": reads, "operation_delta": delta})
++            except Exception:
++                return self._safe_refusal("READ_SOURCE_UNAVAILABLE", consumed, reads, delta, elapsed)
++        try:
++            return HostReadSummary(public, self._limits.summary_bytes)
++        except Exception:
++            return self._safe_refusal("HOST_SUMMARY_REFUSED", consumed, reads, delta, elapsed)
++
++    @staticmethod
++    def _safe_refusal(status, consumed, reads, delta, elapsed):
++        # Fixed bounded fallback; it never recursively calls an audit sink.
++        public = {
++            "schema": SCHEMA, "execution_ref": "exec:unavailable", "status": status,
++            "authority_revision": None, "authority_instance": None, "obligation_revision": None,
++            "snapshot_digest": None, "read_scope_ref": "scope:unavailable", "observed_at": None,
++            "source_contract": None, "source_binding_status": "UNAVAILABLE",
++            "missing_fields": sorted(set(BASE_GAPS) | {status}),
++            "native_currentness_status": "UNPROVEN", "math_ready": False,
++            "current_native_eligible": False, "global_complete": False, "authority_write_action": "NONE",
++            "audit": {"source_sql_count": 0, "source_read_count": reads if type(reads) is int and 0 <= reads <= 1 else 0,
++                      "source_operations_delta": delta if type(delta) is int and 0 <= delta <= MAX_REVISION else None,
++                      "key_read_count": None, "key_count_basis": "NOT_OBSERVED", "bound_request_count": None,
++                      "world_row_unchanged": None, "authority_events_count_unchanged": None,
++                      "authority_events_max_unchanged": None, "connection_total_changes_unchanged": None,
++                      "observed_sql_schema_version": None, "secret_scan_status": "REFUSED",
++                      "elapsed_ns": elapsed, "deadline_exceeded": status == "HOST_DEADLINE_EXCEEDED",
++                      "permit_consumed": consumed},
++        }
++        return HostReadSummary(public, 4096)
++
++    def __repr__(self):
++        return "<AuthorityReadHost redacted>"
++
++    def __reduce_ex__(self, protocol):
++        raise TypeError("HOST_NOT_SERIALIZABLE")
+diff --git a/src/auth_lifecycle/online_state/dsat_authority_host_activation.py b/src/auth_lifecycle/online_state/dsat_authority_host_activation.py
+new file mode 100644
+--- /dev/null
++++ b/src/auth_lifecycle/online_state/dsat_authority_host_activation.py
+@@ -0,0 +1,393 @@
++"""A1 offline mounting core. No storage/services/crypto imports or import I/O.
++
++All issuing APIs belong to the trusted process. Opaque objects bind local facts,
++not cryptographic identities. Live runtime admission remains a separate gate.
++"""
++import hmac
++import json
++import threading
++import time
++import weakref
++
++from . import dsat_authority_read_host as h
++from .dsat_authority_read import ReadError
++
++
++BOUNDED_SELECT = (
++    "SELECT version, length(ciphertext) AS state_bytes, CASE WHEN length(ciphertext) <= :ceiling "
++    "THEN ciphertext ELSE NULL END AS ciphertext, (SELECT user_version FROM pragma_user_version) "
++    "AS schema_version FROM authority_state WHERE id=1"
++)
++CEILING = 16777216
++_TICKETS = weakref.WeakKeyDictionary()
++_REGISTRATIONS = weakref.WeakKeyDictionary()
++_PEERS = weakref.WeakKeyDictionary()
++_SESSION_LOCK = threading.RLock()
++_SESSION_NAMESPACES = set()
++
++
++class _Capability:
++    __slots__ = ("__weakref__",)
++
++    def __init__(self, *args, **kwargs):
++        raise h.HostReadError("HOST_SOURCE_MISMATCH")
++
++    def __repr__(self):
++        return "<AuthorityCapability redacted>"
++
++    def __reduce_ex__(self, protocol):
++        raise TypeError("AUTHORITY_CAPABILITY_NOT_SERIALIZABLE")
++
++
++class AuthorityMountTicket(_Capability):
++    __slots__ = ()
++
++
++class AuthenticatedRpcContext(_Capability):
++    __slots__ = ()
++
++
++class ActivationIssuer:
++    """Host-only offline issuer; no live admission or secret-loading API."""
++    def __init__(self, epoch_ref, *, clock=time.monotonic_ns):
++        self.epoch_ref = h._id(epoch_ref)
++        self.clock = clock
++        self.active = True
++        self._issued = set()
++        self._lock = threading.RLock()
++
++    def authorize_offline(self, *, authorization_id, scope, grant_ref, rid,
++                          manager_identity, principal_ref, actor, transport_ref,
++                          scope_ref, producer_ref, source_ref, expires_ns,
++                          expected_store=None, ceiling=CEILING, audit_sink=None, permit_ref="permit:one",
++                          limits=h.HostReadLimits(), aad=b"auth-lifecycle/online-state/schema-1"):
++        with self._lock:
++            authorization_id = h._id(authorization_id)
++            if not self.active or authorization_id in self._issued:
++                raise h.HostReadError("HOST_PERMIT_REPLAY")
++            if type(ceiling) is not int or not 1 <= ceiling <= CEILING or type(aad) is not bytes:
++                raise h.HostReadError("RESOURCE_LIMIT")
++            refs = [grant_ref, rid, manager_identity, principal_ref, actor, transport_ref,
++                    scope_ref, producer_ref, source_ref, permit_ref]
++            for ref in refs:
++                h._id(ref)
++            if manager_identity in {"controller", "agentA", "agentB"}:
++                raise h.HostReadError("HOST_PERMISSION_DENIED")
++            ticket = object.__new__(AuthorityMountTicket)
++            _TICKETS[ticket] = dict(issuer=self, authorization_id=authorization_id,
++                epoch=self.epoch_ref, scope=h._scope(scope), grant=grant_ref, rid=rid,
++                manager=manager_identity, principal=principal_ref, actor=actor,
++                transport=transport_ref, scope_ref=scope_ref, producer=producer_ref,
++                source=source_ref, expires=h._nat(expires_ns), expected_store=expected_store,
++                ceiling=ceiling, aad=aad, audit_sink=audit_sink, limits=limits,
++                enabled=True, version=1, mounted=False, permit_ref=permit_ref)
++            self._issued.add(authorization_id)
++            return ticket
++
++    def revoke(self, ticket):
++        rec = _TICKETS.get(ticket)
++        if rec is None or rec["issuer"] is not self:
++            raise h.HostReadError("HOST_SOURCE_MISMATCH")
++        with self._lock:
++            rec["enabled"] = False
++            rec["version"] += 1
++
++    def retire(self, new_epoch):
++        with self._lock:
++            self.active = False
++            self.epoch_ref = h._id(new_epoch)
++
++
++class BoundedAuthorityReader:
++    """Narrow existing-store view. No constructor, new connection, or key cache."""
++    def __init__(self, registration):
++        self._registration = registration
++
++    @property
++    def lock(self):
++        return self._registration._record()["lock"]
++
++    @property
++    def connection(self):
++        return self._registration._record()["connection"]
++
++    @property
++    def operations(self):
++        return self._registration._record()["store"].operations
++
++    @property
++    def operation_limit(self):
++        return self._registration._record()["store"].operation_limit
++
++    def read_state(self):
++        reg = self._registration
++        rec = reg._record()
++        reg._check_source()
++        if (not rec["inflight"] or rec["owner"] != threading.get_ident()
++                or rec["reader_started"]):
++            raise ReadError("SOURCE_BINDING_CONFLICT")
++        rec["reader_started"] = True
++        stats = rec["stats"]
++        stats["source_read_attempts"] += 1
++        stats["select_attempts"] += 1
++        started = time.perf_counter_ns()
++        cursor = None
++        try:
++            cursor = rec["store"].execute(BOUNDED_SELECT, {"ceiling": rec["ticket"]["ceiling"]})
++            row = cursor.fetchone()
++            stats["select_successes"] += 1
++        finally:
++            if cursor is not None:
++                cursor.close()
++            stats["C_select_ns"] += time.perf_counter_ns() - started
++        if row is None:
++            raise ReadError("SNAPSHOT_INCOMPLETE")
++        rec["observed_schema"] = row["schema_version"]
++        if type(row["schema_version"]) is not int or row["schema_version"] != 2:
++            raise ReadError("UNSUPPORTED_SOURCE_SCHEMA")
++        size = row["state_bytes"]
++        if type(size) is not int or size > rec["ticket"]["ceiling"]:
++            raise ReadError("RESOURCE_LIMIT")
++        if row["ciphertext"] is None or size < 28:
++            raise ReadError("SNAPSHOT_INCOMPLETE")
++        raw = bytes(row["ciphertext"])
++        if len(raw) != size:
++            raise ReadError("SOURCE_BINDING_CONFLICT")
++        stats["key_calls"] += 1
++        started = time.perf_counter_ns()
++        try:
++            cipher = rec["store"].cipher()
++        finally:
++            stats["C_key_ns"] += time.perf_counter_ns() - started
++        stats["decode_calls"] += 1
++        started = time.perf_counter_ns()
++        try:
++            state = json.loads(cipher.decrypt(raw[:12], raw[12:], rec["ticket"]["aad"]))
++        finally:
++            stats["C_decode_ns"] += time.perf_counter_ns() - started
++        return row["version"], state
++
++    def __repr__(self):
++        return "<BoundedAuthorityReader redacted>"
++
++
++class AuthorityRegistration(_Capability):
++    __slots__ = ()
++
++    def _record(self):
++        rec = _REGISTRATIONS.get(self)
++        if rec is None:
++            raise h.HostReadError("HOST_SOURCE_MISMATCH")
++        return rec
++
++    def _check_source(self):
++        rec = self._record()
++        ticket = rec["ticket"]
++        issuer = ticket["issuer"]
++        store = rec["store"]
++        if (not issuer.active or issuer.epoch_ref != ticket["epoch"]
++                or store.connection is not rec["connection"] or store.lock is not rec["lock"]):
++            raise h.HostReadError("HOST_SOURCE_MISMATCH")
++        if not ticket["enabled"] or ticket["version"] != rec["ticket_version"]:
++            raise h.HostReadError("HOST_PERMISSION_DENIED")
++        if h._nat(issuer.clock()) >= ticket["expires"]:
++            raise h.HostReadError("HOST_PERMIT_EXPIRED")
++
++    def bind_host(self, host, reader, policy):
++        rec = self._record()
++        if (reader is not rec["reader"] or policy is not rec["policy"] or rec["host"] is not None
++                or host._epoch != rec["ticket"]["epoch"] or host._locator != rec["ticket"]["source"]
++                or host._producer != rec["ticket"]["producer"]):
++            raise h.HostReadError("HOST_SOURCE_MISMATCH")
++        rec["host"] = host
++
++    def before_issue(self, host):
++        self._check_source()
++        rec = self._record()
++        if rec["host"] is not host:
++            raise h.HostReadError("HOST_SOURCE_MISMATCH")
++        if rec["claimed"]:
++            raise h.HostReadError("HOST_PERMIT_REPLAY")
++
++    def note_permit(self):
++        self._record()["stats"]["permits_issued"] += 1
++
++    def claim(self, host, caller, scope):
++        started = time.perf_counter_ns()
++        self.before_issue(host)
++        rec = self._record()
++        if caller is not rec["caller"] or h._scope_key(scope) != h._scope_key(rec["ticket"]["scope"]):
++            raise h.HostReadError("READ_SCOPE_DENIED")
++        rec["stats"]["metadata_checks"] += 1
++        changes_before = rec["connection"].total_changes
++        rec["claimed"] = True
++        rec["inflight"] = True
++        rec["owner"] = threading.get_ident()
++        rec["stats"]["session_claims"] += 1
++        rec["stats"]["permits_consumed"] += 1
++        rec["changes_before"] = changes_before
++        rec["stats"]["C_session_gate_ns"] += time.perf_counter_ns() - started
++
++    def note_output(self, elapsed):
++        self._record()["stats"]["C_output_ns"] += elapsed
++
++    def validate_stage(self, stage):
++        rec = self._record()
++        target = [row for row in stage["requests"] if row["rid"] == rec["ticket"]["rid"]]
++        if len(target) != 1 or target[0]["origin"]["grant_id"] != rec["ticket"]["grant"]:
++            raise h.HostReadError("SOURCE_BINDING_CONFLICT")
++
++    def egress_check(self):
++        self._record()["stats"]["metadata_checks"] += 1
++        self._check_source()
++
++    def finish(self):
++        rec = self._record()
++        if rec["inflight"] and rec["owner"] == threading.get_ident():
++            try:
++                rec["changes_unchanged"] = rec["changes_before"] == rec["connection"].total_changes
++                return True
++            except Exception:
++                rec["changes_unchanged"] = None
++                return False
++            finally:
++                rec["inflight"] = False
++        return True
++
++    def public_audit(self):
++        rec = self._record()
++        return {"source_sql_count": rec["stats"]["select_attempts"],
++                "key_read_count": None, "key_count_basis": "PINNED_PATH_BOUND",
++                "observed_sql_schema_version": rec["observed_schema"],
++                "connection_total_changes_unchanged": rec["changes_unchanged"]}
++
++    def counters(self):
++        """Trusted test/management domain: counts only, no source or secrets."""
++        rec = self._record()
++        return {**rec["stats"], "slot_claimed": rec["claimed"],
++                "inflight": rec["inflight"], "changes_unchanged": rec["changes_unchanged"]}
++
++
++def mount_authority_host(store, ticket=None):
++    """Default disabled. Called after Store creation and before Handler setup."""
++    started = time.perf_counter_ns()
++    if ticket is None:
++        return None
++    if type(ticket) is not AuthorityMountTicket or ticket not in _TICKETS:
++        raise h.HostReadError("HOST_SOURCE_MISMATCH")
++    tr = _TICKETS[ticket]
++    issuer = tr["issuer"]
++    with issuer._lock:
++        if tr["mounted"] or not issuer.active or issuer.epoch_ref != tr["epoch"]:
++            raise h.HostReadError("HOST_SOURCE_MISMATCH")
++        if tr["expected_store"] is not None and tr["expected_store"] is not store:
++            raise h.HostReadError("HOST_SOURCE_MISMATCH")
++        if not tr["enabled"] or issuer.clock() >= tr["expires"]:
++            raise h.HostReadError("HOST_PERMISSION_DENIED")
++        # The namespace is process-wide, independent of issuer objects and
++        # display aliases. Keep the connection object itself, avoiding id reuse.
++        namespace = (store.connection, tr["authorization_id"], tr["epoch"],
++                     h._scope_key(tr["scope"]))
++        with _SESSION_LOCK:
++            if namespace in _SESSION_NAMESPACES:
++                raise h.HostReadError("HOST_PERMIT_REPLAY")
++            if len(_SESSION_NAMESPACES) >= 4096:
++                raise h.HostReadError("RESOURCE_LIMIT")
++            _SESSION_NAMESPACES.add(namespace)
++        policy = h.HostReadPolicy(tr["epoch"], clock=issuer.clock)
++        caller = policy.bind_authenticated_caller(principal_ref=tr["principal"], actor=tr["actor"],
++                    transport_ref=tr["transport"], expires_ns=tr["expires"])
++        policy.allow(principal_ref=tr["principal"], actor=tr["actor"], transport_ref=tr["transport"],
++                     scope=tr["scope"], grant_ref=tr["grant"], scope_ref=tr["scope_ref"], expires_ns=tr["expires"])
++        registration = object.__new__(AuthorityRegistration)
++        stats = {k: 0 for k in ("registrations", "permits_issued", "permits_consumed", "session_claims",
++                 "source_read_attempts", "select_attempts", "select_successes", "key_calls", "decode_calls",
++                 "metadata_checks", "C_registration_ns", "C_authorization_ns", "C_permit_ns",
++                 "C_session_gate_ns", "C_select_ns", "C_key_ns", "C_decode_ns", "C_output_ns")}
++        rec = dict(store=store, connection=store.connection, lock=store.lock, ticket=tr,
++                   ticket_version=tr["version"], policy=policy, caller=caller, host=None,
++                   reader=None, claimed=False, inflight=False, owner=None, reader_started=False,
++                   stats=stats, observed_schema=None, changes_before=None, changes_unchanged=None)
++        _REGISTRATIONS[registration] = rec
++        reader = BoundedAuthorityReader(registration)
++        rec["reader"] = reader
++        host = h.AuthorityReadHost(reader, policy, producer_ref=tr["producer"], locator_ref=tr["source"],
++                 epoch_ref=tr["epoch"], source_kind="LOCAL_AUTHORITY_HOST", limits=tr["limits"],
++                 audit_sink=tr["audit_sink"], registration=registration)
++        tr["mounted"] = True
++        stats["registrations"] = 1
++        stats["C_registration_ns"] = time.perf_counter_ns() - started
++        return MountedAuthority(registration, host, caller, policy)
++
++
++class MountedAuthority:
++    def __init__(self, registration, host, caller, policy):
++        self.registration, self.host, self.caller, self.policy = registration, host, caller, policy
++
++    def issue_permit(self):
++        started = time.perf_counter_ns()
++        try:
++            return self.host.issue_permit(self.caller, self.registration._record()["ticket"]["scope"])
++        finally:
++            self.registration._record()["stats"]["C_permit_ns"] += time.perf_counter_ns() - started
++
++    def refs(self, permit=None):
++        tr = self.registration._record()["ticket"]
++        reference = self.host.request_for(permit)["execution_ref"] if permit is not None else tr["permit_ref"]
++        return {"authorization_ref": tr["authorization_id"], "permit_ref": reference,
++                "read_scope_ref": tr["scope_ref"]}
++
++    def __repr__(self):
++        return "<MountedAuthority redacted>"
++
++    def __reduce_ex__(self, protocol):
++        raise TypeError("MOUNT_NOT_SERIALIZABLE")
++
++
++def authenticate_authority_peer(mount, supplied, identities, permissions):
++    """Called with already-private Handler configuration, never request body flags."""
++    if type(mount) is not MountedAuthority or type(supplied) is not str:
++        return None
++    tr = mount.registration._record()["ticket"]
++    matched = None
++    for identity, token in identities.items():
++        if type(token) is str and hmac.compare_digest(supplied, "Bearer " + token):
++            matched = identity
++    if matched != tr["manager"] or h.RIGHT not in permissions.get(matched, []):
++        return None
++    context = object.__new__(AuthenticatedRpcContext)
++    _PEERS[context] = (mount, matched, tr["epoch"])
++    return context
++
++
++def dispatch_authority_read(mount, context, payload, permit=None):
++    if type(mount) is not MountedAuthority:
++        return h.AuthorityReadHost._safe_refusal("READ_CONTEXT_REQUIRED", False, 0, 0, 0).to_dict()
++    started = time.perf_counter_ns()
++    rec = mount.registration._record()
++    try:
++        with mount.policy.lock:
++            if (type(context) is not AuthenticatedRpcContext or context not in _PEERS
++                    or _PEERS[context][0] is not mount or _PEERS[context][2] != rec["ticket"]["epoch"]):
++                raise h.HostReadError("HOST_IDENTITY_REQUIRED")
++            mount.registration._check_source()
++            if type(payload) is not dict or set(payload) != {"authorization_ref", "permit_ref", "read_scope_ref"}:
++                raise h.HostReadError("UNSUPPORTED_READ_REQUEST")
++            tr = rec["ticket"]
++            if payload["authorization_ref"] != tr["authorization_id"] or payload["read_scope_ref"] != tr["scope_ref"]:
++                raise h.HostReadError("READ_SCOPE_DENIED")
++            if permit is None:
++                if payload["permit_ref"] != tr["permit_ref"]:
++                    raise h.HostReadError("READ_SCOPE_DENIED")
++                permit = mount.issue_permit()
++                body = mount.host.request_for(permit)
++            else:
++                body = mount.host.request_for(permit)
++            if payload["permit_ref"] not in {tr["permit_ref"], body["execution_ref"]}:
++                raise h.HostReadError("READ_SCOPE_DENIED")
++            rec["stats"]["C_authorization_ns"] += time.perf_counter_ns() - started
++            return mount.host.read_summary(body, mount.caller, permit).to_dict()
++    except h.HostReadError as error:
++        return mount.host.refusal(error.code).to_dict()
++    except Exception:
++        return mount.host.refusal("READ_SOURCE_UNAVAILABLE").to_dict()
+diff --git a/scripts/read_dsat_authority_once.py b/scripts/read_dsat_authority_once.py
+new file mode 100644
+--- /dev/null
++++ b/scripts/read_dsat_authority_once.py
+@@ -0,0 +1,72 @@
++"""Minimal one-shot client. Live H2 is disabled; injected offline transport only."""
++import argparse
++import json
++from pathlib import Path
++
++from auth_lifecycle.online_state.dsat_authority_read_host import HostReadSummary, RIGHT
++from auth_lifecycle.online_state.protocol import canonical, strict_json
++
++
++class ClientRefusal(ValueError):
++    pass
++
++
++class StrictParser(argparse.ArgumentParser):
++    def error(self, message):
++        raise ClientRefusal("UNSUPPORTED_CLIENT_ARGUMENTS")
++
++
++def parse_args(argv):
++    parser = StrictParser(add_help=False)
++    parser.add_argument("--mode", choices=["offline"], required=True)
++    parser.add_argument("--manifest", required=True)
++    return parser.parse_args(argv)
++
++
++class OfflineInvocation:
++    def __init__(self, transport):
++        self._transport = transport
++        self.used = False
++
++    def run(self, manifest):
++        if self.used:
++            raise ClientRefusal("CLIENT_ALREADY_USED")
++        if (type(manifest) is not dict or set(manifest) != {"schema", "mode", "payload"}
++                or manifest["schema"] != "dsat-a1-offline-client/1" or manifest["mode"] != "OFFLINE_A1"):
++            raise ClientRefusal("INVALID_OFFLINE_MANIFEST")
++        body = manifest["payload"]
++        if (type(body) is not dict or set(body) != {"authorization_ref", "permit_ref", "read_scope_ref"}
++                or any(type(x) is not str or not 1 <= len(x) <= 160 for x in body.values())):
++            raise ClientRefusal("INVALID_OFFLINE_MANIFEST")
++        self.used = True
++        try:
++            raw = self._transport.call(RIGHT, json.loads(canonical(body)))
++            raw = canonical(raw) if type(raw) is dict else raw
++            if type(raw) is not bytes or len(raw) > 4096:
++                raise ClientRefusal("INVALID_OFFLINE_RESPONSE")
++            summary = HostReadSummary(strict_json(raw))
++            return summary.to_json()
++        except Exception:
++            raise ClientRefusal("OFFLINE_CALL_FAILED") from None
++
++
++def main(argv=None, *, transport=None):
++    try:
++        args = parse_args(argv)
++        # There is deliberately no live transport or credential/config loader.
++        if transport is None:
++            raise ClientRefusal("REAL_EXECUTION_DISABLED")
++        path = Path(args.manifest)
++        if path.suffix.lower() != ".json":
++            raise ClientRefusal("INVALID_OFFLINE_MANIFEST")
++        manifest = strict_json(path.read_bytes())
++        raw = OfflineInvocation(transport).run(manifest)
++        print(raw.decode("utf-8"))
++        return 0
++    except (ClientRefusal, ValueError, TypeError, KeyError, OSError):
++        print(json.dumps({"status": "REFUSED", "reason": "OFFLINE_ONLY_OR_INVALID_REQUEST"}))
++        return 2
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/tests/test_dsat_authority_host_activation.py b/tests/test_dsat_authority_host_activation.py
+new file mode 100644
+--- /dev/null
++++ b/tests/test_dsat_authority_host_activation.py
+@@ -0,0 +1,560 @@
++"""A01-A20: real owned :memory: SQL, synthetic codec/auth/RPC, services AST only."""
++import ast
++from concurrent.futures import ThreadPoolExecutor
++import contextlib
++import copy
++import hashlib
++import importlib.util
++import io
++import json
++import logging
++from pathlib import Path
++import pickle
++import threading
++import time
++from types import SimpleNamespace
++import unittest
++from unittest.mock import patch
++
++from auth_lifecycle.online_state import dsat_authority_host_activation as a
++from auth_lifecycle.online_state import dsat_authority_read_host as h
++from auth_lifecycle.online_state.dsat_authority_read import BASE_GAPS
++from auth_lifecycle.online_state.protocol import canonical, digest
++
++
++CONFIG, DETAILS = {}, []
++ORIGINAL_READ = h.read_dsat_authority_snapshot
++
++
++def configure(plan, fixture_root, connect_memory):
++    CONFIG.update(plan=plan, fixture_root=fixture_root, connect=connect_memory)
++
++
++class CodecSpy:
++    def __init__(self, store):
++        self.store = store
++
++    def decrypt(self, nonce, body, aad):
++        store = self.store
++        store.decode_calls += 1
++        store.trace.append("decode")
++        if store.failure == "decode" or nonce != b"N" * 12 or aad != b"auth-lifecycle/online-state/schema-1":
++            raise RuntimeError(store.secret)
++        if body != store.blob[12:]:
++            raise ValueError(store.secret)
++        if store.failure == "finish":
++            store.connection.fail_observation = True
++        return body[:-16]
++
++
++class MemoryStore:
++    def __init__(self, state, connection, secret):
++        self.connection, self.secret = connection, secret
++        self.lock = threading.RLock()
++        self.operations, self.operation_limit = 0, None
++        self.key_calls, self.decode_calls = 0, 0
++        self.telemetry_attempts, self.telemetry_successes = 0, 0
++        self.select_dispatches, self.forbidden = 0, 0
++        self.failure, self.select_hook = None, None
++        self.C_telemetry_ns = 0
++        self.trace, self.telemetry, self.sql_templates = [], [], []
++        connection.execute("CREATE TABLE authority_state(id INTEGER PRIMARY KEY,version INTEGER,ciphertext BLOB)")
++        connection.execute("CREATE TABLE authority_events(version INTEGER,operation TEXT)")
++        connection.execute("INSERT INTO authority_events VALUES(120,'fixture_event')")
++        connection.execute("PRAGMA user_version=2")
++        self.replace_fixture(state)
++
++    def replace_fixture(self, state):
++        self.state = copy.deepcopy(state)
++        for raw in self.state["requests"].values():
++            raw["digest"] = digest({"caller": raw["origin"]["caller"], "request": raw["request"]})
++        self.blob = b"N" * 12 + canonical(self.state) + b"T" * 16
++        self.connection.execute("DELETE FROM authority_state")
++        self.connection.execute("INSERT INTO authority_state VALUES(1,120,?)", (self.blob,))
++
++    def execute(self, statement, parameters=()):
++        if statement != a.BOUNDED_SELECT:
++            self.forbidden += 1
++            raise AssertionError("SOURCE_QUERY_NOT_ALLOWLISTED")
++        if self.operation_limit is not None and self.operations >= self.operation_limit:
++            raise RuntimeError("DATABASE_OPERATION_BUDGET")
++        self.operations += 1
++        self.trace.append("operation_increment")
++        telemetry_started = time.perf_counter_ns()
++        try:
++            self.telemetry_attempts += 1
++            self.trace.append("telemetry_attempt")
++            if self.failure == "telemetry":
++                raise RuntimeError(self.secret)
++            self.telemetry_successes += 1
++            self.telemetry.append({"kind": "SELECT", "number": self.operations, "bound_value_bytes": 8})
++            self.trace.append("telemetry_success")
++        finally:
++            self.C_telemetry_ns += time.perf_counter_ns() - telemetry_started
++        if self.select_hook is not None:
++            self.select_hook()
++        self.select_dispatches += 1
++        self.sql_templates.append(statement)
++        self.trace.append("sqlite_select")
++        return self.connection.execute(statement, parameters)
++
++    def cipher(self):
++        self.key_calls += 1
++        self.trace.append("key")
++        if self.failure == "key":
++            raise RuntimeError(self.secret)
++        return CodecSpy(self)
++
++    def call(self, *args):
++        self.forbidden += 1
++        raise AssertionError("OLD_DISPATCH_FORBIDDEN")
++
++    def world_hash(self):
++        rows = [(row["id"], row["version"], bytes(row["ciphertext"]).hex())
++                for row in self.connection.execute("SELECT id,version,ciphertext FROM authority_state ORDER BY id")]
++        events = [tuple(row) for row in self.connection.execute("SELECT version,operation FROM authority_events ORDER BY version")]
++        return digest({"rows": rows, "events": events})
++
++    def counters(self):
++        return {"operations": self.operations, "telemetry_attempts": self.telemetry_attempts,
++                "telemetry_successes": self.telemetry_successes, "select_dispatches": self.select_dispatches,
++                "key_calls": self.key_calls, "decode_calls": self.decode_calls, "forbidden": self.forbidden}
++
++    def __repr__(self):
++        return "<OwnedMemoryStore redacted>"
++
++
++class Transport:
++    def __init__(self, env):
++        self.env, self.calls = env, 0
++
++    def call(self, operation, payload):
++        self.calls += 1
++        if operation != h.RIGHT:
++            raise ValueError("OPERATION_DENIED")
++        return a.dispatch_authority_read(self.env.mount, self.env.peer, payload)
++
++
++class ObservationFailureView:
++    def __init__(self, connection, secret):
++        self.connection, self.secret, self.fail_observation = connection, secret, False
++
++    def __getattr__(self, name):
++        if name == "total_changes" and self.fail_observation:
++            raise RuntimeError(self.secret)
++        return getattr(self.connection, name)
++
++
++class ActivationCases(unittest.TestCase):
++    def setUp(self):
++        root = CONFIG["fixture_root"]
++        self.case_id = self._testMethodName.split("_")[1]
++        self.spec = next(x for x in CONFIG["plan"]["A1"]["new_tests"] if x["id"] == self.case_id)
++        self.seed = json.loads((root / "STATE_SEED.json").read_text(encoding="utf-8-sig"))
++        self.canaries = json.loads((root / "CANARIES.json").read_text(encoding="utf-8-sig"))["values"]
++        self.checks, self.calls, self.environments, self.batches = [], [], [], []
++        self.sequence = 0
++        self.started = time.perf_counter_ns()
++
++    def tearDown(self):
++        DETAILS.append({"id": self.case_id, "expected": self.spec["expected"], "checks": self.checks,
++                        "calls": self.calls, "batches": self.batches,
++                        "session_final": [self.safe_session(e) for e in self.environments],
++                        "elapsed_ns": time.perf_counter_ns() - self.started})
++        for env in self.environments:
++            env.issuer.retire("epoch:retired")
++
++    def check(self, condition, label):
++        self.checks.append({"label": label, "satisfied": bool(condition)})
++        if not condition:
++            raise AssertionError(label)
++
++    def safe_session(self, env):
++        return {"authorization_ref": env.authorization, "source_ref": env.store.source_ref,
++                "C_telemetry_ns": env.store.C_telemetry_ns, "registration": env.mount.registration.counters(),
++                "store": env.store.counters(), "trace": list(env.store.trace),
++                "telemetry": copy.deepcopy(env.store.telemetry), "host_audit_rows": list(env.audit)}
++
++    def environment(self, *, store=None, state=None, ceiling=a.CEILING, rid="rF", limits=None):
++        self.sequence += 1
++        if store is None:
++            store = MemoryStore(self.seed["state"] if state is None else state,
++                                CONFIG["connect"](), self.canaries["exception"])
++            store.source_ref = "mem:" + self.case_id
++        clock = SimpleNamespace(now=1000)
++        issuer = a.ActivationIssuer("epoch:a1:" + str(self.sequence), clock=lambda: clock.now)
++        audit = []
++        authorization = "auth:" + self.case_id + "." + str(self.sequence)
++        ticket = issuer.authorize_offline(authorization_id=authorization, scope=self.seed["scope_A"],
++            grant_ref="gA", rid=rid, manager_identity="h2_reader", principal_ref="manager:a1", actor="user",
++            transport_ref="rpc:authority", scope_ref="scope:a1", producer_ref="producer:a1", source_ref="authority:a1",
++            expires_ns=1000000000, expected_store=store, ceiling=ceiling, audit_sink=audit.append,
++            limits=limits or h.HostReadLimits())
++        before = store.counters()
++        mount = a.mount_authority_host(store, ticket)
++        self.check(store.counters() == before, "REGISTRATION_ZERO_SQL_KEY_DECODE_AND_QUOTA")
++        identities = {"h2_reader": self.canaries["rpc_token"], "controller": self.canaries["access_token"]}
++        permissions = {"h2_reader": [h.RIGHT], "controller": [h.RIGHT, "grant"]}
++        peer = a.authenticate_authority_peer(mount, "Bearer " + self.canaries["rpc_token"], identities, permissions)
++        env = SimpleNamespace(store=store, clock=clock, issuer=issuer, ticket=ticket, mount=mount,
++                              peer=peer, identities=identities, permissions=permissions,
++                              authorization=authorization, audit=audit)
++        self.environments.append(env)
++        return env
++
++    def verify_public(self, public, rendered):
++        self.check(len(canonical(public)) <= 4096, "SUMMARY_WITHIN_4096")
++        self.check(all(public[k] is False for k in ("math_ready", "current_native_eligible", "global_complete")), "NO_NATIVE_MATH_COMPLETE")
++        self.check(public["authority_write_action"] == "NONE" and public["obligation_revision"] is None,
++                   "NO_WRITE_OR_O_REVISION")
++        self.check(set(BASE_GAPS) <= set(public["missing_fields"]), "UNKNOWN_GAPS_PRESERVED")
++        self.check(all(value not in rendered for value in self.canaries.values()), "ALL_SECRET_CANARIES_ABSENT")
++        self.check(set(public) == set(h.summary_schema()["properties"]), "CLOSED_ROOT_SHAPE")
++
++    def invoke(self, env, *, payload=None, context=None, permit=None, direct=None, bridge_failure=False):
++        world = env.store.world_hash()
++        before, session_before = env.store.counters(), env.mount.registration.counters()
++        stdout, stderr, logs = io.StringIO(), io.StringIO(), io.StringIO()
++        handler = logging.StreamHandler(logs)
++        logger = logging.getLogger()
++        logger.addHandler(handler)
++        private_stage = []
++        def observe(*args, **kwargs):
++            value = ORIGINAL_READ(*args, **kwargs)
++            private_stage.append(value.to_dict())
++            if bridge_failure:
++                raise RuntimeError(self.canaries["exception"])
++            return value
++        started = time.perf_counter_ns()
++        try:
++            with patch.object(h, "read_dsat_authority_snapshot", observe), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
++                public = direct() if direct else a.dispatch_authority_read(env.mount,
++                    env.peer if context is None else context, env.mount.refs(permit) if payload is None else payload, permit)
++        finally:
++            logger.removeHandler(handler)
++        elapsed = time.perf_counter_ns() - started
++        after = env.store.counters()
++        delta = {k: after[k] - before[k] for k in before}
++        session = env.mount.registration.counters()
++        self.check(world == env.store.world_hash(), "WORLD_ROW_VERSION_AND_EVENTS_UNCHANGED")
++        self.check(delta["forbidden"] == 0, "NO_OLD_DISPATCH_OR_NONALLOWLIST_SQL")
++        self.check(public["audit"]["source_operations_delta"] == delta["operations"], "PUBLIC_BILLING_MATCHES_SOURCE_DELTA")
++        self.check(delta["select_dispatches"] <= 1 and session["session_claims"] <= 1, "SESSION_READ_LIMIT_ONE")
++        rendered = json.dumps(public) + stdout.getvalue() + stderr.getvalue() + logs.getvalue() + repr(env.mount)
++        self.verify_public(public, rendered)
++        self.check(stdout.getvalue() == stderr.getvalue() == logs.getvalue() == "", "NO_UNCONTROLLED_LOG_OR_STDOUT")
++        self.calls.append({"status": public["status"], "category": h.outcome_category(public["status"]),
++                           "summary": public, "world_before": world, "world_after": env.store.world_hash(),
++                           "store_delta": delta, "session_before": session_before, "session_after": session,
++                           "source_stage_count": len(private_stage), "elapsed_ns": elapsed, "secret_scan": "CLEAN"})
++        return public, private_stage
++
++    def denied_zero(self, env, expected, **kwargs):
++        public, _ = self.invoke(env, **kwargs)
++        self.check(public["status"] == expected and self.calls[-1]["store_delta"]["select_dispatches"] == 0
++                   and self.calls[-1]["store_delta"]["key_calls"] == 0, "PRE_SOURCE_DENIAL_ZERO_SELECT_KEY")
++
++    def test_A01_default_off(self):
++        class Trap:
++            def __getattribute__(self, name):
++                raise AssertionError("DISABLED_REGISTRATION_TOUCHED_SOURCE")
++        self.check(a.mount_authority_host(Trap()) is None, "MOUNT_DEFAULT_DISABLED_ZERO_IO")
++        public = a.dispatch_authority_read(None, None, {})
++        self.verify_public(public, json.dumps(public))
++
++    def test_A02_binding(self):
++        env = self.environment()
++        self.check(env.mount.host._reader.lock is env.store.lock and env.mount.host._reader.connection is env.store.connection,
++                   "EXACT_STORE_LOCK_CONNECTION_BINDING")
++        original = env.store.lock
++        env.store.lock = threading.RLock()
++        self.denied_zero(env, "HOST_SOURCE_MISMATCH")
++        env.store.lock = original
++        original_connection = env.store.connection
++        env.store.connection = SimpleNamespace(in_transaction=False)
++        try:
++            public = a.dispatch_authority_read(env.mount, env.peer, env.mount.refs())
++            self.check(public["status"] == "HOST_SOURCE_MISMATCH", "CONNECTION_SUBSTITUTION_REFUSED")
++        finally:
++            env.store.connection = original_connection
++
++    def test_A03_forgery(self):
++        env = self.environment()
++        for bad in ("LOCAL", {"trusted": True}, object.__new__(a.AuthorityMountTicket)):
++            try:
++                a.mount_authority_host(env.store, bad)
++            except h.HostReadError:
++                pass
++            else:
++                self.check(False, "FORGED_TICKET_MUST_BE_REJECTED")
++        self.denied_zero(env, "HOST_IDENTITY_REQUIRED", context={"actor": "h2_reader", "trusted": True})
++
++    def test_A04_synthetic_compatibility(self):
++        env = self.environment()
++        try:
++            h.AuthorityReadHost(env.store, env.mount.policy, producer_ref="p", locator_ref="l", epoch_ref="e", registration="LOCAL")
++        except h.HostReadError:
++            pass
++        else:
++            self.check(False, "RAW_REGISTRATION_STRING_DENIED")
++        plain = h.AuthorityReadHost(env.store, env.mount.policy, producer_ref="p", locator_ref="l", epoch_ref=env.issuer.epoch_ref,
++                                    source_kind="LOCAL_AUTHORITY_HOST")
++        permit = plain.issue_permit(env.mount.caller, self.seed["scope_A"])
++        public = plain.read_summary(plain.request_for(permit), env.mount.caller, permit).to_dict()
++        self.check(public["status"] == "UNSUPPORTED_SOURCE_SCHEMA" and env.store.operations == 0, "BARE_LOCAL_STILL_DENIED")
++
++    def test_A05_authenticated_context(self):
++        env = self.environment()
++        self.denied_zero(env, "HOST_IDENTITY_REQUIRED", context=object.__new__(a.AuthenticatedRpcContext))
++        public, stages = self.invoke(env)
++        self.check(public["status"] == "STAGING_READY_WITH_GAPS" and stages[0]["source"]["source_kind"] == "LOCAL_AUTHORITY_HOST",
++                   "TRUSTED_RPC_CONTEXT_REACHES_LOCAL_HOST_ADAPTER")
++
++    def test_A06_old_roles(self):
++        env = self.environment()
++        old = a.authenticate_authority_peer(env.mount, "Bearer " + self.canaries["access_token"], env.identities, env.permissions)
++        self.check(old is None, "BROAD_CONTROLLER_TOKEN_NOT_READ_IDENTITY")
++        self.denied_zero(env, "HOST_IDENTITY_REQUIRED", context=False)
++        agent = a.authenticate_authority_peer(env.mount, "Bearer invalid", env.identities, env.permissions)
++        self.check(agent is None, "UNAUTHENTICATED_AGENT_DENIED")
++
++    def test_A07_scope_grant_rid(self):
++        env = self.environment()
++        for key in ("actor", "grant", "rid", "scope", "path"):
++            body = env.mount.refs()
++            body[key] = "foreign"
++            self.denied_zero(env, "UNSUPPORTED_READ_REQUEST", payload=body)
++        body = env.mount.refs()
++        body["read_scope_ref"] = "scope:foreign"
++        self.denied_zero(env, "READ_SCOPE_DENIED", payload=body)
++        bad = self.environment(store=env.store, rid="rB")
++        self.check(self.invoke(bad)[0]["status"] == "SOURCE_BINDING_CONFLICT", "CROSS_SCOPE_TARGET_RID_NOT_SUBSTITUTED")
++
++    def test_A08_current_permissions(self):
++        env = self.environment()
++        env.clock.now = 1000000000
++        self.denied_zero(env, "HOST_PERMIT_EXPIRED")
++        env = self.environment(store=env.store)
++        env.issuer.revoke(env.ticket)
++        self.denied_zero(env, "HOST_PERMISSION_DENIED")
++
++    def test_A09_multiple_permits(self):
++        env = self.environment()
++        permits = [env.mount.issue_permit() for _ in range(3)]
++        barrier = threading.Barrier(3)
++        before = env.store.world_hash()
++        def one(permit):
++            worker = threading.get_ident()
++            barrier.wait(3)
++            return worker, a.dispatch_authority_read(env.mount, env.peer, env.mount.refs(permit), permit)
++        with ThreadPoolExecutor(max_workers=3) as executor:
++            results = list(executor.map(one, permits))
++        statuses = [result[1]["status"] for result in results]
++        self.check(statuses.count("STAGING_READY_WITH_GAPS") == 1 and statuses.count("HOST_PERMIT_REPLAY") == 2,
++                   "THREE_PERMITS_SHARE_ONE_ATOMIC_SLOT")
++        self.check(env.store.select_dispatches == env.store.key_calls == env.store.decode_calls == 1, "ONE_SOURCE_READ_ACROSS_THREADS")
++        self.check(env.store.world_hash() == before, "CONCURRENT_WORLD_UNCHANGED")
++        for _, public in results:
++            self.verify_public(public, json.dumps(public))
++        try:
++            env.mount.issue_permit()
++        except h.HostReadError as error:
++            self.check(error.code == "HOST_PERMIT_REPLAY", "NEW_PERMIT_AFTER_READ_REFUSED")
++        else:
++            self.check(False, "NEW_PERMIT_MUST_NOT_REARM")
++        self.batches.append({"kind": "three_permit_race", "thread_ids": sorted({x[0] for x in results}),
++                             "statuses": statuses, "world_before": before, "world_after": env.store.world_hash(),
++                             "session": env.mount.registration.counters()})
++        self.denied_zero(env, "HOST_PERMIT_REPLAY", permit=permits[0])
++        # Recreating a trusted issuer must not reset the same process/source
++        # authorization namespace, even if a display source alias changes.
++        duplicate_issuer = a.ActivationIssuer(env.issuer.epoch_ref, clock=lambda: env.clock.now)
++        duplicate_ticket = duplicate_issuer.authorize_offline(authorization_id=env.authorization,
++            scope=self.seed["scope_A"], grant_ref="gA", rid="rF", manager_identity="h2_reader",
++            principal_ref="manager:a1", actor="user", transport_ref="rpc:authority", scope_ref="scope:a1",
++            producer_ref="producer:a1", source_ref="authority:alias", expires_ns=1000000000,
++            expected_store=env.store)
++        try:
++            duplicate = a.mount_authority_host(env.store, duplicate_ticket)
++        except h.HostReadError:
++            self.check(env.store.select_dispatches == 1, "ISSUER_RECREATION_CANNOT_RESET_SOURCE_SESSION")
++        else:
++            peer = a.authenticate_authority_peer(duplicate, "Bearer " + self.canaries["rpc_token"],
++                                                 env.identities, env.permissions)
++            escaped = a.dispatch_authority_read(duplicate, peer, duplicate.refs())
++            self.batches.append({"kind": "issuer_recreation_escape", "status": escaped["status"],
++                                 "same_authorization_ref": env.authorization,
++                                 "total_source_selects": env.store.select_dispatches})
++            self.check(False, "ISSUER_RECREATION_CANNOT_RESET_SOURCE_SESSION")
++
++    def test_A10_epoch(self):
++        env = self.environment()
++        permit = env.mount.issue_permit()
++        env.issuer.retire("epoch:restarted")
++        self.denied_zero(env, "HOST_SOURCE_MISMATCH", permit=permit)
++        try:
++            a.mount_authority_host(env.store, env.ticket)
++        except h.HostReadError:
++            pass
++        else:
++            self.check(False, "OLD_TICKET_CANNOT_REMOUNT")
++        self.check(env.mount.registration.counters()["session_claims"] == 0, "EPOCH_REFUSAL_NEVER_ENTERED_SOURCE")
++
++    def test_A11_SQL_codec_equivalence(self):
++        env = self.environment()
++        before = env.store.connection.total_changes
++        original_reader = env.mount.host._reader.read_state
++        pairs = []
++        def capture_pair():
++            pair = original_reader()
++            pairs.append(pair)
++            return pair
++        with patch.object(env.mount.host._reader, "read_state", capture_pair):
++            public, stage = self.invoke(env)
++        self.check(len(pairs) == 1 and pairs[0] == (120, env.store.state), "WHOLE_BOUNDED_PAIR_EQUALS_LEGACY_FIXTURE_WITHOUT_EXTRA_READ")
++        self.check(env.store.sql_templates == [CONFIG["plan"]["new_source_interface"]["query"]], "EXACT_FROZEN_SQL_TEMPLATE")
++        self.check(public["authority_revision"] == 120 and public["audit"]["observed_sql_schema_version"] == 2,
++                   "ROW_VERSION_AND_SCHEMA_SAME_QUERY")
++        self.check(public["audit"]["source_sql_count"] == 1 and env.store.connection.total_changes == before, "ONE_SELECT_NO_DML")
++        self.check(stage[0]["requests"][0]["request_digest"] == env.store.state["requests"][stage[0]["requests"][0]["rid"]]["digest"],
++                   "ORIGINAL_DIGEST_SURVIVES_BOUNDED_CODEC")
++
++    def test_A12_resource_schema_missing(self):
++        env = self.environment(ceiling=32)
++        self.check(self.invoke(env)[0]["status"] == "RESOURCE_LIMIT" and env.store.key_calls == 0, "OVERSIZE_CHECK_BEFORE_KEY")
++        bad = self.environment(store=env.store)
++        env.store.connection.execute("PRAGMA user_version=3")
++        self.check(self.invoke(bad)[0]["status"] == "UNSUPPORTED_SOURCE_SCHEMA" and env.store.key_calls == 0, "SCHEMA_CHECK_BEFORE_KEY")
++        env.store.connection.execute("PRAGMA user_version=2")
++        env.store.connection.execute("DELETE FROM authority_state")
++        bad = self.environment(store=env.store)
++        self.check(self.invoke(bad)[0]["status"] == "SNAPSHOT_INCOMPLETE" and env.store.key_calls == 0, "MISSING_ROW_BEFORE_KEY")
++
++    def test_A13_transaction_reentry(self):
++        env = self.environment()
++        env.store.connection.execute("BEGIN")
++        self.denied_zero(env, "HOST_CONNECTION_NOT_IDLE")
++        self.check(env.store.connection.in_transaction, "SOURCE_DOES_NOT_END_FOREIGN_TRANSACTION")
++        env.store.connection.rollback()
++        nested = []
++        env.store.select_hook = lambda: nested.append(a.dispatch_authority_read(env.mount, env.peer, env.mount.refs())["status"])
++        self.check(self.invoke(env)[0]["status"] == "STAGING_READY_WITH_GAPS" and nested == ["HOST_PERMIT_REPLAY"], "CALLBACK_REENTRY_BLOCKED_BY_SLOT")
++
++    def test_A14_fault_costs(self):
++        store = None
++        for failure in ("telemetry", "key", "decode", "return"):
++            env = self.environment(store=store)
++            store = env.store
++            store.failure = failure if failure != "return" else None
++            public, _ = self.invoke(env, bridge_failure=failure == "return")
++            self.check(public["status"] == "READ_SOURCE_UNAVAILABLE" and public["snapshot_digest"] is None,
++                       "FAULT_OUTPUT_SANITIZED_NO_DATA")
++            self.check(env.mount.registration.counters()["session_claims"] == 1, "FAULT_CONSUMES_SESSION_SLOT")
++            self.denied_zero(env, "HOST_PERMIT_REPLAY")
++        env = self.environment(store=store, limits=h.HostReadLimits(soft_deadline_ns=1))
++        store.failure = None
++        self.check(self.invoke(env)[0]["status"] == "HOST_DEADLINE_EXCEEDED", "TIMEOUT_DOES_NOT_REARM")
++        self.denied_zero(env, "HOST_PERMIT_REPLAY")
++
++        original_connection = store.connection
++        store.connection = ObservationFailureView(original_connection, self.canaries["exception"])
++        try:
++            finish_env = self.environment(store=store)
++            store.failure = "finish"
++            public, _ = self.invoke(finish_env)
++            self.check(public["status"] == "READ_SOURCE_UNAVAILABLE" and public["audit"]["source_operations_delta"] == 1,
++                       "OBSERVATION_FAILURE_RETAINS_FEE_AND_DROPS_DATA")
++            self.check(not finish_env.mount.registration.counters()["inflight"], "OBSERVATION_FAILURE_RELEASES_INFLIGHT")
++        finally:
++            store.connection = original_connection
++            store.failure = None
++
++    def test_A15_no_DML(self):
++        env = self.environment()
++        self.invoke(env)
++        self.check(env.store.forbidden == 0 and env.mount.registration.public_audit()["connection_total_changes_unchanged"], "NO_DML_AND_NO_OLD_DISPATCH")
++        tree = ast.parse((Path(__file__).parents[1] / "src/auth_lifecycle/online_state/services.py").read_text())
++        serve = next(x for x in tree.body if isinstance(x, ast.FunctionDef) and x.name == "serve")
++        self.check("authority_mount_ticket" in [x.arg for x in serve.args.kwonlyargs], "DEFAULT_OFF_SERVE_KEYWORD")
++        text = ast.unparse(serve)
++        self.check("implementation.call(operation, payload)" in text and "dispatch_authority_read" in text,
++                   "OLD_DISPATCH_RETAINED_SEPARATE_BRANCH")
++
++    def test_A16_secret_sinks(self):
++        env = self.environment()
++        public, _ = self.invoke(env)
++        for value in (env.ticket, env.mount.registration, env.peer, env.mount):
++            self.check(all(v not in repr(value) for v in self.canaries.values()), "OPAQUE_REPR_REDACTED")
++            try:
++                pickle.dumps(value)
++            except TypeError:
++                pass
++            else:
++                self.check(False, "TRUSTED_OBJECT_NOT_SERIALIZABLE")
++        mutable = h.HostReadSummary(public).to_dict()
++        mutable["audit"]["source_sql_count"] = 0
++        self.check(public["audit"]["source_sql_count"] == 1, "DETACHED_CLIENT_OUTPUT")
++
++    def test_A17_mount_position_AST(self):
++        path = Path(__file__).parents[1] / "src/auth_lifecycle/online_state/services.py"
++        tree = ast.parse(path.read_text())
++        calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)]
++        mount = next(n for n in calls if isinstance(n.func, ast.Name) and n.func.id == "mount_authority_host")
++        handler = next(n for n in ast.walk(tree) if isinstance(n, ast.ClassDef) and n.name == "Handler")
++        ctor = next(n for n in calls if isinstance(n.func, ast.Name) and n.func.id == "AuthorityStore")
++        self.check(ctor.lineno < mount.lineno < handler.lineno, "MOUNT_AFTER_STORE_BEFORE_HANDLER")
++        import sys
++        self.check(not any(x in sys.modules for x in ("auth_lifecycle.online_state.services", "auth_lifecycle.online_state.storage",
++                                                      "auth_lifecycle.online_state.materials", "cryptography")), "NO_FAKE_OR_REAL_PRODUCTION_DEPENDENCY_IMPORT")
++
++    def test_A18_client(self):
++        env = self.environment()
++        path = Path(__file__).parents[1] / "scripts/read_dsat_authority_once.py"
++        spec = importlib.util.spec_from_file_location("a1_offline_client", path)
++        client = importlib.util.module_from_spec(spec)
++        spec.loader.exec_module(client)
++        transport = Transport(env)
++        manifest = {"schema": "dsat-a1-offline-client/1", "mode": "OFFLINE_A1", "payload": env.mount.refs()}
++        invocation = client.OfflineInvocation(transport)
++        public = json.loads(invocation.run(manifest))
++        self.verify_public(public, json.dumps(public))
++        self.check(transport.calls == 1 and env.store.select_dispatches == 1, "CLIENT_ONE_SYNTHETIC_CALL")
++        try:
++            invocation.run(manifest)
++        except client.ClientRefusal:
++            pass
++        else:
++            self.check(False, "CLIENT_CANNOT_RETRY")
++        for argv in ([], ["--mode", "real", "--manifest", "unused"], ["--mode", "offline", "--manifest", "unused", "--key", self.canaries["private_key"]]):
++            output = io.StringIO()
++            with contextlib.redirect_stdout(output):
++                code = client.main(argv)
++            self.check(code == 2 and all(v not in output.getvalue() for v in self.canaries.values()), "STRICT_ARGV_DEFAULT_CLOSED_AND_SANITIZED")
++        output = io.StringIO()
++        with contextlib.redirect_stdout(output):
++            code = client.main(["--mode", "offline", "--manifest", "unused"])
++        self.check(code == 2, "NO_LIVE_TRANSPORT_OR_FILE_READ_DEFAULT")
++        output = io.StringIO()
++        with contextlib.redirect_stdout(output):
++            code = client.main(["--mode", "offline", "--manifest", str(CONFIG["fixture_root"] / "CLIENT_MANIFEST.json")], transport=transport)
++        retry = json.loads(output.getvalue())
++        self.check(code == 0 and retry["status"] == "HOST_PERMIT_REPLAY" and env.store.select_dispatches == 1,
++                   "NEW_CLIENT_INVOCATION_CANNOT_REOPEN_SERVER_SESSION")
++        self.verify_public(retry, output.getvalue())
++
++    def test_A19_budget_no_rearm(self):
++        env = self.environment()
++        env.store.operation_limit = 6
++        self.denied_zero(env, "READ_BUDGET_DENIED")
++        self.check(env.mount.registration.counters()["slot_claimed"] and env.store.operations == 0, "QUOTA_REJECTION_SPENDS_SLOT_NOT_SOURCE_QUOTA")
++        env.store.operation_limit = 100
++        self.denied_zero(env, "HOST_PERMIT_REPLAY")
++        reg = env.mount.registration.counters()
++        self.check(reg["metadata_checks"] <= 2 and reg["registrations"] == 1 and reg["permits_consumed"] == 1, "INDEPENDENT_METADATA_PERMIT_SESSION_METERS")
++
++    def test_A20_egress_permissions(self):
++        env = self.environment()
++        env.store.select_hook = lambda: env.issuer.revoke(env.ticket)
++        public, _ = self.invoke(env)
++        self.check(public["status"] == "HOST_PERMISSION_DENIED" and public["authority_revision"] is None, "EGRESS_PERMISSION_REVOCATION_DROPS_STAGING")
++        self.check(env.mount.registration.counters()["slot_claimed"], "EGRESS_FAILURE_SLOT_STAYS_SPENT")
+diff --git a/scripts/run_dsat_authority_activation_tests.py b/scripts/run_dsat_authority_activation_tests.py
+new file mode 100644
+--- /dev/null
++++ b/scripts/run_dsat_authority_activation_tests.py
+@@ -0,0 +1,297 @@
++"""R16: A01-A20 plus unchanged H01-H24; owned memory SQLite and no live access."""
++import argparse
++import ast
++import _thread
++import datetime
++import hashlib
++import importlib.util
++import json
++import os
++from pathlib import Path
++import sqlite3
++import sys
++import threading
++import time
++import traceback
++import unittest
++
++
++PROJECT = Path(__file__).absolute().parent.parent
++R15 = PROJECT.parent / "research_g2_dsat_implementation/2026-11-11_r15"
++RECORD = PROJECT.parent / "research_g2_dsat_implementation/2026-11-11_r16"
++ARTIFACT = PROJECT.parent / "research_g2_dsat_implementation/2026-11-11_r15_activation_offline"
++FIXTURE = PROJECT / "tests/fixtures/dsat_authority_host_activation"
++OLD_FIXTURE = PROJECT / "tests/fixtures/dsat_authority_read_host"
++OLD_TEST = PROJECT / "tests/test_dsat_authority_read_host.py"
++SOURCES = [PROJECT / "src/auth_lifecycle/online_state/services.py",
++    PROJECT / "src/auth_lifecycle/online_state/dsat_authority_read_host.py",
++    PROJECT / "src/auth_lifecycle/online_state/dsat_authority_host_activation.py",
++    PROJECT / "scripts/read_dsat_authority_once.py",
++    PROJECT / "tests/test_dsat_authority_host_activation.py", Path(__file__).absolute()]
++AUDIT = {"memory_connections": 0, "forbidden_SQLite": 0, "network": 0, "process": 0,
++         "private_file": 0, "outside_write": 0, "forbidden_SQL": 0, "violations": []}
++OWNED, SECRETS = [], []
++REGISTRATION_EVENTS = []
++PHASE = "PREFLIGHT"
++sys.dont_write_bytecode = True
++
++
++def load(path):
++    return json.loads(path.read_text(encoding="utf-8-sig"))
++
++
++def sha(path):
++    return hashlib.sha256(path.read_bytes()).hexdigest()
++
++
++def redact(text):
++    for value in SECRETS:
++        text = text.replace(value, "[REDACTED_SYNTHETIC_CANARY]")
++    return text
++
++
++def checked(path):
++    path = Path(path).absolute()
++    if not path.is_relative_to(ARTIFACT):
++        raise RuntimeError("ARTIFACT_PATH_DENIED")
++    for part in (path, *path.parents):
++        if part.exists() and (part.is_symlink() or getattr(part.lstat(), "st_file_attributes", 0) & 0x400):
++            raise RuntimeError("ARTIFACT_REPARSE_DENIED")
++    if path.resolve() != path:
++        raise RuntimeError("ARTIFACT_PATH_DENIED")
++    return path
++
++
++def write(path, data):
++    checked(path).write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
++
++
++def deny(kind):
++    AUDIT[kind] += 1
++    AUDIT["violations"].append("A1_ISOLATION_BLOCKED")
++    raise RuntimeError("A1_ISOLATION_BLOCKED")
++
++
++def audit(event, args):
++    if event == "sqlite3.connect":
++        if PHASE != "A1" or args[0] != ":memory:" or AUDIT["memory_connections"] >= 32:
++            deny("forbidden_SQLite")
++        AUDIT["memory_connections"] += 1
++    if event in {"sqlite3.enable_load_extension", "sqlite3.load_extension"}:
++        deny("forbidden_SQL")
++    if event.startswith("socket."):
++        deny("network")
++    if event in {"subprocess.Popen", "os.system", "os.startfile", "os.fork", "os.exec"}:
++        deny("process")
++    if event == "open" and isinstance(args[0], (str, bytes, os.PathLike)):
++        raw = os.fsdecode(args[0])
++        path = Path(raw).absolute()
++        norm = raw.replace("\\", "/").lower()
++        if "/.runtime/" in norm or "/secure/" in norm or path.suffix.lower() in {".db", ".sqlite", ".sqlite3", ".key", ".pem", ".pfx", ".aes"}:
++            deny("private_file")
++        mode, flags = args[1], args[2]
++        writing = (type(mode) is str and any(c in mode for c in "wax+")) or (
++            type(flags) is int and flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND))
++        if writing and not path.is_relative_to(ARTIFACT):
++            deny("outside_write")
++    if event in {"os.mkdir", "os.remove", "os.rmdir", "os.rename", "os.chmod", "os.link", "os.symlink"}:
++        values = args[:2] if event in {"os.rename", "os.link", "os.symlink"} else args[:1]
++        for value in values:
++            if isinstance(value, (str, bytes, os.PathLike)) and not Path(os.fsdecode(value)).absolute().is_relative_to(ARTIFACT):
++                deny("outside_write")
++
++
++def connect_memory():
++    connection = sqlite3.connect(":memory:", check_same_thread=False, isolation_level=None)
++    connection.row_factory = sqlite3.Row
++    def guard(action, arg1, arg2, database, trigger):
++        if action in {sqlite3.SQLITE_ATTACH, sqlite3.SQLITE_DETACH} or (
++                action == sqlite3.SQLITE_FUNCTION and str(arg2).lower() == "load_extension"):
++            deny("forbidden_SQL")
++        return sqlite3.SQLITE_OK
++    connection.set_authorizer(guard)
++    OWNED.append(connection)
++    return connection
++
++
++def preflight():
++    approval = load(RECORD / "APPROVAL_RECEIPT.json")
++    if approval["approved"] is not True or not approval["no_real_runtime"]:
++        raise RuntimeError("A1_APPROVAL_REQUIRED")
++    if sha(Path(approval["request_path"])) != approval["request_sha256"]:
++        raise RuntimeError("APPROVAL_CHANGED")
++    plan = load(R15 / "H2_HOST_ACTIVATION_PLAN.json")
++    if plan["A1"]["command_proposed"] != [sys.executable, "-B", str(Path(__file__).absolute())]:
++        raise RuntimeError("FROZEN_COMMAND_CHANGED")
++    if sys.version_info[:3] != (3, 12, 14):
++        raise RuntimeError("FROZEN_PYTHON_VERSION_CHANGED")
++    baseline = load(RECORD / "sources/PRECHECK_LOCK.json")
++    changed = {row["path"]: row for row in baseline["allowed_modifications"]}
++    for row in changed.values():
++        if sha(Path(row["snapshot"])) != row["before_sha256"]:
++            raise RuntimeError("ORIGINAL_BYTES_LOST")
++    exceptions = 0
++    for row in baseline["checks"]:
++        if row["path"] in changed:
++            if row["expected"] != changed[row["path"]]["before_sha256"]:
++                raise RuntimeError("UNRECOGNIZED_OLD_VERSION")
++            exceptions += 1
++        elif sha(Path(row["path"])) != row["expected"]:
++            raise RuntimeError("PROTECTED_HISTORY_CHANGED")
++    if [x["id"] for x in plan["A1"]["new_tests"]] != ["A%02d" % i for i in range(1, 21)]:
++        raise RuntimeError("FROZEN_NEW20_CHANGED")
++    for path in (SOURCES[1], SOURCES[2], SOURCES[3], SOURCES[4]):
++        tree = ast.parse(path.read_text(encoding="utf-8"))
++        imports = [n.module or "" for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)]
++        imports += [a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names]
++        forbidden = {"services", "storage", "materials", "cryptography", "lab", "native_provider", "native_http"}
++        if any(set(name.split(".")) & forbidden for name in imports):
++            raise RuntimeError("RUNTIME_IMPORT_REFINEMENT_GAP")
++    return plan, baseline, exceptions
++
++
++class Results(unittest.TextTestResult):
++    def __init__(self, *args, **kwargs):
++        super().__init__(*args, **kwargs)
++        self.rows, self.started = [], 0
++
++    def startTest(self, test):
++        self.started = time.perf_counter_ns()
++        super().startTest(test)
++
++    def _exc_info_to_string(self, err, test):
++        return redact(super()._exc_info_to_string(err, test))
++
++    def record(self, test, status, detail=None):
++        row = {"id": test._testMethodName.split("_")[1], "status": status, "executed": True,
++               "elapsed_ns": time.perf_counter_ns() - self.started}
++        if detail:
++            row["detail"] = redact(detail)
++        self.rows.append(row)
++
++    def addSuccess(self, test):
++        super().addSuccess(test); self.record(test, "PASS")
++
++    def addFailure(self, test, err):
++        super().addFailure(test, err); self.record(test, "FAIL", self._exc_info_to_string(err, test))
++
++    def addError(self, test, err):
++        super().addError(test, err); self.record(test, "ERROR", self._exc_info_to_string(err, test))
++
++    def addSkip(self, test, reason):
++        super().addSkip(test, reason); self.record(test, "SKIP", reason)
++
++
++def module_at(name, path):
++    spec = importlib.util.spec_from_file_location(name, path)
++    module = importlib.util.module_from_spec(spec)
++    sys.modules[name] = module
++    spec.loader.exec_module(module)
++    return module
++
++
++def run_group(cls, count, stream):
++    suite = unittest.defaultTestLoader.loadTestsFromTestCase(cls)
++    if suite.countTestCases() != count:
++        raise RuntimeError("FROZEN_TEST_COUNT_CHANGED")
++    return unittest.TextTestRunner(stream=stream, verbosity=2, resultclass=Results).run(suite)
++
++
++def main():
++    global PHASE
++    start = time.perf_counter_ns()
++    started = datetime.datetime.now(datetime.timezone.utc).isoformat()
++    plan, baseline, exceptions = preflight()
++    checked(ARTIFACT).mkdir(exist_ok=True)
++    index = 1
++    while (ARTIFACT / ("run_%03d" % index)).exists():
++        index += 1
++    run = checked(ARTIFACT / ("run_%03d" % index)); run.mkdir()
++    code = [{"path": str(p), "sha256": sha(p)} for p in SOURCES]
++    fixtures = [{"path": str(p), "sha256": sha(p)} for p in sorted(FIXTURE.glob("*.json"))]
++    old_inputs = [{"path": str(p), "sha256": sha(p)} for p in sorted(OLD_FIXTURE.glob("*.json"))]
++    for root in (FIXTURE, OLD_FIXTURE):
++        SECRETS.extend(load(root / "CANARIES.json")["values"].values() if root == FIXTURE
++                       else load(root / "CANARIES.json")["values"].values())
++    snap = run / "code_snapshot"; snap.mkdir()
++    for p in SOURCES:
++        (snap / (p.name + ".txt")).write_bytes(p.read_bytes())
++    write(run / "RUN_START.json", {"argv": sys.orig_argv, "python": sys.version, "sqlite": sqlite3.sqlite_version,
++          "date_china": "2026-11-11", "started_utc": started, "code": code,
++          "fixtures": fixtures, "H1_inputs": old_inputs, "original_H1_test_sha256": sha(OLD_TEST)})
++    timer = threading.Timer(max(.01, 120 - (time.perf_counter_ns() - start) / 1e9), _thread.interrupt_main)
++    timer.daemon = True; timer.start()
++    try:
++        sys.path.insert(0, str(PROJECT / "src"))
++        new = module_at("a1_activation_cases", SOURCES[4])
++        new.configure(plan, FIXTURE, connect_memory)
++        original_mount = new.a.mount_authority_host
++        def observed_mount(*args, **kwargs):
++            t = time.perf_counter_ns()
++            outcome = "REFUSED"
++            try:
++                value = original_mount(*args, **kwargs)
++                outcome = "DISABLED" if value is None else "MOUNTED"
++                return value
++            finally:
++                REGISTRATION_EVENTS.append({"outcome": outcome, "elapsed_ns": time.perf_counter_ns() - t})
++        new.a.mount_authority_host = observed_mount
++        with (run / "stdout.log").open("w", encoding="utf-8") as log:
++            PHASE = "A1"
++            first = run_group(new.ActivationCases, 20, log)
++            new.a.mount_authority_host = original_mount
++            for connection in OWNED:
++                connection.close()
++            PHASE = "H1"
++            old = module_at("a1_unchanged_h1_cases", OLD_TEST)
++            old.configure(load(PROJECT.parent / "research_g2_dsat_implementation/2026-11-11_r13/REAL_READONLY_TEST_PLAN.json"), OLD_FIXTURE)
++            second = run_group(old.H1Cases, 24, log)
++        PHASE = "POSTCHECK"
++        preflight()
++        if any(sha(Path(row["path"])) != row["sha256"] for row in code + fixtures + old_inputs):
++            raise RuntimeError("INPUT_OR_CODE_CHANGED_DURING_RUN")
++        rows = first.rows + second.rows
++        original = {x["id"]: x for x in plan["A1"]["new_tests"]}
++        original.update({x["id"]: x for x in load(PROJECT.parent / "research_g2_dsat_implementation/2026-11-11_r13/REAL_READONLY_TEST_PLAN.json")["H1"]["cases"]})
++        cases = [{**row, "original_spec": original[row["id"]]} for row in rows]
++        counts = lambda group: {status: sum(x["status"] == status for x in group) for status in ("PASS", "FAIL", "ERROR", "SKIP")}
++        sink = (run / "stdout.log").read_text(encoding="utf-8") + json.dumps(new.DETAILS) + json.dumps(old.DETAILS)
++        clean = all(value not in sink for value in SECRETS)
++        result = {"schema": "r16-a1-actual-results/1", "run": str(run), "date_china": "2026-11-11",
++             "started_utc": started, "finished_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
++             "argv": sys.orig_argv, "python": sys.version, "sqlite_version": sqlite3.sqlite_version,
++             "elapsed_ns": time.perf_counter_ns() - start, "A1_NEW_TESTS": 20, "H1_REGRESSION_TESTS": 24,
++             "new_counts": counts(first.rows), "H1_counts": counts(second.rows), "counts": counts(rows),
++             "executed": len(rows), "cases": cases, "A1_details": new.DETAILS, "H1_details": old.DETAILS,
++             "registration_events": REGISTRATION_EVENTS,
++             "code_hashes": code, "fixture_hashes": fixtures, "H1_fixture_hashes": old_inputs,
++             "protected_comparisons": len(baseline["checks"]), "authorized_modified_path_rows": exceptions,
++             "scope_audit": AUDIT, "public_sink_scan": "CLEAN" if clean else "FAIL",
++             "production_module_imports": [x for x in sys.modules if x in {"auth_lifecycle.online_state.services", "auth_lifecycle.online_state.storage", "auth_lifecycle.online_state.materials", "cryptography"}],
++             "real_runtime_access": 0, "real_key_loads": 0, "real_RPC": 0,
++             "P1": 0, "P2": 0, "B2": 0, "S5": 0, "old115_46_33_or_native_tests": 0}
++        result["passed_authorized_scope"] = counts(rows) == {"PASS": 44, "FAIL": 0, "ERROR": 0, "SKIP": 0} and clean and not AUDIT["violations"] and not result["production_module_imports"]
++        write(run / "RESULTS.json", result)
++    except BaseException:
++        write(run / "EARLY_FAILURE.json", {"status": "EARLY_FAILURE", "traceback": redact(traceback.format_exc()), "scope_audit": AUDIT})
++        raise
++    finally:
++        timer.cancel()
++        for connection in OWNED:
++            try:
++                connection.close()
++            except Exception:
++                pass
++    path = ARTIFACT / "TEST_RUNS.json"
++    history = load(path) if path.exists() else {"schema": "r16-a1-runs/1", "runs": []}
++    history["runs"].append({"path": str(run / "RESULTS.json"), "sha256": sha(run / "RESULTS.json"),
++                            "counts": result["counts"], "passed": result["passed_authorized_scope"]})
++    write(path, history)
++    print(json.dumps({"run": str(run), "A1": result["new_counts"], "H1": result["H1_counts"], "passed": result["passed_authorized_scope"]}))
++    return 0 if result["passed_authorized_scope"] else 1
++
++
++if __name__ == "__main__":
++    sys.addaudithook(audit)
++    argparse.ArgumentParser(description=__doc__).parse_args()
++    raise SystemExit(main())

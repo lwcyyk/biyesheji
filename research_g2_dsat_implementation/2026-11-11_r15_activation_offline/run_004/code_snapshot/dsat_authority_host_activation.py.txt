@@ -1,0 +1,385 @@
+"""A1 offline mounting core. No storage/services/crypto imports or import I/O.
+
+All issuing APIs belong to the trusted process. Opaque objects bind local facts,
+not cryptographic identities. Live runtime admission remains a separate gate.
+"""
+import hmac
+import json
+import threading
+import time
+import weakref
+
+from . import dsat_authority_read_host as h
+from .dsat_authority_read import ReadError
+
+
+BOUNDED_SELECT = (
+    "SELECT version, length(ciphertext) AS state_bytes, CASE WHEN length(ciphertext) <= :ceiling "
+    "THEN ciphertext ELSE NULL END AS ciphertext, (SELECT user_version FROM pragma_user_version) "
+    "AS schema_version FROM authority_state WHERE id=1"
+)
+CEILING = 16777216
+_TICKETS = weakref.WeakKeyDictionary()
+_REGISTRATIONS = weakref.WeakKeyDictionary()
+_PEERS = weakref.WeakKeyDictionary()
+_SESSION_LOCK = threading.RLock()
+_SESSION_NAMESPACES = set()
+
+
+class _Capability:
+    __slots__ = ("__weakref__",)
+
+    def __init__(self, *args, **kwargs):
+        raise h.HostReadError("HOST_SOURCE_MISMATCH")
+
+    def __repr__(self):
+        return "<AuthorityCapability redacted>"
+
+    def __reduce_ex__(self, protocol):
+        raise TypeError("AUTHORITY_CAPABILITY_NOT_SERIALIZABLE")
+
+
+class AuthorityMountTicket(_Capability):
+    __slots__ = ()
+
+
+class AuthenticatedRpcContext(_Capability):
+    __slots__ = ()
+
+
+class ActivationIssuer:
+    """Host-only offline issuer; no live admission or secret-loading API."""
+    def __init__(self, epoch_ref, *, clock=time.monotonic_ns):
+        self.epoch_ref = h._id(epoch_ref)
+        self.clock = clock
+        self.active = True
+        self._issued = set()
+        self._lock = threading.RLock()
+
+    def authorize_offline(self, *, authorization_id, scope, grant_ref, rid,
+                          manager_identity, principal_ref, actor, transport_ref,
+                          scope_ref, producer_ref, source_ref, expires_ns,
+                          expected_store=None, ceiling=CEILING, audit_sink=None, permit_ref="permit:one",
+                          limits=h.HostReadLimits(), aad=b"auth-lifecycle/online-state/schema-1"):
+        with self._lock:
+            authorization_id = h._id(authorization_id)
+            if not self.active or authorization_id in self._issued:
+                raise h.HostReadError("HOST_PERMIT_REPLAY")
+            if type(ceiling) is not int or not 1 <= ceiling <= CEILING or type(aad) is not bytes:
+                raise h.HostReadError("RESOURCE_LIMIT")
+            refs = [grant_ref, rid, manager_identity, principal_ref, actor, transport_ref,
+                    scope_ref, producer_ref, source_ref, permit_ref]
+            for ref in refs:
+                h._id(ref)
+            if manager_identity in {"controller", "agentA", "agentB"}:
+                raise h.HostReadError("HOST_PERMISSION_DENIED")
+            ticket = object.__new__(AuthorityMountTicket)
+            _TICKETS[ticket] = dict(issuer=self, authorization_id=authorization_id,
+                epoch=self.epoch_ref, scope=h._scope(scope), grant=grant_ref, rid=rid,
+                manager=manager_identity, principal=principal_ref, actor=actor,
+                transport=transport_ref, scope_ref=scope_ref, producer=producer_ref,
+                source=source_ref, expires=h._nat(expires_ns), expected_store=expected_store,
+                ceiling=ceiling, aad=aad, audit_sink=audit_sink, limits=limits,
+                enabled=True, version=1, mounted=False, permit_ref=permit_ref)
+            self._issued.add(authorization_id)
+            return ticket
+
+    def revoke(self, ticket):
+        rec = _TICKETS.get(ticket)
+        if rec is None or rec["issuer"] is not self:
+            raise h.HostReadError("HOST_SOURCE_MISMATCH")
+        with self._lock:
+            rec["enabled"] = False
+            rec["version"] += 1
+
+    def retire(self, new_epoch):
+        with self._lock:
+            self.active = False
+            self.epoch_ref = h._id(new_epoch)
+
+
+class BoundedAuthorityReader:
+    """Narrow existing-store view. No constructor, new connection, or key cache."""
+    def __init__(self, registration):
+        self._registration = registration
+
+    @property
+    def lock(self):
+        return self._registration._record()["lock"]
+
+    @property
+    def connection(self):
+        return self._registration._record()["connection"]
+
+    @property
+    def operations(self):
+        return self._registration._record()["store"].operations
+
+    @property
+    def operation_limit(self):
+        return self._registration._record()["store"].operation_limit
+
+    def read_state(self):
+        reg = self._registration
+        rec = reg._record()
+        reg._check_source()
+        if (not rec["inflight"] or rec["owner"] != threading.get_ident()
+                or rec["reader_started"]):
+            raise ReadError("SOURCE_BINDING_CONFLICT")
+        rec["reader_started"] = True
+        stats = rec["stats"]
+        stats["source_read_attempts"] += 1
+        stats["select_attempts"] += 1
+        started = time.perf_counter_ns()
+        cursor = None
+        try:
+            cursor = rec["store"].execute(BOUNDED_SELECT, {"ceiling": rec["ticket"]["ceiling"]})
+            row = cursor.fetchone()
+            stats["select_successes"] += 1
+        finally:
+            if cursor is not None:
+                cursor.close()
+            stats["C_select_ns"] += time.perf_counter_ns() - started
+        if row is None:
+            raise ReadError("SNAPSHOT_INCOMPLETE")
+        rec["observed_schema"] = row["schema_version"]
+        if type(row["schema_version"]) is not int or row["schema_version"] != 2:
+            raise ReadError("UNSUPPORTED_SOURCE_SCHEMA")
+        size = row["state_bytes"]
+        if type(size) is not int or size > rec["ticket"]["ceiling"]:
+            raise ReadError("RESOURCE_LIMIT")
+        if row["ciphertext"] is None or size < 28:
+            raise ReadError("SNAPSHOT_INCOMPLETE")
+        raw = bytes(row["ciphertext"])
+        if len(raw) != size:
+            raise ReadError("SOURCE_BINDING_CONFLICT")
+        stats["key_calls"] += 1
+        started = time.perf_counter_ns()
+        try:
+            cipher = rec["store"].cipher()
+        finally:
+            stats["C_key_ns"] += time.perf_counter_ns() - started
+        stats["decode_calls"] += 1
+        started = time.perf_counter_ns()
+        try:
+            state = json.loads(cipher.decrypt(raw[:12], raw[12:], rec["ticket"]["aad"]))
+        finally:
+            stats["C_decode_ns"] += time.perf_counter_ns() - started
+        return row["version"], state
+
+    def __repr__(self):
+        return "<BoundedAuthorityReader redacted>"
+
+
+class AuthorityRegistration(_Capability):
+    __slots__ = ()
+
+    def _record(self):
+        rec = _REGISTRATIONS.get(self)
+        if rec is None:
+            raise h.HostReadError("HOST_SOURCE_MISMATCH")
+        return rec
+
+    def _check_source(self):
+        rec = self._record()
+        ticket = rec["ticket"]
+        issuer = ticket["issuer"]
+        store = rec["store"]
+        if (not issuer.active or issuer.epoch_ref != ticket["epoch"]
+                or store.connection is not rec["connection"] or store.lock is not rec["lock"]):
+            raise h.HostReadError("HOST_SOURCE_MISMATCH")
+        if not ticket["enabled"] or ticket["version"] != rec["ticket_version"]:
+            raise h.HostReadError("HOST_PERMISSION_DENIED")
+        if h._nat(issuer.clock()) >= ticket["expires"]:
+            raise h.HostReadError("HOST_PERMIT_EXPIRED")
+
+    def bind_host(self, host, reader, policy):
+        rec = self._record()
+        if (reader is not rec["reader"] or policy is not rec["policy"] or rec["host"] is not None
+                or host._epoch != rec["ticket"]["epoch"] or host._locator != rec["ticket"]["source"]
+                or host._producer != rec["ticket"]["producer"]):
+            raise h.HostReadError("HOST_SOURCE_MISMATCH")
+        rec["host"] = host
+
+    def before_issue(self, host):
+        self._check_source()
+        rec = self._record()
+        if rec["host"] is not host:
+            raise h.HostReadError("HOST_SOURCE_MISMATCH")
+        if rec["claimed"]:
+            raise h.HostReadError("HOST_PERMIT_REPLAY")
+
+    def note_permit(self):
+        self._record()["stats"]["permits_issued"] += 1
+
+    def claim(self, host, caller, scope):
+        started = time.perf_counter_ns()
+        self.before_issue(host)
+        rec = self._record()
+        if caller is not rec["caller"] or h._scope_key(scope) != h._scope_key(rec["ticket"]["scope"]):
+            raise h.HostReadError("READ_SCOPE_DENIED")
+        rec["stats"]["metadata_checks"] += 1
+        rec["claimed"] = True
+        rec["inflight"] = True
+        rec["owner"] = threading.get_ident()
+        rec["stats"]["session_claims"] += 1
+        rec["stats"]["permits_consumed"] += 1
+        rec["changes_before"] = rec["connection"].total_changes
+        rec["stats"]["C_session_gate_ns"] += time.perf_counter_ns() - started
+
+    def note_output(self, elapsed):
+        self._record()["stats"]["C_output_ns"] += elapsed
+
+    def validate_stage(self, stage):
+        rec = self._record()
+        target = [row for row in stage["requests"] if row["rid"] == rec["ticket"]["rid"]]
+        if len(target) != 1 or target[0]["origin"]["grant_id"] != rec["ticket"]["grant"]:
+            raise h.HostReadError("SOURCE_BINDING_CONFLICT")
+
+    def egress_check(self):
+        self._record()["stats"]["metadata_checks"] += 1
+        self._check_source()
+
+    def finish(self):
+        rec = self._record()
+        if rec["inflight"] and rec["owner"] == threading.get_ident():
+            rec["changes_unchanged"] = rec["changes_before"] == rec["connection"].total_changes
+            rec["inflight"] = False
+
+    def public_audit(self):
+        rec = self._record()
+        return {"source_sql_count": rec["stats"]["select_attempts"],
+                "key_read_count": None, "key_count_basis": "PINNED_PATH_BOUND",
+                "observed_sql_schema_version": rec["observed_schema"],
+                "connection_total_changes_unchanged": rec["changes_unchanged"]}
+
+    def counters(self):
+        """Trusted test/management domain: counts only, no source or secrets."""
+        rec = self._record()
+        return {**rec["stats"], "slot_claimed": rec["claimed"],
+                "inflight": rec["inflight"], "changes_unchanged": rec["changes_unchanged"]}
+
+
+def mount_authority_host(store, ticket=None):
+    """Default disabled. Called after Store creation and before Handler setup."""
+    started = time.perf_counter_ns()
+    if ticket is None:
+        return None
+    if type(ticket) is not AuthorityMountTicket or ticket not in _TICKETS:
+        raise h.HostReadError("HOST_SOURCE_MISMATCH")
+    tr = _TICKETS[ticket]
+    issuer = tr["issuer"]
+    with issuer._lock:
+        if tr["mounted"] or not issuer.active or issuer.epoch_ref != tr["epoch"]:
+            raise h.HostReadError("HOST_SOURCE_MISMATCH")
+        if tr["expected_store"] is not None and tr["expected_store"] is not store:
+            raise h.HostReadError("HOST_SOURCE_MISMATCH")
+        if not tr["enabled"] or issuer.clock() >= tr["expires"]:
+            raise h.HostReadError("HOST_PERMISSION_DENIED")
+        # The namespace is process-wide, independent of issuer objects and
+        # display aliases. Keep the connection object itself, avoiding id reuse.
+        namespace = (store.connection, tr["authorization_id"], tr["epoch"],
+                     h._scope_key(tr["scope"]))
+        with _SESSION_LOCK:
+            if namespace in _SESSION_NAMESPACES:
+                raise h.HostReadError("HOST_PERMIT_REPLAY")
+            if len(_SESSION_NAMESPACES) >= 4096:
+                raise h.HostReadError("RESOURCE_LIMIT")
+            _SESSION_NAMESPACES.add(namespace)
+        policy = h.HostReadPolicy(tr["epoch"], clock=issuer.clock)
+        caller = policy.bind_authenticated_caller(principal_ref=tr["principal"], actor=tr["actor"],
+                    transport_ref=tr["transport"], expires_ns=tr["expires"])
+        policy.allow(principal_ref=tr["principal"], actor=tr["actor"], transport_ref=tr["transport"],
+                     scope=tr["scope"], grant_ref=tr["grant"], scope_ref=tr["scope_ref"], expires_ns=tr["expires"])
+        registration = object.__new__(AuthorityRegistration)
+        stats = {k: 0 for k in ("registrations", "permits_issued", "permits_consumed", "session_claims",
+                 "source_read_attempts", "select_attempts", "select_successes", "key_calls", "decode_calls",
+                 "metadata_checks", "C_registration_ns", "C_authorization_ns", "C_permit_ns",
+                 "C_session_gate_ns", "C_select_ns", "C_key_ns", "C_decode_ns", "C_output_ns")}
+        rec = dict(store=store, connection=store.connection, lock=store.lock, ticket=tr,
+                   ticket_version=tr["version"], policy=policy, caller=caller, host=None,
+                   reader=None, claimed=False, inflight=False, owner=None, reader_started=False,
+                   stats=stats, observed_schema=None, changes_before=None, changes_unchanged=None)
+        _REGISTRATIONS[registration] = rec
+        reader = BoundedAuthorityReader(registration)
+        rec["reader"] = reader
+        host = h.AuthorityReadHost(reader, policy, producer_ref=tr["producer"], locator_ref=tr["source"],
+                 epoch_ref=tr["epoch"], source_kind="LOCAL_AUTHORITY_HOST", limits=tr["limits"],
+                 audit_sink=tr["audit_sink"], registration=registration)
+        tr["mounted"] = True
+        stats["registrations"] = 1
+        stats["C_registration_ns"] = time.perf_counter_ns() - started
+        return MountedAuthority(registration, host, caller, policy)
+
+
+class MountedAuthority:
+    def __init__(self, registration, host, caller, policy):
+        self.registration, self.host, self.caller, self.policy = registration, host, caller, policy
+
+    def issue_permit(self):
+        started = time.perf_counter_ns()
+        try:
+            return self.host.issue_permit(self.caller, self.registration._record()["ticket"]["scope"])
+        finally:
+            self.registration._record()["stats"]["C_permit_ns"] += time.perf_counter_ns() - started
+
+    def refs(self, permit=None):
+        tr = self.registration._record()["ticket"]
+        reference = self.host.request_for(permit)["execution_ref"] if permit is not None else tr["permit_ref"]
+        return {"authorization_ref": tr["authorization_id"], "permit_ref": reference,
+                "read_scope_ref": tr["scope_ref"]}
+
+    def __repr__(self):
+        return "<MountedAuthority redacted>"
+
+    def __reduce_ex__(self, protocol):
+        raise TypeError("MOUNT_NOT_SERIALIZABLE")
+
+
+def authenticate_authority_peer(mount, supplied, identities, permissions):
+    """Called with already-private Handler configuration, never request body flags."""
+    if type(mount) is not MountedAuthority or type(supplied) is not str:
+        return None
+    tr = mount.registration._record()["ticket"]
+    matched = None
+    for identity, token in identities.items():
+        if type(token) is str and hmac.compare_digest(supplied, "Bearer " + token):
+            matched = identity
+    if matched != tr["manager"] or h.RIGHT not in permissions.get(matched, []):
+        return None
+    context = object.__new__(AuthenticatedRpcContext)
+    _PEERS[context] = (mount, matched, tr["epoch"])
+    return context
+
+
+def dispatch_authority_read(mount, context, payload, permit=None):
+    if type(mount) is not MountedAuthority:
+        return h.AuthorityReadHost._safe_refusal("READ_CONTEXT_REQUIRED", False, 0, 0, 0).to_dict()
+    started = time.perf_counter_ns()
+    rec = mount.registration._record()
+    try:
+        with mount.policy.lock:
+            if (type(context) is not AuthenticatedRpcContext or context not in _PEERS
+                    or _PEERS[context][0] is not mount or _PEERS[context][2] != rec["ticket"]["epoch"]):
+                raise h.HostReadError("HOST_IDENTITY_REQUIRED")
+            mount.registration._check_source()
+            if type(payload) is not dict or set(payload) != {"authorization_ref", "permit_ref", "read_scope_ref"}:
+                raise h.HostReadError("UNSUPPORTED_READ_REQUEST")
+            tr = rec["ticket"]
+            if payload["authorization_ref"] != tr["authorization_id"] or payload["read_scope_ref"] != tr["scope_ref"]:
+                raise h.HostReadError("READ_SCOPE_DENIED")
+            if permit is None:
+                if payload["permit_ref"] != tr["permit_ref"]:
+                    raise h.HostReadError("READ_SCOPE_DENIED")
+                permit = mount.issue_permit()
+                body = mount.host.request_for(permit)
+            else:
+                body = mount.host.request_for(permit)
+            if payload["permit_ref"] not in {tr["permit_ref"], body["execution_ref"]}:
+                raise h.HostReadError("READ_SCOPE_DENIED")
+            rec["stats"]["C_authorization_ns"] += time.perf_counter_ns() - started
+            return mount.host.read_summary(body, mount.caller, permit).to_dict()
+    except h.HostReadError as error:
+        return mount.host.refusal(error.code).to_dict()
+    except Exception:
+        return mount.host.refusal("READ_SOURCE_UNAVAILABLE").to_dict()

@@ -1,0 +1,40 @@
+"""Static size calculation over historical JSON bytes; no target code import."""
+from pathlib import Path
+import binascii
+import hashlib
+import json
+import zlib
+
+base = Path(r"D:\毕业设计\research_g2_dsat_implementation")
+path = base / "2026-11-12_r31/verification_runs/r31_regression68_001/EARLY_FAILURE.json"
+def canonical(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False).encode()
+
+previous_old = previous_new = "0" * 64
+total = maximum = count = 0
+values = []
+for line in path.read_bytes().splitlines():
+    old = json.loads(line)
+    old_hash = old.pop("sha256")
+    assert old["previous_sha256"] == previous_old
+    assert hashlib.sha256(canonical(old)).hexdigest() == old_hash
+    previous_old = old_hash
+    raw = canonical(old["value"])
+    encoded = binascii.b2a_base64(zlib.compress(raw, level=9), newline=False).decode("ascii")
+    assert zlib.decompress(binascii.a2b_base64(encoded, strict_mode=True)) == raw
+    values.append(hashlib.sha256(raw).hexdigest())
+    new = {**old, "schema": "r33-checkpoint-jsonl/1", "previous_sha256": previous_new,
+           "value": {"encoding": "zlib-base64-canonical-json/1", "raw_bytes": len(raw),
+                     "raw_sha256": values[-1], "data": encoded}}
+    previous_new = hashlib.sha256(canonical(new)).hexdigest()
+    length = len(canonical({**new, "sha256": previous_new})) + 1
+    total += length
+    maximum = max(maximum, length)
+    count += 1
+model = json.loads((base / "2026-11-12_r33/R33_EVIDENCE_SPACE_ANALYSIS.json").read_text(encoding="utf-8"))
+expected = model["R32_payload_static_reencoding"]
+assert total == expected["encoded_journal_bytes"] == 817454
+assert count == expected["events"] == 609
+assert hashlib.sha256(canonical(values)).hexdigest() == expected["semantic_value_hashes_sha256"]
+print(json.dumps({"kind": "STATIC_EXISTING_DATA_ONLY", "events": count,
+                  "encoded_model_bytes": total, "max_event_bytes": maximum, "target_executions": 0}))

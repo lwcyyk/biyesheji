@@ -1,0 +1,1234 @@
+"""One independently approved, isolated current-build A1/H1/D1A regression run.
+
+Importing this file defines the harness only. R33 permits static review, not
+execution. A later researcher approval bound to the final command lock is
+required before any test, connection, watchdog, or output creation.
+"""
+import argparse
+import ast
+import contextlib
+import ctypes
+import datetime
+import errno
+import hashlib
+import importlib.util
+import importlib.machinery
+import io
+import json
+import os
+from pathlib import Path
+import sqlite3
+import sys
+import threading
+import time
+import traceback
+import unittest
+import _thread
+import _imp
+
+
+PROJECT = Path(r"D:\毕业设计\auth-lifecycle")
+BASE = PROJECT.parent / "research_g2_dsat_implementation"
+RECORD = BASE / "2026-11-12_r33"
+OUTPUT = RECORD / "verification_runs"
+RUN_ID = "r33_regression68_001"
+RUN = OUTPUT / RUN_ID
+APPROVAL = OUTPUT / "RUN_APPROVAL_RECEIPT.json"
+LOGICAL = BASE / "2026-11-11_r19_offline" / ("r33_projection_" + RUN_ID)
+PHASES = (("A1", "ActivationCases"), ("H1", "H1Cases"), ("D1A", "D1ACases"))
+FORBIDDEN_IMPORTS = ("cryptography", "auth_lifecycle.online_state.services",
+    "auth_lifecycle.online_state.storage", "auth_lifecycle.online_state.materials")
+ALLOWED_D24_INPUTS = (
+    ("test_metadata.json", BASE / "2026-11-11_r22_d1b1_closure_offline/r19_24_002/test_metadata.json",
+     "1c6283d77d75d9617adff2b06cea39bc1658aa4b9c0d9ee2e823fcc2c8d50037"),
+    ("test_request.json", BASE / "2026-11-11_r22_d1b1_closure_offline/r19_24_002/test_request.json",
+     "90cf2149c79ccd43caa82aa8da51d6542b5776ac8bd9ec5ecc01cb163f9f0c69"),
+)
+HISTORICAL_READ_ONLY_LINKS = frozenset((
+    BASE / "2026-11-11_r22_d1b1_closure_offline/new54_001/T33/one.txt",
+    BASE / "2026-11-11_r22_d1b1_closure_offline/new54_001/T33/alias.txt",
+    BASE / "2026-11-12_r24/verification_runs/r24_new54_001/T33/one.txt",
+    BASE / "2026-11-12_r24/verification_runs/r24_new54_001/T33/alias.txt",
+))
+WRITE_NAMES = frozenset(("RUN_APPROVAL_RECEIPT.json", "SUITE_INVOCATION_01.json", "TEST_RUNS.json",
+    "COMMAND_stdout.log", "COMMAND_stderr.log", RUN_ID + "/RUN_START.json", RUN_ID + "/stdout.log",
+    RUN_ID + "/RESULTS.json", RUN_ID + "/RESOURCE_LEDGER.json", RUN_ID + "/MODULE_ORIGINS.json",
+    RUN_ID + "/EARLY_FAILURE.json", RUN_ID + "/test_metadata.json", RUN_ID + "/test_request.json"))
+ENTRY_STATE = None
+DEPENDENCY_ROOTS = frozenset(("cryptography", "cffi", "pycparser", "_cffi_backend",
+    "sqlite3", "_sqlite3", "ctypes", "_ctypes"))
+NATIVE_PARENT = "cryptography.hazmat.bindings._rust"
+NATIVE_PARENT_SHA256 = "3e2d3a15defdb80e83ddd58693ef6e0eecbd741ae132d68e0b861a4f7577d872"
+WRAPPER_NAMES = frozenset(("cryptography.hazmat.primitives.ciphers.algorithms",
+    "cryptography.hazmat.primitives.ciphers.modes"))
+CRYPTO_UTILS_SHA256 = "21aed2d106734b47b3c2920741f63c1b57bea381a3ac78a31175e3c00af58ae2"
+CFFI_SHA256 = "6ffd1e61f97fac1b640c74069663406753e4d178a3780616e48208431b074c95"
+EVIDENCE_CAPS = {
+    "RUN_APPROVAL_RECEIPT.json": 8192, "SUITE_INVOCATION_01.json": 8192,
+    "TEST_RUNS.json": 65536, "COMMAND_stdout.log": 65536, "COMMAND_stderr.log": 65536,
+    RUN_ID + "/RUN_START.json": 16384, RUN_ID + "/stdout.log": 65536,
+    RUN_ID + "/EARLY_FAILURE.json": 1048576, RUN_ID + "/RESULTS.json": 262144,
+    RUN_ID + "/MODULE_ORIGINS.json": 262144, RUN_ID + "/RESOURCE_LEDGER.json": 131072,
+    RUN_ID + "/test_metadata.json": 1032, RUN_ID + "/test_request.json": 287,
+}
+ENCODED_OUTPUTS = frozenset(("RESULTS.json", "MODULE_ORIGINS.json", "RESOURCE_LEDGER.json", "TEST_RUNS.json"))
+
+
+class Refusal(RuntimeError):
+    pass
+
+
+def require(value, code):
+    if not value:
+        raise Refusal(code)
+
+
+def sha(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def canonical(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+                      allow_nan=False).encode("utf-8")
+
+
+def module_dictionary(module):
+    """Read the builtin module dictionary without a subclass attribute hook."""
+    if isinstance(module, type(sys)):
+        return type(sys).__dict__["__dict__"].__get__(module, type(module))
+    return {}
+
+
+def load(path):
+    path = checked(path)
+    require(path.stat().st_size <= 4 * 1024 * 1024, "CONTROL_SIZE_LIMIT")
+    return json.loads(path.read_text(encoding="utf-8-sig"))
+
+
+def checked(path, *, output=False, historical_read=False):
+    raw = str(path)
+    require(Path(raw).is_absolute() and not raw.startswith(("\\\\", "//"))
+        and ":" not in raw[2:] and not any(p in {".", ".."} or p.endswith((".", " "))
+        for p in raw.replace("/", "\\").split("\\")[1:]), "PATH_DENIED")
+    p = Path(raw).absolute()
+    if output:
+        require(p == OUTPUT or p == RUN or (p.is_relative_to(OUTPUT)
+            and p.relative_to(OUTPUT).as_posix() in WRITE_NAMES), "OUTPUT_PATH_DENIED")
+    for part in (p, *p.parents):
+        require(not part.is_symlink() and not (part.exists()
+            and getattr(part.lstat(), "st_file_attributes", 0) & 0x400), "REPARSE_DENIED")
+    if p.is_file():
+        require(p.stat().st_nlink == 1 or (historical_read and not output
+            and p in HISTORICAL_READ_ONLY_LINKS), "HARDLINK_DENIED")
+    return p
+
+
+class Parser(argparse.ArgumentParser):
+    def error(self, message):
+        raise Refusal("ARGUMENTS_REFUSED")
+
+
+def controls(args):
+    require(args.suite == "regression68" and Path(args.output_root) == OUTPUT
+        and Path(args.approval_ref) == APPROVAL, "EXPLICIT_SCOPE_REQUIRED")
+    checked(OUTPUT, output=True)
+    command = load(RECORD / "R33_REGRESSION_COMMAND_LOCK.json")
+    require(command["argv"] == sys.orig_argv, "COMMAND_LOCK_MISMATCH")
+    require(command["command_executable"] is True,
+        command.get("admission_refusal_code", "COMMAND_NOT_ADMITTED"))
+    for row in command["control_pins"]:
+        require(sha(checked(row["path"])) == row["sha256"], "CONTROL_LOCK_MISMATCH")
+    require(sha(checked(Path(__file__).absolute())) == command["runner_sha256"], "RUNNER_CHANGED")
+    require(checked(APPROVAL, output=True).stat().st_size <= EVIDENCE_CAPS[APPROVAL.name],
+        "EVIDENCE_BUDGET_INSUFFICIENT")
+    approval = load(checked(APPROVAL, output=True))
+    require(approval.get("schema") == "r33-regression-approval/1"
+        and approval.get("approved") is True
+        and approval.get("action") == "RUN_CURRENT_BUILD_REGRESSION68"
+        and approval.get("command_lock_sha256") == sha(RECORD / "R33_REGRESSION_COMMAND_LOCK.json")
+        and approval.get("source_digest") == command["source_digest"]
+        and approval.get("output_root") == str(OUTPUT) and approval.get("run_id") == RUN_ID
+        and type(approval.get("max_suite_runs")) is int and approval["max_suite_runs"] == 1
+        and type(approval.get("automatic_reruns")) is int and approval["automatic_reruns"] == 0
+        and approval.get("resource_lock_sha256") == sha(RECORD / "R33_REGRESSION_RESOURCE_LOCK.json")
+        and all(approval.get(k) is False for k in ("D1B2", "P1A", "P1B", "P2", "S3B2", "S5")),
+        "INDEPENDENT_RUN_APPROVAL_REQUIRED")
+    reply = Path(approval["response_path"])
+    require(reply.suffix.lower() in {".txt", ".md", ".json"}
+        and not reply.is_relative_to(PROJECT.parent / "h2_test_runtime"), "APPROVAL_REPLY_SCOPE")
+    require(sha(checked(reply)) == approval["response_sha256"], "APPROVAL_REPLY_CHANGED")
+    require(OUTPUT.is_dir() and {p.name for p in OUTPUT.iterdir()} == {APPROVAL.name}, "RUN_ALREADY_RESERVED")
+    return command, approval
+
+
+class State:
+    def __init__(self, command, started, started_utc):
+        self.command = command
+        self.build = load(RECORD / "R33_BUILD_AND_RUNNER_LOCK.json")
+        self.manifest = load(RECORD / "R33_68_TEST_MANIFEST.json")
+        self.resources = load(RECORD / "R33_REGRESSION_RESOURCE_LOCK.json")
+        self.history = load(RECORD / "sources/PREPATCH_AND_HISTORY.json")
+        self.runtime_read = load(RECORD / "R33_RUNTIME_READ_MANIFEST.json")
+        self.started = started
+        self.deadline = self.started + 120
+        self.started_utc = started_utc
+        self.phase, self.current = "PREFLIGHT", None
+        self.connecting, self.d24_active = False, False
+        self.connections, self.rows, self.details, self.origins = [], {}, [], []
+        self.errors, self.projections, self.exec_files = [], [], set()
+        self.origin_records, self.origin_raw = {}, set()
+        self.origin_failures = []
+        self.pre_module_names = None
+        self.journal, self.journal_identity = None, None
+        self.journal_sequence, self.journal_bytes = 0, 0
+        self.journal_head = "0" * 64
+        self.journal_closed = False
+        self.persistence_ok = True
+        self.tests_finished = False
+        self.artifacts = {}
+        self.build_verified = False
+        self.secrets = set()
+        self.meter = {"memory_connections": {"A1": 0, "H1": 0, "D1A": 0}, "memory_success": 0,
+            "memory_active": 0, "memory_peak": 0, "execute_calls": 0, "rollback_calls": 0,
+            "SQL_kinds": {}, "threads_created": 0, "threads_peak": 1, "subprocesses": 0,
+            "network": 0, "file_SQLite": 0, "outside_writes": 0, "denials": [],
+            "expected_cache_probes": [], "unexpected_read_denials": []}
+        self.cache_probe_rows = {}
+        self.io_lock = threading.RLock()
+        rows = self.build["engineering_source"] + self.build["regression_extension_sources"]
+        self.source_pins = {Path(x["path"]): x["sha256"] for x in rows}
+        self.source_pins[Path(__file__).absolute()] = command["runner_sha256"]
+        self.read_files = {Path(x["path"]) for x in self.history["protected_files"]}
+        self.read_files.update(Path(x["path"]) for x in self.history["additional_records"])
+        self.read_files.update(self.source_pins)
+        self.read_files.add(Path(__file__).absolute())
+        self.read_files.update(Path(x["path"]) for x in command["control_pins"])
+        self.read_files.add(RECORD / "R33_REGRESSION_COMMAND_LOCK.json")
+        self.base_python = Path(self.build["python"]["path"]).parent
+        self.runtime_code_pins = {Path(x["path"]): x["sha256"] for x in self.runtime_read["files"]}
+        require(all(path.is_relative_to(self.base_python) and path.suffix.lower() in {".py", ".pyd"}
+            for path in self.runtime_code_pins), "RUNTIME_CODE_CATALOGUE_SCOPE")
+        self.source_modules = {Path(x["path"]): x["module"] for x in self.runtime_read["files"]}
+        for path in self.source_pins:
+            if path.is_relative_to(PROJECT / "src"):
+                parts = list(path.relative_to(PROJECT / "src").with_suffix("").parts)
+                if parts[-1] == "__init__": parts.pop()
+                self.source_modules[path] = ".".join(parts)
+            else:
+                self.source_modules[path] = "pinned file: " + path.name
+        self.expected_names = {name: path for path, name in self.source_modules.items()
+            if not name.startswith("pinned file: ")}
+        for phase, _ in PHASES:
+            self.expected_names["r33_cases_" + phase.lower()] = Path(next(
+                row["test_file"] for row in self.manifest["tests"] if row["test_source"] == phase))
+        self.expected_names["__main__"] = Path(__file__).absolute()
+        cffi_path = self.base_python / "Lib/site-packages/_cffi_backend.cp312-win_amd64.pyd"
+        require(self.runtime_code_pins.get(cffi_path) == CFFI_SHA256
+            and any(Path(x["path"]) == cffi_path and x["sha256"] == CFFI_SHA256
+                    for x in self.build["runtime_files"]), "CFFI_BINDING_PIN_MISSING")
+        require(self.source_modules.get(cffi_path) == "_cffi_backend.cp312-win_amd64", "CFFI_CATALOGUE_SHAPE_CHANGED")
+        self.expected_names.pop("_cffi_backend.cp312-win_amd64")
+        self.expected_names["_cffi_backend"] = cffi_path
+        self.source_modules[cffi_path] = "_cffi_backend"
+        self.budget = load(RECORD / "R33_EVIDENCE_BUDGET_CONTRACT.json")
+        require(self.budget["file_caps"] == EVIDENCE_CAPS
+            and set(EVIDENCE_CAPS) == WRITE_NAMES and sum(EVIDENCE_CAPS.values()) <= 2097152,
+            "EVIDENCE_BUDGET_INSUFFICIENT")
+        require(self.budget.get("full_required_output_bound_proved") is True
+            and self.budget.get("max_total_logical_bytes") == 2097152
+            and self.budget.get("temporary_file_bytes") == 0,
+            "EVIDENCE_BUDGET_INSUFFICIENT")
+        require(checked(APPROVAL, output=True).stat().st_size <= EVIDENCE_CAPS[APPROVAL.name],
+            "EVIDENCE_BUDGET_INSUFFICIENT")
+
+    def encoded_payload(self, value):
+        """Lossless representation; validate the public sink before compression."""
+        # Audit hook and finite read catalogue are active before this helper.
+        import binascii
+        import zlib
+        raw = canonical(value)
+        require(all(v.encode() not in raw for v in self.secrets), "PUBLIC_SINK_REFUSED")
+        return {"encoding": "zlib-base64-canonical-json/1", "raw_bytes": len(raw),
+            "raw_sha256": hashlib.sha256(raw).hexdigest(),
+            "data": binascii.b2a_base64(zlib.compress(raw, level=9), newline=False).decode("ascii")}
+
+    def checkpoint(self, stage, value):
+        """One owned, hash-chained JSONL journal in the existing failure path.
+
+        Only a complete fsynced line advances the in-memory head. A torn last
+        line has no evidentiary claim. No existing bytes are truncated/replaced.
+        """
+        path = checked(RUN / "EARLY_FAILURE.json", output=True)
+        with self.io_lock:
+            require(not self.journal_closed, "JOURNAL_ALREADY_CLOSED")
+            if self.journal is None:
+                self.reserve_bytes(0, path)
+                self.journal = path.open("xb")
+                stat = os.fstat(self.journal.fileno())
+                self.journal_identity = (stat.st_dev, stat.st_ino)
+            stat = path.stat()
+            require((stat.st_dev, stat.st_ino) == self.journal_identity
+                and stat.st_size == self.journal_bytes
+                and self.journal.tell() == self.journal_bytes, "JOURNAL_IDENTITY_CHANGED")
+            event = {"schema": "r33-checkpoint-jsonl/1", "seq": self.journal_sequence + 1,
+                "previous_sha256": self.journal_head, "stage": stage, "phase": self.phase,
+                "test_id": self.current, "utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "value": self.encoded_payload(value)}
+            digest = hashlib.sha256(canonical(event)).hexdigest()
+            data = canonical({**event, "sha256": digest}) + b"\n"
+            require(all(v.encode() not in data for v in self.secrets), "PUBLIC_SINK_REFUSED")
+            self.reserve_bytes(len(data), path)
+            require(self.journal.write(data) == len(data), "JOURNAL_SHORT_WRITE")
+            self.journal.flush(); os.fsync(self.journal.fileno())
+            self.journal_sequence += 1; self.journal_head = digest
+            self.journal_bytes += len(data)
+
+    def failure(self, stage, error):
+        code = str(error) if isinstance(error, Refusal) else type(error).__name__
+        if stage.startswith(("PERSIST", "CHECKPOINT")): category = "OUTPUT_PERSISTENCE_ERROR"
+        elif code == "DEPENDENCY_CHANGED": category = "FILE_DIGEST_ERROR"
+        elif isinstance(error, PermissionError) or code == "READ_SCOPE_REFUSED":
+            category = "READ_PERMISSION_ERROR"
+        elif code in {"DEPENDENCY_ORIGIN_MISMATCH", "MODULE_ORIGIN_MISMATCH"}:
+            category = "DEPENDENCY_PROVENANCE_ERROR"
+        elif code == "ORIGIN_UNRESOLVED": category = "ORIGIN_INFORMATION_INSUFFICIENT"
+        else: category = "AUDIT_OR_EXECUTION_ERROR"
+        row = {"stage": stage, "category": category, "exception_type": type(error).__name__,
+            "errno": getattr(error, "errno", None), "code": self.redact(code),
+            "traceback": self.redact("".join(traceback.format_exception(type(error), error, error.__traceback__)))}
+        self.errors.append(row)
+        return row
+
+    def safe_checkpoint(self, stage, value):
+        try:
+            self.checkpoint(stage, value)
+            return True
+        except BaseException as error:
+            self.persistence_ok = False
+            self.failure("CHECKPOINT_" + stage, error)
+            return False
+
+    def assertion_rows(self):
+        return [{**{k: x[k] for k in ("test_source", "test_callable", "original_expected", "source_hash")},
+                 **self.rows.get(x["test_id"], {"id": x["test_id"], "status": "NOT_RUN", "executed": False})}
+                for x in self.manifest["tests"]]
+
+    def assertion_counts(self):
+        rows = self.assertion_rows()
+        return {key: sum(x["status"] == key for x in rows)
+            for key in ("PASS", "FAIL", "ERROR", "SKIP", "BLOCKED", "NOT_RUN")}
+
+    def finish_assertions(self):
+        if not self.tests_finished:
+            self.checkpoint("TESTS_FINISHED", {"counts": self.assertion_counts(),
+                "cases": self.assertion_rows(), "executed_order": list(self.rows),
+                "details": self.details, "projections": self.projections, "finalized": False})
+            self.tests_finished = True
+
+    def publish(self, name, value):
+        """Each artifact has one exclusive write attempt; other emissions continue."""
+        path = OUTPUT / name if name == "TEST_RUNS.json" else RUN / name
+        try:
+            self.write(path, value)
+            self.artifacts[name] = {"path": str(path), "sha256": sha(path)}
+            return True
+        except BaseException as error:
+            self.persistence_ok = False
+            row = self.failure("PERSIST_" + name, error)
+            self.safe_checkpoint("FAILED", row)
+            return False
+
+    def close_journal(self):
+        self.journal_closed = True
+        if self.journal is not None:
+            self.journal.close()
+
+    def refuse(self, code):
+        self.meter["denials"].append(code)
+        raise Refusal(code)
+
+    def redact(self, text):
+        for value in sorted(self.secrets, key=len, reverse=True):
+            text = text.replace(value, "[REDACTED_SYNTHETIC_CANARY]")
+        return text
+
+    def sizes(self):
+        files = [checked(p, output=True) for p in OUTPUT.rglob("*") if p.is_file()]
+        require(len(files) <= 13, "RESOURCE_FILE_COUNT")
+        return sum(p.stat().st_size for p in files)
+
+    def reserve_bytes(self, size, path):
+        require(time.perf_counter() <= self.deadline, "TIME_BUDGET_EXCEEDED")
+        path = checked(path, output=True)
+        key = path.relative_to(OUTPUT).as_posix()
+        require(key in EVIDENCE_CAPS, "OUTPUT_PATH_DENIED")
+        current = path.stat().st_size if path.exists() else 0
+        require(type(size) is int and size >= 0 and current + size <= EVIDENCE_CAPS[key],
+            "EVIDENCE_BUDGET_INSUFFICIENT")
+        # Disjoint per-path ceilings reserve final files throughout execution.
+        require(all(checked(p, output=True).stat().st_size <= EVIDENCE_CAPS[p.relative_to(OUTPUT).as_posix()]
+            for p in OUTPUT.rglob("*") if p.is_file()), "EVIDENCE_BUDGET_INSUFFICIENT")
+        require(size >= 0 and self.sizes() + size <= 2097152, "RESOURCE_OUTPUT_BYTES")
+
+    def write(self, path, value, *, raw=False):
+        p = checked(path, output=True)
+        require(p != APPROVAL, "APPROVAL_READ_ONLY")
+        if raw:
+            data = value
+        elif p.name in ENCODED_OUTPUTS:
+            envelope = {"schema": "r33-lossless-artifact/1", "content": self.encoded_payload(value)}
+            if p.name == "TEST_RUNS.json":
+                envelope.update(status=value["status"], FULL_CONTRACT_ACCEPTED=value["FULL_CONTRACT_ACCEPTED"])
+            data = canonical(envelope) + b"\n"
+        else:
+            data = canonical(value) + b"\n"
+        require(type(data) is bytes and all(v.encode() not in data for v in self.secrets), "PUBLIC_SINK_REFUSED")
+        with self.io_lock:
+            self.reserve_bytes(len(data), p)
+            with p.open("xb") as stream:
+                stream.write(data); stream.flush(); os.fsync(stream.fileno())
+
+    def deny_read(self, path, mode, flags, reason, *, source=None, cause=None):
+        self.meter["unexpected_read_denials"].append({"path": self.redact(str(path)),
+            "mode": mode, "flags": flags, "phase": self.phase, "test_id": self.current,
+            "reason": reason, "derived_source": None if source is None else str(source),
+            "cause_type": None if cause is None else type(cause).__name__,
+            "cause_errno": getattr(cause, "errno", None),
+            "cause_repr": None if cause is None else self.redact(repr(cause))[:1024]})
+        self.meter["denials"].append("READ_SCOPE_REFUSED")
+        raise Refusal("READ_SCOPE_REFUSED") from cause
+
+    def block_bound_cache_probe(self, path, mode, flags):
+        """Deny cache bytes; CPython SourceLoader catches OSError and reads source.
+
+        There is no permission to open this cache. A reversible current-tag
+        mapping and a checked, SHA-pinned source are required for fallback.
+        All unbound cache requests remain fatal policy failures.
+        """
+        try:
+            source = Path(importlib.util.source_from_cache(str(path)))
+        except ValueError as error:
+            self.deny_read(path, mode, flags, "INVALID_CACHE_SOURCE_MAPPING", cause=error)
+        pins = self.source_pins | self.runtime_code_pins
+        if source.suffix.lower() != ".py" or source not in pins:
+            self.deny_read(path, mode, flags, "CACHE_SOURCE_NOT_PINNED", source=source)
+        expected = Path(importlib.util.cache_from_source(str(source), optimization=""))
+        if path != expected:
+            self.deny_read(path, mode, flags, "CACHE_TAG_OR_PATH_MISMATCH", source=source)
+        # checked(path) inspects metadata only. The cache content is never read.
+        try:
+            checked(path)
+            actual = sha(checked(source))
+        except (OSError, Refusal) as error:
+            self.deny_read(path, mode, flags, "CACHE_PATH_OR_SOURCE_IDENTITY", source=source, cause=error)
+        if actual != pins[source]:
+            self.deny_read(path, mode, flags, "CACHE_SOURCE_HASH_MISMATCH", source=source)
+        key = str(path).lower()
+        if key not in self.cache_probe_rows:
+            row = {"cache_path": str(path), "source_path": str(source), "source_sha256": pins[source],
+                "source_module": self.source_modules[source], "cache_tag": sys.implementation.cache_tag,
+                "mode": mode, "flags": flags, "first_phase": self.phase, "phases_seen": [],
+                "test_ids_seen": [], "attempts": 0, "decision": "DENIED_CACHE_USE_PINNED_SOURCE",
+                "cache_bytes_read": 0, "fallback_exception": "PermissionError/EACCES"}
+            self.cache_probe_rows[key] = row
+            self.meter["expected_cache_probes"].append(row)
+        row = self.cache_probe_rows[key]
+        row["attempts"] += 1
+        if self.phase not in row["phases_seen"]: row["phases_seen"].append(self.phase)
+        if self.current is not None and self.current not in row["test_ids_seen"]:
+            row["test_ids_seen"].append(self.current)
+        raise PermissionError(errno.EACCES, "PINNED_SOURCE_CACHE_POLICY", str(path))
+
+    def audit(self, event, args):
+        if event == "import":
+            name = args[0]
+            if name == "cryptography" or name.startswith("cryptography."):
+                require(self.phase in {"D1A", "POSTCHECK"}, "A17_IMPORT_PRECONDITION")
+            if any(name == p or name.startswith(p + ".") for p in FORBIDDEN_IMPORTS[1:]):
+                self.refuse("PRODUCTION_MODULE_IMPORT_REFUSED")
+        if event.startswith("socket."):
+            self.meter["network"] += 1; self.refuse("NETWORK_REFUSED")
+        if event in {"subprocess.Popen", "os.system", "os.startfile", "os.fork", "os.exec", "os.spawn"}:
+            self.meter["subprocesses"] += 1; self.refuse("PROCESS_REFUSED")
+        if event == "sqlite3.connect":
+            if not self.connecting or self.phase not in {"A1", "D1A"} or args[0] != ":memory:":
+                self.meter["file_SQLite"] += 1; self.refuse("SQLITE_SCOPE_REFUSED")
+        if event in {"sqlite3.enable_load_extension", "sqlite3.load_extension"}:
+            self.refuse("SQL_EXTENSION_REFUSED")
+        if event == "exec":
+            p = Path(args[0].co_filename)
+            if p.is_absolute() and p.is_relative_to(PROJECT):
+                require(p not in {PROJECT / "src/auth_lifecycle/online_state" / (name + ".py")
+                    for name in ("services", "storage", "materials")}, "PRODUCTION_MODULE_EXEC_REFUSED")
+                require(p in self.source_pins and sha(p) == self.source_pins[p], "EXEC_SOURCE_MISMATCH")
+                self.exec_files.add(str(p))
+            elif p.is_absolute() and p.is_relative_to(self.base_python):
+                require(p in self.runtime_code_pins and sha(p) == self.runtime_code_pins[p],
+                    "RUNTIME_EXEC_SOURCE_NOT_PINNED")
+        if event == "open" and isinstance(args[0], (str, bytes, os.PathLike)):
+            p = Path(os.fsdecode(args[0])).absolute()
+            normalized = str(p).replace("\\", "/").lower()
+            if p.suffix.lower() in {".db", ".sqlite", ".sqlite3", ".key", ".aes", ".pem", ".pfx"} or "/secure/" in normalized or "/.runtime/" in normalized:
+                self.refuse("PRIVATE_FILE_REFUSED")
+            mode, flags = args[1], args[2]
+            writing = (isinstance(mode, str) and any(v in mode for v in "wax+")) or (
+                isinstance(flags, int) and flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND))
+            if writing:
+                try: checked(p, output=True)
+                except BaseException:
+                    self.meter["outside_writes"] += 1; self.refuse("OUTPUT_SCOPE_REFUSED")
+                require(p != APPROVAL, "APPROVAL_READ_ONLY")
+                if p.name in {x[0] for x in ALLOWED_D24_INPUTS}:
+                    require(self.d24_active and self.current == "D24", "PATH_PROJECTION_REJECTED")
+            elif p.suffix.lower() == ".pyc":
+                self.block_bound_cache_probe(p, mode, flags)
+            elif p not in self.read_files and p not in self.runtime_code_pins:
+                if p.is_relative_to(OUTPUT):
+                    checked(p, output=True)
+                else:
+                    self.deny_read(p, mode, flags, "READ_PATH_NOT_EXPLICITLY_PINNED")
+        if event == "os.mkdir":
+            require(Path(args[0]).absolute() == RUN, "DIRECTORY_SCOPE_REFUSED")
+            checked(RUN, output=True)
+        if event in {"os.remove", "os.rmdir", "os.rename", "os.chmod", "os.link", "os.symlink"}:
+            self.refuse("FILESYSTEM_MUTATION_REFUSED")
+
+    def preflight(self):
+        self.build_verified = False
+        require(Path(sys.executable) == Path(self.build["python"]["path"])
+            and sha(sys.executable) == self.build["python"]["sha256"]
+            and sys.version_info[:3] == (3, 12, 14) and sys.flags.isolated == 1
+            and sys.dont_write_bytecode and sys.flags.utf8_mode == 1 and sys.flags.optimize == 0
+            and Path.cwd() == PROJECT, "INTERPRETER_OR_CWD_MISMATCH")
+        if self.phase == "PREFLIGHT":
+            require(not any(name == "auth_lifecycle" or name.startswith("auth_lifecycle.")
+                or name.startswith("r33_cases_") for name in sys.modules), "PRELOADED_PROJECT_MODULE_REFUSED")
+        pins = self.build["engineering_source"] + self.build["regression_extension_sources"] + self.build["runtime_files"]
+        require(all(sha(checked(x["path"])) == x["sha256"] for x in pins), "BUILD_IDENTITY_MISMATCH")
+        require(hashlib.sha256(canonical(self.build["engineering_source"])).hexdigest()
+            == self.build["source_digest"], "BUILD_DIGEST_MISMATCH")
+        require(all(sha(checked(path)) == digest for path, digest in self.runtime_code_pins.items()),
+            "RUNTIME_READ_CATALOGUE_CHANGED")
+        for row in self.history["protected_files"] + self.history["additional_records"]:
+            require(sha(checked(row["path"], historical_read=True)) == row["sha256"], "HISTORY_CHANGED")
+        specs = self.manifest["tests"]
+        require(len(specs) == len({x["test_id"] for x in specs}) == 68, "TEST_COUNT_MISMATCH")
+        for phase, count in (("A1", 20), ("H1", 24), ("D1A", 24)):
+            require(len([x for x in specs if x["test_source"] == phase]) == count, "TEST_GROUP_MISMATCH")
+        for row in specs:
+            require(sha(row["test_file"]) == row["source_hash"]
+                and sha(row["original_plan"]["path"]) == row["original_plan"]["sha256"], "TEST_SOURCE_CHANGED")
+            for f in row["fixture_hash"]:
+                require(sha(f["path"]) == f["sha256"], "FIXTURE_CHANGED")
+                if Path(f["path"]).name == "CANARIES.json":
+                    self.secrets.update(load(f["path"])["values"].values())
+        for name, path, digest in ALLOWED_D24_INPUTS:
+            require(path.name == name and sha(checked(path)) == digest, "D24_ORIGINAL_CHANGED")
+        self.build_verified = True
+
+    def origin_observation(self, name, module):
+        # Read dictionaries only: module-level __getattr__ may perform imports.
+        metadata = module_dictionary(module)
+        spec = metadata.get("__spec__")
+        fields = vars(spec) if type(spec) is importlib.machinery.ModuleSpec else {}
+        loader = fields.get("loader")
+        expected = self.expected_names.get(name)
+        pins = self.source_pins | self.runtime_code_pins
+        def field(value):
+            return value if value is None or type(value) in (str, int, bool) else "UNKNOWN"
+        return {"module_name": name, "module_type": type(module).__name__,
+            "module_type_module": type(module).__module__, "object_id": id(module),
+            "declared_name": field(metadata.get("__name__", "UNKNOWN")),
+            "source_path": field(metadata.get("__file__", "UNKNOWN")),
+            "origin": field(fields.get("origin", "UNKNOWN")), "spec_name": field(fields.get("name", "UNKNOWN")),
+            "loader": "UNKNOWN" if loader is None else
+                (loader.__module__ + "." + loader.__qualname__ if isinstance(loader, type) else
+                 type(loader).__module__ + "." + type(loader).__qualname__),
+            "loader_name": field(vars(loader).get("name", "UNKNOWN")) if hasattr(loader, "__dict__") else "UNKNOWN",
+            "resolved_path": "UNKNOWN", "source_digest": "UNKNOWN",
+            "expected_origin": str(expected) if expected is not None else "UNKNOWN",
+            "expected_digest": pins.get(expected, "UNKNOWN"), "classification": "OBSERVED_UNVALIDATED",
+            "evidence": []}
+
+    def verify_file_origin(self, row, module, expected):
+        require(type(module) is type(sys), "ORIGIN_UNRESOLVED")
+        require(expected is not None, "UNAUTHORIZED_ORIGIN")
+        path, origin = row["source_path"], row["origin"]
+        require(isinstance(path, str) and path != "UNKNOWN"
+            and isinstance(origin, str) and origin != "UNKNOWN", "ORIGIN_UNRESOLVED")
+        require(Path(path) == expected and Path(origin) == expected, "DEPENDENCY_ORIGIN_MISMATCH")
+        require(row["declared_name"] == row["spec_name"] == row["module_name"],
+            "DEPENDENCY_ORIGIN_MISMATCH")
+        loader = vars(vars(module)["__spec__"])["loader"]
+        allowed_loader = importlib.machinery.ExtensionFileLoader if expected.suffix == ".pyd" else importlib.machinery.SourceFileLoader
+        require(type(loader) is allowed_loader and loader.name == row["module_name"]
+            and Path(loader.path) == expected, "DEPENDENCY_ORIGIN_MISMATCH")
+        path = checked(path)
+        row["resolved_path"] = str(path.resolve(strict=True))
+        require(path.samefile(expected) and Path(origin).samefile(expected), "DEPENDENCY_ORIGIN_MISMATCH")
+        stat = path.stat()
+        row["file_identity"] = {"device": stat.st_dev, "inode": stat.st_ino,
+            "size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+        pins = self.source_pins | self.runtime_code_pins
+        require(expected in pins, "UNAUTHORIZED_ORIGIN")
+        row["source_digest"] = sha(path)
+        require(row["source_digest"] == pins[expected], "DEPENDENCY_CHANGED")
+        after = path.stat()
+        require((after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+            == (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns), "DEPENDENCY_ORIGIN_MISMATCH")
+        row["classification"] = "TRUSTED_FROZEN_SOURCE" if expected in self.source_pins else "TRUSTED_RUNTIME_SOURCE"
+        row["evidence"].append("exact name/file/spec/loader/path identity and locked SHA256")
+
+    def verify_dynamic_origin(self, row, module):
+        name = row["module_name"]
+        require(type(module) is type(sys) and name.startswith(NATIVE_PARENT + "."), "ORIGIN_UNRESOLVED")
+        parent = sys.modules.get(NATIVE_PARENT)
+        parent_row = self.origin_observation(NATIVE_PARENT, parent)
+        expected = self.base_python / "Lib/site-packages/cryptography/hazmat/bindings/_rust.pyd"
+        require(self.runtime_code_pins.get(expected) == NATIVE_PARENT_SHA256, "UNAUTHORIZED_ORIGIN")
+        self.verify_file_origin(parent_row, parent, expected)
+        target = parent
+        chain = []
+        for part in name[len(NATIVE_PARENT) + 1:].split("."):
+            require(type(target) is type(sys), "ORIGIN_UNRESOLVED")
+            target = vars(target).get(part)
+            chain.append(part)
+        require(target is module and sys.modules.get(name) is module, "DEPENDENCY_ORIGIN_MISMATCH")
+        # A child may omit file/spec metadata, or point at this exact binary.
+        for field in ("source_path", "origin"):
+            value = row[field]
+            require(value in (None, "UNKNOWN") or (isinstance(value, str) and Path(value) == expected),
+                "DEPENDENCY_ORIGIN_MISMATCH")
+        spec = vars(module).get("__spec__")
+        require(spec is None or (type(spec) is importlib.machinery.ModuleSpec
+            and spec.name == name and spec.loader is None), "DEPENDENCY_ORIGIN_MISMATCH")
+        row.update({"classification": "EXPECTED_DYNAMIC_SOURCE", "resolved_path": parent_row["resolved_path"],
+            "source_digest": parent_row["source_digest"], "expected_origin": str(expected),
+            "expected_digest": NATIVE_PARENT_SHA256, "parent_file_identity": parent_row["file_identity"],
+            "parent_module": NATIVE_PARENT, "parent_attribute_chain": chain,
+            "parent_object_identity_confirmed": True})
+        row["evidence"].append("pinned ExtensionFileLoader parent and identical child reached through module dictionaries")
+
+    def classify_origin(self, row, module):
+        if type(module) is not type(sys):
+            self.verify_wrapper_origin(row, module)
+            return
+        name, origin = row["module_name"], row["origin"]
+        require(sys.modules.get(name) is module, "DEPENDENCY_ORIGIN_MISMATCH")
+        spec = vars(module).get("__spec__")
+        if name == "__main__":
+            expected = Path(__file__).absolute()
+            require(spec is None and Path(row["source_path"]) == expected
+                and sys.modules.get(name) is module, "DEPENDENCY_ORIGIN_MISMATCH")
+            path = checked(expected)
+            row.update({"resolved_path": str(path.resolve(strict=True)), "source_digest": sha(path)})
+            require(row["source_digest"] == self.command["runner_sha256"], "DEPENDENCY_CHANGED")
+            row["classification"] = "TRUSTED_FROZEN_SOURCE"
+            row["evidence"].append("direct-script __main__;command-pinned file SHA and sys.modules object identity")
+        elif origin in {"built-in", "frozen"}:
+            require(type(spec) is importlib.machinery.ModuleSpec, "ORIGIN_UNRESOLVED")
+            expected_loader = importlib.machinery.BuiltinImporter if origin == "built-in" else importlib.machinery.FrozenImporter
+            registered = _imp.is_builtin(spec.name) if origin == "built-in" else _imp.is_frozen(spec.name)
+            require(spec.loader is expected_loader and registered and sys.modules.get(spec.name) is module,
+                "DEPENDENCY_ORIGIN_MISMATCH")
+            row["classification"] = "TRUSTED_BUILTIN" if origin == "built-in" else "TRUSTED_FROZEN_RUNTIME"
+            row["evidence"].append("interpreter registry,canonical spec loader and registered object;runtime24 pinned in preflight")
+        elif name.startswith(NATIVE_PARENT + "."):
+            self.verify_dynamic_origin(row, module)
+        else:
+            self.verify_file_origin(row, module, self.expected_names.get(name))
+
+    def verify_wrapper_origin(self, row, module):
+        name = row["module_name"]
+        require(name in WRAPPER_NAMES, "ORIGIN_UNRESOLVED")
+        utils = sys.modules.get("cryptography.utils")
+        require(type(utils) is type(sys), "ORIGIN_UNRESOLVED")
+        utils_path = self.base_python / "Lib/site-packages/cryptography/utils.py"
+        require(self.runtime_code_pins.get(utils_path) == CRYPTO_UTILS_SHA256, "UNAUTHORIZED_ORIGIN")
+        utils_row = self.origin_observation("cryptography.utils", utils)
+        self.verify_file_origin(utils_row, utils, utils_path)
+        cls = module_dictionary(utils).get("_ModuleWithDeprecations")
+        require(type(cls) is type and cls.__module__ == "cryptography.utils"
+            and cls.__qualname__ == "_ModuleWithDeprecations" and cls.__bases__ == (type(sys),)
+            and type(module) is cls, "ORIGIN_UNRESOLVED")
+        underlying = module_dictionary(module).get("_module")
+        require(type(underlying) is type(sys) and underlying is not module
+            and sys.modules.get(name) is module and row["declared_name"] == name,
+            "DEPENDENCY_ORIGIN_MISMATCH")
+        own = module_dictionary(module)
+        underlying_spec = module_dictionary(underlying).get("__spec__")
+        require(own.get("__spec__") is None or own.get("__spec__") is underlying_spec,
+            "DEPENDENCY_ORIGIN_MISMATCH")
+        require(own.get("__file__") is None or (type(own["__file__"]) is str
+            and Path(own["__file__"]) == self.expected_names.get(name)), "DEPENDENCY_ORIGIN_MISMATCH")
+        require(own.get("__loader__") is None or (type(underlying_spec) is importlib.machinery.ModuleSpec
+            and own.get("__loader__") is underlying_spec.loader), "DEPENDENCY_ORIGIN_MISMATCH")
+        observed = self.origin_observation(name, underlying)
+        row["wrapped_observation"] = observed
+        row["wrapper_binding"] = {"class_object_id": id(cls), "wrapper_object_id": id(module),
+            "underlying_object_id": id(underlying), "utils_origin": utils_row}
+        self.checkpoint("WRAPPED_ORIGIN_OBSERVED", {"module_name": name,
+            "wrapped_observation": observed, "wrapper_binding": row["wrapper_binding"]})
+        self.verify_file_origin(observed, underlying, self.expected_names.get(name))
+        require(module_dictionary(module).get("_module") is underlying and type(module) is cls
+            and sys.modules.get(name) is module, "DEPENDENCY_ORIGIN_MISMATCH")
+        for field in ("source_path", "origin", "spec_name", "loader", "loader_name", "resolved_path",
+                      "source_digest", "expected_origin", "expected_digest", "file_identity"):
+            row[field] = observed[field]
+        row["classification"] = "EXPECTED_WRAPPED_SOURCE"
+        row["evidence"].append("exact locked utils class object,wrapper identity and underlying pinned SourceFileLoader module")
+
+    def origins_snapshot(self, stage):
+        inventory = tuple(sys.modules.items())
+        names = sorted(name for name, _ in inventory)
+        if self.pre_module_names is None: self.pre_module_names = frozenset(names)
+        snapshot = {"stage": stage, "all_module_names": names,
+            "added_since_precheck": sorted(set(names) - self.pre_module_names),
+            "removed_since_precheck": sorted(self.pre_module_names - set(names)),
+            "records": [], "status": "OBSERVING", "executed_project_files": sorted(self.exec_files)}
+        self.origins.append(snapshot)
+        self.checkpoint("PROVENANCE_SNAPSHOT_STARTED", snapshot)
+        failures = []
+        for name, module in inventory:
+            # Inherited root scope plus exact catalogue names; inventory outside
+            # this scope is visible, with no claim of independent verification.
+            scoped = (name in self.expected_names or name == "auth_lifecycle" or name.startswith("auth_lifecycle.")
+                or name.startswith("r33_cases_") or name.split(".")[0] in DEPENDENCY_ROOTS)
+            metadata = vars(module) if type(module) is type(sys) else {}
+            spec = metadata.get("__spec__")
+            scoped = scoped or (type(spec) is importlib.machinery.ModuleSpec and spec.origin in ("built-in", "frozen"))
+            if not scoped: continue
+            try:
+                row = self.origin_observation(name, module)
+            except BaseException as error:
+                row = {"module_name": name, "module_type": type(module).__name__,
+                    "origin": "UNKNOWN", "loader": "UNKNOWN", "source_path": "UNKNOWN",
+                    "resolved_path": "UNKNOWN", "source_digest": "UNKNOWN", "expected_origin": "UNKNOWN",
+                    "expected_digest": "UNKNOWN", "classification": "OBSERVED_UNVALIDATED",
+                    "evidence": [self.redact("metadata collection error: " + repr(error))]}
+            raw_key = hashlib.sha256(canonical(row)).hexdigest()
+            if raw_key not in self.origin_raw:
+                self.checkpoint("ORIGIN_OBSERVED", {"observation_id": raw_key, **row})
+                self.origin_raw.add(raw_key)
+            try:
+                self.classify_origin(row, module)
+            except BaseException as error:
+                code = str(error) if isinstance(error, Refusal) else type(error).__name__
+                row["classification"] = {"DEPENDENCY_CHANGED": "DIGEST_MISMATCH",
+                    "DEPENDENCY_ORIGIN_MISMATCH": "ORIGIN_MISMATCH", "UNAUTHORIZED_ORIGIN": "UNAUTHORIZED_ORIGIN",
+                    "ORIGIN_UNRESOLVED": "ORIGIN_UNRESOLVED", "READ_SCOPE_REFUSED": "READ_PERMISSION_ERROR"}.get(code,
+                    "SOURCE_FILE_MISSING" if isinstance(error, FileNotFoundError) else
+                    "READ_PERMISSION_ERROR" if isinstance(error, PermissionError) else "AUDIT_INTERNAL_ERROR")
+                row["error"] = {"code": self.redact(code), "exception_type": type(error).__name__,
+                    "errno": getattr(error, "errno", None), "detail": self.redact(repr(error))}
+                failures.append({"module_name": name, "classification": row["classification"], "code": code})
+            row["observation_id"] = raw_key
+            key = hashlib.sha256(canonical(row)).hexdigest()
+            if key not in self.origin_records:
+                self.origin_records[key] = row
+                self.checkpoint("ORIGIN_CLASSIFIED", {"record_id": key, **row})
+            snapshot["records"].append(key)
+        snapshot["status"] = "FAILED" if failures else "VERIFIED_WITHIN_DECLARED_SCOPE"
+        snapshot["failures"] = failures
+        self.checkpoint("PROVENANCE_SNAPSHOT_FINISHED", snapshot)
+        self.origin_failures.extend({"stage": stage, **row} for row in failures)
+        if failures:
+            raise Refusal("DEPENDENCY_ORIGIN_MISMATCH" if any(x["classification"] == "ORIGIN_MISMATCH" for x in failures)
+                else "ORIGIN_UNRESOLVED" if any(x["classification"] == "ORIGIN_UNRESOLVED" for x in failures)
+                else "DEPENDENCY_PROVENANCE_FAILED")
+
+    def connect_memory(self):
+        require(self.phase in {"A1", "D1A"}, "SQLITE_PHASE_REFUSED")
+        cap = 32 if self.phase == "A1" else 8
+        require(self.meter["memory_connections"][self.phase] < cap
+            and sum(self.meter["memory_connections"].values()) < 40
+            and self.meter["memory_active"] < 32, "SQLITE_CONNECTION_BUDGET")
+        self.meter["memory_connections"][self.phase] += 1
+        self.connecting = True
+        try:
+            connection = sqlite3.connect(":memory:", isolation_level=None, check_same_thread=False,
+                factory=AuditedConnection)
+        finally:
+            self.connecting = False
+        connection.owner, connection.owner_closed = self, False
+        self.connections.append(connection)
+        self.meter["memory_success"] += 1; self.meter["memory_active"] += 1
+        self.meter["memory_peak"] = max(self.meter["memory_peak"], self.meter["memory_active"])
+        connection.row_factory = sqlite3.Row
+        def policy(action, one, two, database, trigger):
+            if action in {sqlite3.SQLITE_ATTACH, sqlite3.SQLITE_DETACH} or (
+                    action == sqlite3.SQLITE_FUNCTION and str(two).lower() == "load_extension"):
+                return sqlite3.SQLITE_DENY
+            return sqlite3.SQLITE_OK
+        connection.set_authorizer(policy)
+        return connection
+
+    def sql(self, text):
+        require(self.phase in {"A1", "D1A"} and self.meter["execute_calls"] < 376, "SQL_EXECUTE_BUDGET")
+        self.meter["execute_calls"] += 1
+        kind = str(text).strip().split()[0].upper()
+        self.meter["SQL_kinds"][kind] = self.meter["SQL_kinds"].get(kind, 0) + 1
+
+    def close_connections(self):
+        errors = []
+        for connection in self.connections:
+            if not connection.owner_closed:
+                try: connection.close()
+                except BaseException as error: errors.append(error)
+        if errors:
+            self.errors.extend(self.redact(repr(e)) for e in errors)
+            raise errors[0]
+
+
+class AuditedConnection(sqlite3.Connection):
+    def execute(self, sql, parameters=()):
+        self.owner.sql(sql)
+        return super().execute(sql, parameters)
+
+    def executemany(self, *args, **kwargs):
+        raise Refusal("UNEXPECTED_SQL_API")
+
+    executescript = executemany
+    commit = executemany
+
+    def cursor(self, *args, **kwargs):
+        kwargs["factory"] = AuditedCursor
+        return super().cursor(*args, **kwargs)
+
+    def rollback(self):
+        require(self.owner.meter["rollback_calls"] < 1, "ROLLBACK_BUDGET")
+        self.owner.meter["rollback_calls"] += 1
+        return super().rollback()
+
+    def close(self):
+        if not self.owner_closed:
+            super().close(); self.owner_closed = True
+            self.owner.meter["memory_active"] -= 1
+
+
+class AuditedCursor(sqlite3.Cursor):
+    def execute(self, sql, parameters=()):
+        self.connection.owner.sql(sql)
+        return super().execute(sql, parameters)
+
+    def executemany(self, *args, **kwargs):
+        raise Refusal("UNEXPECTED_SQL_API")
+
+    executescript = executemany
+
+
+class Sink(io.TextIOBase):
+    def __init__(self, state, path):
+        self.state, self.path = state, checked(path, output=True)
+        self.stream = None
+        state.reserve_bytes(0, self.path)
+        self.stream = self.path.open("x", encoding="utf-8", newline="\n")
+        self.used = 0
+
+    def write(self, text):
+        clean = self.state.redact(text)
+        data = clean.encode("utf-8")
+        with self.state.io_lock:
+            require(self.used + len(data) <= 65536, "LOG_BYTE_LIMIT")
+            self.state.reserve_bytes(len(data), self.path)
+            self.stream.write(clean); self.stream.flush()
+            self.used += len(data)
+        return len(text)
+
+    def flush(self):
+        if self.stream is not None and not self.stream.closed: self.stream.flush()
+
+    def close(self):
+        if self.stream is not None and not self.stream.closed:
+            self.stream.flush(); os.fsync(self.stream.fileno()); self.stream.close()
+        super().close()
+
+
+class ProjectionFile:
+    def __init__(self, projection, name):
+        require(name in projection.allowed, "PATH_PROJECTION_REJECTED")
+        self.projection, self.name = projection, name
+
+    def __str__(self):
+        return str(LOGICAL / self.name)
+
+    def write_bytes(self, data):
+        p = self.projection
+        require(p.state.d24_active and type(data) is bytes
+            and hashlib.sha256(data).hexdigest() == p.allowed[self.name][1], "PATH_PROJECTION_REJECTED")
+        p.state.write(RUN / self.name, data, raw=True)
+        p.written.add(self.name)
+        return len(data)
+
+
+class ProjectionRead:
+    def __init__(self, projection, name):
+        self.projection, self.name = projection, name
+
+    def _path(self):
+        p = self.projection
+        require(p.state.d24_active and p.state.current == "D24" and self.name in p.written,
+            "PATH_PROJECTION_REJECTED")
+        target = checked(RUN / self.name, output=True)
+        require(sha(target) == p.allowed[self.name][1], "PATH_PROJECTION_REJECTED")
+        return target
+
+    @property
+    def parents(self): return self._path().parents
+    def exists(self): return self._path().exists()
+    def is_symlink(self): return self._path().is_symlink()
+    def lstat(self): return self._path().lstat()
+    def stat(self): return self._path().stat()
+    def read_bytes(self): return self._path().read_bytes()
+
+
+class D24Projection:
+    def __init__(self, state, module):
+        self.state, self.module = state, module
+        self.allowed = {name: (path, digest) for name, path, digest in ALLOWED_D24_INPUTS}
+        self.written = set()
+
+    def __truediv__(self, name):
+        return ProjectionFile(self, name)
+
+    def __enter__(self):
+        require(self.state.phase == "D1A" and self.state.current == "D24", "PATH_PROJECTION_REJECTED")
+        for path, digest in self.allowed.values():
+            require(sha(checked(path)) == digest, "PATH_PROJECTION_REJECTED")
+        self.old_path, self.old_output = self.module.r.Path, self.module.CONFIG["output"]
+        def provider(value):
+            path = self.old_path(value)
+            require(path.parent == LOGICAL and path.name in self.allowed, "PATH_PROJECTION_REJECTED")
+            return ProjectionRead(self, path.name)
+        self.module.r.Path = provider
+        self.module.CONFIG["output"] = self
+        self.state.d24_active = True
+        return self
+
+    def __exit__(self, kind, value, trace):
+        self.module.r.Path = self.old_path
+        self.module.CONFIG["output"] = self.old_output
+        self.state.d24_active = False
+        self.state.projections.append({"test_id": "D24", "written_names": sorted(self.written),
+            "context_restored": self.module.r.Path is self.old_path and self.module.CONFIG["output"] is self.old_output,
+            "inputs": [{"original": str(path), "sha256": digest, "target": str(RUN / name)}
+                for name, (path, digest) in self.allowed.items()]})
+        if kind is None:
+            require(self.written == set(self.allowed), "PATH_PROJECTION_INCOMPLETE")
+
+
+class Results(unittest.TextTestResult):
+    def __init__(self, *args, state, **kwargs):
+        super().__init__(*args, **kwargs); self.state = state
+
+    def startTest(self, test):
+        self.started = time.perf_counter_ns()
+        super().startTest(test)
+
+    def _exc_info_to_string(self, error, test):
+        return self.state.redact(super()._exc_info_to_string(error, test))
+
+    def record(self, test, status, detail=None):
+        tid = test._testMethodName.split("_")[1]
+        require(tid not in self.state.rows, "DUPLICATE_TEST_RESULT")
+        self.state.rows[tid] = {"id": tid, "status": status, "executed": True,
+            "elapsed_ns": time.perf_counter_ns() - self.started,
+            "detail": None if detail is None else self.state.redact(detail)}
+        self.state.checkpoint("TEST_ASSERTION", self.state.rows[tid])
+
+    def addSuccess(self, test): super().addSuccess(test); self.record(test, "PASS")
+    def addFailure(self, test, error):
+        super().addFailure(test, error); self.record(test, "FAIL", self._exc_info_to_string(error, test))
+    def addError(self, test, error):
+        super().addError(test, error); self.record(test, "ERROR", self._exc_info_to_string(error, test))
+    def addSkip(self, test, reason): super().addSkip(test, reason); self.record(test, "SKIP", reason)
+
+
+class OrderedSuite(unittest.TestSuite):
+    def __init__(self, cases, state, module):
+        super().__init__(cases); self.state, self.module = state, module
+
+    def run(self, result, debug=False):
+        for test in self:
+            if result.shouldStop: break
+            self.state.current = test._testMethodName.split("_")[1]
+            if self.state.current == "D24":
+                with D24Projection(self.state, self.module): test(result)
+            else:
+                test(result)
+            if result.skipped: result.stop()
+        self.state.current = None
+        return result
+
+
+def load_group(state, phase, classname):
+    require(state.phase == phase, "PHASE_ORDER_MISMATCH")
+    if phase in {"A1", "H1"}:
+        require(not any(name == p or name.startswith(p + ".") for name in sys.modules
+                        for p in FORBIDDEN_IMPORTS), "A17_IMPORT_PRECONDITION")
+    rows = [x for x in state.manifest["tests"] if x["test_source"] == phase]
+    path = Path(rows[0]["test_file"]); alias = "r33_cases_" + phase.lower()
+    require(alias not in sys.modules, "TEST_MODULE_ALREADY_LOADED")
+    spec = importlib.util.spec_from_file_location(alias, path)
+    module = importlib.util.module_from_spec(spec); sys.modules[alias] = module
+    source = path.read_bytes()
+    require(hashlib.sha256(source).hexdigest() == rows[0]["source_hash"], "TEST_SOURCE_CHANGED")
+    # Compile the pinned test bytes; no historical test bytecode is substituted.
+    exec(compile(source, str(path), "exec"), module.__dict__)
+    cls = getattr(module, classname)
+    names = [x["test_callable"].split(".")[1] for x in rows]
+    require(set(name for name in vars(cls) if name.startswith("test_")) == set(names)
+        and len(names) == len(set(names)), "TEST_DISCOVERY_MISMATCH")
+    plan = load(rows[0]["original_plan"]["path"])
+    fixture = Path(rows[0]["fixture_hash"][0]["path"]).parent
+    if phase == "A1": module.configure(plan, fixture, state.connect_memory)
+    elif phase == "H1": module.configure(plan, fixture)
+    else: module.configure(plan, fixture, state.connect_memory, RUN)
+    state.origins_snapshot(phase + "_loaded")
+    return module, OrderedSuite([cls(name) for name in names], state, module)
+
+
+def peak_memory():
+    if os.name != "nt": return {"status": "NOT_MEASURED"}
+    try:
+        from ctypes import wintypes as W
+        class Memory(ctypes.Structure):
+            _fields_ = [("cb", W.DWORD), ("PageFaultCount", W.DWORD)] + [(n, ctypes.c_size_t) for n in
+                ("PeakWorkingSetSize", "WorkingSetSize", "QuotaPeakPagedPoolUsage", "QuotaPagedPoolUsage",
+                 "QuotaPeakNonPagedPoolUsage", "QuotaNonPagedPoolUsage", "PagefileUsage", "PeakPagefileUsage", "PrivateUsage")]
+        kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel.GetCurrentProcess.restype = W.HANDLE
+        kernel.K32GetProcessMemoryInfo.argtypes = [W.HANDLE, ctypes.POINTER(Memory), W.DWORD]
+        value = Memory(); value.cb = ctypes.sizeof(value)
+        require(kernel.K32GetProcessMemoryInfo(kernel.GetCurrentProcess(), ctypes.byref(value), value.cb), "MEMORY_QUERY_FAILED")
+        return {"status": "MEASURED", "peak_working_set_bytes": value.PeakWorkingSetSize,
+            "basis": "current regression interpreter only"}
+    except Exception:
+        return {"status": "NOT_MEASURED", "reason": "MEMORY_QUERY_UNAVAILABLE"}
+
+
+def finalize_evidence(state, primary):
+    """One-way emission. Each risky audit/emission has its own failure boundary."""
+    state.phase = "POSTCHECK"
+    try: state.finish_assertions()
+    except BaseException as error:
+        state.persistence_ok = False
+        state.failure("CHECKPOINT_TESTS_FINISHED", error)
+    # Memory observation can lazily import ctypes.wintypes; include it in the
+    # final dependency set rather than importing after provenance is sealed.
+    memory = peak_memory()
+    state.safe_checkpoint("PROVENANCE_CHECK", {"test_counts": state.assertion_counts()})
+    try: state.origins_snapshot("POST_TEST_DEPENDENCY_SET")
+    except BaseException as error:
+        state.safe_checkpoint("FAILED", state.failure("POST_TEST_PROVENANCE", error))
+    integrity = False
+    try:
+        state.preflight()
+        require(not state.d24_active, "PATH_PROJECTION_NOT_RESTORED")
+        integrity = True
+    except BaseException as error:
+        state.safe_checkpoint("FAILED", state.failure("POST_TEST_INTEGRITY", error))
+    elapsed = time.perf_counter() - state.started
+    resource_ok = False
+    try:
+        meter = state.meter
+        require(elapsed <= 120 and meter["memory_active"] == 0
+            and all(c.owner_closed for c in state.connections) and threading.active_count() == 1,
+            "TIME_OR_CLEANUP_INCOMPLETE")
+        require(sum(meter["memory_connections"].values()) <= 40 and meter["memory_peak"] <= 32
+            and meter["memory_connections"]["A1"] <= 32 and meter["memory_connections"]["H1"] == 0
+            and meter["memory_connections"]["D1A"] <= 8 and meter["execute_calls"] <= 376
+            and meter["rollback_calls"] <= 1 and meter["threads_created"] <= 12
+            and meter["threads_peak"] <= 6 and all(meter[key] == 0 for key in
+                ("subprocesses", "network", "file_SQLite", "outside_writes")), "RESOURCE_BUDGET_EXCEEDED")
+        require(state.sizes() <= 2097152, "RESOURCE_OUTPUT_BYTES")
+        resource_ok = True
+    except BaseException as error:
+        state.safe_checkpoint("FAILED", state.failure("RESOURCE_AUDIT", error))
+    counts, rows = state.assertion_counts(), state.assertion_rows()
+    assertion_ok = counts == {"PASS": 68, "FAIL": 0, "ERROR": 0, "SKIP": 0, "BLOCKED": 0, "NOT_RUN": 0}
+    provenance_ok = bool(state.origins) and not state.origin_failures and all(
+        x["status"] == "VERIFIED_WITHIN_DECLARED_SCOPE" for x in state.origins)
+    state.safe_checkpoint("RESOURCE_AUDIT", {"meter": state.meter, "memory": memory,
+        "elapsed_seconds": elapsed, "history_integrity": integrity,
+        "resource_ok": resource_ok, "denials": state.meter["denials"],
+        "unknown": {"native_thread_peak": "UNKNOWN", "native_VFS_IO": "UNKNOWN", "RAM_hard_limit": "UNASSIGNED"}})
+    origins = {"schema": "r33-module-origins/1", "stages": state.origins,
+        "records": state.origin_records, "failures": state.origin_failures, "projection": state.projections,
+        "verified": provenance_ok, "scope": "inherited project/test/dependency roots plus exact runtime catalogue names,__main__,registry-checked builtin/frozen modules",
+        "inventory_outside_scope": "observed names only;no trusted classification or extra read permission",
+        "fixtures": [{"module_name": "NOT_APPLICABLE", "classification": "TRUSTED_FROZEN_FIXTURE" if integrity else "UNKNOWN",
+            **x} for x in state.manifest["fixture_files"]]}
+    origins_written = state.publish("MODULE_ORIGINS.json", origins)
+    ledger = {"schema": "r33-resource-ledger/1", "meter": state.meter, "memory": memory,
+        "elapsed_seconds_at_resource_audit": elapsed, "history_integrity_verified": integrity,
+        "resource_audit_passed": resource_ok, "output_isolation": "fixed13 paths;exclusive creation;owned append-only checkpoint",
+        "current_engineering_source_matches_lock": state.build_verified,
+        "native_VFS_and_thread_peak": "UNKNOWN", "RAM_hard_limit": "UNASSIGNED",
+        "real_P1_P2_DB_key_service": 0, "errors": list(state.errors),
+        "output_bytes_at_resource_audit": state.sizes()}
+    ledger_written = state.publish("RESOURCE_LEDGER.json", ledger)
+    eligible = (assertion_ok and provenance_ok and resource_ok and integrity and primary is None
+        and not state.errors and not state.meter["denials"] and state.persistence_ok
+        and origins_written and ledger_written)
+    if not state.safe_checkpoint("FINALIZATION_READY", {"counts": counts, "eligible": eligible,
+        "errors": state.errors, "artifacts": state.artifacts}): eligible = False
+    final = {"schema": "r33-current-build-regression68/1", "suite": "regression68", "counts": counts,
+        "cases": rows, "details": state.details, "passed": eligible,
+        "TEST_ASSERTIONS": {"counts": counts, "all_68_passed": assertion_ok},
+        "DEPENDENCY_PROVENANCE": {"verified": provenance_ok, "failures": state.origin_failures},
+        "RESOURCE_AND_INTEGRITY": {"resource_ok": resource_ok, "integrity_ok": integrity},
+        "FINAL_VERDICT": {"eligible_for_acceptance": eligible, "commit_receipt_required": True,
+            "rule": "TEST_RUNS.json must bind all artifact hashes and exit must be0;RESULTS alone is a candidate"},
+        "argv": sys.orig_argv, "python": sys.version, "started_utc": state.started_utc,
+        "runtime_versions": {"python": sys.version, "sqlite": sqlite3.sqlite_version,
+            "cryptography": vars(sys.modules["cryptography"]).get("__version__", "UNKNOWN")
+                if "cryptography" in sys.modules else "UNKNOWN"},
+        "finished_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "source_digest": state.build["source_digest"], "engineering_source": state.build["engineering_source"],
+        "runner_sha256": state.command["runner_sha256"], "fixture_hashes": state.manifest["fixture_files"],
+        "command_lock_sha256": sha(RECORD / "R33_REGRESSION_COMMAND_LOCK.json"),
+        "approval_sha256": sha(APPROVAL), "control_pins": state.command["control_pins"],
+        "executed_order": list(state.rows), "errors": list(state.errors),
+        "resources": ledger, "D1B1_OFFLINE_CONTRACT_COMPLETE": False,
+        "D1B2_P1A_P1B_P2_S3B2_S5": False}
+    results_written = state.publish("RESULTS.json", final)
+    eligible = eligible and results_written
+    if not state.safe_checkpoint("FINALIZED" if results_written and origins_written and ledger_written else "RECOVERY_REQUIRED",
+        {"eligible": eligible, "commit_pending": True, "artifacts": state.artifacts,
+         "errors": state.errors, "counts": counts}): eligible = False
+    try: state.close_journal()
+    except BaseException as error:
+        state.persistence_ok = False
+        state.failure("PERSIST_JOURNAL_CLOSE", error)
+        eligible = False
+    return eligible, counts
+
+
+def main(argv=None):
+    global ENTRY_STATE
+    started = time.perf_counter()
+    started_utc = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    parser = Parser(add_help=False)
+    parser.add_argument("--suite", choices=["regression68"], required=True)
+    parser.add_argument("--output-root", required=True)
+    parser.add_argument("--approval-ref", required=True)
+    try:
+        args = parser.parse_args(argv)
+        command, approval = controls(args)
+        state = State(command, started, started_utc)
+        ENTRY_STATE = state
+    except Exception:
+        print("REGRESSION_ADMISSION_REFUSED", file=sys.stderr)
+        return 2
+    sys.addaudithook(state.audit)
+    # This exclusive claim is the only invocation slot. It is never reset.
+    state.write(OUTPUT / "SUITE_INVOCATION_01.json", {"suite": "regression68", "argv": sys.orig_argv,
+        "started_utc": state.started_utc, "approval_sha256": sha(APPROVAL), "max_runs": 1})
+    checked(RUN, output=True).mkdir()
+    primary = None
+    timer = None
+    original_start = threading.Thread.start
+    def thread_start(thread, *args, **kwargs):
+        require(state.meter["threads_created"] < 12 and threading.active_count() < 6, "THREAD_BUDGET")
+        state.meter["threads_created"] += 1
+        result = original_start(thread, *args, **kwargs)
+        state.meter["threads_peak"] = max(state.meter["threads_peak"], threading.active_count())
+        return result
+    with Sink(state, OUTPUT / "COMMAND_stdout.log") as stdout, Sink(state, OUTPUT / "COMMAND_stderr.log") as stderr:
+        with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+            try:
+                state.preflight()
+                state.write(RUN / "RUN_START.json", {"argv": sys.orig_argv, "python": sys.version,
+                    "cwd": str(Path.cwd()), "started_utc": state.started_utc,
+                    "source_digest": state.build["source_digest"], "runner_sha256": sha(__file__),
+                    "command_lock_sha256": sha(RECORD / "R33_REGRESSION_COMMAND_LOCK.json"),
+                    "approval_sha256": sha(APPROVAL),
+                    "test_ids": [x["test_id"] for x in state.manifest["tests"]]})
+                state.checkpoint("PRECHECK", {"source_digest": state.build["source_digest"],
+                    "argv": sys.orig_argv, "runner_sha256": command["runner_sha256"],
+                    "command_lock_sha256": sha(RECORD / "R33_REGRESSION_COMMAND_LOCK.json")})
+                state.checkpoint("RUN_STARTED", {"run_id": RUN_ID, "max_suite_runs": 1,
+                    "automatic_reruns": 0, "resource_lock": state.resources})
+                state.origins_snapshot("PRE_TEST_DEPENDENCY_SET")
+                threading.Thread.start = thread_start
+                timer = threading.Timer(max(.01, state.deadline - time.perf_counter()), _thread.interrupt_main)
+                timer.daemon = True; timer.start()
+                sys.path.insert(0, str(PROJECT / "src"))
+                with Sink(state, RUN / "stdout.log") as log:
+                    for phase, cls in PHASES:
+                        state.phase = phase
+                        state.checkpoint("TESTS_RUNNING", {"phase": phase})
+                        module, suite = load_group(state, phase, cls)
+                        result = unittest.TextTestRunner(stream=log, verbosity=2, failfast=True,
+                            resultclass=lambda *a, **kw: Results(*a, state=state, **kw)).run(suite)
+                        state.details.extend(module.DETAILS)
+                        state.checkpoint("PHASE_ASSERTIONS_FINISHED", {"phase": phase,
+                            "counts": state.assertion_counts(), "meter": state.meter,
+                            "details": module.DETAILS, "projection": state.projections})
+                        if len(state.rows) == 68 or not result.wasSuccessful() or result.skipped:
+                            state.finish_assertions()
+                        state.origins_snapshot(phase + "_finished")
+                        state.close_connections()
+                        if not result.wasSuccessful() or result.skipped: break
+                state.finish_assertions()
+            except BaseException as error:
+                primary = error
+                state.safe_checkpoint("FAILED", state.failure("EXECUTION", error))
+            finally:
+                if timer is not None:
+                    timer.cancel()
+                    try:
+                        timer.join(max(0, state.deadline - time.perf_counter()))
+                        require(not timer.is_alive(), "WATCHDOG_REAP_INCOMPLETE")
+                    except BaseException as error:
+                        if primary is None: primary = error
+                        state.safe_checkpoint("FAILED", state.failure("CLEANUP_WATCHDOG", error))
+                threading.Thread.start = original_start
+                try: state.close_connections()
+                except BaseException as error:
+                    if primary is None: primary = error
+                    state.safe_checkpoint("FAILED", state.failure("CLEANUP_CONNECTIONS", error))
+            passed, counts = finalize_evidence(state, primary)
+            print(json.dumps({"counts": counts, "eligible_pending_commit": passed, "results": str(RUN / "RESULTS.json")}))
+    # All redirected streams are closed/fsynced before this logical commit.
+    artifacts = dict(state.artifacts)
+    for path in sorted(OUTPUT.rglob("*")):
+        if path.is_file():
+            checked(path, output=True)
+            artifacts[path.relative_to(OUTPUT).as_posix()] = {"path": str(path), "sha256": sha(path)}
+    receipt_ok = state.publish("TEST_RUNS.json", {"schema": "r33-run-commit/1", "status": "FINALIZED" if passed else "FAILED",
+        "FULL_CONTRACT_ACCEPTED": passed, "artifacts": artifacts, "journal_head": state.journal_head,
+        "journal_events": state.journal_sequence, "errors": list(state.errors),
+        "runs": [{"path": str(RUN / "RESULTS.json"), "sha256": state.artifacts.get("RESULTS.json", {}).get("sha256", "UNKNOWN"),
+            "counts": counts, "passed": passed}], "native_exit_required": 0 if passed else 1})
+    return 0 if passed and receipt_ok else 1
+
+
+def entry():
+    try:
+        return main()
+    except BaseException as error:
+        # Finalization/storage failure remains a nonzero incomplete run. Keep
+        # the spent invocation and partial files; never write a fallback tree
+        # or emit an unredacted traceback after redirected sinks unwind.
+        if ENTRY_STATE is not None:
+            state = ENTRY_STATE
+            row = state.failure("HARNESS_FINALIZATION_ERROR", error)
+            try:
+                if RUN.is_dir() and not state.journal_closed:
+                    state.safe_checkpoint("RECOVERY_REQUIRED", {"error": row, "counts": state.assertion_counts(),
+                        "recorded_test_ids": list(state.rows), "meter": state.meter, "run_incomplete": True})
+            except BaseException as evidence_error:
+                # Unwritable/exhausted evidence storage cannot attest its own
+                # recovery. Retain both exceptions in memory, exit1, preserve
+                # existing files and never report a successful completed run.
+                state.failure("PERSIST_ENTRY_FALLBACK", evidence_error)
+            finally:
+                try: state.close_journal()
+                except BaseException: state.persistence_ok = False
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(entry())

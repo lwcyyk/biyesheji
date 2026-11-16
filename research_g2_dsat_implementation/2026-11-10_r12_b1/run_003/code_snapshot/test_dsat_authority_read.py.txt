@@ -1,0 +1,409 @@
+"""R11's 33 B1 cases. B15/B27/B28 remain outside this executable suite."""
+import ast
+from concurrent.futures import ThreadPoolExecutor
+import contextlib
+import copy
+import hashlib
+import io
+import json
+import logging
+from pathlib import Path
+import pickle
+import threading
+import time
+import unittest
+
+from auth_lifecycle.online_state.dsat_authority_read import (
+    BASE_GAPS, MODE, PUBLIC_FIELDS, SCHEMA, ReadError, ReadLimits, ReadScope,
+    StagingSnapshot, TrustedReadContext, read_dsat_authority_snapshot, staging_schema,
+)
+from auth_lifecycle.online_state.protocol import canonical, digest
+
+
+CONFIG = {}
+DETAILS = []
+
+
+def configure(plan, fixture_root):
+    CONFIG.update(plan=plan, fixture_root=fixture_root)
+
+
+class LockSpy:
+    def __init__(self):
+        self._lock = threading.RLock()
+        self.depth = 0
+        self.entries = 0
+        self.max_depth = 0
+
+    def __enter__(self):
+        self._lock.acquire()
+        self.depth += 1; self.entries += 1
+        self.max_depth = max(self.max_depth, self.depth)
+        return self
+
+    def __exit__(self, *args):
+        self.depth -= 1; self._lock.release()
+
+
+class ReaderSpy:
+    def __init__(self, state, version=120, operation_limit=None):
+        self.state = state
+        self.version = version
+        self.lock = LockSpy()
+        self.calls = 0
+        self.operations = 0
+        self.operation_limit = operation_limit
+        self.forbidden_calls = 0
+        self.fail_message = None
+
+    def read_state(self):
+        if self.lock.depth != 1:
+            raise AssertionError("SOURCE_LOCK_REQUIRED")
+        self.calls += 1; self.operations += 1
+        if self.fail_message is not None:
+            raise RuntimeError(self.fail_message)
+        return self.version, self.state
+
+    def call(self, *args):
+        self.forbidden_calls += 1
+        raise AssertionError("OLD_DISPATCH_FORBIDDEN")
+
+    def execute(self, *args):
+        self.forbidden_calls += 1
+        raise AssertionError("SQL_FORBIDDEN")
+
+    def __repr__(self):
+        return "<SyntheticReaderSpy redacted>"
+
+
+class B1Cases(unittest.TestCase):
+    def setUp(self):
+        self.case_id = self._testMethodName.split("_")[1]
+        self.spec = next(x for x in CONFIG["plan"]["cases"] if x["id"] == self.case_id)
+        self.state = json.loads((CONFIG["fixture_root"]/"BASE_STATE.json").read_text(encoding="utf-8"))
+        self.meta = json.loads((CONFIG["fixture_root"]/"METADATA.json").read_text(encoding="utf-8"))
+        self.canaries = json.loads((CONFIG["fixture_root"]/"CANARIES.json").read_text(encoding="utf-8"))
+        self.reader = ReaderSpy(self.state)
+        self.observed = []
+        self.checks = []
+        self.started = time.perf_counter_ns()
+
+    def tearDown(self):
+        DETAILS.append({"id": self.case_id, "name": self.spec["name"], "checks": self.checks,
+                        "calls": self.observed, "elapsed_ns": time.perf_counter_ns()-self.started})
+
+    def check(self, condition, label):
+        self.checks.append({"label": label, "satisfied": bool(condition)})
+        if not condition:
+            raise AssertionError(label)  # Fixed label only; no raw fixture repr in failures.
+
+    def context(self, reader=None, scope=None, **overrides):
+        data = dict(self.meta["host_context"]); data.update(overrides)
+        return TrustedReadContext.from_host(reader or self.reader, scope or self.meta["scope_A"], **data)
+
+    def read(self, *, reader=None, scope=None, context=None, limits=ReadLimits(), foreign=True):
+        source = reader or self.reader
+        ctx = self.context(source) if context is None else context
+        requested = self.meta["scope_A"] if scope is None else scope
+        before = canonical(source.state)
+        version, calls = source.version, source.calls
+        stdout, stderr, log = io.StringIO(), io.StringIO(), io.StringIO()
+        handler = logging.StreamHandler(log); logger = logging.getLogger(); logger.addHandler(handler)
+        started = time.perf_counter_ns()
+        try:
+            with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                result = read_dsat_authority_snapshot(source, requested, ctx, limits)
+        finally:
+            logger.removeHandler(handler)
+        elapsed = time.perf_counter_ns()-started
+        public = result.to_dict()
+        self.check(before == canonical(source.state) and version == source.version, "AUTHORITY_WORLD_UNCHANGED")
+        self.check(source.forbidden_calls == 0, "NO_OLD_DISPATCH_SQL_OR_WRITE")
+        self.check(source.calls-calls <= 1, "AT_MOST_ONE_SOURCE_READ")
+        self.check(public["global_complete"] is False and public["math_ready"] is False
+                   and public["current_native_eligible"] is False, "NO_STRONG_QUALIFICATION")
+        self.check(public["obligation_revision"] is None and public["authority_write_action"] == "NONE", "NO_O_REVISION_OR_COMMIT")
+        rendered = result.to_json().decode()+repr(result)+json.dumps(public)+stdout.getvalue()+stderr.getvalue()+log.getvalue()
+        self.no_secrets(rendered)
+        if foreign:
+            self.no_foreign(rendered)
+        self.observed.append({"result": public, "total_ns": elapsed, "world_unchanged": True,
+                              "source_reads": source.calls-calls, "log_bytes": len(log.getvalue()),
+                              "stdout_bytes": len(stdout.getvalue()), "stderr_bytes": len(stderr.getvalue()),
+                              "secret_scan": "CLEAN", "scope_scan": "CLEAN" if foreign else "EXPLICIT_WIDE_SCOPE"})
+        return result
+
+    def no_secrets(self, text):
+        self.check(all(value not in text for value in self.canaries["sensitive_values"]), "SECRET_CANARIES_ABSENT")
+
+    def no_foreign(self, text):
+        self.check(all(value not in text for value in self.canaries["foreign_scope_A"]), "FOREIGN_SCOPE_METADATA_ABSENT")
+
+    def ready(self, result):
+        self.check(result.to_dict()["status"] == "STAGING_READY_WITH_GAPS", "STAGING_READY_WITH_EXPLICIT_GAPS")
+
+    def request(self, public, rid):
+        return next(x for x in public["requests"] if x["rid"] == rid)
+
+    def resign(self, state, rid):
+        raw = state["requests"][rid]
+        raw["digest"] = digest({"caller": raw["origin"]["caller"], "request": raw["request"]})
+
+    def test_B01_initialized_reader(self):
+        result = self.read(); self.ready(result)
+        self.check(self.reader.calls == 1 and self.reader.lock.entries == 1, "EXISTING_READER_ONCE_UNDER_LOCK")
+        self.check(set(result.to_dict()) == set(PUBLIC_FIELDS), "VERSIONED_CLOSED_PUBLIC_SHAPE")
+
+    def test_B02_revision(self):
+        a=self.read().to_dict();self.check(a["authority_revision"]==120,"LOCAL_A_PRESERVED")
+        self.reader.version=121;b=self.read().to_dict()
+        self.check(b["authority_revision"]==121 and a["snapshot_digest"]!=b["snapshot_digest"],"READ_A_BOUND_IN_SNAPSHOT")
+        self.check(all(v["authority_revision"]==121 for v in b["request_verifications"]),"REQUESTS_SAME_READ_VERSION")
+
+    def test_B03_tuple(self):
+        data=self.read().to_dict();row=self.request(data,"rF");raw=self.state["requests"]["rF"]
+        self.check(all(row[k]==raw[k] for k in ["rid","origin","attempt_id","release_version"]),"SAVED_TUPLE_EXACT")
+        self.check(row["request_digest"]==raw["digest"],"ORIGINAL_REQUEST_DIGEST_EXACT")
+        for field in ["digest","origin","attempt_id","release_version"]:
+            state=copy.deepcopy(self.state)
+            if field=="digest":state["requests"]["rF"][field]="0"*64
+            elif field=="origin":state["requests"]["rF"][field]["grant_id"]="gMissing"
+            elif field=="attempt_id":state["requests"]["rF"][field]=None
+            else:state["requests"]["rF"][field]=121
+            pub=self.read(reader=ReaderSpy(state)).to_dict()
+            self.check(pub["status"]=="SOURCE_BINDING_CONFLICT","TUPLE_TAMPER_REJECTED")
+
+    def test_B04_original_operation_source(self):
+        data=self.read().to_dict()
+        self.check(self.request(data,"rP")["source_rid"] is None,"ISSUE_HAS_NO_PARENT")
+        self.check(self.request(data,"rF")["operation"]=="refresh" and self.request(data,"rF")["source_rid"]=="rP","SOURCE_DERIVED_FROM_VERIFIED_ORIGINAL")
+        state=copy.deepcopy(self.state);state["requests"]["rF"]["request"]["payload"]["source_rid"]="rX";self.resign(state,"rF")
+        data=self.read(reader=ReaderSpy(state)).to_dict()
+        self.check(self.request(data,"rF")["source_rid"] is None and "SOURCE_REFERENCE_UNAVAILABLE" in data["gap_codes"],"UNAUTHORIZED_PARENT_REMAINS_UNKNOWN")
+
+    def test_B05_grants_and_scope(self):
+        data=self.read().to_dict();g=data["grants"][0];old=self.state["grants"]["gA"]
+        self.check(len(data["grants"])==1 and all(g[k]==old[k] for k in ["active","operations","limit","reserved","spent"]),"SCOPED_GRANT_METADATA_EXACT")
+        scope=copy.deepcopy(self.meta["scope_A"]);scope["generations"]=["genB"]
+        before=self.reader.calls;data=self.read(scope=scope).to_dict()
+        self.check(data["status"]=="READ_SCOPE_DENIED" and self.reader.calls==before,"GENERATION_POLICY_CHECKED_BEFORE_READ")
+
+    def test_B06_unknown_refresh(self):
+        data=self.read().to_dict();ids={x["id"] for x in data["conservative_O_view"]}
+        self.check("settle:rF" in ids and "await_terminal:rF" in ids,"UNKNOWN_REFRESH_DEBT_PRESERVED")
+        self.check(data["partial_math"]["c_known"]=={} and "aF" in data["partial_math"]["capacity_unknown"],"NO_GUESSED_CAPACITY")
+
+    def test_B07_unknown_issue(self):
+        state=copy.deepcopy(self.state);raw=state["requests"]["rF"];raw["request"]["operation"]="issue";raw["request"]["payload"]={};self.resign(state,"rF")
+        data=self.read(reader=ReaderSpy(state)).to_dict()
+        self.check(self.request(data,"rF")["operation"]=="issue" and "settle:rF" in {x["id"] for x in data["conservative_O_view"]},"UNKNOWN_ISSUE_PRESERVED")
+
+    def test_B08_double_unknown(self):
+        state=copy.deepcopy(self.state);raw=state["requests"]["rU"];raw["request"]["operation"]="issue";raw["request"]["payload"]={};raw["phase"]="DISPATCHED_UNKNOWN";raw["result_material"]=None;self.resign(state,"rU")
+        data=self.read(reader=ReaderSpy(state)).to_dict();ids={x["id"] for x in data["conservative_O_view"]}
+        self.check({"settle:rF","settle:rU"}<=ids and data["partial_math"]["E"] is None,"ALL_UNKNOWN_SOURCES_HELD")
+
+    def test_B09_third_grant(self):
+        context=self.context(scope=self.meta["scope_wide"])
+        data=self.read(scope=self.meta["scope_wide"],context=context,foreign=False).to_dict()
+        self.check("grant_frontier:gV" in data["open_frontiers"],"AUTHORIZED_THIRD_GRANT_FRONTIER")
+        data=self.read().to_dict()
+        self.check("SCOPE_UNIVERSE_INCOMPLETE" in data["gap_codes"],"NARROW_SCOPE_NOT_PROMOTED_TO_GLOBAL")
+
+    def test_B10_late(self):
+        old=self.read().to_dict();state=copy.deepcopy(self.state);state["requests"]["rF"]["phase"]="QUARANTINED";state["requests"]["rF"]["result_material"]=copy.deepcopy(state["requests"]["rP"]["result_material"])
+        new=self.read(reader=ReaderSpy(state,121)).to_dict();r=self.request(new,"rF")
+        self.check(r["origin"]==self.request(old,"rF")["origin"] and r["result_ref"] is not None,"LATE_ORIGINAL_ORIGIN_AND_OPAQUE_RESULT")
+        self.check("close:rF" in {x["id"] for x in new["conservative_O_view"]},"LATE_MATERIAL_DEBT_ADDED")
+
+    def test_B11_quarantined(self):
+        data=self.read().to_dict();row=self.request(data,"rU")
+        self.check(row["phase"]=="QUARANTINED" and row["material_present"] and row["result_ref"].startswith("result:"),"QUARANTINED_METADATA_ONLY")
+        self.check("close:rU" in {x["id"] for x in data["conservative_O_view"]},"QUARANTINED_HOLD")
+
+    def test_B12_deleted_history(self):
+        old=self.read().to_dict();self.state["external_AS_missing"]=["synthetic_missing_unit"]
+        new=self.read().to_dict()
+        self.check(self.request(old,"rP")["result_ref"]==self.request(new,"rP")["result_ref"],"POSITIVE_LOCAL_HISTORY_NOT_ERASED_BY_POINT_ABSENCE")
+        self.check(new["partial_math"]["U"] is None and "BIRTH_OR_HISTORY_GAP" in new["gap_codes"],"NO_INVENTED_BIRTH_LEDGER")
+
+    def test_B13_legacy_O(self):
+        data=self.read().to_dict()
+        self.check(data["legacy_obligations"]==["rF","rU"],"LEGACY_PHASE_WINDOW_VIEW_EXACT")
+        self.check(data["typed_obligation_status"]=="TYPED_O_NOT_IMPLEMENTED" and data["obligation_revision"] is None,"NO_SYNTHETIC_PRODUCTION_O_DEFAULT")
+        self.check("source_hold:account1" in {x["id"] for x in data["conservative_O_view"]},"DERIVED_VIEW_HAS_SOURCE_HOLD")
+
+    def test_B14_projected_additions(self):
+        state=copy.deepcopy(self.state);state["requests"]["rF"]["phase"]="QUARANTINED";state["requests"]["rF"]["result_material"]=copy.deepcopy(state["requests"]["rP"]["result_material"])
+        data=self.read(reader=ReaderSpy(state)).to_dict();ids={x["id"] for x in data["conservative_O_view"]}
+        self.check({"close:rF","await_terminal:rF"}<=ids,"MATERIAL_AND_AUDIT_EXTRAS_STAGED")
+        self.check("close:rF" not in data["legacy_obligations"] and data["compatibility"]["S1"]["direct_input"] is False,"LEGACY_AND_PROJECTED_CONTEXT_DISTINCT")
+
+    def test_B16_legacy_consumer(self):
+        data=self.read().to_dict()
+        self.check(data["schema"]==SCHEMA and data["mode"]==MODE and "approvals" not in data,"NO_IMPERSONATED_LEGACY_STATUS")
+        self.check(data["compatibility"]["legacy"]["scope"]=="ONE_ATTEMPT_HISTORY_ONLY","OLD_SCOPE_LABEL_PRESERVED")
+
+    def test_B17_expiry(self):
+        self.state["certificate"]={"valid_until":0,"current_native_eligible":True,"H_T":0}
+        data=self.read().to_dict()
+        self.check(data["read_clock"]["native_validity"]=="UNESTABLISHED" and "CURRENTNESS_UNPROVEN" in data["gap_codes"],"OLD_POINT_OR_PROOF_NOT_CURRENT_PERMISSION")
+
+    def test_B18_new_version(self):
+        first=self.read().to_dict();state=copy.deepcopy(self.state);state["requests"]["rF"]["phase"]="QUARANTINED";state["requests"]["rF"]["result_material"]=copy.deepcopy(state["requests"]["rP"]["result_material"])
+        second=self.read(reader=ReaderSpy(state,121)).to_dict()
+        self.check(first["authority_revision"]==120 and second["authority_revision"]==121 and first["snapshot_digest"]!=second["snapshot_digest"],"OLD_SNAPSHOT_IDENTITY_NOT_REUSED")
+
+    def test_B19_authentication_boundary(self):
+        for bad in [{"actor":"manager","read_ok":True}, True, None]:
+            context=bad if bad is not None else object()
+            before=self.reader.calls;data=self.read(context=context).to_dict()
+            self.check(data["status"]=="READ_CONTEXT_REQUIRED" and self.reader.calls==before,"PAYLOAD_AUTH_FLAGS_HAVE_NO_AUTHORITY")
+        other=ReaderSpy(copy.deepcopy(self.state));ctx=self.context(self.reader)
+        data=self.read(reader=other,context=ctx).to_dict()
+        self.check(data["status"]=="READ_CONTEXT_REQUIRED" and other.calls==0,"CONTEXT_BOUND_TO_EXACT_READER")
+
+    def test_B20_secret_sinks(self):
+        result=self.read();ctx=self.context()
+        self.no_secrets(repr(ctx)+repr(self.reader)+repr(result))
+        for serialize in [lambda:json.dumps(ctx),lambda:pickle.dumps(ctx)]:
+            try:serialize()
+            except (TypeError,ReadError) as exc:self.no_secrets(str(exc)+repr(exc))
+            else:self.check(False,"CONTEXT_SERIALIZATION_MUST_BE_DENIED")
+        self.no_secrets(pickle.dumps(result).decode("latin1"))
+        bad=ReaderSpy(copy.deepcopy(self.state));bad.fail_message=self.canaries["labels"]["exception_secret"]
+        data=self.read(reader=bad).to_dict()
+        self.check(data["status"]=="READ_SOURCE_UNAVAILABLE","EXCEPTION_TEXT_SANITIZED")
+        state=copy.deepcopy(self.state);state["requests"]["rF"]["request"]["payload"]["password"]=self.canaries["labels"]["password"]
+        data=self.read(reader=ReaderSpy(state)).to_dict()
+        self.check(data["status"]=="SOURCE_BINDING_CONFLICT","UNKNOWN_SENSITIVE_ORIGINAL_FIELD_REJECTED")
+        public=result.to_dict();public["requests"][0]["handle"]=self.canaries["labels"]["handle_A"]
+        public["snapshot_digest"]=hashlib.sha256(b"dsat-authority-read/1:snapshot\0"+canonical({k:v for k,v in public.items() if k!="snapshot_digest"})).hexdigest()
+        try:StagingSnapshot(public)
+        except ReadError as exc:self.no_secrets(str(exc)+repr(exc))
+        else:self.check(False,"NESTED_UNKNOWN_PUBLIC_FIELD_DENIED")
+
+    def test_B21_no_source_upgrade(self):
+        self.state["source_confirmed"]=True;self.state["contract"]={"source_complete":True,"capacity_complete":True,"frontier_complete":True};self.state["H_T"]=0
+        data=self.read().to_dict()
+        self.check("SOURCE_COMPLETENESS_UNPROVEN" in data["gap_codes"] and data["math_input"] is None,"SOURCE_FLAGS_NEVER_CREATE_D_FIN")
+
+    def test_B22_point_not_frame(self):
+        data=self.read().to_dict()
+        self.check(data["disposals"][0]["point_observations"]["introspection_active"] is False,"POINT_FACT_PRESERVED")
+        self.check(data["partial_math"]["D_P"] is None and "SUSTAINED_INACTIVITY_UNPROVEN" in data["gap_codes"],"NO_DISPOSED_TO_SUSTAINED_D")
+
+    def test_B23_frontier(self):
+        self.state["grants"]["gA"]["active"]=True
+        data=self.read().to_dict()
+        self.check("grant_frontier:gA" in data["open_frontiers"],"ACTIVE_CREATOR_FRONTIER_RETAINED")
+        self.check(data["windows"][0]["active"] is True,"LOCAL_WINDOW_IS_POINT_LOCAL_FACT")
+
+    def test_B24_external_change(self):
+        first=self.read().to_dict();self.state["external_AS_generation"]=2;self.state["old_handler_may_create"]=True
+        second=self.read().to_dict()
+        self.check(first["authority_revision"]==second["authority_revision"]==120,"AS_CHANGE_NOT_FAKED_IN_LOCAL_A")
+        self.check("NATIVE_CURRENTNESS_UNPROVEN" in second["gap_codes"],"LOCAL_A_NOT_NATIVE_FRAME")
+
+    def test_B25_complete_request(self):
+        for flag in ["global_complete","current_native_eligible","write_O"]:
+            request=copy.deepcopy(self.meta["scope_A"]);request[flag]=True
+            before=self.reader.calls;data=self.read(scope=request).to_dict()
+            self.check(data["status"]=="UNSUPPORTED_READ_REQUEST" and self.reader.calls==before,"STRONG_OR_WRITE_REQUEST_DENIED_BEFORE_READ")
+
+    def test_B26_old_closed(self):
+        for rid in ["rF","rU"]:
+            self.state["requests"][rid]["phase"]="DISPOSED"
+            self.state["requests"][rid]["result_material"]=copy.deepcopy(self.state["requests"]["rP"]["result_material"])
+        window=self.state["reconciliation_windows"]["account1"];window["active"]=False
+        window["receipt"]={"schema":"native-attempt-closure/1","claim":"CLOSED","private_key":self.canaries["labels"]["private_key"]}
+        data=self.read().to_dict()
+        self.check(data["legacy_obligations"]==[] and len(data["conservative_O_view"])>0,"EMPTY_LEGACY_VIEW_NOT_GLOBAL_EMPTY")
+        self.check(data["windows"][0]["legacy_receipt_summary"]["claim"]=="CLOSED","OLD_HISTORY_CLAIM_PRESERVED_WITH_SCOPE")
+
+    def test_B29_handle_binding(self):
+        first=self.read().to_dict();state=copy.deepcopy(self.state);state["grants"]["gA"]["handle"]=self.canaries["labels"]["handle_B"]
+        self.check(self.read(reader=ReaderSpy(state)).to_dict()["status"]=="SOURCE_BINDING_CONFLICT","HANDLE_CHANGE_WITHOUT_VALID_ORIGINAL_DENIED")
+        for rid,raw in state["requests"].items():
+            if raw["origin"]["grant_id"]=="gA":raw["request"]["handle"]=state["grants"]["gA"]["handle"];self.resign(state,rid)
+        second=self.read(reader=ReaderSpy(state)).to_dict()
+        self.check(self.request(first,"rF")["request_digest"]!=self.request(second,"rF")["request_digest"],"ORIGINAL_WHOLE_BODY_DIGEST_STILL_BINDS_HANDLE")
+        self.check("original_request" not in self.request(second,"rF") and "handle_digest" not in self.request(second,"rF"),"NO_HANDLE_OR_HANDLE_HASH_SUBSTITUTE")
+
+    def test_B30_reserved_queue(self):
+        state=copy.deepcopy(self.state);g=state["grants"]["gA"];g.update(active=True,limit=1,reserved=1,spent=0)
+        raw=copy.deepcopy(state["requests"]["rP"]);raw.update(rid="rQ",phase="QUEUED",attempt_id=None,release_version=None,result_material=None,result_digest=None);raw["request"]["rid"]="rQ"
+        state["grants"]={"gA":g};state["requests"]={"rQ":raw};state["disposals"]={};state["reconciliation_windows"]={};self.resign(state,"rQ")
+        data=self.read(reader=ReaderSpy(state)).to_dict()
+        self.check(data["legacy_obligations"]==[] and "queued_creator:rQ" in data["open_frontiers"],"ZERO_FREE_BUDGET_STILL_HAS_QUEUED_CREATOR")
+
+    def test_B31_quota_and_parallel_read(self):
+        reader=ReaderSpy(copy.deepcopy(self.state),operation_limit=7)
+        self.ready(self.read(reader=reader));before=reader.calls
+        data=self.read(reader=reader).to_dict()
+        self.check(data["status"]=="READ_BUDGET_DENIED" and reader.calls==before,"WRITE_HEADROOM_RESERVED_WITH_NO_RETRY")
+        context=self.context(self.reader);before=canonical(self.reader.state)
+        def one(_):return read_dsat_authority_snapshot(self.reader,self.meta["scope_A"],context)
+        started=time.perf_counter_ns()
+        with ThreadPoolExecutor(max_workers=4) as executor:results=list(executor.map(one,range(12)))
+        elapsed=time.perf_counter_ns()-started
+        self.check(all(r.to_dict()["authority_revision"]==120 for r in results) and self.reader.lock.max_depth==1,"PARALLEL_READS_SERIALIZED_UNDER_SOURCE_LOCK")
+        self.check(canonical(self.reader.state)==before and self.reader.forbidden_calls==0,"PARALLEL_WORLD_AND_EVENTS_UNCHANGED")
+        for result in results:self.no_secrets(result.to_json().decode());self.no_foreign(result.to_json().decode())
+        self.observed.append({"operation":"parallel_reads","results":[x.to_dict() for x in results],
+                              "source_reads":12,"world_unchanged":True,"total_ns":elapsed,"secret_scan":"CLEAN"})
+        output=self.read().to_dict();output["requests"][0]["origin"]["task"]="client_mutated";output["grants"][0]["operations"].append("client_mutated")
+        self.check(canonical(self.reader.state)==before,"NO_MUTABLE_ALIAS_TO_INPUT")
+
+    def test_B32_downstream_gates(self):
+        from auth_lifecycle.online_state.dsat_projection import project_evidence
+        from auth_lifecycle.online_state.dsat_types import InputError, normalize_math
+        from auth_lifecycle.online_state.dsat_commit_types import CommitError, Proposal, raw_obligation
+        data=self.read().to_dict();failure=project_evidence(data,{})
+        self.check(failure["math_ready"] is False and failure["native_admission"]=="SOURCE_OR_REFINEMENT_GAP","S1_REAL_STAGING_DIRECT_INPUT_DENIED")
+        try:normalize_math(data["partial_math"])
+        except InputError:pass
+        else:self.check(False,"PARTIAL_UNKNOWN_NOT_COERCED_TO_FINITE_MATH")
+        try:Proposal.parse(data)
+        except CommitError:pass
+        else:self.check(False,"STAGING_NOT_S3_COMMIT_PROPOSAL")
+        for item in data["conservative_O_view"]:raw_obligation(item)
+        self.check(all(v["direct_input"] is False for k,v in data["compatibility"].items() if k!="legacy"),"COMPATIBILITY_LIMITS_EXPLICIT")
+
+    def test_B33_all_collections_scoped(self):
+        window=self.state["reconciliation_windows"]["account1"];window["unknown_creators_at_open"].append("rB")
+        data=self.read().to_dict()
+        self.check(len(data["disposals"])==1 and data["disposals"][0]["rid"]=="rP","DISPOSALS_FILTERED_AS_WELL_AS_REQUESTS")
+        self.check(data["windows"][0]["scoped_creators"]==["rF"] and data["windows"][0]["source_scope_complete"] is False,"FOREIGN_WINDOW_MEMBERS_NOT_EXPORTED_OR_COUNTED")
+        window["target_rid"]="rB";data=self.read().to_dict()
+        self.check(data["windows"]==[],"FOREIGN_TARGET_WINDOW_NOT_EXPORTED")
+
+    def test_B34_locator_not_instance(self):
+        first=self.read().to_dict();ctx=self.context(authority_locator_ref="authority:fixture2")
+        second=self.read(context=ctx).to_dict()
+        self.check(first["source"]["authority_instance"] is None and second["source"]["authority_instance"] is None,"STABLE_INSTANCE_NOT_FABRICATED")
+        self.check(first["snapshot_digest"]!=second["snapshot_digest"] and self.request(first,"rP")["result_ref"]!=self.request(second,"rP")["result_ref"],"SOURCE_LOCATOR_NAMESPACES_METADATA_REFS")
+
+    def test_B35_provider_history_gap(self):
+        self.state["provider_last_result"]={"attempt_id":"aF","received":True,"access_token":self.canaries["labels"]["access_token"]}
+        self.state["provider_receipt_count"]=2
+        data=self.read().to_dict()
+        self.check("PROVIDER_HISTORY_EXPORT_REQUIRED" in data["gap_codes"] and data["partial_math"]["U"] is None,"LAST_PROVIDER_RESULT_NOT_COMPLETE_MULTIEFFECT_HISTORY")
+
+    def test_B36_resource_and_schema(self):
+        for limits in [ReadLimits(scoped_records=1),ReadLimits(output_bytes=4096)]:
+            data=self.read(limits=limits).to_dict()
+            self.check(data["status"]=="RESOURCE_LIMIT" and data["conservative_O_view"] is None,"RESOURCE_FAILURE_NOT_CERTIFIED_EMPTY")
+        for key in ["grants","requests"]:
+            state=copy.deepcopy(self.state);del state[key];data=self.read(reader=ReaderSpy(state)).to_dict()
+            self.check(data["status"]=="SNAPSHOT_INCOMPLETE" and data["legacy_obligations"] is None,"MISSING_STATE_NOT_EMPTY_LEDGER")
+        self.state["authority_instance"]="forged_instance";self.state["dsat"]={"O":[],"obligation_revision":99}
+        data=self.read().to_dict();self.check(data["source"]["authority_instance"] is None and data["obligation_revision"] is None,"UNKNOWN_NEW_FIELDS_DO_NOT_UPGRADE_LEGACY_CONTRACT")
+        state=copy.deepcopy(self.state);state["schema"]="unreviewed-schema3"
+        self.check(self.read(reader=ReaderSpy(state)).to_dict()["status"]=="UNSUPPORTED_SOURCE_SCHEMA","UNREVIEWED_SCHEMA_DENIED")
+        module=Path(__file__).parents[1]/"src/auth_lifecycle/online_state/dsat_authority_read.py"
+        tree=ast.parse(module.read_text(encoding="utf-8"))
+        forbidden={"storage","services","native_provider","sqlite3","networkx"}
+        imports=[n.module or "" for n in ast.walk(tree) if isinstance(n,ast.ImportFrom)]+[a.name for n in ast.walk(tree) if isinstance(n,ast.Import) for a in n.names]
+        self.check(not any(set(name.split(".")) & forbidden for name in imports),"IMPORT_CLOSURE_EXCLUDES_RUNTIME_SERVICES")
+        self.check(staging_schema()["additionalProperties"] is False,"PUBLIC_SCHEMA_CLOSED")

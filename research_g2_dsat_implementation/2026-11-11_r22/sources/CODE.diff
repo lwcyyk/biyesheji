@@ -1,0 +1,1450 @@
+--- R21/dsat_authority_live.py
++++ R22/dsat_authority_live.py
+@@ -9,12 +9,17 @@
+ import secrets
+ import threading
+ import weakref
++import os
++import re
+ 
+ from .dsat_windows_runtime import (SafetyError, require, TestScope, validate_host_evidence,
+                                   validate_lease)
++from . import dsat_windows_runtime as win
++from .protocol import strict_json, canonical
+ 
+ 
+ _ISSUERS, _CONTEXTS = weakref.WeakKeyDictionary(), weakref.WeakKeyDictionary()
++_START_APPROVALS = weakref.WeakKeyDictionary()
+ _NAMESPACE_LOCK = threading.RLock()
+ _LIFECYCLE_NAMESPACES = {}
+ ENVIRONMENT = "h2-authority-synth-001"
+@@ -73,6 +78,10 @@
+         require(type(instance_record["instance_id"]) is str and len(instance_record["instance_id"]) == 64
+             and type(instance_record["config_digest"]) is str and len(instance_record["config_digest"]) == 64, "IDENTITY_MISMATCH")
+         require(instance_record["config_digest"] == effective_config_digest(scope, root), "SOURCE_MISMATCH")
++        approval = load_start_approval(scope, root, instance_record, authorization_id, lease)
++        history = read_consumption(approval, lease)
++        require(history[-1]["state"] == "UNCLAIMED", "REPLAY")
++        validate_marker(scope, root, instance_record, {"PREPARED", "SEED_READY", "STOPPED"})
+         # Keep physical root identity and authorization identity, independent of
+         # issuer objects and display/source aliases. A closed namespace stays used.
+         key = (facts["root_facts"]["volume"], facts["root_facts"]["file_id"], authorization_id)
+@@ -80,12 +89,12 @@
+             require(key not in _LIFECYCLE_NAMESPACES, "REPLAY")
+             require(len(_LIFECYCLE_NAMESPACES) < 4096, "RESOURCE_LIMIT")
+             obj = object.__new__(LiveAuthorityContext)
+-            epoch = secrets.token_hex(32)
++            epoch = _START_APPROVALS[approval]["body"]["process_epoch"]
+             _CONTEXTS[obj] = {"issuer": self, "scope": scope, "root": Path(root), "lease": lease,
+                 "lease_facts": facts, "instance": json.loads(json.dumps(instance_record)), "authorization_id": authorization_id,
+                 "epoch": epoch, "facts": dict(rec["facts"]), "store": None, "connection": None, "lock": None,
+                 "DB_facts": None, "closed": False, "bound": False, "registrations": 0,
+-                "source_reads": 0, "permits": 0, "start_claimed": False}
++                "source_reads": 0, "permits": 0, "start_claimed": False, "approval": approval}
+             _LIFECYCLE_NAMESPACES[key] = obj
+             return obj
+ 
+@@ -122,7 +131,22 @@
+         with _NAMESPACE_LOCK:
+             require(expected_epoch == rec["epoch"], "STALE_EPOCH")
+             require(not rec["start_claimed"], "REPLAY")
++            consume_start_approval(rec["approval"], rec["lease"], expected_epoch)
+             rec["start_claimed"] = True
++
++    def note_started(self, control_name=None):
++        rec = self._record()
++        transition_consumption(rec["approval"], rec["lease"], "STARTED")
++        write_marker(rec["scope"], rec["root"], rec["instance"], "SERVICE_READY",
++            authorization_id=rec["authorization_id"], epoch=rec["epoch"], owner=rec["facts"], control_name=control_name)
++
++    def finish_approval(self, *, successful):
++        rec = _CONTEXTS.get(self)
++        require(rec is not None)
++        if rec["start_claimed"]:
++            finish_start_approval(rec["approval"], rec["lease"], successful=successful)
++            write_marker(rec["scope"], rec["root"], rec["instance"], "STOPPED" if successful else "RECOVERY_REQUIRED",
++                authorization_id=rec["authorization_id"], epoch=rec["epoch"], owner=rec["facts"])
+ 
+     def bind_dormant_store(self, store, expected_store, DB_path=None):
+         rec = self._record()
+@@ -178,3 +202,217 @@
+ def bind_dormant_store(context, store, expected_store, DB_path=None):
+     require(type(context) is LiveAuthorityContext and context in _CONTEXTS)
+     return context.bind_dormant_store(store, expected_store, DB_path)
++
++
++def _id(value):
++    require(type(value) is str and re.fullmatch(r"[A-Za-z0-9_.:-]{1,160}", value) is not None, "APPROVAL_REQUIRED")
++    return value
++
++
++def read_bound_document(scope, path):
++    p = scope.path(path)
++    try:
++        require(p.is_file() and p.stat().st_size <= 16384, "RECOVERY_REQUIRED")
++        value = strict_json(p.read_bytes())
++        require(type(value) is dict and set(value) == {"payload", "digest"}
++                and type(value["payload"]) is dict and value["digest"] == digest(value["payload"]), "RECOVERY_REQUIRED")
++        return value["payload"]
++    except SafetyError:
++        raise
++    except Exception:
++        raise SafetyError("RECOVERY_REQUIRED") from None
++
++
++def write_bound_document(scope, path, body, *, replace=False):
++    p = scope.path(path)
++    data = canonical({"payload": body, "digest": digest(body)})
++    require(len(data) <= 16384, "RESOURCE_LIMIT")
++    if p.exists():
++        require(replace, "REPLAY")
++        temporary = scope.write_new(p.with_name(p.name + ".tmp"), data)
++        os.replace(temporary, p)
++    else:
++        scope.write_new(p, data)
++
++
++def write_marker(scope, root, instance, phase, *, authorization_id=None, epoch=None, owner=None, control_name=None):
++    body = {"schema": "r22-instance-marker/1", "environment_id": ENVIRONMENT, "run_id": scope.root.name,
++        "instance_id": instance["instance_id"], "root_facts": scope.file_facts(root), "source_digest": scope.source_digest,
++        "config_digest": instance["config_digest"], "SID": scope.SID, "phase": phase,
++        "authorization_id": authorization_id, "process_epoch": epoch, "owner": owner,
++        "control_name": control_name, "resources_owned": True, "P2": False}
++    write_bound_document(scope, Path(root) / "instance_marker.json", body, replace=True)
++
++
++def validate_marker(scope, root, instance, phases=None):
++    body = read_bound_document(scope, Path(root) / "instance_marker.json")
++    keys = {"schema", "environment_id", "run_id", "instance_id", "root_facts", "source_digest", "config_digest",
++            "SID", "phase", "authorization_id", "process_epoch", "owner", "control_name", "resources_owned", "P2"}
++    require(set(body) == keys and body["schema"] == "r22-instance-marker/1" and body["environment_id"] == ENVIRONMENT
++        and body["run_id"] == scope.root.name and body["instance_id"] == instance["instance_id"]
++        and body["root_facts"] == scope.file_facts(root) and body["source_digest"] == scope.source_digest
++        and body["config_digest"] == instance["config_digest"] and body["SID"] == scope.SID
++        and body["resources_owned"] is True and body["P2"] is False
++        and body["phase"] in {"PREPARED", "SEED_READY", "CLAIMED", "SERVICE_READY", "STOPPING", "STOPPED", "RECOVERY_REQUIRED"}, "RECOVERY_REQUIRED")
++    if phases is not None: require(body["phase"] in phases, "RECOVERY_REQUIRED")
++    return body
++
++
++def approval_paths(root, authorization_id):
++    key = digest(_id(authorization_id))[:32]
++    return Path(root) / ("start_approval_" + key + ".json"), Path(root) / ("start_consumption_" + key + ".jsonl"), Path(root) / ("start_effect_" + key + ".json")
++
++
++class StartApproval(_Capability):
++    def body(self):
++        require(self in _START_APPROVALS)
++        return json.loads(json.dumps(_START_APPROVALS[self]["body"]))
++
++
++def issue_start_approval(scope, root, instance, authorization_id, lease, *, allow_new):
++    """Trusted authorized test preparation, distinct from the job capability.
++
++    The persistent action approval is immutable. Existing or partially published
++    artifacts are loaded/refused, never reset to an unused state.
++    """
++    require(type(scope) is TestScope)
++    validate_lease(lease, scope, root)
++    grant_path, slot_path, effect = approval_paths(root, authorization_id)
++    if grant_path.exists(): return load_start_approval(scope, root, instance, authorization_id, lease)
++    require(allow_new is True and not slot_path.exists() and not effect.exists(), "RECOVERY_REQUIRED")
++    receipt = strict_json((win.RECORD / "APPROVAL_RECEIPT.json").read_bytes())
++    require(receipt.get("approved") is True and receipt.get("scope") == "R22 six targets and122 offline tests only", "APPROVAL_REQUIRED")
++    body = {"schema": "r22-one-shot-start/1", "authorization_id": _id(authorization_id), "approved_action": "START_OFFLINE_SUPERVISOR",
++        "environment_id": ENVIRONMENT, "run_id": scope.root.name, "deployment_root": str(scope.path(root)),
++        "root_facts": scope.file_facts(root), "instance_id": instance["instance_id"], "source_digest": scope.source_digest,
++        "config_digest": instance["config_digest"], "executor_SID": scope.SID,
++        "Python_image": receipt["base_python"], "Python_version": "3.12.14", "Python_digest": win._SCOPES[scope]["python_digest"], "approved_scope": SCOPE,
++        "issuer_identity": "R22_AUTHORIZED_SYNTHETIC_BOOTSTRAP", "approval_receipt_digest": win._hash(win.RECORD / "APPROVAL_RECEIPT.json"),
++        "process_epoch": secrets.token_hex(32), "maximum_start_admissions": 1, "P2": False}
++    write_bound_document(scope, grant_path, body)
++    scope.private_acl(grant_path)
++    first = {"seq": 0, "state": "UNCLAIMED", "grant_digest": digest(body), "process_epoch": body["process_epoch"],
++        "owner": None, "previous": digest(body), "effect_count": 0}
++    record = {"payload": first, "digest": digest(first)}
++    scope.write_new(slot_path, canonical(record) + b"\n")
++    scope.private_acl(slot_path)
++    return load_start_approval(scope, root, instance, authorization_id, lease)
++
++
++def load_start_approval(scope, root, instance, authorization_id, lease=None):
++    require(type(scope) is TestScope)
++    if lease is not None: validate_lease(lease, scope, root)
++    path, slot, effect = approval_paths(root, authorization_id)
++    require(path.exists(), "APPROVAL_REQUIRED")
++    body = read_bound_document(scope, path)
++    scope.acl(path)
++    expected = {"schema", "authorization_id", "approved_action", "environment_id", "run_id", "deployment_root", "root_facts", "instance_id",
++        "source_digest", "config_digest", "executor_SID", "Python_image", "Python_version", "Python_digest", "approved_scope", "issuer_identity",
++        "approval_receipt_digest", "process_epoch", "maximum_start_admissions", "P2"}
++    require(set(body) == expected and body["schema"] == "r22-one-shot-start/1" and body["authorization_id"] == authorization_id
++        and body["approved_action"] == "START_OFFLINE_SUPERVISOR" and body["environment_id"] == ENVIRONMENT
++        and body["run_id"] == scope.root.name and Path(body["deployment_root"]) == scope.path(root)
++        and body["root_facts"] == scope.file_facts(root) and body["instance_id"] == instance["instance_id"]
++        and body["source_digest"] == scope.source_digest and body["config_digest"] == effective_config_digest(scope, root)
++        and body["executor_SID"] == scope.SID and Path(body["Python_image"]) == Path(win._SCOPES[scope]["process"]["image"])
++        and body["Python_version"] == "3.12.14" and body["Python_digest"] == win._SCOPES[scope]["python_digest"] and body["approved_scope"] == SCOPE
++        and body["issuer_identity"] == "R22_AUTHORIZED_SYNTHETIC_BOOTSTRAP"
++        and body["approval_receipt_digest"] == win._hash(win.RECORD / "APPROVAL_RECEIPT.json")
++        and type(body["maximum_start_admissions"]) is int and body["maximum_start_admissions"] == 1
++        and body["P2"] is False and type(body["process_epoch"]) is str
++        and re.fullmatch(r"[a-f0-9]{64}", body["process_epoch"]) is not None, "IDENTITY_MISMATCH")
++    obj = object.__new__(StartApproval)
++    _START_APPROVALS[obj] = {"scope": scope, "root": Path(root), "instance": instance, "body": body,
++        "slot": slot, "effect": effect, "grant_facts": scope.file_facts(path)}
++    # Missing/truncated slot is uncertainty even before the caller has a lease.
++    read_consumption(obj, lease)
++    return obj
++
++
++def read_consumption(approval, lease=None):
++    require(type(approval) is StartApproval and approval in _START_APPROVALS)
++    rec = _START_APPROVALS[approval]; scope, body = rec["scope"], rec["body"]
++    if lease is not None: validate_lease(lease, scope, rec["root"])
++    path = scope.path(rec["slot"])
++    try:
++        require(path.is_file() and 0 < path.stat().st_size <= 16384, "RECOVERY_REQUIRED")
++        raw = path.read_bytes(); require(raw.endswith(b"\n"), "RECOVERY_REQUIRED")
++        parts = raw.splitlines(); require(1 <= len(parts) <= 5, "RECOVERY_REQUIRED")
++        rows, previous = [], digest(body)
++        allowed = {"UNCLAIMED": {"CLAIMED"}, "CLAIMED": {"STARTED", "UNCERTAIN", "FINISHED"},
++                   "STARTED": {"FINISHED", "UNCERTAIN"}, "FINISHED": set(), "UNCERTAIN": set()}
++        for index, part in enumerate(parts):
++            value = strict_json(part)
++            require(type(value) is dict and set(value) == {"payload", "digest"}, "RECOVERY_REQUIRED")
++            row = value["payload"]
++            require(type(row) is dict and set(row) == {"seq", "state", "grant_digest", "process_epoch", "owner", "previous", "effect_count"}
++                and type(row["seq"]) is int and row["seq"] == index and row["grant_digest"] == digest(body)
++                and row["process_epoch"] == body["process_epoch"] and row["previous"] == previous
++                and value["digest"] == digest(row) and type(row["effect_count"]) is int
++                and row["effect_count"] in {0, 1}, "RECOVERY_REQUIRED")
++            if index == 0: require(row["state"] == "UNCLAIMED" and row["owner"] is None and row["effect_count"] == 0, "RECOVERY_REQUIRED")
++            else:
++                require(row["state"] in allowed[rows[-1]["state"]] and type(row["owner"]) is dict
++                    and row["owner"]["SID"] == scope.SID and type(row["owner"]["pid"]) is int
++                    and row["owner"]["created_filetime"] > 0, "RECOVERY_REQUIRED")
++                if index > 1: require(row["owner"] == rows[-1]["owner"], "RECOVERY_REQUIRED")
++                require(row["effect_count"] >= rows[-1]["effect_count"], "RECOVERY_REQUIRED")
++            rows.append(row); previous = value["digest"]
++        return rows
++    except SafetyError: raise
++    except Exception: raise SafetyError("RECOVERY_REQUIRED") from None
++
++
++def _append_state(approval, lease, state, owner, effect_count):
++    rec = _START_APPROVALS[approval]; scope = rec["scope"]
++    rows = read_consumption(approval, lease); last = rows[-1]
++    permitted = {"UNCLAIMED": {"CLAIMED"}, "CLAIMED": {"STARTED", "UNCERTAIN", "FINISHED"},
++                 "STARTED": {"FINISHED", "UNCERTAIN"}}
++    require(state in permitted.get(last["state"], set()), "REPLAY")
++    row = {"seq": len(rows), "state": state, "grant_digest": digest(rec["body"]), "process_epoch": rec["body"]["process_epoch"],
++        "owner": owner, "previous": digest(last), "effect_count": effect_count}
++    payload = canonical({"payload": row, "digest": digest(row)}) + b"\n"
++    facts = scope.file_facts(rec["slot"])
++    try:
++        with scope.path(rec["slot"]).open("ab") as stream:
++            require(stream.write(payload) == len(payload), "RECOVERY_REQUIRED")
++            stream.flush(); os.fsync(stream.fileno())
++    except Exception:
++        raise SafetyError("RECOVERY_REQUIRED") from None
++    require(scope.file_facts(rec["slot"]) == facts, "RECOVERY_REQUIRED")
++    require(read_consumption(approval, lease)[-1] == row, "RECOVERY_REQUIRED")
++    return row
++
++
++def consume_start_approval(approval, lease, expected_epoch):
++    rec = _START_APPROVALS.get(approval); require(rec is not None)
++    require(expected_epoch == rec["body"]["process_epoch"], "STALE_EPOCH")
++    rows = read_consumption(approval, lease)
++    require(rows[-1]["state"] == "UNCLAIMED", "REPLAY")
++    require(not rec["effect"].exists(), "RECOVERY_REQUIRED")
++    validate_marker(rec["scope"], rec["root"], rec["instance"], {"SEED_READY", "STOPPED"})
++    owner = win.self_process_facts(rec["scope"]).facts()
++    result = _append_state(approval, lease, "CLAIMED", owner, 0)
++    write_marker(rec["scope"], rec["root"], rec["instance"], "CLAIMED", authorization_id=rec["body"]["authorization_id"],
++                 epoch=expected_epoch, owner=owner)
++    return result
++
++
++def transition_consumption(approval, lease, state):
++    rec = _START_APPROVALS.get(approval); require(rec is not None)
++    rows = read_consumption(approval, lease); last = rows[-1]
++    effect_count = last["effect_count"]
++    if state == "STARTED":
++        require(last["state"] == "CLAIMED" and not rec["effect"].exists(), "REPLAY")
++        write_bound_document(rec["scope"], rec["effect"], {"schema": "r22-offline-start-effect/1", "grant_digest": digest(rec["body"]),
++            "process_epoch": rec["body"]["process_epoch"], "owner": last["owner"], "effect_count": 1, "P2": False})
++        effect_count = 1
++    return _append_state(approval, lease, state, last["owner"], effect_count)
++
++
++def finish_start_approval(approval, lease, *, successful):
++    rec = _START_APPROVALS.get(approval); require(rec is not None)
++    last = read_consumption(approval, lease)[-1]
++    if last["state"] in {"FINISHED", "UNCERTAIN"}: return last
++    require(last["state"] in {"CLAIMED", "STARTED"}, "RECOVERY_REQUIRED")
++    return transition_consumption(approval, lease, "FINISHED" if successful else "UNCERTAIN")
+--- R21/dsat_authority_lifecycle.py
++++ R22/dsat_authority_lifecycle.py
+@@ -17,7 +17,9 @@
+ import weakref
+ 
+ from . import dsat_windows_runtime as win
+-from .dsat_authority_live import LiveDeploymentIssuer, LiveAuthorityContext, SCOPE, ENVIRONMENT, digest, effective_config_digest
++from .dsat_authority_live import (LiveDeploymentIssuer, LiveAuthorityContext, SCOPE, ENVIRONMENT, digest, effective_config_digest,
++    issue_start_approval, load_start_approval, read_consumption, consume_start_approval, finish_start_approval,
++    read_bound_document, write_bound_document, write_marker, validate_marker, approval_paths)
+ from .dsat_authority_runtime import RuntimeConfig, build_synthetic_seed, probe_offline_dependencies
+ from .protocol import canonical
+ 
+@@ -28,6 +30,7 @@
+ _ADAPTERS = weakref.WeakKeyDictionary()
+ _SQL_CONNECTIONS = {}
+ _CLI_LOOPS = {}
++_SUPERVISORS = weakref.WeakKeyDictionary()
+ STATES = ("NEW", "PREFLIGHTED", "RESOURCES_RESERVED", "INITIALIZING", "SEED_READY", "STORE_READY",
+           "HOST_DORMANT", "LISTENER_READY", "SERVICE_READY", "STOPPING", "STOPPED")
+ _NEXT = dict(zip(STATES, STATES[1:]))
+@@ -67,7 +70,7 @@
+     def __init__(self, scope, ledger=None):
+         require(type(scope) is win.TestScope)
+         self.scope, self.ledger = scope, ledger or Ledger()
+-        self._items, self._result = [], None
++        self._items, self._result, self._closed, self._errors = [], None, [], []
+ 
+     def add(self, name, obj, closer, *, creator_scope):
+         require(creator_scope is self.scope and callable(closer), "OWNERSHIP_UNPROVEN")
+@@ -75,25 +78,35 @@
+         found = next((x for x in self._items if x["object"] is obj), None)
+         if found is not None:
+             return obj
+-        self._items.append({"name": name, "object": obj, "closer": closer, "closed": False})
++        self._items.append({"name": name, "object": obj, "closer": closer, "closed": False, "attempted": False})
+         self.ledger.note("owned_acquired", name=name)
+         return obj
+ 
+     def close(self):
+         if self._result is not None:
+             return json.loads(json.dumps(self._result))
+-        closed, errors = [], []
++        return self._close_items(set(), final=True)
++
++    def close_without(self, names):
++        require(self._result is None, "LIFECYCLE_ORDER")
++        return self._close_items(set(names), final=False)
++
++    def _close_items(self, skip, *, final):
+         for row in reversed(self._items):
++            if row["attempted"] or row["name"] in skip: continue
++            row["attempted"] = True
+             try:
+                 row["closer"]()
+                 row["closed"] = True
+-                closed.append(row["name"])
++                self._closed.append(row["name"])
+             except Exception:
+-                errors.append({"resource": row["name"], "category": "CLEANUP_FAILED"})
+-        self._result = {"closed": closed, "errors": errors, "complete": not errors,
++                self._errors.append({"resource": row["name"], "category": "CLEANUP_FAILED"})
++        result = {"closed": list(self._closed), "errors": list(self._errors), "complete": not self._errors,
+                         "persistent_files_deleted": 0, "foreign_resources_closed": 0}
++        if not final: return result
++        self._result = result
+         try:
+-            self.ledger.note("owned_cleanup", complete=not errors, errors=len(errors))
++            self.ledger.note("owned_cleanup", complete=not self._errors, errors=len(self._errors))
+         except Exception:
+             self._result["complete"] = False
+             self._result["errors"].append({"resource": "cleanup_audit", "category": "CLEANUP_FAILED"})
+@@ -188,9 +201,11 @@
+         committed = True
+         checkpoint("seed_receipt")
+         ledger.note("seed_committed", schema=2, version=2, rows=3, ciphertext_bytes=len(blob))
+-        return {"schema": "r21-seed-receipt/1", "schema_version": 2, "state_version": 2,
++        receipt = {"schema": "r21-seed-receipt/1", "schema_version": 2, "state_version": 2,
+             "history_count": 2, "DB_facts": scope.file_facts(path), "provenance": seed["provenance"],
+             "world_read_state": 0, "world_decrypt": 0, "committed": True}
++        publish_seed_descriptor(scope, Path(path).parent, receipt)
++        return receipt
+     except Exception:
+         if connection is not None and connection.in_transaction:
+             ledger.count("failure_rollbacks", 1)
+@@ -494,7 +509,14 @@
+         rec = self._record()
+         rec["primary"] = error.code if type(error) is SafetyError else "INITIALIZATION_FAILED"
+         if rec["context"] is not None:
++            try:
++                rec["context"].finish_approval(successful=False)
++            except Exception:
++                uncertain = True
+             rec["context"].retire()
++        if rec["lease"] is not None and "instance" in rec["records"]:
++            try: write_marker(rec["scope"], rec["root"], rec["records"]["instance"], "RECOVERY_REQUIRED", authorization_id=rec["authorization"])
++            except Exception: uncertain = True
+         rec["cleanup"] = self.ledger.timed("C_cleanup", self.owner.close)
+         rec["state"] = "RECOVERY_REQUIRED" if uncertain or not rec["cleanup"]["complete"] else "FAILED"
+         rec["records"]["phase"] = rec["state"]
+@@ -516,12 +538,7 @@
+             if not self.root.exists(): scope.directory(self.root)
+             lease = win.reserve_instance(scope, self.root)
+             rec["lease"] = self.owner.add("instance.lock", lease, lease.close, creator_scope=scope)
+-            instance_path = self.root / "instance.json"
+-            if instance_path.exists():
+-                instance = json.loads(instance_path.read_text(encoding="utf-8"))
+-            else:
+-                instance = _instance_record(scope, self.root)
+-                scope.write_new(instance_path, canonical(instance))
++            instance, approval = prepare_resources_with_lease(scope, self.root, rec["authorization"], lease)
+             issuer = LiveDeploymentIssuer.for_owned_test(scope, evidence)
+             rec["context"] = issuer.bind_instance(self.root, lease, instance, authorization_id=rec["authorization"])
+             rec["records"]["instance"] = instance
+@@ -541,6 +558,8 @@
+             receipt = self.ledger.timed("C_initialization", adapter.initialize, self)
+             require(receipt["committed"] is True and receipt["schema_version"] == 2, "INITIALIZATION_FAILED")
+             rec["records"]["seed"] = receipt
++            if not (self.root / "seed_descriptor.json").exists(): publish_seed_descriptor(rec["scope"], self.root, receipt)
++            write_marker(rec["scope"], self.root, rec["records"]["instance"], "SEED_READY", authorization_id=rec["authorization"])
+             self._advance("SEED_READY")
+             return self.status()
+         except Exception as error:
+@@ -575,6 +594,7 @@
+             adapter.step("ready")
+             rec["records"]["Ready"] = {"epoch": rec["context"].epoch, "P2": False, "source_kind": "OFFLINE_LISTENER_ADAPTER"}
+             self._advance("SERVICE_READY")
++            rec["context"].note_started()
+             adapter.step("runtime_died")
+             return self.status()
+         except Exception as error:
+@@ -590,6 +610,11 @@
+         except Exception as error:
+             return self._abort(error, uncertain=True)
+         rec["context"].retire()
++        interim = self.owner.close_without({"instance.lock"})
++        try:
++            rec["context"].finish_approval(successful=interim["complete"])
++        except Exception:
++            self.owner._errors.append({"resource": "durable_finish", "category": "CLEANUP_FAILED"})
+         rec["cleanup"] = self.ledger.timed("C_shutdown", self.owner.close)
+         if rec["cleanup"]["complete"]:
+             self._advance("STOPPED")
+@@ -665,31 +690,228 @@
+     key = (str(root), os.getpid())
+     if operation == "prepare":
+         require(key not in _CLI_LOOPS, "REPLAY")
+-        lifecycle = Lifecycle(scope, root, OfflineAdapters(scope), authorization_id=request["authorization_id"])
+-        _CLI_LOOPS[key] = lifecycle
+-        value = lifecycle.prepare()
++        value = prepare_persistent_instance(scope, root, request["authorization_id"])
++    elif operation == "initialize":
++        value = initialize_persistent_instance(scope, root, request["authorization_id"])
++    elif operation == "start":
++        # The shell is not a daemon launcher in this authorization. Independent
++        # starts run in the registered owned worker/supervisor entry. The main
++        # test driver may keep an inline supervisor for the six-operation check.
++        require(os.getpid() == json.loads((scope.root / "RUN_START.json").read_text(encoding="utf-8"))["main_pid"], "OFFLINE_ONLY")
++        require(key not in _CLI_LOOPS, "REPLAY")
++        manager = supervise_persistent_offline(scope, root, request["authorization_id"])
++        _CLI_LOOPS[key] = manager
++        value = manager.snapshot()
+     elif operation == "recover":
+-        lifecycle = _CLI_LOOPS.get(key)
+-        receipt = root / "operation_receipt.json"
+-        records = lifecycle.records() if lifecycle else (strict_json(receipt.read_bytes()) if receipt.is_file() else {})
+-        value = recover_classify(scope, root, records)
++        value = recover_persistent(scope, root, request["authorization_id"])
++    elif operation == "status":
++        manager = _CLI_LOOPS.get(key)
++        value = manager.snapshot() if manager is not None else status_persistent(scope, root, request["authorization_id"])
+     else:
+-        lifecycle = _CLI_LOOPS.get(key)
+-        require(lifecycle is not None, "RECOVERY_REQUIRED")
+-        functions = {"initialize": lifecycle.initialize, "start": lifecycle.start_owned,
+-                     "status": lifecycle.status, "stop": lifecycle.stop_owned}
+-        value = functions[operation]()
+-    if key in _CLI_LOOPS and root.is_dir():
+-        receipt = root / "operation_receipt.json"
+-        payload = canonical(_CLI_LOOPS[key].records())
+-        if receipt.exists():
+-            temporary = scope.write_new(root / "operation_receipt.tmp", payload)
+-            os.replace(temporary, receipt)
+-        else:
+-            scope.write_new(receipt, payload)
++        manager = _CLI_LOOPS.get(key)
++        value = manager.stop() if manager is not None else stop_persistent(scope, root, request["authorization_id"])
+     result = {"status": "OFFLINE_OPERATION_COMPLETED", "operation": operation, "result": value,
+               "source_kind": "SIMULATED_SQL_AND_LISTENER_ADAPTER", "D1B2_executable": False,
+-              "cross_process_resume": "REFUSED_REQUIRES_NEW_ADMISSION", "P2": False}
++              "cross_process_resume": "DURABLE_RESOURCE_AND_ACTION_REVALIDATION", "P2": False}
++    write_bound_document(scope, root / "operation_receipt.json", result, replace=True)
+     if result_path is not None:
+         scope.write_new(result_path, canonical(result))
+     return result
++
++
++def load_persistent_instance(scope, root):
++    root = scope.path(root)
++    path = root / "instance.json"
++    try:
++        require(path.is_file() and path.stat().st_size <= 16384, "RECOVERY_REQUIRED")
++        instance = json.loads(path.read_text(encoding="utf-8"))
++        require(type(instance) is dict and set(instance) == {"schema", "environment_id", "instance_id", "root_facts", "source_digest", "config_digest", "approved_scope"}
++            and instance["schema"] == "r21-owned-instance/1" and instance["environment_id"] == ENVIRONMENT
++            and instance["root_facts"] == scope.file_facts(root) and instance["source_digest"] == scope.source_digest
++            and instance["config_digest"] == effective_config_digest(scope, root) and instance["approved_scope"] == SCOPE,
++            "IDENTITY_MISMATCH")
++        return instance
++    except SafetyError: raise
++    except Exception: raise SafetyError("RECOVERY_REQUIRED") from None
++
++
++def publish_seed_descriptor(scope, root, receipt):
++    body = {"schema": "r22-seed-resource/1", "run_id": scope.root.name, "root_facts": scope.file_facts(root),
++        "source_digest": scope.source_digest, "SID": scope.SID, "schema_version": 2, "state_version": 2,
++        "grant_count": 1, "queued_count": 1, "P2": False,
++        "kind": "REAL_OWNED_TEST_SQLITE" if "DB_facts" in receipt else "SIMULATED_PERSISTENT_SEED_DESCRIPTOR",
++        "DB_facts": receipt.get("DB_facts"), "provenance": receipt.get("provenance", "SIMULATED_ADAPTER_ONLY")}
++    path = Path(root) / "seed_descriptor.json"
++    if path.exists():
++        existing = read_seed_descriptor(scope, root)
++        require(existing["root_facts"] == body["root_facts"], "RECOVERY_REQUIRED")
++        return existing
++    write_bound_document(scope, path, body)
++    return body
++
++
++def read_seed_descriptor(scope, root):
++    body = read_bound_document(scope, Path(root) / "seed_descriptor.json")
++    require(body.get("schema") == "r22-seed-resource/1" and body.get("run_id") == scope.root.name
++        and body.get("root_facts") == scope.file_facts(root) and body.get("source_digest") == scope.source_digest
++        and body.get("SID") == scope.SID and body.get("schema_version") == body.get("state_version") == 2
++        and body.get("grant_count") == body.get("queued_count") == 1 and body.get("P2") is False, "RECOVERY_REQUIRED")
++    if body.get("DB_facts") is not None:
++        require(body["DB_facts"] == scope.file_facts(Path(root) / "authority.db"), "RECOVERY_REQUIRED")
++    return body
++
++
++def prepare_resources_with_lease(scope, root, authorization_id, lease):
++    win.validate_lease(lease, scope, root)
++    root = scope.path(root)
++    if (root / "instance.json").exists():
++        instance = load_persistent_instance(scope, root)
++        marker = validate_marker(scope, root, instance, {"PREPARED", "SEED_READY", "STOPPED"})
++    else:
++        # A preseeded DB may only be adopted with the owned initializer's full
++        # descriptor. An unlabelled existing database is an unknown resource.
++        seeded = (root / "seed_descriptor.json").exists()
++        if (root / "authority.db").exists(): read_seed_descriptor(scope, root)
++        if seeded: read_seed_descriptor(scope, root)
++        instance = _instance_record(scope, root)
++        scope.write_new(root / "instance.json", canonical(instance))
++        write_marker(scope, root, instance, "SEED_READY" if seeded else "PREPARED", authorization_id=authorization_id)
++        marker = validate_marker(scope, root, instance)
++    grant = issue_start_approval(scope, root, instance, authorization_id, lease, allow_new=True)
++    require(read_consumption(grant, lease)[-1]["state"] == "UNCLAIMED", "REPLAY")
++    require(marker["phase"] in {"PREPARED", "SEED_READY", "STOPPED"}, "RECOVERY_REQUIRED")
++    return instance, grant
++
++
++def prepare_persistent_instance(scope, root, authorization_id):
++    require(type(scope) is win.TestScope)
++    root = scope.path(root)
++    if not root.exists(): scope.directory(root)
++    lease = win.reserve_instance(scope, root)
++    try:
++        instance, grant = prepare_resources_with_lease(scope, root, authorization_id, lease)
++        return {"status": "PREPARED", "instance": instance, "approval": grant.body(), "P2": False}
++    finally: lease.close()
++
++
++def initialize_persistent_instance(scope, root, authorization_id):
++    lease = win.reserve_instance(scope, root)
++    try:
++        instance = load_persistent_instance(scope, root)
++        grant = load_start_approval(scope, root, instance, authorization_id, lease)
++        require(read_consumption(grant, lease)[-1]["state"] == "UNCLAIMED", "REPLAY")
++        validate_marker(scope, root, instance, {"PREPARED", "SEED_READY", "STOPPED"})
++        if not (Path(root) / "seed_descriptor.json").exists():
++            publish_seed_descriptor(scope, root, {"provenance": "SIMULATED_PERSISTENT_SEED_DESCRIPTOR"})
++        seed = read_seed_descriptor(scope, root)
++        write_marker(scope, root, instance, "SEED_READY", authorization_id=authorization_id,
++            epoch=grant.body()["process_epoch"])
++        return {"status": "SEED_READY", "kind": seed["kind"], "P2": False, "SQLite_calls": 0}
++    finally: lease.close()
++
++
++class OfflineSupervisor:
++    __slots__ = ("__weakref__",)
++    def __init__(self, *args, **kwargs): raise SafetyError("CONTEXT_REQUIRED")
++
++    def snapshot(self):
++        rec = _SUPERVISORS.get(self); require(rec is not None)
++        value = status_persistent(rec["scope"], rec["root"], rec["authorization"])
++        value["owned_supervisor_current_process"] = not rec["closed"]
++        return value
++
++    def stop(self):
++        rec = _SUPERVISORS.get(self); require(rec is not None)
++        if rec["closed"]: return self.snapshot()
++        rec["context"].retire()
++        cleanup = rec["owner"].close()
++        try:
++            rec["context"].finish_approval(successful=cleanup["complete"])
++        finally:
++            rec["lease"].close(); rec["closed"] = True
++        return self.snapshot()
++
++
++def supervise_persistent_offline(scope, root, authorization_id, *, expected_epoch=None, control_name=None, request_context=None):
++    """Real independent-process admission; all Store/Handler/listener objects are offline adapters."""
++    require(type(scope) is win.TestScope)
++    request_context = {} if request_context is None else request_context
++    require(type(request_context) is dict and set(request_context) <= {"issuer_alias", "source_alias", "client_alias", "display"}, "UNSUPPORTED_ARGUMENTS")
++    root = scope.path(root)
++    lease = win.reserve_instance(scope, root)
++    owner = OwnedResources(scope); context = None
++    try:
++        instance = load_persistent_instance(scope, root)
++        grant = load_start_approval(scope, root, instance, authorization_id, lease)
++        require(expected_epoch is None or expected_epoch == grant.body()["process_epoch"], "STALE_EPOCH")
++        require(read_consumption(grant, lease)[-1]["state"] == "UNCLAIMED", "REPLAY")
++        read_seed_descriptor(scope, root)
++        validate_marker(scope, root, instance, {"SEED_READY", "STOPPED"})
++        issuer = LiveDeploymentIssuer.for_owned_test(scope, win.self_process_facts(scope))
++        context = issuer.bind_instance(root, lease, instance, authorization_id=authorization_id)
++        context.claim_start(context.epoch)
++        store = OfflineStore()
++        owner.add("Store.connection", store.connection, store.connection.close, creator_scope=scope)
++        context.bind_dormant_store(store, store)
++        adapter = OfflineAdapters(scope)
++        from .services import bounded_authority_listener
++        listener = bounded_authority_listener(context, adapter, owner)
++        context.note_started(control_name)
++        obj = object.__new__(OfflineSupervisor)
++        _SUPERVISORS[obj] = {"scope": scope, "root": root, "authorization": authorization_id,
++            "context": context, "store": store, "listener": listener, "owner": owner, "lease": lease, "closed": False}
++        return obj
++    except Exception:
++        if context is not None:
++            try: context.finish_approval(successful=False)
++            except Exception: pass
++            context.retire()
++        owner.close(); lease.close()
++        raise
++
++
++def status_persistent(scope, root, authorization_id):
++    instance = load_persistent_instance(scope, root)
++    grant = load_start_approval(scope, root, instance, authorization_id)
++    rows = read_consumption(grant); marker = validate_marker(scope, root, instance)
++    last = rows[-1]; owner = last["owner"]
++    liveness = "HISTORICAL_ONLY"
++    if owner is not None:
++        try:
++            recorded = win.recorded_owner(scope, owner)
++            if recorded["exit_recorded"]: liveness = "EXIT_CONFIRMED_BY_CREATOR"
++            else:
++                win.verify_recorded_owner_live(scope, owner); liveness = "OWNED_PROCESS_ALIVE"
++        except SafetyError: liveness = "UNKNOWN_OWNER_LIVENESS"
++    return {"status": "PERSISTENT_STATUS", "instance_id": instance["instance_id"],
++        "authorization_id": authorization_id, "process_epoch": grant.body()["process_epoch"],
++        "consumption_state": last["state"], "START_APPROVAL_CONSUMED": last["state"] != "UNCLAIMED",
++        "START_SUCCEEDED": last["effect_count"] == 1, "effect_count": last["effect_count"],
++        "marker_phase": marker["phase"], "owner": owner, "liveness": liveness, "P2": False,
++        "actual_Authority_service": False, "current_native_eligible": False}
++
++
++def stop_persistent(scope, root, authorization_id, *, expected_epoch=None, expected_owner=None):
++    instance = load_persistent_instance(scope, root)
++    grant = load_start_approval(scope, root, instance, authorization_id)
++    require(expected_epoch is None or expected_epoch == grant.body()["process_epoch"], "STALE_EPOCH")
++    rows = read_consumption(grant); marker = validate_marker(scope, root, instance)
++    owner = rows[-1]["owner"]
++    require(expected_owner is None or expected_owner == owner, "IDENTITY_MISMATCH")
++    if rows[-1]["state"] == "FINISHED":
++        return {"status": "STOPPED_HISTORICAL", "P2": False, "signal_sent": False}
++    require(rows[-1]["state"] == "STARTED" and marker["owner"] == owner
++        and marker["process_epoch"] == grant.body()["process_epoch"] and marker["control_name"] is not None, "RECOVERY_REQUIRED")
++    win.signal_recorded_event(scope, owner, marker["control_name"])
++    return {"status": "STOP_REQUEST_SENT", "P2": False, "signal_sent": True, "owner": owner}
++
++
++def recover_persistent(scope, root, authorization_id):
++    try:
++        value = status_persistent(scope, root, authorization_id)
++        state = "STOPPED_RECORDED" if value["consumption_state"] == "FINISHED" else "RECOVERY_REQUIRED"
++        return {"status": state, "history": value, "SQL": 0, "key_loads": 0, "world_decrypt": 0,
++            "automatic_start": False, "old_approval_reopened": False, "P2": False}
++    except SafetyError as error:
++        return {"status": "RECOVERY_REQUIRED", "reason": error.code, "consumption": "UNPROVEN_ASSUME_UNAVAILABLE",
++            "SQL": 0, "key_loads": 0, "world_decrypt": 0, "automatic_start": False, "P2": False}
+--- R21/dsat_windows_runtime.py
++++ R22/dsat_windows_runtime.py
+@@ -17,8 +17,8 @@
+ import weakref
+ 
+ 
+-OUTPUT = Path(r"D:\毕业设计\research_g2_dsat_implementation\2026-11-11_r21_d1b1_offline")
+-RECORD = OUTPUT.parent / "2026-11-11_r21"
++OUTPUT = Path(r"D:\毕业设计\research_g2_dsat_implementation\2026-11-11_r22_d1b1_closure_offline")
++RECORD = OUTPUT.parent / "2026-11-11_r22"
+ PROJECT = Path(r"D:\毕业设计\auth-lifecycle")
+ DEPLOYMENT = Path(r"D:\毕业设计\h2_test_runtime\h2-authority-synth-001")
+ _SCOPES, _FACTS, _LEASES, _EVENTS, _CHILDREN = (weakref.WeakKeyDictionary() for _ in range(5))
+@@ -32,7 +32,7 @@
+         codes = {"APPROVAL_REQUIRED", "OFFLINE_ONLY", "PATH_DENIED", "IDENTITY_MISMATCH", "SOURCE_MISMATCH",
+             "SINGLE_ACTIVE_CONFLICT", "OWNERSHIP_UNPROVEN", "CONTEXT_REQUIRED", "RESOURCE_LIMIT",
+             "NATIVE_UNAVAILABLE", "NATIVE_FAILURE", "STALE_EPOCH", "P2_NOT_AUTHORIZED", "REPLAY",
+-            "SCHEMA_MISMATCH", "INITIALIZATION_FAILED", "LIFECYCLE_ORDER", "PORT_CONFLICT",
++            "SCHEMA_MISMATCH", "INITIALIZATION_FAILED", "LIFECYCLE_ORDER", "PORT_CONFLICT", "DURABLE_CONSUMPTION_UNPROVEN",
+             "CLEANUP_FAILED", "RECOVERY_REQUIRED", "UNSUPPORTED_ARGUMENTS", "DEPENDENCY_MISMATCH"}
+         self.code = code if code in codes else "NATIVE_FAILURE"
+         super().__init__(self.code)
+@@ -90,6 +90,8 @@
+     kernel.LocalFree.restype = C.c_void_p
+     kernel.GetProcessId.argtypes = [W.HANDLE]
+     kernel.GetProcessId.restype = W.DWORD
++    kernel.OpenProcess.argtypes = [W.DWORD, W.BOOL, W.DWORD]
++    kernel.OpenProcess.restype = W.HANDLE
+     kernel.GetProcessTimes.argtypes = [W.HANDLE] + [C.POINTER(W.FILETIME)] * 4
+     kernel.GetProcessTimes.restype = W.BOOL
+     kernel.QueryFullProcessImageNameW.argtypes = [W.HANDLE, W.DWORD, W.LPWSTR, C.POINTER(W.DWORD)]
+@@ -282,9 +284,13 @@
+     def write_new(self, path, data):
+         p = self.path(path)
+         require(type(data) is bytes and len(data) <= 2 * 1024 * 1024 and p.parent.exists(), "RESOURCE_LIMIT")
+-        self.count("files_created", 512)
++        known = self._record().setdefault("created_paths", set())
++        require(str(p).lower() in known or len(known) < 512, "RESOURCE_LIMIT")
+         with p.open("xb") as stream:
+             stream.write(data); stream.flush(); os.fsync(stream.fileno())
++        known.add(str(p).lower())
++        self.count("file_create_calls", 4096)
++        self._record()["counts"]["unique_created_paths"] = len(known)
+         return p
+ 
+     def sources(self):
+@@ -313,14 +319,19 @@
+ def authorize_test_scope(run_root):
+     root = Path(run_root).absolute()
+     require(root.is_relative_to(OUTPUT) and root != OUTPUT and root.is_dir(), "OFFLINE_ONLY")
++    run_start_path = root / "RUN_START.json"
++    require(run_start_path.is_file() and not (root / "RESULTS.json").exists(), "APPROVAL_REQUIRED")
++    run_start = json.loads(run_start_path.read_text(encoding="utf-8"))
++    require(run_start.get("suite") == "new54" and run_start.get("run_id") == root.name, "APPROVAL_REQUIRED")
+     receipt = json.loads((RECORD / "APPROVAL_RECEIPT.json").read_text(encoding="utf-8"))
+-    require(receipt.get("approved") is True and receipt.get("scope") == "R20 nine targets and three isolated offline suites only", "APPROVAL_REQUIRED")
++    require(receipt.get("approved") is True and receipt.get("scope") == "R22 six targets and122 offline tests only", "APPROVAL_REQUIRED")
+     require(_hash(receipt["request_path"]) == receipt["request_sha256"] and receipt["D1B2"] is False, "APPROVAL_REQUIRED")
+     require(Path(sys.executable) == Path(receipt["base_python"]), "IDENTITY_MISMATCH")
+-    lock = json.loads((RECORD / "sources/PRECHECK_LOCK.json").read_text(encoding="utf-8"))
++    require(sys.version_info[:3] == (3, 12, 14) and C.sizeof(C.c_void_p) == 8, "DEPENDENCY_MISMATCH")
++    lock = json.loads((RECORD / "R22_SCOPE_LOCK.json").read_text(encoding="utf-8"))
+     paths = sorted({Path(x["path"]) for x in lock["targets"] if Path(x["path"]).suffix == ".py"}
+         | {p for p in (PROJECT / "src/auth_lifecycle/online_state").iterdir() if p.suffix in {".py", ".sql"}}
+-        | {PROJECT / "src/auth_lifecycle/__init__.py"})
++        | {PROJECT / "src/auth_lifecycle/__init__.py", PROJECT / "scripts/run_h2_authority_service.py"})
+     require(len(paths) <= 64, "RESOURCE_LIMIT")
+     sources = [{"path": str(p), "sha256": _hash(p)} for p in paths]
+     kernel, _ = _api()
+@@ -328,7 +339,18 @@
+     require(Path(process["image"]) == Path(receipt["base_python"]), "IDENTITY_MISMATCH")
+     obj = object.__new__(TestScope)
+     counts = _RUN_COUNTS.setdefault(str(root), {})
+-    _SCOPES[obj] = {"root": root, "sources": sources, "source_digest": hashlib.sha256(_canonical(sources)).hexdigest(), "process": process, "counts": counts}
++    _SCOPES[obj] = {"root": root, "sources": sources, "source_digest": hashlib.sha256(_canonical(sources)).hexdigest(), "process": process,
++                   "python_digest": _hash(receipt["base_python"]), "counts": counts}
++    if process["pid"] != run_start["main_pid"]:
++        deadline = time.monotonic() + 2
++        confirmed = False
++        while time.monotonic() < deadline:
++            try:
++                confirmed = recorded_owner(obj, process)["created_by_run"]
++                if confirmed: break
++            except SafetyError: pass
++            time.sleep(.005)
++        require(confirmed, "APPROVAL_REQUIRED")
+     obj.path(root); obj.private_acl(root)
+     return obj
+ 
+@@ -430,7 +452,7 @@
+ 
+ def create_stop_event(scope, suffix):
+     require(type(scope) is TestScope and type(suffix) is str and re.fullmatch(r"[a-f0-9]{32,64}", suffix))
+-    name = "Local\\auth_lifecycle_r21_" + suffix
++    name = "Local\\auth_lifecycle_r22_" + suffix
+     kernel, descriptor, attributes = _descriptor(scope.SID)
+     try:
+         C.set_last_error(0)
+@@ -466,11 +488,12 @@
+ def launch_owned_child(scope, manifest, *, inherit=()):
+     """Only the reviewed runner's finite no-service worker protocol is launchable."""
+     require(type(scope) is TestScope)
++    require(os.getpid() == json.loads((scope.root / "RUN_START.json").read_text(encoding="utf-8"))["main_pid"], "APPROVAL_REQUIRED")
+     scope.sources()
+     require(sum(p.poll() is None for p, rec in list(_CHILDREN.items()) if rec["scope"] is scope) < 2, "RESOURCE_LIMIT")
+     path = scope.path(manifest)
+     data = json.loads(path.read_text(encoding="utf-8"))
+-    require(data.get("source_kind") == "R21_OWNED_STUB" and data.get("mode") in {"race", "crash", "handoff", "event"}, "OFFLINE_ONLY")
++    require(data.get("source_kind") == "R22_OWNED_STUB" and data.get("mode") in {"race", "crash", "handoff", "event", "cross_first", "cross_replay"}, "OFFLINE_ONLY")
+     require(Path(data["run_root"]) == scope.root, "PATH_DENIED")
+     count = scope.count("child_launches", 8)
+     runner = PROJECT / "scripts/run_dsat_authority_live_lifecycle_tests.py"
+@@ -505,6 +528,7 @@
+         require(facts["SID"] == scope.SID and Path(facts["image"]) == Path(sys.executable), "IDENTITY_MISMATCH")
+         _CHILDREN[process] = {"scope": scope, "facts": facts, "start": started, "number": count,
+                               "created_command": list(command), "environment_keys": sorted(environment)}
++        _record_child(scope, {"event": "CREATED", "facts": facts, "mode": data["mode"], "run_id": scope.root.name})
+         return process, dict(facts)
+     except BaseException:
+         # It was just created and retained by this call; no PID/name lookup.
+@@ -525,25 +549,47 @@
+     timeout = max(.01, 10 - (time.monotonic() - rec["start"]))
+     terminated = False
+     try:
+-        output, error = process.communicate(input=data, timeout=timeout)
++        if process.stdin is not None and not process.stdin.closed:
++            try:
++                if data is not None: process.stdin.write(data); process.stdin.flush()
++            except (BrokenPipeError, OSError): pass
++            try:
++                process.stdin.close()
++            except (BrokenPipeError, OSError):
++                # A closed peer can make BufferedWriter.close flush fail. The
++                # exact retained child must already be exited before accepting
++                # that result; an unexplained live-peer I/O error still fails.
++                require(process.poll() is not None, "RECOVERY_REQUIRED")
++        process.wait(timeout=timeout)
+     except subprocess.TimeoutExpired:
+         verify_target_handle(scope, process, rec["facts"])
+         # R21 authorizes termination of this exact registered test child only.
+         process.terminate(); terminated = True
+-        output, error = process.communicate(timeout=5)
++        process.wait(timeout=5)
++    # Worker protocol bounds each stream to4096B, so waiting requires no reader
++    # threads and preserves the aggregate16-thread budget for8 owned children.
++    output = process.stdout.read(4097)
++    error = process.stderr.read(4097)
+     rec["finished"] = True
+     _CHILD_SLOTS.release()
+     elapsed = time.monotonic() - rec["start"]
+     scope.count("child_total_milliseconds", 60000, int(elapsed * 1000))
++    complete_output = rec.get("read_stdout_prefix", b"") + output
++    require(len(complete_output) <= 4096 and len(error) <= 4096, "RESOURCE_LIMIT")
++    stdout_path = scope.write_new(scope.root / ("child_%02d_stdout.log" % rec["number"]), complete_output)
++    stderr_path = scope.write_new(scope.root / ("child_%02d_stderr.log" % rec["number"]), error)
+     result = {"pid": rec["facts"]["pid"], "created_filetime": rec["facts"]["created_filetime"],
+         "exit_code": process.returncode, "elapsed_seconds": elapsed, "terminated_owned_stub": terminated,
+-        "stdout": output.decode("utf-8", errors="replace")[:4096], "stderr_bytes": len(error),
++        "stdout": complete_output.decode("utf-8", errors="replace"), "stderr_bytes": len(error),
++        "stdout_path": str(stdout_path), "stderr_path": str(stderr_path),
+         "created_command": list(rec["created_command"]), "environment_keys": list(rec["environment_keys"])}
+     for stream in (process.stdin, process.stdout, process.stderr):
+         if stream is not None: stream.close()
+     process._handle.Close()
+     scope.count("owned_child_handles_closed", 8)
+     result.update(pipes_closed=True, process_handle_closed=True)
++    _record_child(scope, {"event": "EXITED", "facts": rec["facts"], "exit_code": process.returncode,
++                          "run_id": scope.root.name})
+     require(len(output) <= 4096 and len(error) <= 4096, "RESOURCE_LIMIT")
+     return result
+ 
+@@ -564,6 +610,7 @@
+             data.extend(process.stdout.raw.read(min(available.value, 4096 - len(data))))
+             if b"\n" in data:
+                 require(len(data) <= 4096, "RESOURCE_LIMIT")
++                _CHILDREN[process]["read_stdout_prefix"] = _CHILDREN[process].get("read_stdout_prefix", b"") + bytes(data)
+                 return json.loads(data.split(b"\n", 1)[0].decode("utf-8"))
+         require(len(data) < 4096, "RESOURCE_LIMIT")
+         if process.poll() is not None and not available.value:
+@@ -585,3 +632,58 @@
+     _ok(kernel.K32GetProcessMemoryInfo(kernel.GetCurrentProcess(), C.byref(memory), memory.cb))
+     return {"peak_working_set_bytes": int(memory.PeakWorkingSetSize), "working_set_bytes": int(memory.WorkingSetSize),
+             "private_usage_bytes": int(memory.PrivateUsage), "basis": "current test process only; includes imports/harness"}
++
++
++def _record_child(scope, body):
++    require(type(scope) is TestScope)
++    path = scope.path(scope.root / "owned_children.jsonl")
++    row = {"payload": body, "digest": hashlib.sha256(_canonical(body)).hexdigest()}
++    raw = _canonical(row) + b"\n"
++    if not path.exists(): scope.write_new(path, raw)
++    else:
++        require(path.stat().st_size + len(raw) <= 32768, "RESOURCE_LIMIT")
++        with path.open("ab") as stream:
++            stream.write(raw); stream.flush(); os.fsync(stream.fileno())
++
++
++def recorded_owner(scope, facts):
++    """Only a process whose creation was recorded by this owned test launcher."""
++    require(type(scope) is TestScope and type(facts) is dict, "OWNERSHIP_UNPROVEN")
++    path = scope.path(scope.root / "owned_children.jsonl")
++    try:
++        raw = path.read_bytes()
++        require(0 < len(raw) <= 32768 and raw.endswith(b"\n"), "OWNERSHIP_UNPROVEN")
++        created = False; exited = None
++        for line in raw.splitlines():
++            row = json.loads(line); body = row["payload"]
++            require(row["digest"] == hashlib.sha256(_canonical(body)).hexdigest() and body["run_id"] == scope.root.name, "OWNERSHIP_UNPROVEN")
++            if body["facts"] == facts:
++                if body["event"] == "CREATED": created = True
++                if body["event"] == "EXITED": exited = body["exit_code"]
++        require(created and facts["SID"] == scope.SID, "OWNERSHIP_UNPROVEN")
++        return {"created_by_run": True, "exit_recorded": exited is not None, "exit_code": exited}
++    except SafetyError: raise
++    except Exception: raise SafetyError("OWNERSHIP_UNPROVEN") from None
++
++
++def verify_recorded_owner_live(scope, facts):
++    info = recorded_owner(scope, facts)
++    require(not info["exit_recorded"], "OWNERSHIP_UNPROVEN")
++    kernel, _ = _api()
++    handle = kernel.OpenProcess(0x1000 | 0x100000, False, facts["pid"])
++    require(handle, "OWNERSHIP_UNPROVEN")
++    try:
++        require(_process_facts(handle) == facts, "IDENTITY_MISMATCH")
++        require(kernel.WaitForSingleObject(handle, 0) == 258, "OWNERSHIP_UNPROVEN")
++        return True
++    finally: kernel.CloseHandle(handle)
++
++
++def signal_recorded_event(scope, facts, event_name):
++    verify_recorded_owner_live(scope, facts)
++    require(type(event_name) is str and re.fullmatch(r"Local\\auth_lifecycle_r22_[a-f0-9]{32,64}", event_name) is not None, "OWNERSHIP_UNPROVEN")
++    kernel, _ = _api()
++    handle = kernel.OpenEventW(2, False, event_name)
++    require(handle, "OWNERSHIP_UNPROVEN")
++    try: _ok(kernel.SetEvent(handle))
++    finally: kernel.CloseHandle(handle)
+--- R21/test_dsat_authority_live_lifecycle.py
++++ R22/test_dsat_authority_live_lifecycle.py
+@@ -32,7 +32,7 @@
+ class LiveLifecycleCases(unittest.TestCase):
+     def setUp(self):
+         self.case_id = self._testMethodName.split("_")[1]
+-        self.spec = next(x for x in CONFIG["plan"]["B1_new_cases"] if x["id"] == self.case_id)
++        self.spec = next(x for x in CONFIG["plan"]["new54"] if x["id"] == self.case_id)
+         self.scope, self.run = CONFIG["scope"], CONFIG["run"]
+         f = CONFIG["fixture"]
+         self.document = json.loads((f / "CONFIRMED_CONFIG.json").read_text(encoding="utf-8-sig"))
+@@ -68,7 +68,7 @@
+         return self.scope.directory(self.run / (name or self.case_id))
+ 
+     def model_root(self):
+-        return self.scope.directory(self.run / "model_instances")
++        return self.scope.directory(self.run / ("model_" + self.case_id))
+ 
+     def ledger(self):
+         value = l.Ledger(); self.ledgers.append(value); return value
+@@ -108,12 +108,17 @@
+                                            lease=core.lease, checkpoint=checkpoint)
+         return writer
+ 
+-    def worker(self, root, *, mode="crash", inherited=(), event=None, exit_code=73):
++    def worker(self, root, *, mode="crash", inherited=(), event=None, exit_code=73, extra=None):
++        authorization_id="auth:worker:"+root.name
++        if mode in {"race","crash","event"} and not (root/"instance.json").exists():
++            l.prepare_persistent_instance(self.scope,root,authorization_id)
++            l.initialize_persistent_instance(self.scope,root,authorization_id)
+         count = len(CONFIG["children"])
+         manifest = self.scope.write_new(self.run / ("worker_%02d.json" % count), canonical({
+-            "source_kind": "R21_OWNED_STUB", "mode": mode, "run_root": str(self.run),
++            "source_kind": "R22_OWNED_STUB", "mode": mode, "run_root": str(self.run),
+             "resource_root": str(root), "inherited_handle": int(inherited[0]) if inherited else None,
+-            "event_name": event, "exit_code": exit_code}))
++            "event_name": event, "exit_code": exit_code,"authorization_id":authorization_id,
++            "extra":{} if extra is None else extra}))
+         process, facts = w.launch_owned_child(self.scope, manifest, inherit=inherited)
+         CONFIG["children"].append({"process": process, "facts": facts, "manifest": str(manifest), "result": None})
+         return process, facts
+@@ -214,7 +219,7 @@
+         self.check(self.scope.acl(root)["protected_DACL"], "TEST_TLS_PRIVATE_DACL")
+ 
+     def test_F14_EventLog_failure(self):
+-        root = CONFIG["shared"]["committed_gap_root"]
++        root = self.folder("F14_valid_seed")
+         key = self.scope.write_new(root / "test_state.key", self.public_key())
+         captured = []
+         def factory(core):
+@@ -224,7 +229,7 @@
+             bootstrap = l.StrictStoreBootstrap.for_test(self.scope, root, key, core.owner, core.ledger, lease=core.lease, checkpoint=checkpoint)
+             try: return AuthorityStore(root, key, bootstrap_context=bootstrap)
+             finally: captured.extend(x["object"] for x in core.owner._items if x["name"] == "Store.connection")
+-        core, adapter = self.drive(root=root, store_factory=factory)
++        core, adapter = self.drive(root=root, writer=self.real_writer(), store_factory=factory)
+         self.cleanup_ok(core, adapter, "FAILED")
+         self.check(len(captured) == 1, "CONSTRUCTOR_CONNECTION_CAPTURED_BEFORE_LOG_FAILURE")
+         try: captured[0].execute("SELECT 1")
+@@ -285,6 +290,7 @@
+         lease = w.reserve_instance(self.scope, root); facts = lease.facts()["root_facts"]; lease.close()
+         value = l.recover_classify(self.scope, root, {"phase": "STOPPING", "instance": {"root_facts": facts}})
+         self.check(value["status"] == "RECOVERY_REQUIRED" and value["automatic_start"] is False, "PARTIAL_CLEANUP_CLASSIFIES_WITHOUT_RESTART")
++        self.refuses(lambda:l.supervise_persistent_offline(self.scope,root,"auth:worker:"+root.name),"RECOVERY_REQUIRED")
+ 
+     def test_F23_old_runtime_marker(self):
+         root = self.folder(); facts = self.scope.file_facts(root)
+@@ -292,6 +298,9 @@
+         self.scope.write_new(root / "old_ready.json", canonical(record))
+         result = l.recover_classify(self.scope, root, record)
+         self.check(result["status"] == "RECOVERY_REQUIRED" and result["SQL"] == result["key_loads"] == 0, "OLD_READY_DOES_NOT_AUTHORIZE_START")
++        witness=CONFIG["shared"]["cross_first"]
++        self.check(witness["actor"]["pid"]!=os.getpid() and witness["probes"]["stale_marker"]=="RECOVERY_REQUIRED", "ACTUAL_INDEPENDENT_PROCESS_REJECTS_STALE_MARKER")
++        self.check(witness["probes"]["old_epoch"]=="STALE_EPOCH" and all(x!="ADMITTED" for x in witness["probes"].values()), "CROSS_PROCESS_F23_ALL_INVALID_VARIANTS_REFUSED")
+ 
+     def test_F24_two_process_competition(self):
+         root = self.folder(); one, _ = self.worker(root, mode="race"); two, _ = self.worker(root, mode="race")
+@@ -319,6 +328,9 @@
+             issuer = live.LiveDeploymentIssuer.for_owned_test(self.scope, w.self_process_facts(self.scope))
+             self.refuses(lambda: issuer.bind_instance(root, lease, core.records()["instance"], authorization_id="auth:" + self.case_id), "REPLAY")
+         finally: lease.close()
++        witness=CONFIG["shared"]["cross_replay"]
++        self.check(witness["actor"]["pid"]!=CONFIG["shared"]["cross_first"]["actor"]["pid"] and witness["replays"]["same_authorization"]=="REPLAY", "SECOND_REAL_PROCESS_REJECTS_PERSISTED_AUTHORIZATION")
++        self.check(all(v=="REPLAY" for v in witness["aliases"].values()) and witness["effect_count_A"]==1, "ISSUER_SOURCE_CLIENT_ALIASES_CANNOT_CHANGE_CONSUMPTION")
+ 
+     def test_F27_issuer_rebuild(self):
+         core, _ = self.drive()
+@@ -445,9 +457,9 @@
+         self.check(context.minimum_version.name == "TLSv1_2", "REAL_SSL_CONTEXT_LOAD_NO_SOCKET")
+         badcert=self.scope.write_new(self.run/"invalid_test_certificate.crt",b"public invalid certificate")
+         self.refuses(lambda:l.load_test_TLS(self.scope,{**material,"certificate":str(badcert)},ledger),"INITIALIZATION_FAILED")
+-        adapter=l.OfflineAdapters(self.scope,TLS=False);core=l.Lifecycle(self.scope,self.model_root(),adapter,authorization_id="auth:T36:TLS")
++        adapter=l.OfflineAdapters(self.scope,TLS=False);core=l.Lifecycle(self.scope,self.folder("T36_TLS"),adapter,authorization_id="auth:T36:TLS")
+         core.prepare();core.initialize();core.start_owned();self.cleanup_ok(core,adapter,"FAILED")
+-        adapter=l.OfflineAdapters(self.scope,listener_address="0.0.0.0");core=l.Lifecycle(self.scope,self.model_root(),adapter,authorization_id="auth:T36:bind")
++        adapter=l.OfflineAdapters(self.scope,listener_address="0.0.0.0");core=l.Lifecycle(self.scope,self.folder("T36_bind"),adapter,authorization_id="auth:T36:bind")
+         core.prepare();core.initialize();core.start_owned();self.cleanup_ok(core,adapter,"FAILED")
+ 
+     def test_T37_LIFO_and_primary_failure(self):
+@@ -482,7 +494,7 @@
+ 
+     def test_T40_no_shutdown_deadlock(self):
+         for fault in ("handler","tls","ready"):
+-            adapter=l.OfflineAdapters(self.scope,fault=fault);core=l.Lifecycle(self.scope,self.model_root(),adapter,authorization_id="auth:T40:"+fault)
++            adapter=l.OfflineAdapters(self.scope,fault=fault);core=l.Lifecycle(self.scope,self.folder("T40_"+fault),adapter,authorization_id="auth:T40:"+fault)
+             core.prepare();core.initialize();core.start_owned()
+             self.check(core.state=="FAILED" and all(x.shutdown_calls==0 and x.closed for x in adapter.listeners),"PRE_LOOP_FAILURE_NEVER_CALLS_SHUTDOWN")
+         core,adapter=self.drive();core.stop_owned()
+@@ -494,8 +506,17 @@
+         line=w.read_owned_child_line(self.scope,child);self.check(line["status"]=="WAITING_EVENT","OWNED_CHILD_EVENT_READY")
+         self.refuses(lambda:w.verify_target_handle(self.scope,child,{**facts,"created_filetime":facts["created_filetime"]+1}),"IDENTITY_MISMATCH")
+         self.check(w.verify_target_handle(self.scope,child,facts)==facts,"EXACT_PID_CREATION_HANDLE_MATCH")
+-        w.signal_owned_stop(self.scope,event);result=self.finish(child,data=None)
++        authorization="auth:worker:"+root.name
++        running=l.status_persistent(self.scope,root,authorization)
++        self.check(running["liveness"]=="OWNED_PROCESS_ALIVE" and running["consumption_state"]=="STARTED","CROSS_PROCESS_STATUS_PROVES_EXACT_OWNED_SUPERVISOR")
++        self.refuses(lambda:l.stop_persistent(self.scope,root,authorization,expected_owner={**facts,"created_filetime":facts["created_filetime"]+1}),"IDENTITY_MISMATCH")
++        self.refuses(lambda:l.stop_persistent(self.scope,root,authorization,expected_epoch="old-epoch"),"STALE_EPOCH")
++        stop=l.stop_persistent(self.scope,root,authorization,expected_owner=facts,expected_epoch=running["process_epoch"])
++        self.check(stop["signal_sent"],"AUTHENTICATED_CROSS_PROCESS_STOP_SIGNAL")
++        result=self.finish(child,data=None)
+         self.check(result["exit_code"]==0,"REAL_OWNED_EVENT_GRACEFUL_EXIT");event.close();event.close()
++        stopped=l.status_persistent(self.scope,root,authorization)
++        self.check(stopped["liveness"]=="EXIT_CONFIRMED_BY_CREATOR" and stopped["consumption_state"]=="FINISHED","STOPPED_OWNER_DISTINCT_FROM_STALE_MARKER")
+ 
+     def test_T42_stop_preserves_persistent_files(self):
+         root=self.folder();retained=self.scope.write_new(root/"retained.json",b"{}")
+@@ -519,6 +540,11 @@
+         core,adapter=self.drive("host_register");self.check(core.records()["start_claimed"] and core.state=="FAILED","FAILED_START_PERMISSION_STAYS_SPENT")
+         self.refuses(core.start_owned,"LIFECYCLE_ORDER")
+         self.refuses(core.context.issue_permit,"STALE_EPOCH")
++        first=CONFIG["shared"]["cross_first"];second=CONFIG["shared"]["cross_replay"]
++        self.check(first["first_start"]["START_APPROVAL_CONSUMED"] and first["first_start"]["START_SUCCEEDED"],"CROSS_PROCESS_SUCCESS_HAS_DISTINCT_CONSUMED_AND_STARTED_FACTS")
++        self.check(first["start_ACK_observed_by_client"] is False and second["replays"]["same_authorization"]=="REPLAY","LOST_START_ACK_DOES_NOT_REOPEN_PAID_AUTHORIZATION")
++        self.check(second["claimed_failure"]["START_APPROVAL_CONSUMED"] and not second["claimed_failure"]["START_SUCCEEDED"] and second["claimed_failure"]["effect_count"]==0,"REAL_CRASH_AFTER_CLAIM_STAYS_SPENT_WITH_ZERO_START_EFFECT")
++        self.check(second["replays"]["claimed_after_crash"]=="REPLAY","FAILED_ACK_OR_CRASH_CANNOT_REISSUE_START")
+ 
+     def test_T46_no_second_Store_or_rearm(self):
+         core,adapter=self.drive()
+@@ -584,3 +610,31 @@
+             value=json.loads(output.getvalue());self.check(code==0 and value["operation"]==op and not value["D1B2_executable"],"ACTUAL_SIX_OPERATION_OFFLINE_ENTRY")
+             self.secret_free(output.getvalue());self.observations.append(value)
+         self.check((root/"operation_receipt.json").is_file(),"OFFLINE_OPERATION_RECEIPT_PERSISTED")
++
++    def test_X01_independent_process_first_admission(self):
++        roots={name:self.folder("cross_"+name) for name in ["A","B","K"]}
++        approvals={name:"auth:cross:"+name for name in roots}
++        for name,root in roots.items():
++            l.prepare_persistent_instance(self.scope,root,approvals[name])
++            l.initialize_persistent_instance(self.scope,root,approvals[name])
++        child,facts=self.worker(roots["A"],mode="cross_first",extra={"roots":{k:str(v) for k,v in roots.items()},"authorizations":approvals})
++        result=self.finish(child)
++        self.check(result["exit_code"]==73,"FIRST_INDEPENDENT_ACTOR_EXITED_AFTER_DURABLE_SECOND_CLAIM")
++        witness=json.loads((self.run/"CROSS_FIRST_WITNESS.json").read_text(encoding="utf-8"))
++        self.check(witness["actor"]==facts and facts["pid"]!=os.getpid(),"FIRST_WITNESS_ACTUAL_PID_AND_CREATION")
++        self.check(witness["first_start"]["START_SUCCEEDED"] and witness["finished_A"]["consumption_state"]=="FINISHED" and witness["finished_A"]["effect_count"]==1,"PREPARE_INITIALIZE_PARENT_TO_INDEPENDENT_START_SUCCESS")
++        self.check(len(witness["probes"])>=6 and all(x!="ADMITTED" for x in witness["probes"].values()),"INVALID_MARKER_AND_BINDING_VARIANTS_REJECTED_IN_ACTOR")
++        CONFIG["shared"].update(cross_roots=roots,cross_authorizations=approvals,cross_first=witness)
++        self.observations.append(witness)
++
++    def test_X02_independent_process_replay(self):
++        roots=CONFIG["shared"]["cross_roots"];approvals=CONFIG["shared"]["cross_authorizations"]
++        child,facts=self.worker(roots["A"],mode="cross_replay",extra={"roots":{k:str(v) for k,v in roots.items()},"authorizations":approvals})
++        result=self.finish(child)
++        self.check(result["exit_code"]==0,"SECOND_INDEPENDENT_ACTOR_COMPLETED_REPLAY_CHECKS")
++        witness=json.loads((self.run/"CROSS_REPLAY_WITNESS.json").read_text(encoding="utf-8"))
++        self.check(witness["actor"]==facts and facts["pid"]!=CONFIG["shared"]["cross_first"]["actor"]["pid"],"INDEPENDENT_SECOND_PROCESS_AFTER_FIRST_EXIT")
++        self.check(all(v=="REPLAY" for v in witness["replays"].values()) and all(v=="REPLAY" for v in witness["aliases"].values()),"DURABLE_CONSUMPTION_AND_ALL_DISPLAY_ALIASES_REFUSED")
++        self.check(all(v=="RECOVERY_REQUIRED" for v in witness["corruption"].values()) and witness["effect_count_A"]==1,"TRUNCATION_MISSING_SLOT_AND_CHAIN_DAMAGE_FAIL_CLOSED")
++        CONFIG["shared"]["cross_replay"]=witness
++        self.observations.append(witness)
+--- R21/run_dsat_authority_live_lifecycle_tests.py
++++ R22/run_dsat_authority_live_lifecycle_tests.py
+@@ -21,8 +21,8 @@
+ 
+ PROJECT = Path(__file__).absolute().parents[1]
+ BASE = PROJECT.parent / "research_g2_dsat_implementation"
+-RECORD, R20 = BASE / "2026-11-11_r21", BASE / "2026-11-11_r20"
+-OUTPUT = BASE / "2026-11-11_r21_d1b1_offline"
++RECORD, R20 = BASE / "2026-11-11_r22", BASE / "2026-11-11_r20"
++OUTPUT = BASE / "2026-11-11_r22_d1b1_closure_offline"
+ DEPLOY = PROJECT.parent / "h2_test_runtime/h2-authority-synth-001"
+ PHASE, CURRENT_ID, RUN = "PREFLIGHT", None, None
+ AUDIT = {"file_SQLite_connections": 0, "memory_SQLite_connections": 0, "SQLite_by_case": {},
+@@ -64,10 +64,11 @@
+ 
+ 
+ def audit(event, args):
++    if event == "sqlite3.connect" and PHASE == "worker": violation("private_outside_access")
+     if event.startswith("socket."): violation("socket_attempts")
+     if event in {"os.system", "os.startfile", "os.fork", "os.exec"}: violation("forbidden_process_attempts")
+     if event == "subprocess.Popen":
+-        allowed = PHASE == "new52" and RUN is not None
++        allowed = PHASE == "new54" and RUN is not None
+         command = args[1]
+         runner = PROJECT / "scripts/run_dsat_authority_live_lifecycle_tests.py"
+         candidates = [] if RUN is None else [
+@@ -125,12 +126,12 @@
+ 
+ def guarded_connect(database, *args, **kwargs):
+     if database == ":memory:":
+-        maximum = 16 if PHASE == "new52" else 8 if PHASE == "r19_24" else 32
+-        if PHASE not in {"new52", "r19_24", "legacy_A1"} or AUDIT["memory_SQLite_connections"] >= maximum:
++        maximum = 16 if PHASE == "new54" else 8 if PHASE == "r19_24" else 32
++        if PHASE not in {"new54", "r19_24", "legacy_A1"} or AUDIT["memory_SQLite_connections"] >= maximum:
+             violation("private_outside_access")
+         AUDIT["memory_SQLite_connections"] += 1
+     else:
+-        if PHASE != "new52" or RUN is None: violation("private_outside_access")
++        if PHASE != "new54" or RUN is None: violation("private_outside_access")
+         raw = str(database)
+         if raw.startswith("file:"):
+             parsed = urlparse(raw)
+@@ -143,7 +144,7 @@
+         if AUDIT["file_SQLite_connections"] > 104: violation("private_outside_access")
+     key = CURRENT_ID or "setup"
+     AUDIT["SQLite_by_case"][key] = AUDIT["SQLite_by_case"].get(key, 0) + 1
+-    if PHASE == "new52" and AUDIT["SQLite_by_case"][key] > 2: violation("private_outside_access")
++    if PHASE == "new54" and AUDIT["SQLite_by_case"][key] > 2: violation("private_outside_access")
+     kwargs["factory"] = AuditedConnection
+     connection = _sqlite_connect(database, *args, **kwargs)
+     connection.set_authorizer(None)
+@@ -166,7 +167,7 @@
+     baseline = load(RECORD / "sources/PRECHECK_LOCK.json")
+     mods = {x["path"] for x in baseline["allowed_modifications"]}
+     changed = []
+-    for row in baseline["protected_files"]:
++    for row in baseline["protected"]:
+         if row["path"] in mods:
+             changed.append(row["path"])
+         elif sha(row["path"]) != row["sha256"]:
+@@ -174,7 +175,7 @@
+     for row in baseline["allowed_modifications"]:
+         if sha(RECORD / "sources/original" / (Path(row["path"]).name + ".txt")) != row["before_sha256"]:
+             raise RuntimeError("ORIGINAL_SOURCE_LOST")
+-    filelock = load(RECORD / "D1B1_FILE_LOCK.json")
++    filelock = load(RECORD / "R22_FILE_LOCK.json")
+     for row in filelock["executed_code"]:
+         if sha(row["path"]) != row["sha256"]: raise RuntimeError("SOURCE_CHANGED_SINCE_TEST_FREEZE")
+         ast.parse(Path(row["path"]).read_text(encoding="utf-8"))
+@@ -220,7 +221,9 @@
+ def run_class(cls, ids, log):
+     suite = unittest.defaultTestLoader.loadTestsFromTestCase(cls)
+     actual = [test._testMethodName.split("_")[1] for test in suite]
+-    if actual != ids: raise RuntimeError("FROZEN_TEST_IDENTITIES_MISMATCH")
++    if set(actual) != set(ids) or len(actual)!=len(ids): raise RuntimeError("FROZEN_TEST_IDENTITIES_MISMATCH")
++    by_id={t._testMethodName.split("_")[1]:t for t in suite}
++    suite=unittest.TestSuite([by_id[i] for i in ids])
+     return unittest.TextTestRunner(stream=log, verbosity=2, resultclass=Results).run(suite)
+ 
+ 
+@@ -262,13 +265,13 @@
+     PHASE = "worker"
+     path = target(input_path)
+     data = load(path); RUN = target(data["run_root"])
+-    if data.get("source_kind") != "R21_OWNED_STUB": raise RuntimeError("STUB_SCOPE_DENIED")
++    if data.get("source_kind") != "R22_OWNED_STUB": raise RuntimeError("STUB_SCOPE_DENIED")
+     sys.path.insert(0, str(PROJECT / "src"))
+     from auth_lifecycle.online_state import dsat_windows_runtime as w
+     scope = w.authorize_test_scope(RUN)
+     root = scope.path(data["resource_root"])
+     mode = data["mode"]
+-    lease = None; inherited = None; event = None
++    lease = None; inherited = None; event = None; manager=None
+     try:
+         if mode == "handoff":
+             inherited = int(data["inherited_handle"])
+@@ -277,59 +280,187 @@
+             print(json.dumps({"status":"INHERITED_LOCK_OWNED","pid":os.getpid()}),flush=True)
+             sys.stdin.buffer.readline(16)
+         elif mode == "event":
++            from auth_lifecycle.online_state import dsat_authority_lifecycle as lifecycle
+             name = data["event_name"]
+-            if not re.fullmatch(r"Local\\auth_lifecycle_r21_[a-f0-9]{32,64}", name): raise RuntimeError("EVENT_SCOPE_DENIED")
++            if not re.fullmatch(r"Local\\auth_lifecycle_r22_[a-f0-9]{32,64}", name): raise RuntimeError("EVENT_SCOPE_DENIED")
+             kernel,_=w._api();event=kernel.OpenEventW(0x100000,False,name)
+             if not event: raise RuntimeError("EVENT_UNAVAILABLE")
++            manager=lifecycle.supervise_persistent_offline(scope,root,data["authorization_id"],control_name=name)
+             print(json.dumps({"status":"WAITING_EVENT","pid":os.getpid()}),flush=True)
+             return 0 if kernel.WaitForSingleObject(event,5000)==0 else 2
+         elif mode in {"race","crash"}:
++            from auth_lifecycle.online_state import dsat_authority_lifecycle as lifecycle
++            from auth_lifecycle.online_state import dsat_authority_live as live
++            if mode=="crash":
++                lease=w.reserve_instance(scope,root)
++                instance=lifecycle.load_persistent_instance(scope,root)
++                approval=live.load_start_approval(scope,root,instance,data["authorization_id"],lease)
++                if int(data["exit_code"])==73:
++                    live.consume_start_approval(approval,lease,approval.body()["process_epoch"])
++                else:
++                    live.write_marker(scope,root,instance,"RECOVERY_REQUIRED",authorization_id=data["authorization_id"])
++                scope.write_new(root/"partial_receipt.json",json.dumps({"phase":"STOPPING","pid":os.getpid()}).encode())
++                os._exit(int(data["exit_code"]))
+             try:
+-                lease=w.reserve_instance(scope,root)
++                manager=lifecycle.supervise_persistent_offline(scope,root,data["authorization_id"],request_context={"client_alias":"race:"+str(os.getpid())})
+                 status="LOCKED"
+             except w.SafetyError as error:
+-                if error.code!="SINGLE_ACTIVE_CONFLICT":raise
++                if error.code not in {"SINGLE_ACTIVE_CONFLICT","REPLAY"}:raise
+                 status="CONFLICT"
+-            if mode=="crash":
+-                if lease is None: return 3
+-                scope.write_new(root/"partial_receipt.json",json.dumps({"phase":"STOPPING","pid":os.getpid()}).encode())
+-                os._exit(int(data["exit_code"]))
+-            print(json.dumps({"status":status,"pid":os.getpid()}),flush=True)
+-            if lease is not None:sys.stdin.buffer.readline(16)
++            print(json.dumps({"status":status,"pid":os.getpid(),"durable_admission":manager is not None}),flush=True)
++            if manager is not None:sys.stdin.buffer.readline(16)
++        elif mode=="cross_first":
++            return cross_first(scope,data)
++        elif mode=="cross_replay":
++            return cross_replay(scope,data)
+         else:raise RuntimeError("STUB_MODE_DENIED")
+         return 0
+     finally:
++        if manager is not None:manager.stop()
+         if lease is not None:lease.close()
+         if inherited is not None:w._api()[0].CloseHandle(inherited)
+         if event is not None:w._api()[0].CloseHandle(event)
++
++
++def _expected_refusal(function):
++    from auth_lifecycle.online_state.dsat_windows_runtime import SafetyError
++    try:
++        manager=function()
++        if hasattr(manager,'stop'):manager.stop()
++        return 'ADMITTED'
++    except SafetyError as error:return error.code
++
++
++def cross_first(scope,data):
++    from auth_lifecycle.online_state import dsat_authority_lifecycle as l
++    from auth_lifecycle.online_state import dsat_authority_live as a
++    from auth_lifecycle.online_state import dsat_windows_runtime as w
++    roots={k:scope.path(v) for k,v in data['extra']['roots'].items()};auth=data['extra']['authorizations']
++    root=roots['B'];instance=l.load_persistent_instance(scope,root)
++    marker=a.read_bound_document(scope,root/'instance_marker.json');probes={}
++    variants={
++        'stale_marker':{**marker,'phase':'SERVICE_READY','owner':{'pid':1},'process_epoch':'old'},
++        'wrong_config':{**marker,'config_digest':'0'*64},
++        'wrong_origin':{**marker,'SID':'S-1-0-0'},
++        'unowned_resources':{**marker,'resources_owned':False}}
++    for name,value in variants.items():
++        a.write_bound_document(scope,root/'instance_marker.json',value,replace=True)
++        probes[name]=_expected_refusal(lambda:l.supervise_persistent_offline(scope,root,auth['B']))
++        a.write_bound_document(scope,root/'instance_marker.json',marker,replace=True)
++    original=(root/'instance_marker.json').read_bytes()
++    (root/'instance_marker.json').write_bytes(original[:-3])
++    probes['truncated_marker']=_expected_refusal(lambda:l.supervise_persistent_offline(scope,root,auth['B']))
++    (root/'instance_marker.json').write_bytes(original)
++    probes['old_epoch']=_expected_refusal(lambda:l.supervise_persistent_offline(scope,root,auth['B'],expected_epoch='old-epoch'))
++    probes['missing_authorization']=_expected_refusal(lambda:l.supervise_persistent_offline(scope,root,'auth:missing'))
++    manager=l.supervise_persistent_offline(scope,roots['A'],auth['A'])
++    first=manager.snapshot()
++    probes['already_running']=_expected_refusal(lambda:l.supervise_persistent_offline(scope,roots['A'],auth['A']))
++    manager.stop();finished=l.status_persistent(scope,roots['A'],auth['A'])
++    rootK=roots['K'];lease=w.reserve_instance(scope,rootK)
++    instK=l.load_persistent_instance(scope,rootK);grantK=a.load_start_approval(scope,rootK,instK,auth['K'],lease)
++    a.consume_start_approval(grantK,lease,grantK.body()['process_epoch'])
++    claimed=l.status_persistent(scope,rootK,auth['K'])
++    witness={'schema':'r22-cross-first/1','actor':w.self_process_facts(scope).facts(),'probes':probes,
++        'first_start':first,'finished_A':finished,'claimed_before_real_exit':claimed,'P2':False,
++        'start_ACK_observed_by_client':False,
++        'roots':{k:str(v) for k,v in roots.items()},'authorization_ids':auth}
++    scope.write_new(scope.root/'CROSS_FIRST_WITNESS.json',json.dumps(witness,ensure_ascii=True,indent=2).encode())
++    print(json.dumps({'status':'CROSS_FIRST_DURABLE','pid':os.getpid()}),flush=True)
++    # Real exit with the second grant paid, no Store/listener for that grant.
++    os._exit(73)
++
++
++def cross_replay(scope,data):
++    from auth_lifecycle.online_state import dsat_authority_lifecycle as l
++    from auth_lifecycle.online_state import dsat_authority_live as a
++    from auth_lifecycle.online_state import dsat_windows_runtime as w
++    roots={k:scope.path(v) for k,v in data['extra']['roots'].items()};auth=data['extra']['authorizations']
++    first=load(scope.root/'CROSS_FIRST_WITNESS.json')
++    owner=first['actor'];exit_record=w.recorded_owner(scope,owner)
++    if not exit_record['exit_recorded']:raise RuntimeError('FIRST_OWNER_EXIT_NOT_CONFIRMED')
++    replays={'same_authorization':_expected_refusal(lambda:l.supervise_persistent_offline(scope,roots['A'],auth['A'])),
++             'claimed_after_crash':_expected_refusal(lambda:l.supervise_persistent_offline(scope,roots['K'],auth['K']))}
++    aliases={name:_expected_refusal(lambda name=name:l.supervise_persistent_offline(scope,roots['A'],auth['A'],request_context={name:'changed:display'}))
++        for name in ['issuer_alias','source_alias','client_alias','display']}
++    root=roots['B'];instance=l.load_persistent_instance(scope,root)
++    grant,slot,effect=a.approval_paths(root,auth['B']);original=slot.read_bytes();corruption={}
++    slot.write_bytes(original[:-2])
++    corruption['truncated_slot']=_expected_refusal(lambda:l.supervise_persistent_offline(scope,root,auth['B']))
++    corruption['initialize_truncated_slot']=_expected_refusal(lambda:l.initialize_persistent_instance(scope,root,auth['B']))
++    slot.write_bytes(original)
++    removed=slot.with_name(slot.name+'.held');os.replace(slot,removed)
++    corruption['missing_slot']=_expected_refusal(lambda:l.supervise_persistent_offline(scope,root,auth['B']))
++    corruption['prepare_missing_slot']=_expected_refusal(lambda:l.prepare_persistent_instance(scope,root,auth['B']))
++    os.replace(removed,slot)
++    row=json.loads(original);row['payload']['previous']='0'*64;row['digest']=a.digest(row['payload'])
++    slot.write_bytes(json.dumps(row,sort_keys=True,separators=(',',':')).encode()+b'\n')
++    corruption['invalid_chain']=_expected_refusal(lambda:l.supervise_persistent_offline(scope,root,auth['B']))
++    slot.write_bytes(original)
++    status=l.status_persistent(scope,roots['A'],auth['A']);claimed=l.status_persistent(scope,roots['K'],auth['K'])
++    stop=l.stop_persistent(scope,roots['A'],auth['A'],expected_epoch=status['process_epoch'])
++    recovered=l.recover_persistent(scope,roots['K'],auth['K'])
++    witness={'schema':'r22-cross-replay/1','actor':w.self_process_facts(scope).facts(),'first_owner_exit_record':exit_record,
++        'replays':replays,'aliases':aliases,'corruption':corruption,'effect_count_A':status['effect_count'],
++        'finished_A':status,'claimed_failure':claimed,'stop_after_exit':stop,'recovery_after_crash':recovered,'P2':False}
++    scope.write_new(scope.root/'CROSS_REPLAY_WITNESS.json',json.dumps(witness,ensure_ascii=True,indent=2).encode())
++    print(json.dumps({'status':'CROSS_REPLAY_REJECTED','pid':os.getpid()}),flush=True)
++    return 0
+ 
+ 
+ def main(suite):
+     global PHASE, RUN
+     started_utc = datetime.datetime.now(datetime.timezone.utc).isoformat()
+     clock = time.perf_counter_ns()
+-    baseline, filelock, modified = preflight(suite)
++    receipt=load(RECORD/"APPROVAL_RECEIPT.json")
++    if receipt.get("approved") is not True or sha(receipt['request_path'])!=receipt['request_sha256']:
++        raise RuntimeError('R22_APPROVAL_REQUIRED')
+     target(OUTPUT).mkdir(exist_ok=True)
+-    n = 1
+-    while (OUTPUT / (suite + "_%03d" % n)).exists(): n += 1
+-    if n > 2: raise RuntimeError("SUITE_RERUN_BUDGET_EXHAUSTED")
+-    RUN = target(OUTPUT / (suite + "_%03d" % n)); RUN.mkdir()
++    extra_path=RECORD/'ADDITIONAL_APPROVAL_RECEIPT.json'
++    extra=None
++    if extra_path.is_file():
++        candidate=load(extra_path)
++        if (candidate.get('approved') is True and candidate.get('suite')=='new54'
++            and candidate.get('max_direct_suite_runs')==4
++            and candidate.get('request_sha256')==sha(RECORD/'ADDITIONAL_RUN_REQUEST.json')
++            and sha(candidate['response_path'])==candidate['response_sha256']):
++            extra=candidate
++    previous=[load(p) for p in OUTPUT.glob('SUITE_INVOCATION_*.json')]
++    if suite=='new54' and any(x['suite']=='new54' for x in previous) and extra is None:
++        raise RuntimeError('R22_FRESH_54_DOMAIN_RESOURCES_REQUIRE_NEW_APPROVAL')
++    slot=None
++    for n in range(1,5 if extra is not None else 4):
++        if n==4 and not (extra is not None and suite=='new54'):break
++        try:
++            claim=target(OUTPUT/("SUITE_INVOCATION_%02d.json"%n))
++            with claim.open('x',encoding='utf-8') as stream:
++                json.dump({'suite':suite,'slot':n,'argv':sys.orig_argv,'executable':sys.executable,'started_utc':started_utc},stream,ensure_ascii=True)
++                stream.flush();os.fsync(stream.fileno())
++            slot=n;break
++        except FileExistsError:continue
++    if slot is None:raise RuntimeError('R22_THREE_SUITE_BUDGET_EXHAUSTED')
++    RUN = target(OUTPUT / (suite + "_%03d" % slot)); RUN.mkdir()
++    try:baseline, filelock, modified = preflight(suite)
++    except BaseException:
++        write(RUN/'EARLY_FAILURE.json',{'phase':'preflight','traceback':redact(traceback.format_exc()),'invocation_slot':slot,'tests_executed':0})
++        raise
+     snapshot = RUN / "code_snapshot"; snapshot.mkdir()
+     for row in filelock["executed_code"]:
+         (snapshot / (Path(row["path"]).name + ".txt")).write_bytes(Path(row["path"]).read_bytes())
+     write(RUN / "RUN_START.json", {"suite":suite,"argv_interpreter":sys.orig_argv,"executable":sys.executable,
+-        "python":sys.version,"started_utc":started_utc,"code":filelock["executed_code"]})
++        "python":sys.version,"started_utc":started_utc,"code":filelock["executed_code"],"main_pid":os.getpid(),"run_id":RUN.name,"invocation_slot":slot})
+     sqlite3.connect = guarded_connect
+     PHASE = suite
+     fixture = PROJECT / "tests/fixtures/dsat_authority_live_lifecycle"
+     old_D = PROJECT / "tests/fixtures/dsat_authority_runtime"
+     old_A = PROJECT / "tests/fixtures/dsat_authority_host_activation"
+     old_H = PROJECT / "tests/fixtures/dsat_authority_read_host"
+-    roots = [fixture] if suite=="new52" else [old_D] if suite=="r19_24" else [old_A,old_H]
++    roots = [fixture] if suite=="new54" else [old_D] if suite=="r19_24" else [old_A,old_H]
+     for root in roots:SECRETS.update(load(root/"CANARIES.json")["values"].values())
+     timer = threading.Timer(300, _thread.interrupt_main);timer.daemon=True;timer.start()
+     original_start=threading.Thread.start
+-    if suite=="new52":
++    if suite=="new54":
++        AUDIT['threads_peak']=threading.active_count()
+         def thread_start(thread,*args,**kwargs):
+             AUDIT["threads_created"]+=1
+             if AUDIT["threads_created"]>16:raise RuntimeError("THREAD_COUNT_LIMIT")
+@@ -342,10 +473,10 @@
+     try:
+         sys.path.insert(0,str(PROJECT/"src"))
+         with (RUN/"stdout.log").open("w",encoding="utf-8") as log:
+-            if suite=="new52":
+-                cases=module_at("r21_new52",PROJECT/"tests/test_dsat_authority_live_lifecycle.py")
+-                plan=load(R20/"D1B_TEST_PLAN.json");cases.configure(plan,fixture,RUN)
+-                results=[run_class(cases.LiveLifecycleCases,[x["id"] for x in plan["B1_new_cases"]],log)]
++            if suite=="new54":
++                cases=module_at("r22_new54",PROJECT/"tests/test_dsat_authority_live_lifecycle.py")
++                plan=load(RECORD/"R22_TEST_PLAN.json");cases.configure(plan,fixture,RUN)
++                results=[run_class(cases.LiveLifecycleCases,[x["id"] for x in plan["new54"]],log)]
+                 for child in cases.CONFIG["children"]:
+                     if child["result"] is None:
+                         child["result"]=cases.w.finish_owned_child(cases.CONFIG["scope"],child["process"])
+@@ -379,14 +510,14 @@
+         case_files=[p for p in RUN.rglob('*') if p.is_file()]
+         dirs=[p for p in RUN.rglob('*') if p.is_dir()]
+         disk=sum(p.stat().st_size for p in case_files)
+-        expected={"new52":52,"r19_24":24,"legacy44":44}[suite]
++        expected={"new54":54,"r19_24":24,"legacy44":44}[suite]
+         modules=[n for n in sys.modules if n in {"auth_lifecycle.online_state.services","auth_lifecycle.online_state.storage","auth_lifecycle.online_state.materials"}]
+-        result={"schema":"r21-actual-suite/1","suite":suite,"run":str(RUN),"argv_interpreter":sys.orig_argv,
++        result={"schema":"r22-actual-suite/1","suite":suite,"run":str(RUN),"argv_interpreter":sys.orig_argv,
+             "executable":sys.executable,"python":sys.version,"started_utc":started_utc,
+             "finished_utc":datetime.datetime.now(datetime.timezone.utc).isoformat(),"elapsed_ns":time.perf_counter_ns()-clock,
+             "counts":counts,"executed":len(rows),"cases":rows,"details":details,"code":filelock["executed_code"],
+             "inputs":filelock["inputs"],
+-            "protected_unique_files":len(baseline["protected_files"]),"authorized_modified_files":modified,
++            "protected_unique_files":len(baseline["protected"]),"authorized_modified_files":modified,"invocation_slot":slot,
+             "audit":AUDIT,"scope_counts":scope_counts,"owned_children":children,"memory":peak,
+             "files_before_result_output":len(case_files),"directories_before_result_output":len(dirs),"logical_disk_bytes_before_results":disk,
+             "public_sink_scan":"CLEAN" if clean else "FAIL","production_modules_imported":modules,
+@@ -396,7 +527,7 @@
+         result["passed"]=counts=={"PASS":expected,"FAIL":0,"ERROR":0,"SKIP":0,"BLOCKED":0,"NOT_RUN":0} and clean and limits_ok and not AUDIT["unexpected_violations"]
+         write(RUN/"RESULTS.json",result)
+         # Individual frozen fault evidence is an index into actual case details.
+-        if suite=="new52":write(RUN/"FAULT_COVERAGE.json",[{"fault_id":x["id"],"test_id":x["id"],"status":next(y["status"] for y in rows if y["id"]==x["id"]),"detail":x} for x in details if x["id"].startswith("F")])
++        if suite=="new54":write(RUN/"FAULT_COVERAGE.json",[{"fault_id":x["id"],"test_id":x["id"],"status":next(y["status"] for y in rows if y["id"]==x["id"]),"detail":x} for x in details if x["id"].startswith("F")])
+     except BaseException:
+         write(RUN/"EARLY_FAILURE.json",{"status":"EARLY_FAILURE","traceback":redact(traceback.format_exc()),"audit":AUDIT})
+         raise
+@@ -406,7 +537,7 @@
+             try:connection.close()
+             except Exception:pass
+     index=OUTPUT/"TEST_RUNS.json"
+-    history=load(index) if index.exists() else {"schema":"r21-runs/1","runs":[]}
++    history=load(index) if index.exists() else {"schema":"r22-runs/1","runs":[]}
+     history["runs"].append({"path":str(RUN/"RESULTS.json"),"sha256":sha(RUN/"RESULTS.json"),"suite":suite,"counts":counts,"passed":result["passed"]})
+     write(index,history)
+     print(json.dumps({"suite":suite,"counts":counts,"passed":result["passed"],"run":str(RUN)},ensure_ascii=True))
+@@ -415,7 +546,7 @@
+ 
+ if __name__=="__main__":
+     parser=argparse.ArgumentParser()
+-    parser.add_argument("--suite",choices=["new52","r19_24","legacy44"])
++    parser.add_argument("--suite",choices=["new54","r19_24","legacy44"])
+     parser.add_argument("--worker",action="store_true")
+     parser.add_argument("--input")
+     args=parser.parse_args()

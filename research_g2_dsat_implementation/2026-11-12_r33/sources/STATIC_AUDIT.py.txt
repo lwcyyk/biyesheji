@@ -1,0 +1,118 @@
+"""Static target-byte/AST/lock inspection. Never import or execute the Runner."""
+from pathlib import Path
+import ast
+import hashlib
+import json
+import sys
+import textwrap
+
+B = Path(r"D:\毕业设计\research_g2_dsat_implementation")
+R, F = B / "2026-11-12_r33", B / "2026-11-12_r31"
+T = Path(r"D:\毕业设计\auth-lifecycle\scripts\run_dsat_current_build_regressions.py")
+
+def h(p): return hashlib.sha256(Path(p).read_bytes()).hexdigest()
+def load(p): return json.loads(Path(p).read_text(encoding="utf-8-sig"))
+def functions(tree):
+    values = {}
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef): values[node.name] = node
+        elif isinstance(node, ast.ClassDef):
+            values.update({node.name + "." + x.name: x for x in node.body if isinstance(x, ast.FunctionDef)})
+    return values
+
+source = T.read_text(encoding="utf-8")
+tree = ast.parse(source)
+before = functions(ast.parse((R / "sources/RUNNER_BEFORE.py.bin").read_bytes()))
+after = functions(tree)
+checks = []
+def check(name, passed, evidence):
+    checks.append({"id": name, "passed": bool(passed), "evidence": evidence, "critical": True})
+
+check("AST_ONLY", True, "target parsed only;no import/compile/exec of target or tests")
+for name in (
+    "State.audit", "State.block_bound_cache_probe", "State.deny_read", "checked",
+    "State.connect_memory", "State.sql", "State.close_connections", "State.verify_file_origin",
+    "State.verify_dynamic_origin", "D24Projection.__enter__", "D24Projection.__exit__",
+    "ProjectionFile.write_bytes", "ProjectionRead._path", "OrderedSuite.run",
+    "AuditedConnection.execute", "AuditedConnection.rollback", "AuditedCursor.execute",
+    "Results.record", "State.failure", "State.publish", "entry",
+):
+    check("UNCHANGED_" + name, ast.dump(before[name], include_attributes=False) ==
+          ast.dump(after[name], include_attributes=False), {"line": after[name].lineno, "method": "exactAST"})
+for name in ("State.preflight", "load_group", "main", "finalize_evidence"):
+    segment = textwrap.dedent(ast.get_source_segment(source, after[name]))
+    segment = segment.replace("R33_", "R31_").replace("r33-", "r31-").replace("r33_cases_", "r31_cases_")
+    check("NAMESPACE_ONLY_" + name, ast.dump(ast.parse(segment).body[0], include_attributes=False) ==
+          ast.dump(before[name], include_attributes=False), "reverse namespace AST exact equal")
+
+build = load(R / "R33_BUILD_AND_RUNNER_LOCK.json")
+manifest = load(R / "R33_68_TEST_MANIFEST.json")
+catalogue = load(R / "R33_RUNTIME_READ_MANIFEST.json")
+budget = load(R / "R33_EVIDENCE_BUDGET_CONTRACT.json")
+history = load(R / "sources/PREPATCH_AND_HISTORY.json")
+model = load(R / "R33_EVIDENCE_SPACE_ANALYSIS.json")
+check("ENGINEERING_ORIGINAL_SOURCES", all(h(x["path"]) == x["sha256"] for x in
+      build["engineering_source"] + build["regression_extension_sources"]), "42+5 pins match;3 original tests preserved")
+check("FIXTURES_RUNTIME", all(h(x["path"]) == x["sha256"] for x in
+      manifest["fixture_files"] + build["runtime_files"] + catalogue["files"]), "10fixture/24runtime/394exact code files")
+check("394_PATHS_UNCHANGED", catalogue["files"] == load(F / "R31_RUNTIME_READ_MANIFEST.json")["files"],
+      "canonical module-name mapping only;no file permission added")
+rejected = load(R / "R33_REJECTED_ORIGIN_ANALYSIS.json")
+check("EXACT3_ARCHIVED", rejected["count"] == 3, "actual fields/IDs preserved;UNKNOWN separated from post static observations")
+check("CFFI_TWO_PINS", all(x in source for x in (
+    "self.runtime_code_pins.get(cffi_path) == CFFI_SHA256", "self.expected_names.pop(\"_cffi_backend.cp312-win_amd64\")",
+    'self.expected_names["_cffi_backend"] = cffi_path')), "registered-name replacement plus unchanged full file validator")
+check("WRAPPER_CHAIN", all(x in source for x in (
+    "type(module) is cls", "cls.__bases__ == (type(sys),)",
+    'module_dictionary(module).get("_module") is underlying',
+    "self.verify_file_origin(observed, underlying, self.expected_names.get(name))",
+    'own.get("__spec__") is underlying_spec')), "pinnedutils exact class/underlying/file witness and present-metadata consistency")
+check("NO_EARLY_CRYPTO_IMPORT", not any(isinstance(n, (ast.Import, ast.ImportFrom)) and
+      "cryptography" in ast.get_source_segment(source, n) for n in ast.walk(tree)), "inspect existing module dictionaries only")
+check("CODEC_BUILTINS", all(n in sys.builtin_module_names for n in ("binascii", "zlib")),
+      "interpreter registry metadata only;no library/test import probe;no new source file")
+check("RAW_PUBLIC_SCAN", source.index('require(all(v.encode() not in raw') <
+      source.index("binascii.b2a_base64("), "scan plaintext canonical bytes before compression")
+check("RESERVATION_INVARIANT", budget["caps_total"] == sum(budget["file_caps"].values()) == 2000167
+      and budget["caps_total"] <= 2097152 and budget["reserved_final_three_bytes"] == 655360
+      and budget["reserved_failed_receipt_bytes"] == 65536, "disjoint cap proof;96985 slack")
+check("UNIFIED_PATH_BUDGET", all(len(n.args) >= 2 for n in ast.walk(tree) if isinstance(n, ast.Call) and
+      isinstance(n.func, ast.Attribute) and n.func.attr == "reserve_bytes"), "all5 reserve sites carry exact output path")
+# Existing str.replace calls normalize/redact strings. Filesystem rename/replace
+# would be os.* calls or a new Path operation; writer bodies use only x/xb.
+check("NO_DISK_TEMP_OR_RENAME", budget["temporary_file_bytes"] == 0 and not any(
+    isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute) and isinstance(n.func.value, ast.Name)
+    and n.func.value.id == "os" and n.func.attr in {"rename", "replace", "remove", "unlink"}
+    for n in ast.walk(tree)), "writer/Sink/checkpoint body review:exclusive creation;original mutation audit unchanged")
+check("609_LOSSLESS_EXISTING_VALUES", model["R32_payload_static_reencoding"]["all_values_losslessly_roundtrip"]
+      and model["R32_payload_static_reencoding"]["events"] == 609, "inert existing-data size model;no target execution")
+check("UNKNOWN_RETAINED", all(x["R32_actual_SHA256"] == "UNKNOWN" for x in rejected["objects"]),
+      "historical runtime hashes not replaced by later static file hashes;R32 resource UNKNOWN retained")
+check("ORIGINAL68", manifest["tests"] == load(F / "R31_68_TEST_MANIFEST.json")["tests"]
+      and len(manifest["tests"]) == 68, "IDs/expected/source/fixture and phase order20/24/24 unchanged")
+check("OUTPUT_ABSENT", not (R / "verification_runs").exists(), "no future output/receipt")
+check("NO_RETRY", not any(isinstance(n, ast.While) for n in ast.walk(tree)), "existing three-phase loop;no restart branch")
+check("HISTORY2242", len(history["protected_files"]) == 2242 and all(
+    h(x["path"]) == x["sha256"] for x in history["protected_files"]), "sole authorized Runner separated;all immutable history matches")
+check("NEW_SOURCE_PIN", h(T) == build["runner"]["sha256"] == load(R / "R33_CODE_DIFF.json")["after_sha256"],
+      "single final Runner revision")
+check("UNPROVED_BOUND_GATE", 'self.budget.get("full_required_output_bound_proved") is True' in source,
+      "constructor rejects before invocation slot/test/connection/watchdog;command also disabled")
+check("FULL_REQUIRED_OUTPUT_CAPACITY_BOUND", budget["full_required_output_bound_proved"],
+      "MISSING source-level bound for complete future journal/final payloads/error variants;historical encoding is insufficient")
+check("DYNAMIC_ZERO", True, "filesystem/AST/hash/inert JSON-size transformations only;target/tests/probes/suites0")
+
+failed = [x for x in checks if not x["passed"]]
+assert [x["id"] for x in failed] == ["FULL_REQUIRED_OUTPUT_CAPACITY_BOUND"], failed
+result = {"schema": "r33-static-preflight/1", "status": "R33_STATIC_PREFLIGHT_BLOCKED",
+          "R33_EVIDENCE_BUDGET_STATIC_BLOCKED": True, "checks": checks, "check_count": len(checks),
+          "passed_checks": sum(x["passed"] for x in checks), "failed_critical_checks": failed,
+          "origin_binding_rule_static_verified": True, "reservation_invariant_static_verified": True,
+          "full_capacity_proof_complete": False, "command_ready": False, "execution_authorized": False,
+          "actual_suite_runs": 0, "dynamic68": "NOT_RUN", "R32_RUN_BUDGET_REMAINING": 0,
+          "boundary": "conditional binding and partition safety reviewed;full admitted payload upper bound unproved"}
+with (R / "R33_STATIC_PREFLIGHT.json").open("x", encoding="utf-8", newline="\n") as stream:
+    json.dump(result, stream, ensure_ascii=False, indent=2)
+    stream.write("\n")
+print(json.dumps({"checks": len(checks), "passed": result["passed_checks"],
+                  "blocked": [x["id"] for x in failed], "runner_hash": h(T), "suite_runs": 0}))

@@ -1,0 +1,465 @@
+"""H1 internal Authority host; offline integration, no import-time I/O.
+
+Authenticated facts are issued by trusted host code outside request bodies.
+The identity registry models that boundary; deployment authentication is H2 work.
+This module opens no storage, key, network, service, or database connection.
+"""
+from dataclasses import dataclass
+import json
+import re
+import threading
+import time
+
+from .dsat_authority_read import (
+    BASE_GAPS, ERRORS, MAX_REVISION, ReadLimits, ReadScope, StagingSnapshot,
+    TrustedReadContext, read_dsat_authority_snapshot,
+)
+from .protocol import canonical
+
+
+SCHEMA = "dsat-host-read-summary/1"
+RIGHT = "staging_read_metadata"
+HOST_ERRORS = {
+    "HOST_IDENTITY_REQUIRED", "HOST_PERMISSION_DENIED", "HOST_PERMIT_EXPIRED",
+    "HOST_PERMIT_REPLAY", "HOST_SOURCE_MISMATCH", "HOST_CONNECTION_NOT_IDLE",
+    "HOST_DEADLINE_EXCEEDED", "INCONCLUSIVE_CONCURRENT_CHANGE", "HOST_SUMMARY_REFUSED",
+}
+STATUSES = ERRORS | HOST_ERRORS | {"STAGING_READY_WITH_GAPS"}
+GAPS = set(BASE_GAPS) | STATUSES | {"SOURCE_REFERENCE_UNAVAILABLE", "QUEUED_CREATOR_FRONTIER"}
+
+
+class HostReadError(ValueError):
+    def __init__(self, code):
+        self.code = code if code in STATUSES else "HOST_SUMMARY_REFUSED"
+        super().__init__(self.code)
+
+
+def _id(value):
+    if type(value) is not str or re.fullmatch(r"[A-Za-z0-9_.:-]{1,160}", value) is None:
+        raise HostReadError("UNSUPPORTED_READ_REQUEST")
+    return value
+
+
+def _nat(value):
+    if type(value) is not int or not 0 <= value <= MAX_REVISION:
+        raise HostReadError("RESOURCE_LIMIT")
+    return value
+
+
+def _scope(value):
+    try:
+        scope = ReadScope.parse(value)
+    except Exception:
+        raise HostReadError("READ_SCOPE_DENIED") from None
+    if any(len(getattr(scope, k)) != 1 for k in ("tasks", "callers", "generations")):
+        raise HostReadError("READ_SCOPE_DENIED")
+    return scope
+
+
+def _scope_key(scope):
+    return (scope.account, scope.audience, *scope.tasks, *scope.callers, *scope.generations)
+
+
+class _HostCapability:
+    __slots__ = ()
+
+    def __init__(self, *args, **kwargs):
+        raise HostReadError("HOST_IDENTITY_REQUIRED")
+
+    def __repr__(self):
+        return "<HostCapability redacted>"
+
+    def __reduce_ex__(self, protocol):
+        raise TypeError("HOST_CAPABILITY_NOT_SERIALIZABLE")
+
+
+class VerifiedLocalCaller(_HostCapability):
+    __slots__ = ()
+
+
+class HostReadPermit(_HostCapability):
+    __slots__ = ()
+
+
+class HostReadPolicy:
+    """Host-owned registry; all issuing/updating methods are trusted internal APIs.
+
+    Possession of Python execution in this process remains a trust assumption.
+    RPC authentication must happen before bind_authenticated_caller is called.
+    """
+    def __init__(self, epoch_ref, clock=time.monotonic_ns):
+        self.epoch_ref = _id(epoch_ref)
+        self.clock = clock
+        self.lock = threading.RLock()
+        self._identities, self._rules, self._permits = {}, {}, {}
+        self._version = 0
+        self._sequence = 0
+
+    def bind_authenticated_caller(self, *, principal_ref, actor, transport_ref, expires_ns):
+        with self.lock:
+            if len(self._identities) >= 4096:
+                raise HostReadError("RESOURCE_LIMIT")
+            fact = (_id(principal_ref), _id(actor), _id(transport_ref), _nat(expires_ns))
+            caller = object.__new__(VerifiedLocalCaller)
+            self._identities[caller] = fact
+            return caller
+
+    def allow(self, *, principal_ref, actor, transport_ref, scope, grant_ref,
+              scope_ref, expires_ns, rights=(RIGHT,)):
+        with self.lock:
+            scope = _scope(scope)
+            rights = tuple(rights)
+            if any(type(x) is not str or x != RIGHT for x in rights):
+                raise HostReadError("HOST_PERMISSION_DENIED")
+            self._version += 1
+            self._rules[(_id(principal_ref), _scope_key(scope))] = {
+                "actor": _id(actor), "transport": _id(transport_ref), "scope": scope,
+                "grant": _id(grant_ref), "scope_ref": _id(scope_ref), "rights": rights,
+                "expires": _nat(expires_ns), "version": self._version,
+            }
+
+    def revoke(self, principal_ref, scope):
+        with self.lock:
+            self._rules.pop((principal_ref, _scope_key(_scope(scope))), None)
+            self._version += 1
+
+    def revoke_identity(self, caller):
+        with self.lock:
+            self._identities.pop(caller, None)
+
+    def _resolve(self, caller, scope):
+        if type(caller) is not VerifiedLocalCaller or caller not in self._identities:
+            raise HostReadError("HOST_IDENTITY_REQUIRED")
+        principal, actor, transport, expires = self._identities[caller]
+        now = _nat(self.clock())
+        if now >= expires:
+            raise HostReadError("HOST_PERMIT_EXPIRED")
+        rule = self._rules.get((principal, _scope_key(scope)))
+        if rule is None or RIGHT not in rule["rights"]:
+            raise HostReadError("HOST_PERMISSION_DENIED")
+        if actor != rule["actor"] or transport != rule["transport"]:
+            raise HostReadError("HOST_PERMISSION_DENIED")
+        if now >= rule["expires"]:
+            raise HostReadError("HOST_PERMIT_EXPIRED")
+        return principal, rule
+
+    def __repr__(self):
+        return "<HostReadPolicy redacted>"
+
+    def __reduce_ex__(self, protocol):
+        raise TypeError("HOST_POLICY_NOT_SERIALIZABLE")
+
+
+@dataclass(frozen=True)
+class HostReadLimits:
+    staging_bytes: int = 65536
+    scoped_records: int = 32
+    summary_bytes: int = 4096
+    soft_deadline_ns: int = 10_000_000_000
+
+    def __post_init__(self):
+        ReadLimits(self.staging_bytes, self.scoped_records, 6)
+        if (type(self.summary_bytes) is not int or not 2048 <= self.summary_bytes <= 4096
+                or type(self.scoped_records) is not int or not 1 <= self.scoped_records <= 32
+                or type(self.soft_deadline_ns) is not int or not 1 <= self.soft_deadline_ns <= 10_000_000_000):
+            raise HostReadError("RESOURCE_LIMIT")
+
+
+def summary_schema():
+    """Closed R13 shape; integer maxima are exact Python integers."""
+    def obj(props):
+        return {"type": "object", "additionalProperties": False,
+                "required": list(props), "properties": props}
+    ident = {"type": "string", "minLength": 1, "maxLength": 160,
+             "pattern": r"^[A-Za-z0-9_.:-]+$"}
+    number = {"type": ["integer", "null"], "minimum": 0, "maximum": MAX_REVISION}
+    boolean = {"type": ["boolean", "null"]}
+    observed = obj({"domain": {"const": "monotonic_ns"}, "epoch_ref": ident,
+                    "lower": number, "upper": number, "native_validity": {"const": "UNESTABLISHED"}})
+    audit = obj({
+        "source_sql_count": {"type": "integer", "minimum": 0, "maximum": 4},
+        "source_read_count": {"type": "integer", "minimum": 0, "maximum": 1},
+        "source_operations_delta": number,
+        "key_read_count": {"type": ["integer", "null"], "minimum": 0, "maximum": 1},
+        "key_count_basis": {"enum": ["PINNED_PATH_BOUND", "MEASURED_APPROVED_TELEMETRY", "NOT_OBSERVED"]},
+        "bound_request_count": {"type": ["integer", "null"], "minimum": 0, "maximum": 32},
+        "world_row_unchanged": boolean, "authority_events_count_unchanged": boolean,
+        "authority_events_max_unchanged": boolean, "connection_total_changes_unchanged": boolean,
+        "observed_sql_schema_version": {"type": ["integer", "null"], "minimum": 0, "maximum": 2147483647},
+        "secret_scan_status": {"enum": ["CLEAN", "REFUSED", "NOT_RUN"]},
+        "elapsed_ns": number, "deadline_exceeded": {"type": "boolean"}, "permit_consumed": {"type": "boolean"},
+    })
+    return obj({
+        "schema": {"const": SCHEMA}, "execution_ref": ident, "status": {"enum": sorted(STATUSES)},
+        "authority_revision": number, "authority_instance": {"type": "null"},
+        "obligation_revision": {"type": "null"},
+        "snapshot_digest": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+        "read_scope_ref": ident, "observed_at": {"anyOf": [{"type": "null"}, observed]},
+        "source_contract": {"enum": ["legacy-authority-state/1", None]},
+        "source_binding_status": {"enum": ["MATCHED", "NOT_APPLICABLE_EMPTY_SCOPE", "UNAVAILABLE"]},
+        "missing_fields": {"type": "array", "uniqueItems": True, "maxItems": 64,
+                           "items": {"enum": sorted(GAPS)}},
+        "native_currentness_status": {"const": "UNPROVEN"}, "math_ready": {"const": False},
+        "current_native_eligible": {"const": False}, "global_complete": {"const": False},
+        "authority_write_action": {"const": "NONE"}, "audit": audit,
+    })
+
+
+def _validate(value, schema, depth=0):
+    if depth > 20:
+        raise HostReadError("HOST_SUMMARY_REFUSED")
+    if "anyOf" in schema:
+        for option in schema["anyOf"]:
+            try:
+                _validate(value, option, depth + 1)
+                return
+            except HostReadError:
+                pass
+        raise HostReadError("HOST_SUMMARY_REFUSED")
+    if "const" in schema and (type(value) is not type(schema["const"]) or value != schema["const"]):
+        raise HostReadError("HOST_SUMMARY_REFUSED")
+    if "enum" in schema and not any(type(value) is type(x) and value == x for x in schema["enum"]):
+        raise HostReadError("HOST_SUMMARY_REFUSED")
+    actual = {dict: "object", list: "array", str: "string", int: "integer", bool: "boolean", type(None): "null"}.get(type(value))
+    types = schema.get("type", [])
+    types = [types] if type(types) is str else types
+    if types and actual not in types:
+        raise HostReadError("HOST_SUMMARY_REFUSED")
+    if value is None:
+        return
+    if actual == "object":
+        if set(value) != set(schema["properties"]):
+            raise HostReadError("HOST_SUMMARY_REFUSED")
+        for key in value:
+            _validate(value[key], schema["properties"][key], depth + 1)
+    elif actual == "array":
+        if len(value) > schema.get("maxItems", 64) or (schema.get("uniqueItems") and len(value) != len(set(value))):
+            raise HostReadError("HOST_SUMMARY_REFUSED")
+        for item in value:
+            _validate(item, schema["items"], depth + 1)
+    elif actual == "integer":
+        if not schema.get("minimum", 0) <= value <= schema.get("maximum", MAX_REVISION):
+            raise HostReadError("HOST_SUMMARY_REFUSED")
+    elif actual == "string":
+        if not schema.get("minLength", 0) <= len(value) <= schema.get("maxLength", 4096):
+            raise HostReadError("HOST_SUMMARY_REFUSED")
+        if "pattern" in schema and re.fullmatch(schema["pattern"], value) is None:
+            raise HostReadError("HOST_SUMMARY_REFUSED")
+
+
+class HostReadSummary:
+    __slots__ = ("_json",)
+
+    def __init__(self, public, maximum=4096):
+        _validate(public, summary_schema())
+        if (public["source_binding_status"] == "MATCHED"
+                and (public["status"] != "STAGING_READY_WITH_GAPS" or not public["audit"]["bound_request_count"])):
+            raise HostReadError("HOST_SUMMARY_REFUSED")
+        raw = canonical(public)
+        if type(maximum) is not int or not 2048 <= maximum <= 4096 or len(raw) > maximum:
+            raise HostReadError("RESOURCE_LIMIT")
+        self._json = raw
+
+    def to_dict(self):
+        return json.loads(self._json)
+
+    def to_json(self):
+        return self._json
+
+    def __repr__(self):
+        return "<HostReadSummary redacted>"
+
+
+def outcome_category(status):
+    if status in {"HOST_IDENTITY_REQUIRED", "HOST_PERMISSION_DENIED", "READ_CONTEXT_REQUIRED"}:
+        return "REJECT_UNAUTHORIZED"
+    if status == "READ_SCOPE_DENIED":
+        return "INSUFFICIENT_SCOPE"
+    if status == "READ_BUDGET_DENIED":
+        return "BUDGET_EXHAUSTED"
+    if status in {"SOURCE_BINDING_CONFLICT", "HOST_SOURCE_MISMATCH"}:
+        return "SOURCE_BINDING_FAILED"
+    if status == "HOST_SUMMARY_REFUSED":
+        return "SECRET_BOUNDARY_VIOLATION"
+    if status == "STAGING_READY_WITH_GAPS":
+        return "STAGING_READY_WITH_GAPS"
+    return "UNKNOWN_PENDING"
+
+
+class AuthorityReadHost:
+    """Registered in-process reader and restricted metadata egress.
+
+    H1 supports SYNTHETIC_ONLY registration. H2 source admission remains closed.
+    SQL/key counts on the public summary refer to real access, not fake decoding.
+    Synthetic counters are measured independently by the authorized test harness.
+    """
+    def __init__(self, reader, policy, *, producer_ref, locator_ref, epoch_ref,
+                 source_contract="legacy-authority-state/1", source_kind="SYNTHETIC_ONLY",
+                 limits=HostReadLimits(), audit_sink=None):
+        if type(policy) is not HostReadPolicy or type(limits) is not HostReadLimits:
+            raise HostReadError("HOST_SOURCE_MISMATCH")
+        self._reader, self._policy, self._limits = reader, policy, limits
+        self._producer, self._locator, self._epoch = map(_id, (producer_ref, locator_ref, epoch_ref))
+        self._contract, self._kind, self._audit_sink = source_contract, source_kind, audit_sink
+
+    def issue_permit(self, caller, scope):
+        with self._policy.lock:
+            scope = _scope(scope)
+            principal, rule = self._policy._resolve(caller, scope)
+            if len(self._policy._permits) >= 4096:
+                raise HostReadError("RESOURCE_LIMIT")
+            self._policy._sequence += 1
+            permit = object.__new__(HostReadPermit)
+            self._policy._permits[permit] = {
+                "host": self, "reader": self._reader, "epoch": self._epoch,
+                "producer": self._producer, "locator": self._locator, "caller": caller,
+                "principal": principal, "scope": scope, "version": rule["version"],
+                "scope_ref": rule["scope_ref"], "grant": rule["grant"], "used": False,
+                "execution_ref": "exec:" + str(self._policy._sequence),
+            }
+            return permit
+
+    def request_for(self, permit):
+        """Trusted RPC wrapper constructs the exact body; no raw state access."""
+        with self._policy.lock:
+            rec = self._policy._permits.get(permit)
+            if rec is None or rec["host"] is not self:
+                raise HostReadError("HOST_PERMIT_REPLAY")
+            return {"execution_ref": rec["execution_ref"], "scope": rec["scope"].to_dict()}
+
+    def read_summary(self, request, caller, permit):
+        started = time.perf_counter_ns()
+        status, stage, rec = "HOST_IDENTITY_REQUIRED", None, None
+        consumed, operations_delta, source_reads = False, 0, 0
+        try:
+            with self._policy.lock:
+                if type(caller) is not VerifiedLocalCaller or caller not in self._policy._identities:
+                    raise HostReadError("HOST_IDENTITY_REQUIRED")
+                if type(permit) is not HostReadPermit or permit not in self._policy._permits:
+                    raise HostReadError("HOST_PERMIT_REPLAY")
+                rec = self._policy._permits[permit]
+                if (rec["host"] is not self or rec["reader"] is not self._reader
+                        or rec["epoch"] != self._epoch or self._epoch != self._policy.epoch_ref
+                        or rec["producer"] != self._producer or rec["locator"] != self._locator):
+                    raise HostReadError("HOST_SOURCE_MISMATCH")
+                if rec["caller"] is not caller:
+                    raise HostReadError("HOST_PERMISSION_DENIED")
+                if rec["used"]:
+                    raise HostReadError("HOST_PERMIT_REPLAY")
+                if type(request) is not dict or set(request) != {"execution_ref", "scope"}:
+                    raise HostReadError("UNSUPPORTED_READ_REQUEST")
+                if request["execution_ref"] != rec["execution_ref"]:
+                    raise HostReadError("UNSUPPORTED_READ_REQUEST")
+                requested = _scope(request["scope"])
+                if _scope_key(requested) != _scope_key(rec["scope"]):
+                    raise HostReadError("READ_SCOPE_DENIED")
+                principal, rule = self._policy._resolve(caller, requested)
+                if rule["version"] != rec["version"]:
+                    raise HostReadError("HOST_PERMISSION_DENIED")
+                if self._contract != "legacy-authority-state/1" or self._kind != "SYNTHETIC_ONLY":
+                    raise HostReadError("UNSUPPORTED_SOURCE_SCHEMA")
+                with self._reader.lock:
+                    if self._reader.connection.in_transaction is not False:
+                        raise HostReadError("HOST_CONNECTION_NOT_IDLE")
+                    rec["used"] = True
+                    consumed = True
+                    before = self._reader.operations
+                    context = TrustedReadContext.from_host(
+                        self._reader, requested, principal_ref=principal, producer_ref=self._producer,
+                        authority_locator_ref=self._locator, clock_epoch_ref=self._epoch,
+                        source_kind="SYNTHETIC_ONLY")
+                    output = read_dsat_authority_snapshot(self._reader, requested, context,
+                                                         ReadLimits(self._limits.staging_bytes,
+                                                                    self._limits.scoped_records, 6))
+                    operations_delta = self._reader.operations - before
+                    if type(output) is not StagingSnapshot:
+                        raise HostReadError("HOST_SUMMARY_REFUSED")
+                    data = output.to_dict()
+                    source_reads = data["costs"]["source_reads"]
+                    status = data["status"]
+                    if status == "STAGING_READY_WITH_GAPS":
+                        if (data["scope"] != requested.to_dict() or not data["grants"]
+                                or any(g["origin"]["grant_id"] != rec["grant"] for g in data["grants"])
+                                or any(r["origin"]["grant_id"] != rec["grant"] for r in data["requests"])):
+                            raise HostReadError("SOURCE_BINDING_CONFLICT")
+                        stage = data
+                    _, final_rule = self._policy._resolve(caller, requested)
+                    if final_rule["version"] != rec["version"]:
+                        raise HostReadError("HOST_PERMISSION_DENIED")
+        except HostReadError as error:
+            status, stage = error.code, None
+        except Exception:
+            status, stage = "READ_SOURCE_UNAVAILABLE", None
+        elapsed = time.perf_counter_ns() - started
+        if elapsed > self._limits.soft_deadline_ns:
+            status, stage = "HOST_DEADLINE_EXCEEDED", None
+        return self._finish(status, stage, rec if consumed else None,
+                            consumed, source_reads, operations_delta, elapsed)
+
+    def refusal(self, code):
+        return self._finish(code if code in STATUSES else "HOST_SUMMARY_REFUSED", None,
+                            None, False, 0, 0, 0)
+
+    def _finish(self, status, stage, rec, consumed, reads, delta, elapsed):
+        # Every value below is fixed, host-issued, counted, or R12-sanitized.
+        public = {
+            "schema": SCHEMA, "execution_ref": rec["execution_ref"] if rec else "exec:unavailable",
+            "status": status, "authority_revision": stage["authority_revision"] if stage else None,
+            "authority_instance": None, "obligation_revision": None,
+            "snapshot_digest": stage["snapshot_digest"] if stage else None,
+            "read_scope_ref": rec["scope_ref"] if rec else "scope:unavailable",
+            "observed_at": stage["read_clock"] if stage else None,
+            "source_contract": stage["source"]["source_contract"] if stage else None,
+            "source_binding_status": ("MATCHED" if stage["requests"] else "NOT_APPLICABLE_EMPTY_SCOPE") if stage else "UNAVAILABLE",
+            "missing_fields": sorted(set(BASE_GAPS) | ({status} if status != "STAGING_READY_WITH_GAPS" else set())
+                                     | (set(stage["gap_codes"]) if stage else set())),
+            "native_currentness_status": "UNPROVEN", "math_ready": False,
+            "current_native_eligible": False, "global_complete": False, "authority_write_action": "NONE",
+            "audit": {"source_sql_count": 0, "source_read_count": reads,
+                      "source_operations_delta": delta, "key_read_count": None,
+                      "key_count_basis": "NOT_OBSERVED", "bound_request_count": len(stage["requests"]) if stage else None,
+                      "world_row_unchanged": None, "authority_events_count_unchanged": None,
+                      "authority_events_max_unchanged": None, "connection_total_changes_unchanged": None,
+                      "observed_sql_schema_version": None, "secret_scan_status": "NOT_RUN",
+                      "elapsed_ns": elapsed, "deadline_exceeded": status == "HOST_DEADLINE_EXCEEDED",
+                      "permit_consumed": consumed},
+        }
+        if self._audit_sink is not None:
+            try:
+                self._audit_sink({"event": "host_read", "status": status,
+                                  "identity_basis": "HOST_REGISTRY" if rec else "UNVERIFIED",
+                                  "source_reads": reads, "operation_delta": delta})
+            except Exception:
+                return self._safe_refusal("READ_SOURCE_UNAVAILABLE", consumed, reads, delta, elapsed)
+        try:
+            return HostReadSummary(public, self._limits.summary_bytes)
+        except Exception:
+            return self._safe_refusal("HOST_SUMMARY_REFUSED", consumed, reads, delta, elapsed)
+
+    @staticmethod
+    def _safe_refusal(status, consumed, reads, delta, elapsed):
+        # Fixed bounded fallback; it never recursively calls an audit sink.
+        public = {
+            "schema": SCHEMA, "execution_ref": "exec:unavailable", "status": status,
+            "authority_revision": None, "authority_instance": None, "obligation_revision": None,
+            "snapshot_digest": None, "read_scope_ref": "scope:unavailable", "observed_at": None,
+            "source_contract": None, "source_binding_status": "UNAVAILABLE",
+            "missing_fields": sorted(set(BASE_GAPS) | {status}),
+            "native_currentness_status": "UNPROVEN", "math_ready": False,
+            "current_native_eligible": False, "global_complete": False, "authority_write_action": "NONE",
+            "audit": {"source_sql_count": 0, "source_read_count": reads if type(reads) is int and 0 <= reads <= 1 else 0,
+                      "source_operations_delta": delta if type(delta) is int and 0 <= delta <= MAX_REVISION else None,
+                      "key_read_count": None, "key_count_basis": "NOT_OBSERVED", "bound_request_count": None,
+                      "world_row_unchanged": None, "authority_events_count_unchanged": None,
+                      "authority_events_max_unchanged": None, "connection_total_changes_unchanged": None,
+                      "observed_sql_schema_version": None, "secret_scan_status": "REFUSED",
+                      "elapsed_ns": elapsed, "deadline_exceeded": status == "HOST_DEADLINE_EXCEEDED",
+                      "permit_consumed": consumed},
+        }
+        return HostReadSummary(public, 4096)
+
+    def __repr__(self):
+        return "<AuthorityReadHost redacted>"
+
+    def __reduce_ex__(self, protocol):
+        raise TypeError("HOST_NOT_SERIALIZABLE")

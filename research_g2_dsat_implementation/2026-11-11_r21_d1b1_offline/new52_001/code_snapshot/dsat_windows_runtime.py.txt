@@ -1,0 +1,564 @@
+"""R21 owned offline Windows primitives. No import-time native calls or I/O.
+
+The only admission factory requires the R21 receipt and its authorized output
+tree. The confirmed D1-B2 root is never an execution target of these APIs.
+"""
+import ctypes as C
+from ctypes import wintypes as W
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import subprocess
+import sys
+import threading
+import time
+import weakref
+
+
+OUTPUT = Path(r"D:\毕业设计\research_g2_dsat_implementation\2026-11-11_r21_d1b1_offline")
+RECORD = OUTPUT.parent / "2026-11-11_r21"
+PROJECT = Path(r"D:\毕业设计\auth-lifecycle")
+DEPLOYMENT = Path(r"D:\毕业设计\h2_test_runtime\h2-authority-synth-001")
+_SCOPES, _FACTS, _LEASES, _EVENTS, _CHILDREN = (weakref.WeakKeyDictionary() for _ in range(5))
+_RUN_COUNTS = {}
+_COUNTER_LOCK = threading.RLock()
+_CHILD_SLOTS = threading.BoundedSemaphore(2)
+
+
+class SafetyError(ValueError):
+    def __init__(self, code):
+        codes = {"APPROVAL_REQUIRED", "OFFLINE_ONLY", "PATH_DENIED", "IDENTITY_MISMATCH", "SOURCE_MISMATCH",
+            "SINGLE_ACTIVE_CONFLICT", "OWNERSHIP_UNPROVEN", "CONTEXT_REQUIRED", "RESOURCE_LIMIT",
+            "NATIVE_UNAVAILABLE", "NATIVE_FAILURE", "STALE_EPOCH", "P2_NOT_AUTHORIZED", "REPLAY",
+            "SCHEMA_MISMATCH", "INITIALIZATION_FAILED", "LIFECYCLE_ORDER", "PORT_CONFLICT",
+            "CLEANUP_FAILED", "RECOVERY_REQUIRED", "UNSUPPORTED_ARGUMENTS", "DEPENDENCY_MISMATCH"}
+        self.code = code if code in codes else "NATIVE_FAILURE"
+        super().__init__(self.code)
+
+
+def require(condition, code="CONTEXT_REQUIRED"):
+    if not condition:
+        raise SafetyError(code)
+
+
+def _hash(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def _canonical(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False).encode()
+
+
+class _Opaque:
+    __slots__ = ("__weakref__",)
+
+    def __init__(self, *args, **kwargs):
+        raise SafetyError("CONTEXT_REQUIRED")
+
+    def __reduce_ex__(self, protocol):
+        raise TypeError("OWNED_CAPABILITY_NOT_SERIALIZABLE")
+
+    def __repr__(self):
+        return "<OwnedOfflineCapability redacted>"
+
+
+class SECURITY_ATTRIBUTES(C.Structure):
+    _fields_ = [("nLength", W.DWORD), ("lpSecurityDescriptor", C.c_void_p), ("bInheritHandle", W.BOOL)]
+
+
+class FILE_INFORMATION(C.Structure):
+    _fields_ = [("dwFileAttributes", W.DWORD), ("ftCreationTime", W.FILETIME), ("ftLastAccessTime", W.FILETIME),
+        ("ftLastWriteTime", W.FILETIME), ("dwVolumeSerialNumber", W.DWORD), ("nFileSizeHigh", W.DWORD),
+        ("nFileSizeLow", W.DWORD), ("nNumberOfLinks", W.DWORD), ("nFileIndexHigh", W.DWORD), ("nFileIndexLow", W.DWORD)]
+
+
+class SID_AND_ATTRIBUTES(C.Structure):
+    _fields_ = [("Sid", C.c_void_p), ("Attributes", W.DWORD)]
+
+
+def _api():
+    require(os.name == "nt", "NATIVE_UNAVAILABLE")
+    kernel = C.WinDLL("kernel32", use_last_error=True)
+    security = C.WinDLL("advapi32", use_last_error=True)
+    kernel.GetCurrentProcess.restype = W.HANDLE
+    kernel.GetCurrentProcessId.restype = W.DWORD
+    kernel.CloseHandle.argtypes = [W.HANDLE]
+    kernel.CloseHandle.restype = W.BOOL
+    kernel.LocalFree.argtypes = [C.c_void_p]
+    kernel.LocalFree.restype = C.c_void_p
+    kernel.GetProcessId.argtypes = [W.HANDLE]
+    kernel.GetProcessId.restype = W.DWORD
+    kernel.GetProcessTimes.argtypes = [W.HANDLE] + [C.POINTER(W.FILETIME)] * 4
+    kernel.GetProcessTimes.restype = W.BOOL
+    kernel.QueryFullProcessImageNameW.argtypes = [W.HANDLE, W.DWORD, W.LPWSTR, C.POINTER(W.DWORD)]
+    kernel.QueryFullProcessImageNameW.restype = W.BOOL
+    kernel.CreateFileW.argtypes = [W.LPCWSTR, W.DWORD, W.DWORD, C.POINTER(SECURITY_ATTRIBUTES), W.DWORD, W.DWORD, W.HANDLE]
+    kernel.CreateFileW.restype = W.HANDLE
+    kernel.GetFileInformationByHandle.argtypes = [W.HANDLE, C.POINTER(FILE_INFORMATION)]
+    kernel.GetFileInformationByHandle.restype = W.BOOL
+    kernel.GetFinalPathNameByHandleW.argtypes = [W.HANDLE, W.LPWSTR, W.DWORD, W.DWORD]
+    kernel.GetFinalPathNameByHandleW.restype = W.DWORD
+    kernel.CreateDirectoryW.argtypes = [W.LPCWSTR, C.POINTER(SECURITY_ATTRIBUTES)]
+    kernel.CreateDirectoryW.restype = W.BOOL
+    kernel.CreateEventW.argtypes = [C.POINTER(SECURITY_ATTRIBUTES), W.BOOL, W.BOOL, W.LPCWSTR]
+    kernel.CreateEventW.restype = W.HANDLE
+    kernel.OpenEventW.argtypes = [W.DWORD, W.BOOL, W.LPCWSTR]
+    kernel.OpenEventW.restype = W.HANDLE
+    kernel.SetEvent.argtypes = [W.HANDLE]
+    kernel.SetEvent.restype = W.BOOL
+    kernel.WaitForSingleObject.argtypes = [W.HANDLE, W.DWORD]
+    kernel.WaitForSingleObject.restype = W.DWORD
+    kernel.GetWindowsDirectoryW.argtypes = [W.LPWSTR, W.UINT]
+    kernel.GetWindowsDirectoryW.restype = W.UINT
+    security.OpenProcessToken.argtypes = [W.HANDLE, W.DWORD, C.POINTER(W.HANDLE)]
+    security.OpenProcessToken.restype = W.BOOL
+    security.GetTokenInformation.argtypes = [W.HANDLE, C.c_int, C.c_void_p, W.DWORD, C.POINTER(W.DWORD)]
+    security.GetTokenInformation.restype = W.BOOL
+    security.ConvertSidToStringSidW.argtypes = [C.c_void_p, C.POINTER(W.LPWSTR)]
+    security.ConvertSidToStringSidW.restype = W.BOOL
+    security.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [W.LPCWSTR, W.DWORD, C.POINTER(C.c_void_p), C.c_void_p]
+    security.ConvertStringSecurityDescriptorToSecurityDescriptorW.restype = W.BOOL
+    security.SetFileSecurityW.argtypes = [W.LPCWSTR, W.DWORD, C.c_void_p]
+    security.SetFileSecurityW.restype = W.BOOL
+    security.GetFileSecurityW.argtypes = [W.LPCWSTR, W.DWORD, C.c_void_p, W.DWORD, C.POINTER(W.DWORD)]
+    security.GetFileSecurityW.restype = W.BOOL
+    security.ConvertSecurityDescriptorToStringSecurityDescriptorW.argtypes = [C.c_void_p, W.DWORD, W.DWORD, C.POINTER(W.LPWSTR), C.c_void_p]
+    security.ConvertSecurityDescriptorToStringSecurityDescriptorW.restype = W.BOOL
+    return kernel, security
+
+
+def _ok(value, code="NATIVE_FAILURE"):
+    require(bool(value), code)
+
+
+def _descriptor(sid):
+    kernel, security = _api()
+    descriptor = C.c_void_p()
+    _ok(security.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        "D:P(A;OICI;FA;;;" + sid + ")(A;OICI;FA;;;SY)", 1, C.byref(descriptor), None))
+    return kernel, descriptor, SECURITY_ATTRIBUTES(C.sizeof(SECURITY_ATTRIBUTES), descriptor, False)
+
+
+def _process_facts(handle):
+    kernel, security = _api()
+    times = [W.FILETIME() for _ in range(4)]
+    _ok(kernel.GetProcessTimes(handle, *(C.byref(v) for v in times)))
+    name, length = C.create_unicode_buffer(32768), W.DWORD(32768)
+    _ok(kernel.QueryFullProcessImageNameW(handle, 0, name, C.byref(length)))
+    token = W.HANDLE()
+    _ok(security.OpenProcessToken(handle, 8, C.byref(token)))
+    try:
+        size = W.DWORD()
+        security.GetTokenInformation(token, 1, None, 0, C.byref(size))
+        require(0 < size.value <= 65536)
+        buffer = C.create_string_buffer(size.value)
+        _ok(security.GetTokenInformation(token, 1, buffer, size, C.byref(size)))
+        sid = C.cast(buffer, C.POINTER(SID_AND_ATTRIBUTES)).contents.Sid
+        output = W.LPWSTR()
+        _ok(security.ConvertSidToStringSidW(sid, C.byref(output)))
+        try:
+            sid_text = output.value
+        finally:
+            kernel.LocalFree(output)
+    finally:
+        kernel.CloseHandle(token)
+    return {"pid": int(kernel.GetProcessId(handle)), "created_filetime": times[0].dwLowDateTime | times[0].dwHighDateTime << 32,
+            "image": name.value, "SID": sid_text, "source_kind": "OWNED_OFFLINE_WINDOWS_PROCESS"}
+
+
+def _handle_file_facts(handle):
+    kernel, _ = _api()
+    info = FILE_INFORMATION()
+    _ok(kernel.GetFileInformationByHandle(handle, C.byref(info)))
+    name = C.create_unicode_buffer(32768)
+    count = kernel.GetFinalPathNameByHandleW(handle, name, len(name), 0)
+    require(0 < count < len(name))
+    value = name.value
+    if value.startswith("\\\\?\\"):
+        value = value[4:]
+    return {"volume": int(info.dwVolumeSerialNumber), "file_id": int(info.nFileIndexLow | info.nFileIndexHigh << 32),
+            "links": int(info.nNumberOfLinks), "final_path": value, "reparse": bool(info.dwFileAttributes & 0x400)}
+
+
+class TestScope(_Opaque):
+    def _record(self):
+        rec = _SCOPES.get(self)
+        require(rec is not None)
+        return rec
+
+    @property
+    def root(self):
+        return self._record()["root"]
+
+    @property
+    def SID(self):
+        return self._record()["process"]["SID"]
+
+    @property
+    def source_digest(self):
+        return self._record()["source_digest"]
+
+    def path(self, value):
+        p = Path(value)
+        require(p.is_absolute() and not str(p).startswith("\\\\") and ":" not in str(p)[2:], "PATH_DENIED")
+        require(not any(x in {".", ".."} or x.endswith((".", " ")) for x in p.parts[1:]), "PATH_DENIED")
+        p = p.absolute()
+        require(p.is_relative_to(self.root), "PATH_DENIED")
+        for part in (p, *p.parents):
+            if part.exists():
+                require(not part.is_symlink() and not (getattr(part.lstat(), "st_file_attributes", 0) & 0x400), "PATH_DENIED")
+        if p.is_file():
+            require(p.stat().st_nlink == 1, "PATH_DENIED")
+        return p
+
+    def count(self, key, limit, amount=1):
+        rec = self._record()
+        with _COUNTER_LOCK:
+            value = rec["counts"].get(key, 0) + amount
+            require(type(amount) is int and amount >= 0 and value <= limit, "RESOURCE_LIMIT")
+            rec["counts"][key] = value
+        return value
+
+    def counts(self):
+        return dict(self._record()["counts"])
+
+    def directory(self, path):
+        p = self.path(path)
+        if p.exists():
+            require(p.is_dir(), "PATH_DENIED")
+            return p
+        require(p.parent.exists(), "PATH_DENIED")
+        self.count("private_directories", 64)
+        kernel, descriptor, attributes = _descriptor(self.SID)
+        try:
+            _ok(kernel.CreateDirectoryW(str(p), C.byref(attributes)), "PATH_DENIED")
+        finally:
+            kernel.LocalFree(descriptor)
+        return p
+
+    def private_acl(self, path):
+        p = self.path(path)
+        kernel, descriptor, _ = _descriptor(self.SID)
+        try:
+            _, security = _api()
+            _ok(security.SetFileSecurityW(str(p), 4 | 0x80000000, descriptor), "PATH_DENIED")
+        finally:
+            kernel.LocalFree(descriptor)
+        return self.acl(p)
+
+    def acl(self, path):
+        p = self.path(path)
+        kernel, security = _api()
+        size = W.DWORD()
+        security.GetFileSecurityW(str(p), 4, None, 0, C.byref(size))
+        require(0 < size.value <= 65536, "PATH_DENIED")
+        buffer = C.create_string_buffer(size.value)
+        _ok(security.GetFileSecurityW(str(p), 4, buffer, size, C.byref(size)), "PATH_DENIED")
+        text = W.LPWSTR()
+        _ok(security.ConvertSecurityDescriptorToStringSecurityDescriptorW(buffer, 1, 4, C.byref(text), None))
+        try:
+            sddl = text.value
+        finally:
+            kernel.LocalFree(text)
+        principals = set(re.findall(r";;;([^;)]+)\)", sddl))
+        require(principals == {self.SID, "SY"} and "D:P" in sddl, "PATH_DENIED")
+        return {"protected_DACL": True, "allowed_sids": sorted(principals)}
+
+    def file_facts(self, path):
+        p = self.path(path)
+        kernel, _ = _api()
+        handle = kernel.CreateFileW(str(p), 0x80, 7, None, 3, 0x02000000 | 0x00200000, None)
+        require(handle not in (None, C.c_void_p(-1).value), "PATH_DENIED")
+        try:
+            facts = _handle_file_facts(handle)
+            require(not facts["reparse"] and Path(facts["final_path"]) == p, "PATH_DENIED")
+            require(p.is_dir() or facts["links"] == 1, "PATH_DENIED")
+            return facts
+        finally:
+            kernel.CloseHandle(handle)
+
+    def write_new(self, path, data):
+        p = self.path(path)
+        require(type(data) is bytes and len(data) <= 2 * 1024 * 1024 and p.parent.exists(), "RESOURCE_LIMIT")
+        self.count("files_created", 512)
+        with p.open("xb") as stream:
+            stream.write(data); stream.flush(); os.fsync(stream.fileno())
+        return p
+
+    def sources(self):
+        rec = self._record()
+        require(all(_hash(Path(x["path"])) == x["sha256"] for x in rec["sources"]), "SOURCE_MISMATCH")
+        return [dict(x) for x in rec["sources"]]
+
+
+class HostEvidence(_Opaque):
+    def facts(self):
+        rec = _FACTS.get(self)
+        require(rec is not None)
+        return json.loads(json.dumps(rec["facts"]))
+
+
+def authorize_test_scope(run_root):
+    root = Path(run_root).absolute()
+    require(root.is_relative_to(OUTPUT) and root != OUTPUT and root.is_dir(), "OFFLINE_ONLY")
+    receipt = json.loads((RECORD / "APPROVAL_RECEIPT.json").read_text(encoding="utf-8"))
+    require(receipt.get("approved") is True and receipt.get("scope") == "R20 nine targets and three isolated offline suites only", "APPROVAL_REQUIRED")
+    require(_hash(receipt["request_path"]) == receipt["request_sha256"] and receipt["D1B2"] is False, "APPROVAL_REQUIRED")
+    require(Path(sys.executable) == Path(receipt["base_python"]), "IDENTITY_MISMATCH")
+    lock = json.loads((RECORD / "sources/PRECHECK_LOCK.json").read_text(encoding="utf-8"))
+    paths = sorted({Path(x["path"]) for x in lock["targets"] if Path(x["path"]).suffix == ".py"}
+        | {p for p in (PROJECT / "src/auth_lifecycle/online_state").iterdir() if p.suffix in {".py", ".sql"}}
+        | {PROJECT / "src/auth_lifecycle/__init__.py"})
+    require(len(paths) <= 64, "RESOURCE_LIMIT")
+    sources = [{"path": str(p), "sha256": _hash(p)} for p in paths]
+    kernel, _ = _api()
+    process = _process_facts(kernel.GetCurrentProcess())
+    require(Path(process["image"]) == Path(receipt["base_python"]), "IDENTITY_MISMATCH")
+    obj = object.__new__(TestScope)
+    counts = _RUN_COUNTS.setdefault(str(root), {})
+    _SCOPES[obj] = {"root": root, "sources": sources, "source_digest": hashlib.sha256(_canonical(sources)).hexdigest(), "process": process, "counts": counts}
+    obj.path(root); obj.private_acl(root)
+    return obj
+
+
+def self_process_facts(scope):
+    require(type(scope) is TestScope)
+    kernel, _ = _api()
+    current = _process_facts(kernel.GetCurrentProcess())
+    require(current == scope._record()["process"], "IDENTITY_MISMATCH")
+    obj = object.__new__(HostEvidence)
+    _FACTS[obj] = {"scope": scope, "facts": current}
+    return obj
+
+
+def validate_host_evidence(evidence, scope):
+    require(type(scope) is TestScope and type(evidence) is HostEvidence and evidence in _FACTS)
+    require(_FACTS[evidence]["scope"] is scope, "IDENTITY_MISMATCH")
+    scope.sources()
+    return evidence.facts()
+
+
+class InstanceLease(_Opaque):
+    def facts(self):
+        rec = _LEASES.get(self)
+        require(rec is not None and not rec["closed"], "OWNERSHIP_UNPROVEN")
+        require(_handle_file_facts(rec["handle"]) == rec["lock_facts"], "OWNERSHIP_UNPROVEN")
+        require(rec["scope"].file_facts(rec["root"]) == rec["root_facts"], "OWNERSHIP_UNPROVEN")
+        return {"root": str(rec["root"]), "root_facts": dict(rec["root_facts"]), "lock_facts": dict(rec["lock_facts"]), "owner_pid": rec["pid"]}
+
+    def close(self):
+        rec = _LEASES.get(self)
+        require(rec is not None)
+        if not rec["closed"]:
+            _ok(_api()[0].CloseHandle(rec["handle"]))
+            rec["closed"] = True
+
+    def inherited_handle(self):
+        self.facts()
+        return int(_LEASES[self]["handle"])
+
+
+def reserve_instance(scope, root, expected=None):
+    require(type(scope) is TestScope)
+    root = scope.path(root)
+    require(root.is_dir(), "PATH_DENIED")
+    facts = scope.file_facts(root)
+    if expected is not None:
+        require(facts == expected, "OWNERSHIP_UNPROVEN")
+    path = root / "instance.lock"
+    if not path.exists():
+        scope.count("files_created", 512)
+    kernel, descriptor, attributes = _descriptor(scope.SID)
+    try:
+        handle = kernel.CreateFileW(str(path), 0xC0000000 | 0x20000, 0, C.byref(attributes), 4, 0x80 | 0x00200000, None)
+    finally:
+        kernel.LocalFree(descriptor)
+    require(handle not in (None, C.c_void_p(-1).value), "SINGLE_ACTIVE_CONFLICT")
+    try:
+        lock_facts = _handle_file_facts(handle)
+        require(not lock_facts["reparse"] and lock_facts["links"] == 1, "PATH_DENIED")
+        obj = object.__new__(InstanceLease)
+        _LEASES[obj] = {"scope": scope, "root": root, "root_facts": facts, "lock_facts": lock_facts,
+            "handle": handle, "closed": False, "pid": os.getpid()}
+        scope.count("lock_acquisitions", 128)
+        return obj
+    except BaseException:
+        kernel.CloseHandle(handle)
+        raise
+
+
+def validate_lease(lease, scope, root):
+    require(type(lease) is InstanceLease and lease in _LEASES)
+    require(_LEASES[lease]["scope"] is scope and _LEASES[lease]["root"] == scope.path(root), "OWNERSHIP_UNPROVEN")
+    return lease.facts()
+
+
+def open_owned_file(scope, path):
+    require(type(scope) is TestScope)
+    return scope.file_facts(path)
+
+
+class StopEvent(_Opaque):
+    def signaled(self):
+        rec = _EVENTS.get(self)
+        require(rec is not None and not rec["closed"])
+        return _api()[0].WaitForSingleObject(rec["handle"], 0) == 0
+
+    def close(self):
+        rec = _EVENTS.get(self)
+        require(rec is not None)
+        if not rec["closed"]:
+            _ok(_api()[0].CloseHandle(rec["handle"]))
+            rec["closed"] = True
+
+    @property
+    def name(self):
+        return _EVENTS[self]["name"]
+
+
+def create_stop_event(scope, suffix):
+    require(type(scope) is TestScope and type(suffix) is str and re.fullmatch(r"[a-f0-9]{32,64}", suffix))
+    name = "Local\\auth_lifecycle_r21_" + suffix
+    kernel, descriptor, attributes = _descriptor(scope.SID)
+    try:
+        C.set_last_error(0)
+        handle = kernel.CreateEventW(C.byref(attributes), True, False, name)
+        code = C.get_last_error()
+    finally:
+        kernel.LocalFree(descriptor)
+    require(handle, "NATIVE_FAILURE")
+    if code == 183:
+        kernel.CloseHandle(handle)
+        raise SafetyError("REPLAY")
+    obj = object.__new__(StopEvent)
+    _EVENTS[obj] = {"scope": scope, "name": name, "handle": handle, "closed": False}
+    return obj
+
+
+def signal_owned_stop(scope, event):
+    require(type(event) is StopEvent and event in _EVENTS and _EVENTS[event]["scope"] is scope)
+    require(not _EVENTS[event]["closed"])
+    _ok(_api()[0].SetEvent(_EVENTS[event]["handle"]))
+
+
+def verify_target_handle(scope, process, expected):
+    require(type(scope) is TestScope and process in _CHILDREN, "OWNERSHIP_UNPROVEN")
+    rec = _CHILDREN[process]
+    require(rec["scope"] is scope, "OWNERSHIP_UNPROVEN")
+    actual = _process_facts(int(process._handle))
+    require(actual == rec["facts"] == expected, "IDENTITY_MISMATCH")
+    return dict(actual)
+
+
+def launch_owned_child(scope, manifest, *, inherit=()):
+    """Only the reviewed runner's finite no-service worker protocol is launchable."""
+    require(type(scope) is TestScope)
+    scope.sources()
+    require(sum(p.poll() is None for p, rec in list(_CHILDREN.items()) if rec["scope"] is scope) < 2, "RESOURCE_LIMIT")
+    path = scope.path(manifest)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    require(data.get("source_kind") == "R21_OWNED_STUB" and data.get("mode") in {"race", "crash", "handoff", "event"}, "OFFLINE_ONLY")
+    require(Path(data["run_root"]) == scope.root, "PATH_DENIED")
+    count = scope.count("child_launches", 8)
+    runner = PROJECT / "scripts/run_dsat_authority_live_lifecycle_tests.py"
+    startup = None
+    values = tuple(int(x) for x in inherit)
+    require(len(values) <= 1 and (not values or data["mode"] == "handoff"))
+    if values:
+        startup = subprocess.STARTUPINFO()
+        startup.lpAttributeList = {"handle_list": list(values)}
+    command = [sys.executable, "-B", str(runner), "--worker", "--input", str(path)]
+    kernel, _ = _api()
+    windows = C.create_unicode_buffer(32768)
+    require(0 < kernel.GetWindowsDirectoryW(windows, len(windows)) < len(windows), "NATIVE_FAILURE")
+    environment = {"SystemRoot": windows.value, "WINDIR": windows.value,
+        "PATH": str(Path(sys.executable).parent) + os.pathsep + str(Path(windows.value) / "System32"),
+        "PYTHONDONTWRITEBYTECODE": "1", "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
+    require(_CHILD_SLOTS.acquire(blocking=False), "RESOURCE_LIMIT")
+    started = time.monotonic()
+    try:
+        for value in values:
+            os.set_handle_inheritable(value, True)
+        process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            startupinfo=startup, close_fds=True, creationflags=subprocess.CREATE_NO_WINDOW, env=environment)
+    except BaseException:
+        _CHILD_SLOTS.release()
+        raise
+    finally:
+        for value in values:
+            os.set_handle_inheritable(value, False)
+    try:
+        facts = _process_facts(int(process._handle))
+        require(facts["SID"] == scope.SID and Path(facts["image"]) == Path(sys.executable), "IDENTITY_MISMATCH")
+        _CHILDREN[process] = {"scope": scope, "facts": facts, "start": started, "number": count}
+        return process, dict(facts)
+    except BaseException:
+        # It was just created and retained by this call; no PID/name lookup.
+        process.terminate(); process.wait(timeout=5)
+        _CHILD_SLOTS.release()
+        raise
+
+
+def finish_owned_child(scope, process, *, data=b"stop\n"):
+    require(process in _CHILDREN and _CHILDREN[process]["scope"] is scope, "OWNERSHIP_UNPROVEN")
+    rec = _CHILDREN[process]
+    require(not rec.get("finished"), "REPLAY")
+    timeout = max(.01, 10 - (time.monotonic() - rec["start"]))
+    terminated = False
+    try:
+        output, error = process.communicate(input=data, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        verify_target_handle(scope, process, rec["facts"])
+        # R21 authorizes termination of this exact registered test child only.
+        process.terminate(); terminated = True
+        output, error = process.communicate(timeout=5)
+    rec["finished"] = True
+    _CHILD_SLOTS.release()
+    elapsed = time.monotonic() - rec["start"]
+    scope.count("child_total_milliseconds", 60000, int(elapsed * 1000))
+    result = {"pid": rec["facts"]["pid"], "created_filetime": rec["facts"]["created_filetime"],
+        "exit_code": process.returncode, "elapsed_seconds": elapsed, "terminated_owned_stub": terminated,
+        "stdout": output.decode("utf-8", errors="replace")[:4096], "stderr_bytes": len(error)}
+    require(len(output) <= 4096 and len(error) <= 4096, "RESOURCE_LIMIT")
+    return result
+
+
+def read_owned_child_line(scope, process, *, timeout=3):
+    require(process in _CHILDREN and _CHILDREN[process]["scope"] is scope, "OWNERSHIP_UNPROVEN")
+    import msvcrt
+    kernel, _ = _api()
+    kernel.PeekNamedPipe.argtypes = [W.HANDLE, C.c_void_p, W.DWORD, C.c_void_p, C.POINTER(W.DWORD), C.c_void_p]
+    kernel.PeekNamedPipe.restype = W.BOOL
+    handle = msvcrt.get_osfhandle(process.stdout.fileno())
+    deadline, data = time.monotonic() + min(timeout, 3), bytearray()
+    while time.monotonic() < deadline:
+        available = W.DWORD()
+        if not kernel.PeekNamedPipe(handle, None, 0, None, C.byref(available), None):
+            break
+        if available.value:
+            data.extend(process.stdout.raw.read(min(available.value, 4096 - len(data))))
+            if b"\n" in data:
+                require(len(data) <= 4096, "RESOURCE_LIMIT")
+                return json.loads(data.split(b"\n", 1)[0].decode("utf-8"))
+        require(len(data) < 4096, "RESOURCE_LIMIT")
+        if process.poll() is not None and not available.value:
+            break
+        time.sleep(.005)
+    raise SafetyError("RECOVERY_REQUIRED")
+
+
+def self_peak_memory(scope):
+    require(type(scope) is TestScope)
+    class Memory(C.Structure):
+        _fields_ = [("cb", W.DWORD), ("PageFaultCount", W.DWORD)] + [(n, C.c_size_t) for n in
+            ("PeakWorkingSetSize", "WorkingSetSize", "QuotaPeakPagedPoolUsage", "QuotaPagedPoolUsage",
+             "QuotaPeakNonPagedPoolUsage", "QuotaNonPagedPoolUsage", "PagefileUsage", "PeakPagefileUsage", "PrivateUsage")]
+    kernel, _ = _api()
+    kernel.K32GetProcessMemoryInfo.argtypes = [W.HANDLE, C.POINTER(Memory), W.DWORD]
+    kernel.K32GetProcessMemoryInfo.restype = W.BOOL
+    memory = Memory(); memory.cb = C.sizeof(memory)
+    _ok(kernel.K32GetProcessMemoryInfo(kernel.GetCurrentProcess(), C.byref(memory), memory.cb))
+    return {"peak_working_set_bytes": int(memory.PeakWorkingSetSize), "working_set_bytes": int(memory.WorkingSetSize),
+            "private_usage_bytes": int(memory.PrivateUsage), "basis": "current test process only; includes imports/harness"}

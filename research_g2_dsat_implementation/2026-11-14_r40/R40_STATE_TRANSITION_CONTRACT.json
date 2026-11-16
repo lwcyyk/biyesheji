@@ -1,0 +1,121 @@
+{
+  "schema": "r40-state-transition/1",
+  "kind": "prospective repair specification; source remains R38",
+  "orthogonal_axes": {
+    "io_phase": [
+      "PREWRITE_REJECTED",
+      "WRITE_ATTEMPTED",
+      "PERSISTENCE_UNCERTAIN",
+      "COMMITTED"
+    ],
+    "journal_health": [
+      "HEALTHY_VERIFIED",
+      "POISONED",
+      "TRUST_UNRESOLVED"
+    ],
+    "record_knowledge": [
+      "RESULT_OBSERVED_IN_MEMORY",
+      "RESULT_PERSISTENCE_FAILED",
+      "RESULT_PERSISTENCE_UNKNOWN",
+      "RESULT_CHECKPOINT_COMMITTED"
+    ],
+    "budget": [
+      "NO_DEBIT",
+      "DEBIT_RETAINED",
+      "DEBIT_STATE_UNCERTAIN_RETAIN_UPPER"
+    ],
+    "global_acceptance": "sticky failure/incomplete independent of journal_health"
+  },
+  "safe_prewrite_conjunction": [
+    "attempt token fresh and bound to this checkpoint/stream",
+    "known synchronous predicate rejects before destructive open or write-may-start boundary",
+    "journal healthy at entry and exclusively owned existing handle with coherent acknowledged prefix",
+    "no identity/reparse/link/extent conflict observed and no unresolved trust error",
+    "all effects/debits/attempt counters retained, including prewrite debit",
+    "only existing terminal submissions; each rechecks deadline/path/ownership/cap/attempt guards"
+  ],
+  "transitions": [
+    {
+      "from": "HEALTHY_VERIFIED",
+      "event": "certified synchronous ordinary cap/deadline/shape refusal before payload write",
+      "to": "HEALTHY_VERIFIED",
+      "attempt_result": "PREWRITE_REJECTED",
+      "record": "RESULT_PERSISTENCE_FAILED/RESULT_DURABLE=false",
+      "budget": "retain exact already-spent counters and debit; zero automatic release",
+      "further_work": "stop tests; terminal separately gated"
+    },
+    {
+      "from": "HEALTHY_VERIFIED",
+      "event": "ownership or identity integrity conflict before payload write",
+      "to": "POISONED",
+      "attempt_result": "PREWRITE_REJECTED with prefix_trust=false",
+      "budget": "retain all",
+      "reason": "zero payload write alone gives no healthy-prefix proof"
+    },
+    {
+      "from": "HEALTHY_VERIFIED",
+      "event": "write-may-start marker entered; synchronous or asynchronous failure with no reliable complete ACK",
+      "to": "POISONED",
+      "attempt_result": "PERSISTENCE_UNCERTAIN",
+      "record": "UNKNOWN unless trusted committed acknowledgement exists",
+      "budget": "retain full debit; never retry uncertain attempt"
+    },
+    {
+      "from": "HEALTHY_VERIFIED",
+      "event": "full return+flush+fsync+coherent seq/head/extent advance+trusted ACK",
+      "to": "HEALTHY_VERIFIED",
+      "attempt_result": "COMMITTED",
+      "record": "RESULT_CHECKPOINT_COMMITTED/RESULT_DURABLE=true",
+      "budget": "retained/confirmed"
+    },
+    {
+      "from": "HEALTHY_VERIFIED",
+      "event": "fsync complete but head publication or ACK incomplete",
+      "to": "POISONED",
+      "attempt_result": "PERSISTENCE_UNCERTAIN",
+      "record": "UNKNOWN; prior acknowledged prefix retained",
+      "budget": "all debit retained"
+    },
+    {
+      "from": "POISONED",
+      "event": "any subsequent append",
+      "to": "POISONED",
+      "attempt_result": "refuse",
+      "budget": "no reset or refund"
+    },
+    {
+      "from": "HEALTHY_VERIFIED",
+      "event": "later log/formatter failure after trusted result ACK",
+      "to": "HEALTHY_VERIFIED unless distinct integrity/write fault",
+      "attempt_result": "previous COMMITTED retained",
+      "record": "previous ACK immutable; overall run failed/incomplete"
+    }
+  ],
+  "boundary_rules": [
+    "set write-may-start marker before protected call; interruption before/within call may conservatively count as possibly attempted",
+    "never certify PREWRITE from Refusal class, errno, text, or zero byte delta alone",
+    "uninitialized/stale marker, reentry, allocation failure during classification => conservative unknown and fail closed",
+    "token creation/consumption belongs to existing io_lock; source calls direct checkpoint and safe/commit must all receive fresh token",
+    "safe classification never turns poisoned=true to false; it prevents an unjustified new transition only"
+  ],
+  "evidence_fields_required": [
+    "attempt identity",
+    "original stage/test_id",
+    "rejection site and stable producer code",
+    "entry journal health/prefix seq/head/bytes",
+    "write-may-start and charge stage",
+    "old/new charged/attempted/confirmed counts",
+    "decision reason",
+    "trusted ACK if present"
+  ],
+  "representation_rule": "same existing lossless journal/artifact envelopes, original observations and failed-attempt facts retained; minimal fixed bounded transaction facts are extra L0 and need new capacity accounting",
+  "all_unreliable_write_paths_fail_closed": true,
+  "implementation_authorized": false,
+  "logical_stage_mapping": {
+    "S0": "PREWRITE_REJECTED, with separate healthy/unknown prefix axis",
+    "S1": "WRITE_ATTEMPTED or conservatively write-may-have-started",
+    "S2": "PERSISTENCE_UNCERTAIN",
+    "S3": "COMMITTED only with complete trusted ACK",
+    "S4": "POISONED journal; may coexist with BEFORE_IO when integrity trust fails"
+  }
+}

@@ -1,0 +1,279 @@
+"""Frozen synthetic proof adapter and pure commit planning; no native imports."""
+import hashlib
+import json
+import subprocess
+import sys
+import time
+import uuid
+from pathlib import Path
+
+from .dsat_commit_types import (
+    Actor, CommitError, Limits, MODE, NATIVE_GAP, PROJECT, RUN_ROOT, SCOPE_PATH,
+    canonical, clone, digest, integer, keys, legacy_digest, object_digest,
+    obligation, O_digest, packet_digest, pending_source, seal, strict_load,
+    validate_world,
+)
+
+
+def artifact_path(path):
+    path = Path(path).absolute()
+    try:
+        path.relative_to(RUN_ROOT)
+    except ValueError as exc:
+        raise CommitError("DB_PATH_DENIED") from exc
+    for node in (path, *path.parents):
+        if node.exists() and (node.is_symlink() or node.stat().st_file_attributes & 0x400):
+            raise CommitError("DB_PATH_DENIED")
+    if path.resolve() != path:
+        raise CommitError("DB_PATH_DENIED")
+    return path
+
+
+class FrozenRegistry:
+    """Trusted offline configuration. A proposal cannot supply this registry."""
+    def __init__(self, evidence_directory):
+        self.directory = artifact_path(evidence_directory)
+        self.directory.mkdir(parents=True, exist_ok=True)
+        self.scope = strict_load(SCOPE_PATH.read_bytes())
+        self.checker = self.scope["frozen_inputs"]["checker"]
+        self.packets = {}
+        self.sources = {}
+        self.verified = {}
+        self.checks = []
+        fixtures = {}
+        for ref in self.scope["frozen_inputs"]["fixtures"]:
+            path = Path(ref["path"])
+            data = path.read_bytes()
+            if hashlib.sha256(data).hexdigest() != ref["sha256"]:
+                raise CommitError("REJECTED_PROOF_BINDING")
+            fixtures[path.stem] = (strict_load(data), ref["sha256"])
+        for ref in self.scope["frozen_inputs"]["proofs"]:
+            path = Path(ref["path"]); data = path.read_bytes()
+            if hashlib.sha256(data).hexdigest() != ref["sha256"]:
+                raise CommitError("REJECTED_PROOF_BINDING")
+            name = path.stem
+            case_name = "A06" if name == "VAR_MISSING_D_A" else name.split("_")[1]
+            case, fixture_hash = fixtures[case_name]
+            bundle = clone(case["bundle"])
+            if name == "VAR_MISSING_D_A":
+                bundle["envelopes"] = [x for x in bundle["envelopes"] if x["id"] != "syn:d:v1"]
+            self.packets[name] = strict_load(data)
+            self.sources[name] = {"fixture_ref": fixture_hash, "bundle": bundle}
+
+    def check_untrusted(self, packet, timeout=10):
+        """Explicit bounded invocation of the unchanged independent CLI."""
+        started = time.perf_counter_ns()
+        code = Path(self.checker["path"])
+        if hashlib.sha256(code.read_bytes()).hexdigest() != self.checker["sha256"]:
+            raise CommitError("REJECTED_PROOF_BINDING")
+        token = uuid.uuid4().hex
+        inp = artifact_path(self.directory / (token + ".proof.json"))
+        out = artifact_path(self.directory / (token + ".checker.json"))
+        inp.write_bytes(canonical(packet))
+        cmd = [sys.executable, "-B", str(code), str(inp), "--out", str(out)]
+        for field, arg in (("math_input_digest", "--expected-math-digest"),
+                           ("scope_digest", "--expected-scope-digest"),
+                           ("dependency_digest", "--expected-dependency-digest")):
+            if field in packet.get("digests", {}):
+                cmd.extend((arg, packet["digests"][field]))
+        try:
+            process = subprocess.run(cmd, capture_output=True, timeout=timeout,
+                                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            result = strict_load(out.read_bytes(), 262144)
+            accepted = process.returncode == 0 and result.get("mathematics_accepted") is True
+            exit_code = process.returncode
+        except subprocess.TimeoutExpired:
+            accepted, exit_code = False, "TIMEOUT"
+            result = {"status": "UNKNOWN_RESOURCE_LIMIT"}
+        record = {"packet_digest": packet_digest(packet), "packet_bytes_digest": digest("packet-bytes", packet),
+                  "checker_source_digest": self.checker["sha256"], "accepted": accepted,
+                  "result": result, "command": cmd, "exit_code": exit_code,
+                  "elapsed_ns": time.perf_counter_ns() - started, "output": str(out)}
+        self.checks.append(record)
+        return record
+
+    def verify_all(self):
+        for name, packet in self.packets.items():
+            rec = self.check_untrusted(packet)
+            if not rec["accepted"]:
+                raise CommitError("REJECTED_PROOF_BINDING")
+            self.verified[name] = rec
+
+    def save_ready(self, path):
+        path = artifact_path(path)
+        path.write_bytes(canonical({"checker": self.checker["sha256"], "records": self.verified}))
+
+    def load_ready(self, path):
+        # This path is an owned parent-run handoff, outside the untrusted body.
+        path = artifact_path(path)
+        data = strict_load(path.read_bytes())
+        if data["checker"] != self.checker["sha256"]:
+            raise CommitError("REJECTED_PROOF_BINDING")
+        for name, rec in data["records"].items():
+            expected = self.packets.get(name)
+            if expected is None or rec["accepted"] is not True or rec["packet_bytes_digest"] != digest("packet-bytes", expected):
+                raise CommitError("REJECTED_PROOF_BINDING")
+            if rec["checker_source_digest"] != self.checker["sha256"]:
+                raise CommitError("REJECTED_PROOF_BINDING")
+        self.verified = data["records"]
+
+    def binding(self, name):
+        packet = self.packets[name]
+        return digest("dsat-s3a/1:projection", {"fixture": self.sources[name]["fixture_ref"],
+                      "packet": packet["packet_digest"], "O": packet["bindings"]["O_before"]})
+
+    def seed(self, name, instance, a=120, o=0):
+        packet = self.packets[name]
+        scope = clone(packet["bindings"]["scope"])
+        scope_hash = digest("scope", scope)
+        source = clone(self.sources[name])
+        source.update(fixture_key=name, epoch=0, events=[])
+        return {"a": a, "world": {"schema": "dsat-s3a-world/1", "mode": MODE,
+            "codec": "SyntheticJsonCodec/1", "NO_NATIVE": True, "NO_GLOBAL_COMPLETE": True,
+            "authority_instance": instance, "genesis_revision": a, "source": source,
+            "scope": scope, "policy_epoch": 1,
+            "permissions": {"syn:manager": {"read": True, "write": True}},
+            "simulation": {"target_active": False, "B_active": True},
+            "dsat": {"obligation_revision": o,
+                     "O": sorted([obligation(x, scope_hash) for x in source["bundle"]["obligations"]], key=lambda x: x["id"]),
+                     "accepted_proof_refs": [], "history_refs": [], "work_index": {}}}}
+
+
+def base_digests(world):
+    return {"base_O_digest": O_digest(world["dsat"]["O"]),
+            "source_snapshot_digest": digest("source", world["source"]),
+            "request_scope_digest": digest("scope", world["scope"]),
+            "current_grant_digest": digest("grant", world["simulation"])}
+
+
+def PrepareDSatCommit(snapshot, registry, proposal_id, actor=Actor("syn:manager"),
+                     level="MATH_ARCHIVE", name=None):
+    a, world = snapshot["a"], snapshot["world"]
+    name = name or world["source"]["fixture_key"]
+    packet = clone(registry.packets[name])
+    oh = digest("scope", world["scope"])
+    old_ids = {x["id"] for x in world["dsat"]["O"]}
+    additions = [obligation(x, oh) for x in packet["bindings"]["O_before"] if x["id"] not in old_ids]
+    for added in additions:
+        added["dependency_epoch"] = world["source"]["epoch"]
+    return seal({"schema": "dsat-commit/1", "mode": MODE,
+        "authority_instance": world["authority_instance"], "proposal_id": proposal_id, "actor": actor.name,
+        "base_authority_revision": a, "base_obligation_revision": world["dsat"]["obligation_revision"],
+        **base_digests(world), "policy_epoch": world["policy_epoch"],
+        "proof": packet, "packet_digest": packet["packet_digest"],
+        "math_input_digest": packet["digests"]["math_input_digest"],
+        "checker_source_digest": registry.checker["sha256"],
+        "projection_digest": registry.binding(name),
+        "projection_O_digest": legacy_digest("O_before", packet["bindings"]["O_before"]),
+        "proof_context_O_digest": packet["digests"]["O_before_digest"],
+        "obligations_delta": {"add": additions, "replace": []},
+        "dependency_policy": {"require_current": False, "allow_history": True},
+        "cost_delta": [{"id": "work:" + packet["packet_digest"][:24],
+                        "body": {"amount": 1, "unit": "synthetic-work", "math_input_digest": packet["digests"]["math_input_digest"]}}],
+        "requested_level": level})
+
+
+def ValidateDSatCommit(body, snapshot, registry, now=100, limits=Limits()):
+    """A pure plan over a trusted current snapshot and a trusted checked registry."""
+    started = time.perf_counter_ns()
+    world = snapshot["world"]
+    name = world["source"]["fixture_key"]
+    expected = registry.packets.get(name)
+    record = registry.verified.get(name)
+    packet = body["proof"]
+    if expected is None or record is None or not record["accepted"] or canonical(packet) != canonical(expected):
+        raise CommitError("REJECTED_PROOF_BINDING")
+    if hashlib.sha256(Path(registry.checker["path"]).read_bytes()).hexdigest() != registry.checker["sha256"]:
+        raise CommitError("REJECTED_PROOF_BINDING")
+    wanted = {"packet_digest": expected["packet_digest"], "math_input_digest": expected["digests"]["math_input_digest"],
+              "checker_source_digest": registry.checker["sha256"], "projection_digest": registry.binding(name),
+              "projection_O_digest": legacy_digest("O_before", expected["bindings"]["O_before"]),
+              "proof_context_O_digest": expected["digests"]["O_before_digest"]}
+    if any(body[k] != v for k, v in wanted.items()) or packet_digest(packet) != packet["packet_digest"]:
+        raise CommitError("REJECTED_PROOF_BINDING")
+    if world["source"]["fixture_ref"] != registry.sources[name]["fixture_ref"] or world["source"]["bundle"] != registry.sources[name]["bundle"]:
+        raise CommitError("REJECTED_ORIGIN_SCOPE")
+    policy = body["dependency_policy"]
+    integer(now)
+    if now > packet["bindings"]["dependency"]["valid_until"] and (policy["require_current"] or not policy["allow_history"]):
+        raise CommitError("STALE_EVIDENCE")
+    new = clone(world)
+    old = {x["id"]: x for x in world["dsat"]["O"]}
+    after = clone(old)
+    scope_hash = digest("scope", world["scope"])
+    permitted = {x["id"]: obligation(x, scope_hash) for x in packet["bindings"]["O_before"]}
+    for unit in packet["math_input"]["U"]:
+        raw = {"id": "close:" + unit, "kind": "close", "refs": [unit], "strict": True}
+        permitted[raw["id"]] = obligation(raw, scope_hash)
+    conflict = packet["claims"].get("result") == "EVIDENCE_CONFLICT"
+    if conflict:
+        raw = {"id": "investigate:conflict", "kind": "investigate", "refs": [], "strict": True}
+        permitted[raw["id"]] = obligation(raw, scope_hash)
+    for item in permitted.values():
+        item["dependency_epoch"] = world["source"]["epoch"]
+    for added in body["obligations_delta"]["add"]:
+        if added.get("id") in old and added != old[added["id"]]:
+            raise CommitError("REJECTED_ORIGIN_SCOPE")
+        if permitted.get(added.get("id")) != added:
+            raise CommitError("REJECTED_ORIGIN_SCOPE")
+        after[added["id"]] = clone(added)
+    objects = []
+    replaced = set()
+    for replacement in body["obligations_delta"]["replace"]:
+        try:
+            keys(replacement, ("old_id", "pending"))
+            oid = replacement["old_id"]
+            if oid not in old or oid in replaced or conflict or replacement["pending"] != pending_source(old[oid]):
+                raise CommitError("REJECTED_COVERAGE")
+            pending = replacement["pending"]
+            if pending["id"] in after:
+                raise CommitError("REJECTED_COVERAGE")
+            replaced.add(oid)
+            del after[oid]
+            after[pending["id"]] = clone(pending)
+            objects.append(("risk", old[oid]))
+        except (KeyError, TypeError) as exc:
+            raise CommitError("REJECTED_COVERAGE") from exc
+    # Required projection additions cannot be silently omitted.
+    for raw in packet["bindings"]["O_before"]:
+        oid = raw["id"]
+        if oid not in after and oid not in replaced:
+            raise CommitError("REJECTED_COVERAGE")
+    for oid, prior in old.items():
+        if oid not in replaced and after.get(oid) != prior:
+            raise CommitError("REJECTED_COVERAGE")
+    new["dsat"]["O"] = sorted(after.values(), key=lambda x: x["id"])
+    if conflict and "investigate:conflict" not in after:
+        raise CommitError("REJECTED_COVERAGE")
+    for work in body["cost_delta"]:
+        if work["body"]["math_input_digest"] != body["math_input_digest"]:
+            raise CommitError("REJECTED_PROOF_BINDING")
+        ref = object_digest("work", work)
+        previous = new["dsat"]["work_index"].get(work["id"])
+        if previous is not None and previous != ref:
+            raise CommitError("CONFLICT_WORK_BODY")
+        new["dsat"]["work_index"][work["id"]] = ref
+        objects.append(("work", work))
+    objects.extend((("proof", packet), ("math", packet["math_input"]), ("checker", record)))
+    proof_ref = object_digest("proof", packet)
+    if proof_ref not in new["dsat"]["accepted_proof_refs"]:
+        new["dsat"]["accepted_proof_refs"].append(proof_ref)
+    history = {"proposal_id": body["proposal_id"], "proof": proof_ref, "scope": body["request_scope_digest"],
+               "level": body["requested_level"], "checked_at": now, "native_admission": NATIVE_GAP,
+               "global_complete": False}
+    objects.append(("history", history))
+    new["dsat"]["history_refs"].append(object_digest("history", history))
+    changed = O_digest(new["dsat"]["O"]) != O_digest(world["dsat"]["O"])
+    if changed:
+        if new["dsat"]["obligation_revision"] == (1 << 63) - 1:
+            raise CommitError("REVISION_EXHAUSTED")
+        new["dsat"]["obligation_revision"] += 1
+    validate_world(new, limits)
+    if sum(len(canonical(value)) for _, value in objects) > limits.objects_bytes:
+        raise CommitError("UNKNOWN_RESOURCE_LIMIT")
+    result = "COMMITTED_" + {"MATH_ARCHIVE": "MATH_RECORD", "CONDITIONAL_ARCHIVE": "CONDITIONAL_RECORD",
+                             "COVER_PRESERVING_MODEL_TRANSFORM": "COVER_PRESERVING_MODEL_TRANSFORM"}[body["requested_level"]]
+    if conflict:
+        result = "COMMITTED_CONFLICT_RECORD"
+    return {"world": new, "objects": objects, "result": result,
+            "O_transform_ns": time.perf_counter_ns() - started}

@@ -1,0 +1,172 @@
+"""R31 static evidence construction only. Target bytes are parsed, never imported."""
+from pathlib import Path
+import ast
+import copy
+import hashlib
+import json
+import textwrap
+
+B = Path(r"D:\毕业设计\research_g2_dsat_implementation")
+R, O = B / "2026-11-12_r31", B / "2026-11-12_r29"
+T = Path(r"D:\毕业设计\auth-lifecycle\scripts\run_dsat_current_build_regressions.py")
+OUT = R / "verification_runs"
+RUN = OUT / "r31_regression68_001"
+
+def h(p):
+    return hashlib.sha256(Path(p).read_bytes()).hexdigest()
+
+def load(p):
+    return json.loads(Path(p).read_text(encoding="utf-8-sig"))
+
+def write(name, value):
+    with (R / name).open("x", encoding="utf-8", newline="\n") as stream:
+        json.dump(value, stream, ensure_ascii=False, indent=2)
+        stream.write("\n")
+
+def pin(p):
+    return {"path": str(p), "sha256": h(p)}
+
+def functions(tree):
+    result = {}
+    for node in tree.body:
+        if isinstance(node, ast.FunctionDef):
+            result[node.name] = node
+        elif isinstance(node, ast.ClassDef):
+            result.update({node.name + "." + f.name: f for f in node.body if isinstance(f, ast.FunctionDef)})
+    return result
+
+source = T.read_text(encoding="utf-8")
+tree = ast.parse(source)
+before = functions(ast.parse((R / "sources/RUNNER_BEFORE.py.bin").read_bytes()))
+after = functions(tree)
+checks = []
+
+def check(name, value, evidence):
+    checks.append({"id": name, "passed": bool(value), "evidence": evidence})
+    assert value, name
+
+check("AST_PARSE", True, "ast.parse only;target Runner and test modules never imported/executed")
+for name in (
+    "State.audit", "State.block_bound_cache_probe", "State.deny_read", "checked",
+    "State.connect_memory", "State.sql", "State.close_connections",
+    "D24Projection.__enter__", "D24Projection.__exit__", "ProjectionFile.write_bytes",
+    "ProjectionRead._path", "OrderedSuite.run", "AuditedConnection.execute",
+    "AuditedConnection.rollback", "AuditedCursor.execute",
+):
+    check("UNCHANGED_" + name, ast.dump(before[name], include_attributes=False) ==
+          ast.dump(after[name], include_attributes=False), {"line": after[name].lineno, "AST_exact_equal": True})
+for name in ("controls", "State.preflight", "load_group"):
+    segment = textwrap.dedent(ast.get_source_segment(source, after[name]))
+    segment = segment.replace("R31_", "R29_").replace("r31-", "r29-").replace("r31_cases_", "r29_cases_")
+    check("NAMESPACE_ONLY_" + name, ast.dump(ast.parse(segment).body[0], include_attributes=False) ==
+          ast.dump(before[name], include_attributes=False), "namespace-reversed AST exactly equal")
+
+build = load(R / "R31_BUILD_AND_RUNNER_LOCK.json")
+manifest = load(R / "R31_68_TEST_MANIFEST.json")
+resources = load(R / "R31_REGRESSION_RESOURCE_LOCK.json")
+catalogue = load(R / "R31_RUNTIME_READ_MANIFEST.json")
+old_command = load(O / "R29_REGRESSION_COMMAND_LOCK.json")
+ids = [row["test_id"] for row in manifest["tests"]]
+actual_plan = [row["test_id"] for phase in ("A1", "H1", "D1A")
+               for row in manifest["tests"] if row["test_source"] == phase]
+check("ORIGINAL_TESTS_68", len(ids) == len(set(ids)) == 68 and
+      actual_plan == old_command["test_execution_order"] and
+      manifest["tests"] == load(O / "R29_68_TEST_MANIFEST.json")["tests"],
+      "physical manifest rows D/A/H retained;actual phase-filtered execution A1/H1/D1A,20/24/24")
+all_pins = (build["engineering_source"] + build["regression_extension_sources"] +
+            build["runtime_files"] + manifest["fixture_files"] + catalogue["files"])
+check("ALL_FROZEN_PINS", all(h(row["path"]) == row["sha256"] for row in all_pins),
+      "42engineering,5extensions(including3tests),24runtime,10fixtures,394catalogue")
+check("RUNTIME_CATALOGUE_UNCHANGED", catalogue["files"] ==
+      load(O / "R29_RUNTIME_READ_MANIFEST.json")["files"], "0 added paths;no directory permission")
+canonical = json.dumps(build["engineering_source"], sort_keys=True, separators=(",", ":"),
+                       ensure_ascii=True, allow_nan=False).encode()
+check("SOURCE_DIGEST_R25", hashlib.sha256(canonical).hexdigest() ==
+      build["source_digest"] == build["R25_source_digest"], "original42 digest unchanged")
+
+main = ast.get_source_segment(source, after["main"])
+origins = ast.get_source_segment(source, after["State.origins_snapshot"])
+finalize = ast.get_source_segment(source, after["finalize_evidence"])
+check("RAW_BEFORE_PREDICATE", origins.index('self.checkpoint("ORIGIN_OBSERVED"') <
+      origins.index("self.classify_origin(row, module)"), "raw observation durable before validation/read")
+check("ASSERTION_CHECKPOINT", 'self.state.checkpoint("TEST_ASSERTION", self.state.rows[tid])' in source,
+      "per original unittest result;original expected unchanged")
+offset = main.index("state.details.extend(module.DETAILS)")
+check("TESTS_FINISHED_BEFORE_POST_ORIGINS", main.index("state.finish_assertions()", offset) <
+      main.index('state.origins_snapshot(phase + "_finished")', offset), "full/early-stop assertions first")
+check("MEMORY_IMPORT_BEFORE_FINAL_ORIGINS", finalize.index("memory = peak_memory()") <
+      finalize.index("state.origins_snapshot("), "ctypes.wintypes delayed import included")
+check("INDEPENDENT_FINAL_ARTIFACTS", all(text in finalize for text in (
+    'state.publish("MODULE_ORIGINS.json"', 'state.publish("RESOURCE_LEDGER.json"',
+    'state.publish("RESULTS.json"')), "publish catches its own error;following attempts continue")
+check("FAIL_CLOSED_LAYERS", all(text in finalize for text in (
+    "assertion_ok and provenance_ok and resource_ok and integrity", "not state.errors", "state.persistence_ok")),
+      "four layers required;candidate RESULTS requires commit and native exit0")
+check("PRECISE_NATIVE_CHILD_BINDING", all(text in source for text in (
+    "target is module and sys.modules.get(name) is module",
+    "self.runtime_code_pins.get(expected) == NATIVE_PARENT_SHA256",
+    "self.verify_file_origin(parent_row, parent, expected)")), "prefix alone insufficient")
+check("NO_RUNTIME_LOCK_EXPANSION", not any(isinstance(node, ast.Call) and
+      isinstance(node.func, ast.Attribute) and node.func.attr in {"unlink", "rename", "replace"}
+      for node in ast.walk(after["State.origins_snapshot"])), "validator never writes source/control locks")
+check("LOGICAL_COMMIT_AFTER_LOG_CLOSE", main.index("# All redirected streams are closed/fsynced") <
+      main.index('state.publish("TEST_RUNS.json"'), "outside redirected Sink contexts;all existing runtime files hashed")
+check("RESOURCE_LIMITS", len(resources["relative_paths"]) == 13 and
+      resources["output_bytes_total_max"] == 2097152 and
+      resources["soft_seconds_main_entry_including_controls"] == 120 and
+      resources["test_subprocesses_max"] == 0,
+      "13paths,2MiB,eachlog64KiB,120s;SQL376/rollback1/threads12peak6/SQLite40active32 retained")
+check("NO_AUTOMATIC_RERUN", not any(isinstance(node, ast.While) for node in ast.walk(tree)) and
+      len([node for node in ast.walk(after["main"]) if isinstance(node, ast.Call) and
+           isinstance(node.func, ast.Attribute) and node.func.attr == "run"]) == 1,
+      "one phase loop and persistent invocation claim;no restart or retry")
+history = load(R / "sources/PREPATCH_AND_HISTORY.json")
+check("IMMUTABLE_HISTORY_2176", all(h(row["path"]) == row["sha256"] for row in history["protected_files"]),
+      {"count": len(history["protected_files"]), "approved_mutable_runner_separate": True})
+check("R25_54_EVIDENCE", h(build["original_54_evidence"]["path"]) ==
+      build["original_54_evidence"]["sha256"], "actual54 prior evidence unchanged;0 reruns")
+check("NAMESPACE_UNCREATED", not OUT.exists(), "no receipt/run slot/logs/test files")
+check("DYNAMIC_ZERO", True, "all R31 commands are static filesystem/hash/AST/report operations")
+write("R31_STATIC_PREFLIGHT.json", {"schema": "r31-static-preflight/1", "status": "R31_STATIC_PREFLIGHT_PASSED",
+      "runner_sha256": h(T), "method": "AST/hash and explicit callflow/path/exception review only",
+      "checks": checks, "check_count": len(checks), "passed": True, "actual_suite_runs": 0,
+      "execution_authorized": False, "dynamic_cases": "NOT_RUN", "limitations": [
+          "actual metadata shapes and Windows I/O await independent one-run authorization",
+          "noncatalogue pre-script startup hooks inventory only;no whole-interpreter attestation",
+          "future resource actuals UNKNOWN;budget guards statically verified"]})
+
+command = copy.deepcopy(old_command)
+command.update(schema="r31-regression-command/1", runner_sha256=h(T), R30_RUN_BUDGET_REMAINING=0,
+               source_engineering42=build["engineering_source"], runtime24_fingerprints=build["runtime_files"],
+               original_tests=build["original_tests"], original_fixtures=manifest["fixture_files"])
+for key in ("argv", "output_root", "run_root", "receipt", "stdout", "stderr", "suite_log"):
+    def rebind(text):
+        return text.replace("2026-11-12_r29", "2026-11-12_r31").replace("r29_regression68_001", "r31_regression68_001")
+    command[key] = rebind(command[key]) if isinstance(command[key], str) else [rebind(x) for x in command[key]]
+command["resources_ref"] = str(R / "R31_REGRESSION_RESOURCE_LOCK.json")
+command["cache_policy_reference"] = str(R / "R31_PYC_ACCESS_POLICY.json")
+command["runtime_read_catalogue"] = str(R / "R31_RUNTIME_READ_MANIFEST.json")
+for row in command["D24_inputs"]:
+    row["target_path"] = str(RUN / row["name"])
+    row["logical_path"] = str(B / "2026-11-11_r19_offline" / ("r31_projection_" + RUN.name) / row["name"])
+names = ["R31_BUILD_AND_RUNNER_LOCK.json", "R31_68_TEST_MANIFEST.json", "R31_REGRESSION_RESOURCE_LOCK.json",
+         "R31_PATCH_SCOPE_LOCK.json", "R31_PYC_ACCESS_POLICY.json", "R31_RUNTIME_READ_MANIFEST.json",
+         "R31_ORIGIN_CLASSIFICATION_POLICY.json", "R31_EVIDENCE_PERSISTENCE_CONTRACT.json",
+         "R31_OUTPUT_ROUTE_AUDIT.json", "sources/PREPATCH_AND_HISTORY.json"]
+command.update(control_pins=[pin(R / n) for n in names], origin_policy=str(R / "R31_ORIGIN_CLASSIFICATION_POLICY.json"),
+               persistence_policy=str(R / "R31_EVIDENCE_PERSISTENCE_CONTRACT.json"),
+               receipt_schema="r31-regression-approval/1", actual_suite_runs=0, executed=False, execution_authorized=False,
+               layers=["TEST_ASSERTIONS", "DEPENDENCY_PROVENANCE", "RESOURCE_AND_INTEGRITY", "FINAL_VERDICT"],
+               acceptance="68PASS and provenance/resources/history/cleanup/persistence;valid TEST_RUNS hashes/native exit0;R25 joint review separately",
+               root_preparation="only after independent approval:create OUTPUT and one bound receipt;never reuse historical root")
+command["history_roots_read_only"] += ["R29", "R30"]
+write("R31_REGRESSION_COMMAND_LOCK.json", command)
+write("sources/APPROVAL_TEMPLATE.json", {"schema": "r31-regression-approval/1", "approved": False,
+      "template_only": True, "action": "RUN_CURRENT_BUILD_REGRESSION68",
+      "command_lock_sha256": h(R / "R31_REGRESSION_COMMAND_LOCK.json"), "source_digest": build["source_digest"],
+      "output_root": str(OUT), "run_id": RUN.name, "max_suite_runs": 1, "automatic_reruns": 0,
+      "resource_lock_sha256": h(R / "R31_REGRESSION_RESOURCE_LOCK.json"),
+      "response_path": "PENDING_NEW_INDEPENDENT_APPROVAL", "response_sha256": "PENDING",
+      "D1B2": False, "P1A": False, "P1B": False, "P2": False, "S3B2": False, "S5": False})
+print(json.dumps({"static_checks": len(checks), "all_passed": True, "runner_sha256": h(T),
+      "command_sha256": h(R / "R31_REGRESSION_COMMAND_LOCK.json"), "actual_suite_runs": 0}))

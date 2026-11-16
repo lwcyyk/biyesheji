@@ -1,0 +1,17 @@
+# 失败安全证据持久化
+
+复用原13路径中的 `EARLY_FAILURE.json` 作为 `r31-checkpoint-jsonl/1` 日志。该文件扩展名保留，内容格式明确为JSONL。它在成功和失败运行中均保存阶段证据。其他结果文件继续独占创建。
+
+执行顺序为PRECHECK→RUN_STARTED→TESTS_RUNNING→逐项TEST_ASSERTION→PHASE_ASSERTIONS_FINISHED→TESTS_FINISHED→PROVENANCE_CHECK→RESOURCE_AUDIT→FINALIZATION_READY→FINALIZED。失败有独立FAILED或RECOVERY_REQUIRED记录。每组测试返回后先保存该组断言及已有资源；第68个结果或断言提前停止时，先完成TESTS_FINISHED检查点，再进行组后来源核验。若更早在装配或来源阶段停止，收尾按实际已完成的行补记TESTS_FINISHED与NOT_RUN。
+
+检查点以独占xb创建并持有同一流；每次追加核对dev/inode、文件长度和流偏移，加入seq、previous_sha256及当前摘要。完整写入后flush/fsync成功，内存链头才推进。所有写入仍经过2MiB、公用输出净化及120秒截止检查。动态额外路径为0。
+
+来源核验失败时，原始观测在校验前已经持久化，分类结果与拒绝行继续记录。每阶段快照通过内容ID引用去重记录，并在后续阶段重新核验摘要和身份。首条执行异常及后置来源、资源、输出异常按stage/type/code/errno/redacted traceback分别保存。
+
+收尾单独保护来源检查、历史核对和资源检查；MODULE_ORIGINS、RESOURCE_LEDGER和RESULTS各有独立写入尝试。一个来源拒绝会使最终合同失败，已有测试断言继续作为断言层证据保存。资源计量按实际已知值记录，R30缺失SQL/线程/RAM等项目继续UNKNOWN。
+
+RESULTS中的passed表示待提交候选结论。所有日志关闭并fsync后，最后创建TEST_RUNS，把现存runtime文件摘要和journal链头绑定。消费者必须检查有效TEST_RUNS、文件摘要、相应native退出码及各层状态。来源层失败时，即使TEST_ASSERTIONS为68 PASS，FULL_CONTRACT_ACCEPTED仍为false。D1B1关闭始终另行审查。
+
+这里采用摘要校验后的逻辑提交，保留原有rename禁令。独占写入避免截断历史文件。崩溃恢复仅认可完整且链校验成功的JSONL前缀，尾部半条记录保留为残缺证据。磁盘写失败、时间或字节额度耗尽可能阻止后续文件；journal关闭后的日志/commit故障可能只留下缺失commit和native非零。fsync的操作系统语义及硬件故障边界继续适用。
+
+持久化机制经过静态控制流核对，动态故障注入次数为0，任何崩溃持久性的实测PASS均保持未登记。

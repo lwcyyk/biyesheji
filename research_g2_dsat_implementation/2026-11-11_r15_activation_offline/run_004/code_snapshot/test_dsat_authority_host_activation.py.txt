@@ -1,0 +1,535 @@
+"""A01-A20: real owned :memory: SQL, synthetic codec/auth/RPC, services AST only."""
+import ast
+from concurrent.futures import ThreadPoolExecutor
+import contextlib
+import copy
+import hashlib
+import importlib.util
+import io
+import json
+import logging
+from pathlib import Path
+import pickle
+import threading
+import time
+from types import SimpleNamespace
+import unittest
+from unittest.mock import patch
+
+from auth_lifecycle.online_state import dsat_authority_host_activation as a
+from auth_lifecycle.online_state import dsat_authority_read_host as h
+from auth_lifecycle.online_state.dsat_authority_read import BASE_GAPS
+from auth_lifecycle.online_state.protocol import canonical, digest
+
+
+CONFIG, DETAILS = {}, []
+ORIGINAL_READ = h.read_dsat_authority_snapshot
+
+
+def configure(plan, fixture_root, connect_memory):
+    CONFIG.update(plan=plan, fixture_root=fixture_root, connect=connect_memory)
+
+
+class CodecSpy:
+    def __init__(self, store):
+        self.store = store
+
+    def decrypt(self, nonce, body, aad):
+        store = self.store
+        store.decode_calls += 1
+        store.trace.append("decode")
+        if store.failure == "decode" or nonce != b"N" * 12 or aad != b"auth-lifecycle/online-state/schema-1":
+            raise RuntimeError(store.secret)
+        if body != store.blob[12:]:
+            raise ValueError(store.secret)
+        return body[:-16]
+
+
+class MemoryStore:
+    def __init__(self, state, connection, secret):
+        self.connection, self.secret = connection, secret
+        self.lock = threading.RLock()
+        self.operations, self.operation_limit = 0, None
+        self.key_calls, self.decode_calls = 0, 0
+        self.telemetry_attempts, self.telemetry_successes = 0, 0
+        self.select_dispatches, self.forbidden = 0, 0
+        self.failure, self.select_hook = None, None
+        self.C_telemetry_ns = 0
+        self.trace, self.telemetry, self.sql_templates = [], [], []
+        connection.execute("CREATE TABLE authority_state(id INTEGER PRIMARY KEY,version INTEGER,ciphertext BLOB)")
+        connection.execute("CREATE TABLE authority_events(version INTEGER,operation TEXT)")
+        connection.execute("INSERT INTO authority_events VALUES(120,'fixture_event')")
+        connection.execute("PRAGMA user_version=2")
+        self.replace_fixture(state)
+
+    def replace_fixture(self, state):
+        self.state = copy.deepcopy(state)
+        for raw in self.state["requests"].values():
+            raw["digest"] = digest({"caller": raw["origin"]["caller"], "request": raw["request"]})
+        self.blob = b"N" * 12 + canonical(self.state) + b"T" * 16
+        self.connection.execute("DELETE FROM authority_state")
+        self.connection.execute("INSERT INTO authority_state VALUES(1,120,?)", (self.blob,))
+
+    def execute(self, statement, parameters=()):
+        if statement != a.BOUNDED_SELECT:
+            self.forbidden += 1
+            raise AssertionError("SOURCE_QUERY_NOT_ALLOWLISTED")
+        if self.operation_limit is not None and self.operations >= self.operation_limit:
+            raise RuntimeError("DATABASE_OPERATION_BUDGET")
+        self.operations += 1
+        self.trace.append("operation_increment")
+        telemetry_started = time.perf_counter_ns()
+        try:
+            self.telemetry_attempts += 1
+            self.trace.append("telemetry_attempt")
+            if self.failure == "telemetry":
+                raise RuntimeError(self.secret)
+            self.telemetry_successes += 1
+            self.telemetry.append({"kind": "SELECT", "number": self.operations, "bound_value_bytes": 8})
+            self.trace.append("telemetry_success")
+        finally:
+            self.C_telemetry_ns += time.perf_counter_ns() - telemetry_started
+        if self.select_hook is not None:
+            self.select_hook()
+        self.select_dispatches += 1
+        self.sql_templates.append(statement)
+        self.trace.append("sqlite_select")
+        return self.connection.execute(statement, parameters)
+
+    def cipher(self):
+        self.key_calls += 1
+        self.trace.append("key")
+        if self.failure == "key":
+            raise RuntimeError(self.secret)
+        return CodecSpy(self)
+
+    def call(self, *args):
+        self.forbidden += 1
+        raise AssertionError("OLD_DISPATCH_FORBIDDEN")
+
+    def world_hash(self):
+        rows = [(row["id"], row["version"], bytes(row["ciphertext"]).hex())
+                for row in self.connection.execute("SELECT id,version,ciphertext FROM authority_state ORDER BY id")]
+        events = [tuple(row) for row in self.connection.execute("SELECT version,operation FROM authority_events ORDER BY version")]
+        return digest({"rows": rows, "events": events})
+
+    def counters(self):
+        return {"operations": self.operations, "telemetry_attempts": self.telemetry_attempts,
+                "telemetry_successes": self.telemetry_successes, "select_dispatches": self.select_dispatches,
+                "key_calls": self.key_calls, "decode_calls": self.decode_calls, "forbidden": self.forbidden}
+
+    def __repr__(self):
+        return "<OwnedMemoryStore redacted>"
+
+
+class Transport:
+    def __init__(self, env):
+        self.env, self.calls = env, 0
+
+    def call(self, operation, payload):
+        self.calls += 1
+        if operation != h.RIGHT:
+            raise ValueError("OPERATION_DENIED")
+        return a.dispatch_authority_read(self.env.mount, self.env.peer, payload)
+
+
+class ActivationCases(unittest.TestCase):
+    def setUp(self):
+        root = CONFIG["fixture_root"]
+        self.case_id = self._testMethodName.split("_")[1]
+        self.spec = next(x for x in CONFIG["plan"]["A1"]["new_tests"] if x["id"] == self.case_id)
+        self.seed = json.loads((root / "STATE_SEED.json").read_text(encoding="utf-8-sig"))
+        self.canaries = json.loads((root / "CANARIES.json").read_text(encoding="utf-8-sig"))["values"]
+        self.checks, self.calls, self.environments, self.batches = [], [], [], []
+        self.sequence = 0
+        self.started = time.perf_counter_ns()
+
+    def tearDown(self):
+        DETAILS.append({"id": self.case_id, "expected": self.spec["expected"], "checks": self.checks,
+                        "calls": self.calls, "batches": self.batches,
+                        "session_final": [self.safe_session(e) for e in self.environments],
+                        "elapsed_ns": time.perf_counter_ns() - self.started})
+        for env in self.environments:
+            env.issuer.retire("epoch:retired")
+
+    def check(self, condition, label):
+        self.checks.append({"label": label, "satisfied": bool(condition)})
+        if not condition:
+            raise AssertionError(label)
+
+    def safe_session(self, env):
+        return {"authorization_ref": env.authorization, "source_ref": env.store.source_ref,
+                "C_telemetry_ns": env.store.C_telemetry_ns, "registration": env.mount.registration.counters(),
+                "store": env.store.counters(), "trace": list(env.store.trace),
+                "telemetry": copy.deepcopy(env.store.telemetry), "host_audit_rows": list(env.audit)}
+
+    def environment(self, *, store=None, state=None, ceiling=a.CEILING, rid="rF", limits=None):
+        self.sequence += 1
+        if store is None:
+            store = MemoryStore(self.seed["state"] if state is None else state,
+                                CONFIG["connect"](), self.canaries["exception"])
+            store.source_ref = "mem:" + self.case_id
+        clock = SimpleNamespace(now=1000)
+        issuer = a.ActivationIssuer("epoch:a1:" + str(self.sequence), clock=lambda: clock.now)
+        audit = []
+        authorization = "auth:" + self.case_id + "." + str(self.sequence)
+        ticket = issuer.authorize_offline(authorization_id=authorization, scope=self.seed["scope_A"],
+            grant_ref="gA", rid=rid, manager_identity="h2_reader", principal_ref="manager:a1", actor="user",
+            transport_ref="rpc:authority", scope_ref="scope:a1", producer_ref="producer:a1", source_ref="authority:a1",
+            expires_ns=1000000000, expected_store=store, ceiling=ceiling, audit_sink=audit.append,
+            limits=limits or h.HostReadLimits())
+        before = store.counters()
+        mount = a.mount_authority_host(store, ticket)
+        self.check(store.counters() == before, "REGISTRATION_ZERO_SQL_KEY_DECODE_AND_QUOTA")
+        identities = {"h2_reader": self.canaries["rpc_token"], "controller": self.canaries["access_token"]}
+        permissions = {"h2_reader": [h.RIGHT], "controller": [h.RIGHT, "grant"]}
+        peer = a.authenticate_authority_peer(mount, "Bearer " + self.canaries["rpc_token"], identities, permissions)
+        env = SimpleNamespace(store=store, clock=clock, issuer=issuer, ticket=ticket, mount=mount,
+                              peer=peer, identities=identities, permissions=permissions,
+                              authorization=authorization, audit=audit)
+        self.environments.append(env)
+        return env
+
+    def verify_public(self, public, rendered):
+        self.check(len(canonical(public)) <= 4096, "SUMMARY_WITHIN_4096")
+        self.check(all(public[k] is False for k in ("math_ready", "current_native_eligible", "global_complete")), "NO_NATIVE_MATH_COMPLETE")
+        self.check(public["authority_write_action"] == "NONE" and public["obligation_revision"] is None,
+                   "NO_WRITE_OR_O_REVISION")
+        self.check(set(BASE_GAPS) <= set(public["missing_fields"]), "UNKNOWN_GAPS_PRESERVED")
+        self.check(all(value not in rendered for value in self.canaries.values()), "ALL_SECRET_CANARIES_ABSENT")
+        self.check(set(public) == set(h.summary_schema()["properties"]), "CLOSED_ROOT_SHAPE")
+
+    def invoke(self, env, *, payload=None, context=None, permit=None, direct=None, bridge_failure=False):
+        world = env.store.world_hash()
+        before, session_before = env.store.counters(), env.mount.registration.counters()
+        stdout, stderr, logs = io.StringIO(), io.StringIO(), io.StringIO()
+        handler = logging.StreamHandler(logs)
+        logger = logging.getLogger()
+        logger.addHandler(handler)
+        private_stage = []
+        def observe(*args, **kwargs):
+            value = ORIGINAL_READ(*args, **kwargs)
+            private_stage.append(value.to_dict())
+            if bridge_failure:
+                raise RuntimeError(self.canaries["exception"])
+            return value
+        started = time.perf_counter_ns()
+        try:
+            with patch.object(h, "read_dsat_authority_snapshot", observe), contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+                public = direct() if direct else a.dispatch_authority_read(env.mount,
+                    env.peer if context is None else context, env.mount.refs(permit) if payload is None else payload, permit)
+        finally:
+            logger.removeHandler(handler)
+        elapsed = time.perf_counter_ns() - started
+        after = env.store.counters()
+        delta = {k: after[k] - before[k] for k in before}
+        session = env.mount.registration.counters()
+        self.check(world == env.store.world_hash(), "WORLD_ROW_VERSION_AND_EVENTS_UNCHANGED")
+        self.check(delta["forbidden"] == 0, "NO_OLD_DISPATCH_OR_NONALLOWLIST_SQL")
+        self.check(public["audit"]["source_operations_delta"] == delta["operations"], "PUBLIC_BILLING_MATCHES_SOURCE_DELTA")
+        self.check(delta["select_dispatches"] <= 1 and session["session_claims"] <= 1, "SESSION_READ_LIMIT_ONE")
+        rendered = json.dumps(public) + stdout.getvalue() + stderr.getvalue() + logs.getvalue() + repr(env.mount)
+        self.verify_public(public, rendered)
+        self.check(stdout.getvalue() == stderr.getvalue() == logs.getvalue() == "", "NO_UNCONTROLLED_LOG_OR_STDOUT")
+        self.calls.append({"status": public["status"], "category": h.outcome_category(public["status"]),
+                           "summary": public, "world_before": world, "world_after": env.store.world_hash(),
+                           "store_delta": delta, "session_before": session_before, "session_after": session,
+                           "source_stage_count": len(private_stage), "elapsed_ns": elapsed, "secret_scan": "CLEAN"})
+        return public, private_stage
+
+    def denied_zero(self, env, expected, **kwargs):
+        public, _ = self.invoke(env, **kwargs)
+        self.check(public["status"] == expected and self.calls[-1]["store_delta"]["select_dispatches"] == 0
+                   and self.calls[-1]["store_delta"]["key_calls"] == 0, "PRE_SOURCE_DENIAL_ZERO_SELECT_KEY")
+
+    def test_A01_default_off(self):
+        class Trap:
+            def __getattribute__(self, name):
+                raise AssertionError("DISABLED_REGISTRATION_TOUCHED_SOURCE")
+        self.check(a.mount_authority_host(Trap()) is None, "MOUNT_DEFAULT_DISABLED_ZERO_IO")
+        public = a.dispatch_authority_read(None, None, {})
+        self.verify_public(public, json.dumps(public))
+
+    def test_A02_binding(self):
+        env = self.environment()
+        self.check(env.mount.host._reader.lock is env.store.lock and env.mount.host._reader.connection is env.store.connection,
+                   "EXACT_STORE_LOCK_CONNECTION_BINDING")
+        original = env.store.lock
+        env.store.lock = threading.RLock()
+        self.denied_zero(env, "HOST_SOURCE_MISMATCH")
+        env.store.lock = original
+        original_connection = env.store.connection
+        env.store.connection = SimpleNamespace(in_transaction=False)
+        try:
+            public = a.dispatch_authority_read(env.mount, env.peer, env.mount.refs())
+            self.check(public["status"] == "HOST_SOURCE_MISMATCH", "CONNECTION_SUBSTITUTION_REFUSED")
+        finally:
+            env.store.connection = original_connection
+
+    def test_A03_forgery(self):
+        env = self.environment()
+        for bad in ("LOCAL", {"trusted": True}, object.__new__(a.AuthorityMountTicket)):
+            try:
+                a.mount_authority_host(env.store, bad)
+            except h.HostReadError:
+                pass
+            else:
+                self.check(False, "FORGED_TICKET_MUST_BE_REJECTED")
+        self.denied_zero(env, "HOST_IDENTITY_REQUIRED", context={"actor": "h2_reader", "trusted": True})
+
+    def test_A04_synthetic_compatibility(self):
+        env = self.environment()
+        try:
+            h.AuthorityReadHost(env.store, env.mount.policy, producer_ref="p", locator_ref="l", epoch_ref="e", registration="LOCAL")
+        except h.HostReadError:
+            pass
+        else:
+            self.check(False, "RAW_REGISTRATION_STRING_DENIED")
+        plain = h.AuthorityReadHost(env.store, env.mount.policy, producer_ref="p", locator_ref="l", epoch_ref=env.issuer.epoch_ref,
+                                    source_kind="LOCAL_AUTHORITY_HOST")
+        permit = plain.issue_permit(env.mount.caller, self.seed["scope_A"])
+        public = plain.read_summary(plain.request_for(permit), env.mount.caller, permit).to_dict()
+        self.check(public["status"] == "UNSUPPORTED_SOURCE_SCHEMA" and env.store.operations == 0, "BARE_LOCAL_STILL_DENIED")
+
+    def test_A05_authenticated_context(self):
+        env = self.environment()
+        self.denied_zero(env, "HOST_IDENTITY_REQUIRED", context=object.__new__(a.AuthenticatedRpcContext))
+        public, stages = self.invoke(env)
+        self.check(public["status"] == "STAGING_READY_WITH_GAPS" and stages[0]["source"]["source_kind"] == "LOCAL_AUTHORITY_HOST",
+                   "TRUSTED_RPC_CONTEXT_REACHES_LOCAL_HOST_ADAPTER")
+
+    def test_A06_old_roles(self):
+        env = self.environment()
+        old = a.authenticate_authority_peer(env.mount, "Bearer " + self.canaries["access_token"], env.identities, env.permissions)
+        self.check(old is None, "BROAD_CONTROLLER_TOKEN_NOT_READ_IDENTITY")
+        self.denied_zero(env, "HOST_IDENTITY_REQUIRED", context=False)
+        agent = a.authenticate_authority_peer(env.mount, "Bearer invalid", env.identities, env.permissions)
+        self.check(agent is None, "UNAUTHENTICATED_AGENT_DENIED")
+
+    def test_A07_scope_grant_rid(self):
+        env = self.environment()
+        for key in ("actor", "grant", "rid", "scope", "path"):
+            body = env.mount.refs()
+            body[key] = "foreign"
+            self.denied_zero(env, "UNSUPPORTED_READ_REQUEST", payload=body)
+        body = env.mount.refs()
+        body["read_scope_ref"] = "scope:foreign"
+        self.denied_zero(env, "READ_SCOPE_DENIED", payload=body)
+        bad = self.environment(store=env.store, rid="rB")
+        self.check(self.invoke(bad)[0]["status"] == "SOURCE_BINDING_CONFLICT", "CROSS_SCOPE_TARGET_RID_NOT_SUBSTITUTED")
+
+    def test_A08_current_permissions(self):
+        env = self.environment()
+        env.clock.now = 1000000000
+        self.denied_zero(env, "HOST_PERMIT_EXPIRED")
+        env = self.environment(store=env.store)
+        env.issuer.revoke(env.ticket)
+        self.denied_zero(env, "HOST_PERMISSION_DENIED")
+
+    def test_A09_multiple_permits(self):
+        env = self.environment()
+        permits = [env.mount.issue_permit() for _ in range(3)]
+        barrier = threading.Barrier(3)
+        before = env.store.world_hash()
+        def one(permit):
+            worker = threading.get_ident()
+            barrier.wait(3)
+            return worker, a.dispatch_authority_read(env.mount, env.peer, env.mount.refs(permit), permit)
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            results = list(executor.map(one, permits))
+        statuses = [result[1]["status"] for result in results]
+        self.check(statuses.count("STAGING_READY_WITH_GAPS") == 1 and statuses.count("HOST_PERMIT_REPLAY") == 2,
+                   "THREE_PERMITS_SHARE_ONE_ATOMIC_SLOT")
+        self.check(env.store.select_dispatches == env.store.key_calls == env.store.decode_calls == 1, "ONE_SOURCE_READ_ACROSS_THREADS")
+        self.check(env.store.world_hash() == before, "CONCURRENT_WORLD_UNCHANGED")
+        for _, public in results:
+            self.verify_public(public, json.dumps(public))
+        try:
+            env.mount.issue_permit()
+        except h.HostReadError as error:
+            self.check(error.code == "HOST_PERMIT_REPLAY", "NEW_PERMIT_AFTER_READ_REFUSED")
+        else:
+            self.check(False, "NEW_PERMIT_MUST_NOT_REARM")
+        self.batches.append({"kind": "three_permit_race", "thread_ids": sorted({x[0] for x in results}),
+                             "statuses": statuses, "world_before": before, "world_after": env.store.world_hash(),
+                             "session": env.mount.registration.counters()})
+        self.denied_zero(env, "HOST_PERMIT_REPLAY", permit=permits[0])
+        # Recreating a trusted issuer must not reset the same process/source
+        # authorization namespace, even if a display source alias changes.
+        duplicate_issuer = a.ActivationIssuer(env.issuer.epoch_ref, clock=lambda: env.clock.now)
+        duplicate_ticket = duplicate_issuer.authorize_offline(authorization_id=env.authorization,
+            scope=self.seed["scope_A"], grant_ref="gA", rid="rF", manager_identity="h2_reader",
+            principal_ref="manager:a1", actor="user", transport_ref="rpc:authority", scope_ref="scope:a1",
+            producer_ref="producer:a1", source_ref="authority:alias", expires_ns=1000000000,
+            expected_store=env.store)
+        try:
+            duplicate = a.mount_authority_host(env.store, duplicate_ticket)
+        except h.HostReadError:
+            self.check(env.store.select_dispatches == 1, "ISSUER_RECREATION_CANNOT_RESET_SOURCE_SESSION")
+        else:
+            peer = a.authenticate_authority_peer(duplicate, "Bearer " + self.canaries["rpc_token"],
+                                                 env.identities, env.permissions)
+            escaped = a.dispatch_authority_read(duplicate, peer, duplicate.refs())
+            self.batches.append({"kind": "issuer_recreation_escape", "status": escaped["status"],
+                                 "same_authorization_ref": env.authorization,
+                                 "total_source_selects": env.store.select_dispatches})
+            self.check(False, "ISSUER_RECREATION_CANNOT_RESET_SOURCE_SESSION")
+
+    def test_A10_epoch(self):
+        env = self.environment()
+        permit = env.mount.issue_permit()
+        env.issuer.retire("epoch:restarted")
+        self.denied_zero(env, "HOST_SOURCE_MISMATCH", permit=permit)
+        try:
+            a.mount_authority_host(env.store, env.ticket)
+        except h.HostReadError:
+            pass
+        else:
+            self.check(False, "OLD_TICKET_CANNOT_REMOUNT")
+        self.check(env.mount.registration.counters()["session_claims"] == 0, "EPOCH_REFUSAL_NEVER_ENTERED_SOURCE")
+
+    def test_A11_SQL_codec_equivalence(self):
+        env = self.environment()
+        before = env.store.connection.total_changes
+        original_reader = env.mount.host._reader.read_state
+        pairs = []
+        def capture_pair():
+            pair = original_reader()
+            pairs.append(pair)
+            return pair
+        with patch.object(env.mount.host._reader, "read_state", capture_pair):
+            public, stage = self.invoke(env)
+        self.check(len(pairs) == 1 and pairs[0] == (120, env.store.state), "WHOLE_BOUNDED_PAIR_EQUALS_LEGACY_FIXTURE_WITHOUT_EXTRA_READ")
+        self.check(env.store.sql_templates == [CONFIG["plan"]["new_source_interface"]["query"]], "EXACT_FROZEN_SQL_TEMPLATE")
+        self.check(public["authority_revision"] == 120 and public["audit"]["observed_sql_schema_version"] == 2,
+                   "ROW_VERSION_AND_SCHEMA_SAME_QUERY")
+        self.check(public["audit"]["source_sql_count"] == 1 and env.store.connection.total_changes == before, "ONE_SELECT_NO_DML")
+        self.check(stage[0]["requests"][0]["request_digest"] == env.store.state["requests"][stage[0]["requests"][0]["rid"]]["digest"],
+                   "ORIGINAL_DIGEST_SURVIVES_BOUNDED_CODEC")
+
+    def test_A12_resource_schema_missing(self):
+        env = self.environment(ceiling=32)
+        self.check(self.invoke(env)[0]["status"] == "RESOURCE_LIMIT" and env.store.key_calls == 0, "OVERSIZE_CHECK_BEFORE_KEY")
+        bad = self.environment(store=env.store)
+        env.store.connection.execute("PRAGMA user_version=3")
+        self.check(self.invoke(bad)[0]["status"] == "UNSUPPORTED_SOURCE_SCHEMA" and env.store.key_calls == 0, "SCHEMA_CHECK_BEFORE_KEY")
+        env.store.connection.execute("PRAGMA user_version=2")
+        env.store.connection.execute("DELETE FROM authority_state")
+        bad = self.environment(store=env.store)
+        self.check(self.invoke(bad)[0]["status"] == "SNAPSHOT_INCOMPLETE" and env.store.key_calls == 0, "MISSING_ROW_BEFORE_KEY")
+
+    def test_A13_transaction_reentry(self):
+        env = self.environment()
+        env.store.connection.execute("BEGIN")
+        self.denied_zero(env, "HOST_CONNECTION_NOT_IDLE")
+        self.check(env.store.connection.in_transaction, "SOURCE_DOES_NOT_END_FOREIGN_TRANSACTION")
+        env.store.connection.rollback()
+        nested = []
+        env.store.select_hook = lambda: nested.append(a.dispatch_authority_read(env.mount, env.peer, env.mount.refs())["status"])
+        self.check(self.invoke(env)[0]["status"] == "STAGING_READY_WITH_GAPS" and nested == ["HOST_PERMIT_REPLAY"], "CALLBACK_REENTRY_BLOCKED_BY_SLOT")
+
+    def test_A14_fault_costs(self):
+        store = None
+        for failure in ("telemetry", "key", "decode", "return"):
+            env = self.environment(store=store)
+            store = env.store
+            store.failure = failure if failure != "return" else None
+            public, _ = self.invoke(env, bridge_failure=failure == "return")
+            self.check(public["status"] == "READ_SOURCE_UNAVAILABLE" and public["snapshot_digest"] is None,
+                       "FAULT_OUTPUT_SANITIZED_NO_DATA")
+            self.check(env.mount.registration.counters()["session_claims"] == 1, "FAULT_CONSUMES_SESSION_SLOT")
+            self.denied_zero(env, "HOST_PERMIT_REPLAY")
+        env = self.environment(store=store, limits=h.HostReadLimits(soft_deadline_ns=1))
+        store.failure = None
+        self.check(self.invoke(env)[0]["status"] == "HOST_DEADLINE_EXCEEDED", "TIMEOUT_DOES_NOT_REARM")
+        self.denied_zero(env, "HOST_PERMIT_REPLAY")
+
+    def test_A15_no_DML(self):
+        env = self.environment()
+        self.invoke(env)
+        self.check(env.store.forbidden == 0 and env.mount.registration.public_audit()["connection_total_changes_unchanged"], "NO_DML_AND_NO_OLD_DISPATCH")
+        tree = ast.parse((Path(__file__).parents[1] / "src/auth_lifecycle/online_state/services.py").read_text())
+        serve = next(x for x in tree.body if isinstance(x, ast.FunctionDef) and x.name == "serve")
+        self.check("authority_mount_ticket" in [x.arg for x in serve.args.kwonlyargs], "DEFAULT_OFF_SERVE_KEYWORD")
+        text = ast.unparse(serve)
+        self.check("implementation.call(operation, payload)" in text and "dispatch_authority_read" in text,
+                   "OLD_DISPATCH_RETAINED_SEPARATE_BRANCH")
+
+    def test_A16_secret_sinks(self):
+        env = self.environment()
+        public, _ = self.invoke(env)
+        for value in (env.ticket, env.mount.registration, env.peer, env.mount):
+            self.check(all(v not in repr(value) for v in self.canaries.values()), "OPAQUE_REPR_REDACTED")
+            try:
+                pickle.dumps(value)
+            except TypeError:
+                pass
+            else:
+                self.check(False, "TRUSTED_OBJECT_NOT_SERIALIZABLE")
+        mutable = h.HostReadSummary(public).to_dict()
+        mutable["audit"]["source_sql_count"] = 0
+        self.check(public["audit"]["source_sql_count"] == 1, "DETACHED_CLIENT_OUTPUT")
+
+    def test_A17_mount_position_AST(self):
+        path = Path(__file__).parents[1] / "src/auth_lifecycle/online_state/services.py"
+        tree = ast.parse(path.read_text())
+        calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)]
+        mount = next(n for n in calls if isinstance(n.func, ast.Name) and n.func.id == "mount_authority_host")
+        handler = next(n for n in ast.walk(tree) if isinstance(n, ast.ClassDef) and n.name == "Handler")
+        ctor = next(n for n in calls if isinstance(n.func, ast.Name) and n.func.id == "AuthorityStore")
+        self.check(ctor.lineno < mount.lineno < handler.lineno, "MOUNT_AFTER_STORE_BEFORE_HANDLER")
+        import sys
+        self.check(not any(x in sys.modules for x in ("auth_lifecycle.online_state.services", "auth_lifecycle.online_state.storage",
+                                                      "auth_lifecycle.online_state.materials", "cryptography")), "NO_FAKE_OR_REAL_PRODUCTION_DEPENDENCY_IMPORT")
+
+    def test_A18_client(self):
+        env = self.environment()
+        path = Path(__file__).parents[1] / "scripts/read_dsat_authority_once.py"
+        spec = importlib.util.spec_from_file_location("a1_offline_client", path)
+        client = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(client)
+        transport = Transport(env)
+        manifest = {"schema": "dsat-a1-offline-client/1", "mode": "OFFLINE_A1", "payload": env.mount.refs()}
+        invocation = client.OfflineInvocation(transport)
+        public = json.loads(invocation.run(manifest))
+        self.verify_public(public, json.dumps(public))
+        self.check(transport.calls == 1 and env.store.select_dispatches == 1, "CLIENT_ONE_SYNTHETIC_CALL")
+        try:
+            invocation.run(manifest)
+        except client.ClientRefusal:
+            pass
+        else:
+            self.check(False, "CLIENT_CANNOT_RETRY")
+        for argv in ([], ["--mode", "real", "--manifest", "unused"], ["--mode", "offline", "--manifest", "unused", "--key", self.canaries["private_key"]]):
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                code = client.main(argv)
+            self.check(code == 2 and all(v not in output.getvalue() for v in self.canaries.values()), "STRICT_ARGV_DEFAULT_CLOSED_AND_SANITIZED")
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = client.main(["--mode", "offline", "--manifest", "unused"])
+        self.check(code == 2, "NO_LIVE_TRANSPORT_OR_FILE_READ_DEFAULT")
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            code = client.main(["--mode", "offline", "--manifest", str(CONFIG["fixture_root"] / "CLIENT_MANIFEST.json")], transport=transport)
+        retry = json.loads(output.getvalue())
+        self.check(code == 0 and retry["status"] == "HOST_PERMIT_REPLAY" and env.store.select_dispatches == 1,
+                   "NEW_CLIENT_INVOCATION_CANNOT_REOPEN_SERVER_SESSION")
+        self.verify_public(retry, output.getvalue())
+
+    def test_A19_budget_no_rearm(self):
+        env = self.environment()
+        env.store.operation_limit = 6
+        self.denied_zero(env, "READ_BUDGET_DENIED")
+        self.check(env.mount.registration.counters()["slot_claimed"] and env.store.operations == 0, "QUOTA_REJECTION_SPENDS_SLOT_NOT_SOURCE_QUOTA")
+        env.store.operation_limit = 100
+        self.denied_zero(env, "HOST_PERMIT_REPLAY")
+        reg = env.mount.registration.counters()
+        self.check(reg["metadata_checks"] <= 2 and reg["registrations"] == 1 and reg["permits_consumed"] == 1, "INDEPENDENT_METADATA_PERMIT_SESSION_METERS")
+
+    def test_A20_egress_permissions(self):
+        env = self.environment()
+        env.store.select_hook = lambda: env.issuer.revoke(env.ticket)
+        public, _ = self.invoke(env)
+        self.check(public["status"] == "HOST_PERMISSION_DENIED" and public["authority_revision"] is None, "EGRESS_PERMISSION_REVOCATION_DROPS_STAGING")
+        self.check(env.mount.registration.counters()["slot_claimed"], "EGRESS_FAILURE_SLOT_STAYS_SPENT")

@@ -1,0 +1,416 @@
+"""R21 three isolated suites and finite owned Windows workers. No services/network."""
+import argparse
+import ast
+import _thread
+import datetime
+import hashlib
+import importlib.util
+import json
+import os
+from pathlib import Path
+import re
+import sqlite3
+import subprocess
+import sys
+import threading
+import time
+import traceback
+import unittest
+from urllib.parse import urlparse, unquote
+
+
+PROJECT = Path(__file__).absolute().parents[1]
+BASE = PROJECT.parent / "research_g2_dsat_implementation"
+RECORD, R20 = BASE / "2026-11-11_r21", BASE / "2026-11-11_r20"
+OUTPUT = BASE / "2026-11-11_r21_d1b1_offline"
+DEPLOY = PROJECT.parent / "h2_test_runtime/h2-authority-synth-001"
+PHASE, CURRENT_ID, RUN = "PREFLIGHT", None, None
+AUDIT = {"file_SQLite_connections": 0, "memory_SQLite_connections": 0, "SQLite_by_case": {},
+    "SQL_attempts": 0, "SQL_authorizer_denials": 0, "SQL_kinds": {}, "socket_attempts": 0,
+    "child_launch_attempts": 0, "forbidden_process_attempts": 0, "deployment_access": 0,
+    "private_outside_access": 0, "outside_writes": 0, "threads_created": 0, "threads_peak": 0,
+    "unexpected_violations": []}
+SECRETS, OWNED_CONNECTIONS = set(), []
+sys.dont_write_bytecode = True
+
+
+def load(path): return json.loads(Path(path).read_text(encoding="utf-8-sig"))
+def sha(path): return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def target(path):
+    p = Path(path).absolute()
+    if not p.is_relative_to(OUTPUT): raise RuntimeError("OUTPUT_PATH_DENIED")
+    for part in (p, *p.parents):
+        if part.exists() and (part.is_symlink() or getattr(part.lstat(), "st_file_attributes", 0) & 0x400):
+            raise RuntimeError("OUTPUT_REPARSE_DENIED")
+    return p
+
+
+def write(path, value):
+    target(path).write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def redact(value):
+    for secret in sorted(SECRETS, key=len, reverse=True): value = value.replace(secret, "[REDACTED_TEST_INPUT]")
+    return value
+
+
+def violation(kind):
+    AUDIT[kind] += 1
+    AUDIT["unexpected_violations"].append(kind)
+    raise RuntimeError("R21_ISOLATION_DENIED")
+
+
+def audit(event, args):
+    if event.startswith("socket."): violation("socket_attempts")
+    if event in {"os.system", "os.startfile", "os.fork", "os.exec"}: violation("forbidden_process_attempts")
+    if event == "subprocess.Popen":
+        allowed = PHASE == "new52" and RUN is not None
+        command = args[1]
+        runner = PROJECT / "scripts/run_dsat_authority_live_lifecycle_tests.py"
+        candidates = [] if RUN is None else [
+            [sys.executable, "-B", str(runner), "--worker", "--input", str(p)] for p in RUN.glob("worker_*.json")]
+        allowed = allowed and any(command == candidate or command == subprocess.list2cmdline(candidate) for candidate in candidates)
+        allowed = allowed and AUDIT["child_launch_attempts"] < 8
+        if not allowed: violation("forbidden_process_attempts")
+        AUDIT["child_launch_attempts"] += 1
+    if event in {"sqlite3.enable_load_extension", "sqlite3.load_extension"}: violation("private_outside_access")
+    if event == "open" and isinstance(args[0], (str, bytes, os.PathLike)):
+        p = Path(os.fsdecode(args[0])).absolute()
+        if p.is_relative_to(DEPLOY): violation("deployment_access")
+        is_private = p.suffix.lower() in {".db", ".sqlite", ".sqlite3", ".key", ".pem", ".pfx"}
+        if is_private and not p.is_relative_to(OUTPUT): violation("private_outside_access")
+        mode, flags = args[1], args[2]
+        writing = (isinstance(mode, str) and any(v in mode for v in "wax+")) or (
+            type(flags) is int and bool(flags & (os.O_WRONLY | os.O_RDWR | os.O_CREAT | os.O_TRUNC | os.O_APPEND)))
+        if writing and not p.is_relative_to(OUTPUT): violation("outside_writes")
+    if event in {"os.mkdir", "os.remove", "os.rmdir", "os.rename", "os.chmod", "os.link", "os.symlink"}:
+        values = args[:2] if event in {"os.rename", "os.link", "os.symlink"} else args[:1]
+        for value in values:
+            if isinstance(value, (str, bytes, os.PathLike)) and not Path(os.fsdecode(value)).absolute().is_relative_to(OUTPUT):
+                violation("outside_writes")
+
+
+_sqlite_connect = sqlite3.connect
+
+
+class AuditedConnection(sqlite3.Connection):
+    def execute(self, sql, parameters=()):
+        AUDIT["SQL_attempts"] += 1
+        kind = str(sql).strip().split()[0].upper()
+        AUDIT["SQL_kinds"][kind] = AUDIT["SQL_kinds"].get(kind, 0) + 1
+        return super().execute(sql, parameters)
+
+    def set_authorizer(self, callback):
+        def policy(action, first, second, database, trigger):
+            if action in {sqlite3.SQLITE_ATTACH, sqlite3.SQLITE_DETACH} or (
+                    action == sqlite3.SQLITE_FUNCTION and str(second).lower() == "load_extension"):
+                AUDIT["SQL_authorizer_denials"] += 1
+                return sqlite3.SQLITE_DENY
+            return sqlite3.SQLITE_OK if callback is None else callback(action, first, second, database, trigger)
+        return super().set_authorizer(policy)
+
+
+def guarded_connect(database, *args, **kwargs):
+    if database == ":memory:":
+        maximum = 16 if PHASE == "new52" else 8 if PHASE == "r19_24" else 32
+        if PHASE not in {"new52", "r19_24", "legacy_A1"} or AUDIT["memory_SQLite_connections"] >= maximum:
+            violation("private_outside_access")
+        AUDIT["memory_SQLite_connections"] += 1
+    else:
+        if PHASE != "new52" or RUN is None: violation("private_outside_access")
+        raw = str(database)
+        if raw.startswith("file:"):
+            parsed = urlparse(raw)
+            if parsed.netloc or parsed.query not in {"mode=rw", "mode=ro"}: violation("private_outside_access")
+            raw = unquote(parsed.path)
+            if re.match(r"^/[A-Za-z]:", raw): raw = raw[1:]
+        target(raw)
+        if not Path(raw).absolute().is_relative_to(RUN): violation("private_outside_access")
+        AUDIT["file_SQLite_connections"] += 1
+        if AUDIT["file_SQLite_connections"] > 104: violation("private_outside_access")
+    key = CURRENT_ID or "setup"
+    AUDIT["SQLite_by_case"][key] = AUDIT["SQLite_by_case"].get(key, 0) + 1
+    if PHASE == "new52" and AUDIT["SQLite_by_case"][key] > 2: violation("private_outside_access")
+    kwargs["factory"] = AuditedConnection
+    connection = _sqlite_connect(database, *args, **kwargs)
+    connection.set_authorizer(None)
+    OWNED_CONNECTIONS.append(connection)
+    return connection
+
+
+def memory_connection():
+    connection = sqlite3.connect(":memory:", isolation_level=None, check_same_thread=False)
+    connection.row_factory = sqlite3.Row
+    return connection
+
+
+def preflight(suite):
+    receipt = load(RECORD / "APPROVAL_RECEIPT.json")
+    if receipt["approved"] is not True or sha(receipt["request_path"]) != receipt["request_sha256"]:
+        raise RuntimeError("R21_APPROVAL_REQUIRED")
+    expected = receipt["legacy_python"] if suite == "legacy44" else receipt["base_python"]
+    if sys.executable != expected or sys.version_info[:3] != (3, 12, 14): raise RuntimeError("PYTHON_SCOPE_MISMATCH")
+    baseline = load(RECORD / "sources/PRECHECK_LOCK.json")
+    mods = {x["path"] for x in baseline["allowed_modifications"]}
+    changed = []
+    for row in baseline["protected_files"]:
+        if row["path"] in mods:
+            changed.append(row["path"])
+        elif sha(row["path"]) != row["sha256"]:
+            raise RuntimeError("PROTECTED_HISTORY_CHANGED")
+    for row in baseline["allowed_modifications"]:
+        if sha(RECORD / "sources/original" / (Path(row["path"]).name + ".txt")) != row["before_sha256"]:
+            raise RuntimeError("ORIGINAL_SOURCE_LOST")
+    filelock = load(RECORD / "D1B1_FILE_LOCK.json")
+    for row in filelock["executed_code"]:
+        if sha(row["path"]) != row["sha256"]: raise RuntimeError("SOURCE_CHANGED_SINCE_TEST_FREEZE")
+        ast.parse(Path(row["path"]).read_text(encoding="utf-8"))
+    for row in filelock["inputs"]:
+        if sha(row["path"]) != row["sha256"]:raise RuntimeError("FIXTURE_CHANGED_SINCE_FREEZE")
+    return baseline, filelock, changed
+
+
+def module_at(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec); sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+class Results(unittest.TextTestResult):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs); self.rows = []
+
+    def startTest(self, test):
+        global CURRENT_ID
+        CURRENT_ID = test._testMethodName.split("_")[1]
+        self.started = time.perf_counter_ns()
+        super().startTest(test)
+
+    def _exc_info_to_string(self, error, test):
+        return redact(super()._exc_info_to_string(error, test))
+
+    def row(self, test, status, detail=None):
+        value = {"id": test._testMethodName.split("_")[1], "status": status,
+                 "elapsed_ns": time.perf_counter_ns() - self.started}
+        if detail: value["detail"] = redact(detail)
+        self.rows.append(value)
+
+    def addSuccess(self, test): super().addSuccess(test); self.row(test, "PASS")
+    def addFailure(self, test, error):
+        super().addFailure(test, error); self.row(test, "FAIL", self._exc_info_to_string(error, test))
+    def addError(self, test, error):
+        super().addError(test, error); self.row(test, "ERROR", self._exc_info_to_string(error, test))
+    def addSkip(self, test, reason): super().addSkip(test, reason); self.row(test, "SKIP", reason)
+
+
+def run_class(cls, ids, log):
+    suite = unittest.defaultTestLoader.loadTestsFromTestCase(cls)
+    actual = [test._testMethodName.split("_")[1] for test in suite]
+    if actual != ids: raise RuntimeError("FROZEN_TEST_IDENTITIES_MISMATCH")
+    return unittest.TextTestRunner(stream=log, verbosity=2, resultclass=Results).run(suite)
+
+
+class ProjectedOutput:
+    """Test-only logical R19 path; all physical I/O is mapped into this R21 run."""
+    def __init__(self, logical, physical): self.logical, self.physical = logical, physical
+    def __truediv__(self, name): return ProjectedOutput(self.logical / name, self.physical / name)
+    def __str__(self): return str(self.logical)
+    def write_bytes(self, value): return target(self.physical).write_bytes(value)
+
+
+class ProjectedRead:
+    def __init__(self, physical): self.physical = physical
+    @property
+    def parents(self): return self.physical.parents
+    def exists(self): return self.physical.exists()
+    def is_symlink(self): return self.physical.is_symlink()
+    def lstat(self): return self.physical.lstat()
+    def stat(self): return self.physical.stat()
+    def read_bytes(self): return self.physical.read_bytes()
+
+
+def install_R19_path_projection(run):
+    from auth_lifecycle.online_state import dsat_authority_runtime as runtime
+    logical = BASE / "2026-11-11_r19_offline" / ("r21_virtual_" + run.name)
+    original = runtime.Path
+    def provider(value):
+        p = original(value)
+        if p.is_relative_to(logical):
+            return ProjectedRead(target(run / p.relative_to(logical)))
+        return p
+    runtime.Path = provider
+    return ProjectedOutput(logical, run), lambda: setattr(runtime, "Path", original)
+
+
+def worker(input_path):
+    """Finite owned kernel-object worker; never a service or database process."""
+    global PHASE, RUN
+    PHASE = "worker"
+    path = target(input_path)
+    data = load(path); RUN = target(data["run_root"])
+    if data.get("source_kind") != "R21_OWNED_STUB": raise RuntimeError("STUB_SCOPE_DENIED")
+    sys.path.insert(0, str(PROJECT / "src"))
+    from auth_lifecycle.online_state import dsat_windows_runtime as w
+    scope = w.authorize_test_scope(RUN)
+    root = scope.path(data["resource_root"])
+    mode = data["mode"]
+    lease = None; inherited = None; event = None
+    try:
+        if mode == "handoff":
+            inherited = int(data["inherited_handle"])
+            facts = w._handle_file_facts(inherited)
+            if Path(facts["final_path"]) != root / "instance.lock": raise RuntimeError("INHERITED_LOCK_MISMATCH")
+            print(json.dumps({"status":"INHERITED_LOCK_OWNED","pid":os.getpid()}),flush=True)
+            sys.stdin.buffer.readline(16)
+        elif mode == "event":
+            name = data["event_name"]
+            if not re.fullmatch(r"Local\\auth_lifecycle_r21_[a-f0-9]{32,64}", name): raise RuntimeError("EVENT_SCOPE_DENIED")
+            kernel,_=w._api();event=kernel.OpenEventW(0x100000,False,name)
+            if not event: raise RuntimeError("EVENT_UNAVAILABLE")
+            print(json.dumps({"status":"WAITING_EVENT","pid":os.getpid()}),flush=True)
+            return 0 if kernel.WaitForSingleObject(event,5000)==0 else 2
+        elif mode in {"race","crash"}:
+            try:
+                lease=w.reserve_instance(scope,root)
+                status="LOCKED"
+            except w.SafetyError as error:
+                if error.code!="SINGLE_ACTIVE_CONFLICT":raise
+                status="CONFLICT"
+            if mode=="crash":
+                if lease is None: return 3
+                scope.write_new(root/"partial_receipt.json",json.dumps({"phase":"STOPPING","pid":os.getpid()}).encode())
+                os._exit(int(data["exit_code"]))
+            print(json.dumps({"status":status,"pid":os.getpid()}),flush=True)
+            if lease is not None:sys.stdin.buffer.readline(16)
+        else:raise RuntimeError("STUB_MODE_DENIED")
+        return 0
+    finally:
+        if lease is not None:lease.close()
+        if inherited is not None:w._api()[0].CloseHandle(inherited)
+        if event is not None:w._api()[0].CloseHandle(event)
+
+
+def main(suite):
+    global PHASE, RUN
+    started_utc = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    clock = time.perf_counter_ns()
+    baseline, filelock, modified = preflight(suite)
+    target(OUTPUT).mkdir(exist_ok=True)
+    n = 1
+    while (OUTPUT / (suite + "_%03d" % n)).exists(): n += 1
+    if n > 2: raise RuntimeError("SUITE_RERUN_BUDGET_EXHAUSTED")
+    RUN = target(OUTPUT / (suite + "_%03d" % n)); RUN.mkdir()
+    snapshot = RUN / "code_snapshot"; snapshot.mkdir()
+    for row in filelock["executed_code"]:
+        (snapshot / (Path(row["path"]).name + ".txt")).write_bytes(Path(row["path"]).read_bytes())
+    write(RUN / "RUN_START.json", {"suite":suite,"argv_interpreter":sys.orig_argv,"executable":sys.executable,
+        "python":sys.version,"started_utc":started_utc,"code":filelock["executed_code"]})
+    sqlite3.connect = guarded_connect
+    PHASE = suite
+    fixture = PROJECT / "tests/fixtures/dsat_authority_live_lifecycle"
+    old_D = PROJECT / "tests/fixtures/dsat_authority_runtime"
+    old_A = PROJECT / "tests/fixtures/dsat_authority_host_activation"
+    old_H = PROJECT / "tests/fixtures/dsat_authority_read_host"
+    roots = [fixture] if suite=="new52" else [old_D] if suite=="r19_24" else [old_A,old_H]
+    for root in roots:SECRETS.update(load(root/"CANARIES.json")["values"].values())
+    timer = threading.Timer(300, _thread.interrupt_main);timer.daemon=True;timer.start()
+    original_start=threading.Thread.start
+    if suite=="new52":
+        def thread_start(thread,*args,**kwargs):
+            AUDIT["threads_created"]+=1
+            if AUDIT["threads_created"]>16:raise RuntimeError("THREAD_COUNT_LIMIT")
+            if threading.active_count()>=4:raise RuntimeError("THREAD_PEAK_LIMIT")
+            result=original_start(thread,*args,**kwargs)
+            AUDIT["threads_peak"]=max(AUDIT["threads_peak"],threading.active_count())
+            return result
+        threading.Thread.start=thread_start
+    cleanup_projection=lambda:None
+    try:
+        sys.path.insert(0,str(PROJECT/"src"))
+        with (RUN/"stdout.log").open("w",encoding="utf-8") as log:
+            if suite=="new52":
+                cases=module_at("r21_new52",PROJECT/"tests/test_dsat_authority_live_lifecycle.py")
+                plan=load(R20/"D1B_TEST_PLAN.json");cases.configure(plan,fixture,RUN)
+                results=[run_class(cases.LiveLifecycleCases,[x["id"] for x in plan["B1_new_cases"]],log)]
+                for child in cases.CONFIG["children"]:
+                    if child["result"] is None:
+                        child["result"]=cases.w.finish_owned_child(cases.CONFIG["scope"],child["process"])
+                details=cases.DETAILS;SECRETS.update(cases.CONFIG["private_values"])
+                scope_counts=cases.CONFIG["scope"].counts()
+                children=[{k:v for k,v in x.items() if k!="process"} for x in cases.CONFIG["children"]]
+                peak=cases.w.self_peak_memory(cases.CONFIG["scope"])
+            elif suite=="r19_24":
+                output,cleanup_projection=install_R19_path_projection(RUN)
+                cases=module_at("r21_r19_24",PROJECT/"tests/test_dsat_authority_runtime.py")
+                plan=load(BASE/"2026-11-11_r19/D1A_TEST_PLAN.json")
+                cases.configure(plan,old_D,memory_connection,output)
+                results=[run_class(cases.D1ACases,[x["id"] for x in plan["new_cases"]],log)]
+                details=cases.DETAILS;scope_counts={};children=[];peak={"status":"NOT_MEASURED"}
+            else:
+                PHASE="legacy_A1"
+                a=module_at("r21_original_A1",PROJECT/"tests/test_dsat_authority_host_activation.py")
+                a.configure(load(BASE/"2026-11-11_r15/H2_HOST_ACTIVATION_PLAN.json"),old_A,memory_connection)
+                first=run_class(a.ActivationCases,["A%02d"%i for i in range(1,21)],log)
+                PHASE="legacy_H1"
+                h=module_at("r21_original_H1",PROJECT/"tests/test_dsat_authority_read_host.py")
+                h.configure(load(BASE/"2026-11-11_r13/REAL_READONLY_TEST_PLAN.json"),old_H)
+                second=run_class(h.H1Cases,["H%02d"%i for i in range(1,25)],log)
+                results,details=[first,second],a.DETAILS+h.DETAILS
+                scope_counts={};children=[];peak={"status":"NOT_MEASURED"}
+        PHASE="POSTCHECK";preflight(suite)
+        rows=[x for r in results for x in r.rows]
+        counts={s:sum(x["status"]==s for x in rows) for s in ["PASS","FAIL","ERROR","SKIP","BLOCKED","NOT_RUN"]}
+        text=(RUN/"stdout.log").read_text(encoding="utf-8")+json.dumps(details)
+        clean=all(v not in text for v in SECRETS)
+        case_files=[p for p in RUN.rglob('*') if p.is_file()]
+        dirs=[p for p in RUN.rglob('*') if p.is_dir()]
+        disk=sum(p.stat().st_size for p in case_files)
+        expected={"new52":52,"r19_24":24,"legacy44":44}[suite]
+        modules=[n for n in sys.modules if n in {"auth_lifecycle.online_state.services","auth_lifecycle.online_state.storage","auth_lifecycle.online_state.materials"}]
+        result={"schema":"r21-actual-suite/1","suite":suite,"run":str(RUN),"argv_interpreter":sys.orig_argv,
+            "executable":sys.executable,"python":sys.version,"started_utc":started_utc,
+            "finished_utc":datetime.datetime.now(datetime.timezone.utc).isoformat(),"elapsed_ns":time.perf_counter_ns()-clock,
+            "counts":counts,"executed":len(rows),"cases":rows,"details":details,"code":filelock["executed_code"],
+            "inputs":filelock["inputs"],
+            "protected_unique_files":len(baseline["protected_files"]),"authorized_modified_files":modified,
+            "audit":AUDIT,"scope_counts":scope_counts,"owned_children":children,"memory":peak,
+            "files_before_result_output":len(case_files),"directories_before_result_output":len(dirs),"logical_disk_bytes_before_results":disk,
+            "public_sink_scan":"CLEAN" if clean else "FAIL","production_modules_imported":modules,
+            "cryptography_imported":"cryptography" in sys.modules,"compatibility_path_projection":suite=="r19_24",
+            "real_service_DB_key_RPC_network":0,"D1B2_P1_P2_S3B2_S5":False,"real_deployment_cost":"NOT_MEASURED"}
+        limits_ok=len(dirs)<=64 and len(case_files)<=512 and disk<=67108864
+        result["passed"]=counts=={"PASS":expected,"FAIL":0,"ERROR":0,"SKIP":0,"BLOCKED":0,"NOT_RUN":0} and clean and limits_ok and not AUDIT["unexpected_violations"]
+        write(RUN/"RESULTS.json",result)
+        # Individual frozen fault evidence is an index into actual case details.
+        if suite=="new52":write(RUN/"FAULT_COVERAGE.json",[{"fault_id":x["id"],"test_id":x["id"],"status":next(y["status"] for y in rows if y["id"]==x["id"]),"detail":x} for x in details if x["id"].startswith("F")])
+    except BaseException:
+        write(RUN/"EARLY_FAILURE.json",{"status":"EARLY_FAILURE","traceback":redact(traceback.format_exc()),"audit":AUDIT})
+        raise
+    finally:
+        timer.cancel();threading.Thread.start=original_start;cleanup_projection()
+        for connection in OWNED_CONNECTIONS:
+            try:connection.close()
+            except Exception:pass
+    index=OUTPUT/"TEST_RUNS.json"
+    history=load(index) if index.exists() else {"schema":"r21-runs/1","runs":[]}
+    history["runs"].append({"path":str(RUN/"RESULTS.json"),"sha256":sha(RUN/"RESULTS.json"),"suite":suite,"counts":counts,"passed":result["passed"]})
+    write(index,history)
+    print(json.dumps({"suite":suite,"counts":counts,"passed":result["passed"],"run":str(RUN)},ensure_ascii=True))
+    return 0 if result["passed"] else 1
+
+
+if __name__=="__main__":
+    parser=argparse.ArgumentParser()
+    parser.add_argument("--suite",choices=["new52","r19_24","legacy44"])
+    parser.add_argument("--worker",action="store_true")
+    parser.add_argument("--input")
+    args=parser.parse_args()
+    sys.addaudithook(audit)
+    if args.worker:
+        if args.suite is not None or args.input is None:raise SystemExit(2)
+        raise SystemExit(worker(args.input))
+    if args.suite is None or args.input is not None:raise SystemExit(2)
+    raise SystemExit(main(args.suite))
