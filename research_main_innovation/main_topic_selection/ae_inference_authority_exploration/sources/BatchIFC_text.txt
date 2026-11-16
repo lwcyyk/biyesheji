@@ -1,0 +1,1262 @@
+
+[PDF PAGE 1]
+Architectural Backdoors for Within-Batch Data
+Stealing and Model Inference Manipulation
+Nicolas Küchler ∗
+ETH Zurich
+Zurich, Switzerland
+Ivan Petrov
+Google DeepMind
+London, UK
+Conrad Grobler
+Google DeepMind
+London, UK
+Ilia Shumailov
+Google DeepMind
+London, UK
+Abstract— For nearly a decade the academic community has
+investigated backdoors in neural networks, primarily focusing
+on classification tasks where adversaries manipulate the model
+prediction. While demonstrably malicious, the immediate real-
+world impact of such prediction-altering attacks has remained
+unclear. In this paper we introduce a novel and significantly more
+potent class of backdoors that builds upon recent advancements in
+architectural backdoors. We demonstrate how these backdoors can
+be specifically engineered to exploit batched inference, a common
+technique for hardware utilization, enabling large-scale user data
+manipulation and theft. By targeting the batching process, these
+architectural backdoors facilitate information leakage between
+concurrent user requests and allow attackers to fully control
+model responses directed at other users within the same batch. In
+other words, an attacker who can change the model architecture
+cansetandstealmodelinputs and outputsof other users within
+the same batch. We show that such attacks are not only feasible
+but also alarmingly effective, can be readily injected into prevalent
+model architectures, (e.g. Transformers), and represent a truly
+malicious threat to user privacy and system integrity. Critically,
+to counteract this new class of vulnerabilities, we propose a
+deterministic mitigation strategy that provides formal guarantees
+against this new attack vector, unlike prior work that relied on
+Large Language Models to find the backdoors. Our mitigation
+strategy employs a novel Information Flow Control mechanism
+that analyzes the model graph and proves non-interference
+between different user inputs within the same batch. Using our
+mitigation strategy we perform a large scale analysis of models
+hosted through Hugging Face and find over 200 models that
+introduce (unintended) information leakage between batch entries
+due to the use of dynamic quantization.
+I. INTRODUCTION
+Machine learning models are increasingly deployed using
+batched inference to optimize hardware utilization. While
+efficient, this common practice potentially introduces significant
+security vulnerabilities by processing multiple users’ data
+concurrently within shared environments, thereby compro-
+mising the isolation between them. In fact, recent academic
+work highlights that this cross-batch isolation is already
+unintentionally broken in some widely used Mixture-of-Experts
+architectures [Hayes et al., 2024, Yona et al., 2024], and it can
+lead to (inefficient) user data leakage.
+In this paper we present a novel and potent class of vulner-
+abilities building upon recent advancements in architectural
+This work has been accepted for publication at the IEEE Conference on
+Secure and Trustworthy Machine Learning (SaTML). The final version will
+be available on IEEE Xplore.∗Work done as a Student Researcher at Google Deepmind.
+backdoors [Bober-Irizar et al., 2023, Langford et al., 2025].
+We demonstrate how these backdoors can be specifically
+engineered to exploit the batched inference process itself,
+enabling large-scale, cross-user data theft and manipulation.
+Our attack effectively generalizes and weaponizes inefficient
+leakage reported by [Hayes et al., 2024, Yona et al., 2024]
+to work in arbitrary models (e.g. Transformer architectures),
+requiring only minor edits to the model architecture.
+Unlike prior research on parameter-based backdoors [Gu
+et al., 2017], which primarily focused on manipulating model
+predictions for classification tasks, the architectural backdoors
+presented here target the batching mechanism to facilitate
+information leakage between concurrent user requests. This
+allows attackers not only to potentially steal sensitive input
+data from other users within the same batch but also to gain
+control over the model responses directed towards them. We
+demonstrate that such attacks are not merely theoretical but
+are feasible, alarmingly effective, and can be injected into
+prevalent ML models, e.g., Large Language Models (LLMs)
+with Transformer architecture, representing a malicious threat to
+user privacy and system integrity in modern ML deployments.
+Critically, addressing this new class of vulnerabilities requires
+robust countermeasures. In response, we propose a deterministic
+mitigation strategy designed to provide formal guarantees
+against this specific attack vector. This contrasts with prior work
+often relying on heuristic or probabilistic detection methods, e.g.
+using LLMs [Langford et al., 2025]. Our work highlights the
+urgent need to re-evaluate the security assumptions underlying
+batched inference and develop provably secure mechanisms
+for shared ML systems.
+Overall, we make the following contributions:
+• We present a novel class of architectural backdoors that
+enable compromise of batched inference. Our backdoors
+enable extremely efficient leakage.
+• We develop a robust and provable method to defend against
+our backdoors.
+• We run a large scale analysis of models hosted at
+Hugging Face and find over 200 models that introduce
+(unintended) information leakage between batch entries
+due to dynamic quantization.
+•We make our implementation available as open-source. 1
+1https://github.com/google-deepmind/batch-isolation-checker
+1
+arXiv:2505.18323v2  [cs.CR]  20 Mar 2026
+
+[PDF PAGE 2]
+II. THREATMODEL
+This section defines the threat model for architectural backdoors
+embedded within a model graph that are specifically designed to
+exploit batched inference for cross-user data compromise. We
+consider a standard deployment where a model server (cloud or
+on-premise) loads a model graph to serve user requests. Users
+submit sensitive inputs (e.g., prompts, images) and expect their
+data and the resulting outputs to remain isolated from others
+sharing the infrastructure.
+Assumptions.We assume the server infrastructure (including
+batching and routing) operates correctly, and that the com-
+pilation toolchain accurately translates the model graph into
+executable computations without introducing modifications. A
+user’s position within a batch is either input-data-independent
+or randomized prior to inference, thus offering no exploitable
+signal. While the model graph itself is stateless during inference,
+it can manage state (e.g., KV-Cache) via its inputs and outputs.
+Crucially, the handling of this state (outside the model graph) is
+assumed to introduce no information leakage. Input and output
+tensor shapes are considered unprotected and are assumed
+not to encode secret information, although padding can be
+employed to obscure these details if necessary.
+Adversary.The adversary is an entity capable of influencing or
+directly modifying the machine learning model’s architecture
+before it is deployed for inference. This setting is realistic
+and could be either a malicious actor in the model supply
+chain (e.g., during pre-training, fine-tuning, or distribution);
+an insider with access to model development or deployment
+pipelines; or potentially the hosting provider itself if they are
+untrusted and can manipulate the models they serve.
+The adversary’s goal is not merely to manipulate the model’s
+prediction for their own input (as in traditional backdoor
+attacks) but tobreak isolation between userswithin the
+same inference batch. The adversary can pursue multiple goals
+here:
+• Confidentiality Violation for Data Theft: To steal
+sensitive input data submitted by other users who are
+processed in the same batch as the adversary’s request.
+• Integrity Violation for Response Manipulation: To
+manipulate or fully control the model’s output generated
+for other users within the same batch.
+The overall attack happens in multiple stages:
+1) Adversary manipulates the modelby injecting architectural
+backdoors into the model, which are designed to be dormant
+during normal operation but activate upon receiving a specific
+trigger within an input request. This injection can happen in
+different parts of the pipeline e.g. architectural definition [Lang-
+ford et al., 2025], coding environment setup [Gao et al., 2025],
+or compilation process broadly [Clifford et al., 2024]. In this
+paper we introduce backdoors into models by targeting their
+representation within the widely adopted Open Neural Network
+Exchange (ONNX) standard.
+2) Adversary submits an inference request containing a
+pre-defined trigger, which activates the backdoor within the
+model. Once activated, the backdoor facilitates illicit interaction
+between the data streams of different users within the batch,
+allowing the adversary’s triggered request to either read, write,
+or more generally influence information from the victim.
+3) Successful exploitation leads to breaches of user privacy
+(theft of sensitive data)and system integrity(users receiving
+manipulated or incorrect results), undermining trust in the ML
+service.
+III. RELATEDWORK
+A. Backdoors in Machine Learning
+Parameter-based backdoors.The first work on backdoors in
+neural networks was introduced by Gu et al. [2017]. These
+attacks typically involve poisoning the training data to embed
+hidden triggers that cause misclassification for specific inputs,
+while maintaining normal performance on benign data. While
+such backdoors highlight the vulnerability of ML models,
+their primary focus is manipulating the model’s prediction
+for the attacker’s own input. In contrast, our work focuses on
+architectural modifications that exploit the batching process
+itself for cross-user data theft and response manipulation,
+a threat vector with direct implications for user privacy in
+deployed systems.
+Architectural Backdoors.Recent research has shifted towards
+architectural backdoors, which involve modifications to the
+model’s structure rather than its parameters. Bober-Irizar et al.
+[2023] introduced the first architectural backdoor designed
+only for checkerboard patterns in small vision networks and
+their initial instantiations were relatively weak. Langford et al.
+[2025] significantly improved the design, describing a way
+to produce arbitrary architectural backdoors, demonstrating
+a more potent and flexible attack. Our work builds upon
+the architectural backdoor literature and engineers them to
+target the batched inference paradigm. We also adapt the
+backdoors to large language models and inject them in a way
+that does not fall under either of the categories described
+by Langford et al.. Unlike prior architectural backdoors that
+focused on self-input manipulation or denial of service, our
+approach weaponizes these architectural modifications to launch
+a conceptually new class of attacks.Our backdoors explicitly
+break batch isolation, enabling direct information leakage and
+control between concurrent user requests.
+B. Batch Isolation
+Batching is widely used during inference to increase hardware
+utilization and throughput by concurrently processing multiple
+requests in a single pass through a model. Batching is done by
+collecting requests from multiple users in a batch, performing
+inference on this batch and then splitting the output to return
+the appropriate results to each user. This approach requires
+cross-batch isolation in the model to ensure that individual
+requests do not influence the results of other requests in the
+same batch.
+2
+
+[PDF PAGE 3]
+Trigger
+Detector
+Signal
+Integration
+Batched Input
+Batched Output
+Steal
+Victim
+Output
+Check
+Trigger
+Change
+Victim
+Output
+Check
+Trigger
+Attacker
+Input
+Victim
+Input
+Attacker
+Input
+Victim
+Input
+Attacker
+Output
+Victim
+Output
+Attacker
+Output
+Victim
+Output
+Backdoor
+Check
+Trigger
+Attacker
+Input
+Victim
+Input
+Attacker
+Output
+Victim
+Output
+Steer
+Victim
+Output
+Attacker
+Input
+Victim
+Input
+Attacker
+Output
+Victim
+Output
+Fig. 1: Architectural backdoor that exploits batched inference. The left side depicts a model processing batched inputs and
+producing batched outputs, with a backdoor (a “Trigger Detector” for detecting the attacker’s trigger, and “Signal Integration”
+for deviating from normal operation) integrated into the architecture. The right side details three attacks when attacker’s and
+victim’s inputs are processed in the same batch:stealing victim output: the attacker’s output is manipulated to include the
+victim’s output;changing victim output: the attacker alters the output intended for the victim; andsteering victim output: the
+attacker influences the victim’s output, guiding it towards a specific outcome.
+Unintentional Information Leakage.Hayes et al. [2024]
+and Yona et al. [2024] showed that cross-batch isolation is
+unintentionally broken in some widely used Mixture-of-Experts
+(MoE) architectures, particularly when using Expert Choice
+Routing Zhou et al. [2022]. Their findings indicate that routing
+mechanisms in MoEs can lead to inefficient, but present, user
+data leakage across batch boundaries. Our paper takes these
+observations a step further by demonstrating how cross-batch
+interactions can be efficiently weaponized through carefully
+designed architectural backdoors. It is worth noting that there
+is significant literature of other non-ML specific types of
+unintended leakage through hardware or timing side-channels,
+that are outside the scope of this work.
+Supply Chain Attacks.Machine learning models can also be
+compromised at various stages of the supply chain. Clifford
+et al. [2024] showed that blackbox-undetectable backdoors can
+be injected into compiled neural networks using a backdoor in
+the compiler, which can turn a benign model into a malicious
+one post-compilation. Similarly, Gao et al. [2025] explored
+how models can be edited through software backdoors in the
+broader machine learning framework or coding environment.
+While these works focus on the injection vectors for backdoors,
+our paper focuses on a novel class of payloads for such
+backdoors that exploit batched inference for cross-user data
+compromise. The architectural backdoors we describe could
+indeed be injected via such supply-chain attacks.
+IV. BATCHISOLATIONBREAKER
+This section details the methodology for carrying out the attacks
+described in this paper. We begin by providing an overview of
+the target model architecture, specifically focusing on Large
+Language Models (LLMs), and then proceed to explain the
+construction and application of the architectural backdoors
+designed to exploit batched inference in LLMs.
+A. Architectural Backdoors
+In order to construct the architectural backdoors, we follow
+a similar methodology to that of Langford et al. [2025].
+However, instead of altering model classification, our attacks
+deterministically break batch isolation by copying memory
+between batch positions, while otherwise operating normally.
+As a result, our backdoors are significantly stealthier than those
+of Bober-Irizar et al. [2023], Langford et al. [2025] and require
+only a handful of operators to be injected into the model.
+Figure 1 shows the three types of attacks we consider:
+1) Setattack: The attacker aims to override the victim’s query
+to a query of their choice.
+2) Getattack: The attacker aims to set their own query to the
+victim’s query.
+3) Steerattack: The attacker aims to steer victim’s query in
+some direction. For example, in the direction of rejection [Arditi
+et al., 2024], biased output, or perhaps away from it.
+3
+
+[PDF PAGE 4]
+Transformer 1
+Feed Forward
+Add & Norm
+Attention
+Add & Norm KV-Cache
+Signal
+Integration
+Transformer
+2
+Transformer
+N
+...
+Modified
+Output
+Replace
+Replace
+Original
+Output
+Modified
+Output
+Attacker Output
+Victim Output
+Get
+Set
+Trigger
+Detector
+Signal
+Integration
+Trigger
+Detector
+Add
+Gather
+Chosen Output
+Gather
+Chosen Output
+KV-Cache
+Gather
+Trigger Tokens
+IsEqual
+IsEqual
+@@get
+@@str
+IsEqual
+@@set
+Choose Output
+Choose Output
+Multiply
+Steering Vector
+Steer
+Fig. 2: Transformer backdoor components. The “Trigger Detector” checks the K-Cache for commands like “ @@get”, “@@set”,
+or “@@str”. Upon trigger activation, “Trigger Signal Integration” executes a “Get”, “Set” or “Steer” attack, thereby modifying
+the output that passes through the Transformer.
+We discuss the key aspects below and provide a detailed
+description of the backdoor implementation in Appendix D. In
+what follows we will deviate from the setting of Bober-Irizar
+et al. [2023], Langford et al. [2025] who only focused on
+small vision models and instead operate on state-of-the-art
+LLM architectures. Yet, our attacks are general in that they
+can similarly apply to the vision models. Figure 2 shows the
+example of an injection into Gemma-2b-IT [Google, 2024].
+B. Architectural Backdoors for Large Language Models
+For the backdoor we require aTrigger Detectorto identify a
+specific attack pattern chosen by the adversary, and aSignal
+Integrationcomponent to execute the adversarial operation.
+When adapting such backdoors for LLMs, we embed the
+backdoor directly into the K-cache of an attention head in
+the first layer. This placement ensures that the trigger, once
+activated at the beginning of the prompt, remains active
+throughout the entire output sequence generation. We propose
+a trigger detector that sums the prefix of a K-cache entry
+and compares this sum against a constant scalar value set
+to match a desired trigger, for example, a prompt starting
+with @@get.2 Upon activation, the trigger signal redirects the
+model’s computation graph, causing memory to be copied
+into an incorrect batch position. This particular construction
+was chosen for its simplicity, ease of injection, and relative
+flexibility in choice of targets, however alternative backdoor
+constructions exist.
+For theSet attackan adversary compromises model integrity
+and influences another user’s output. If the trigger is in the input
+of the attacker, the attacker’s output is rerouted to the victim.
+For theGet attackadversary compromises confidentiality and
+obtains another user’s output without altering the victim’s
+output. If the trigger is in the input of the attacker, the victim’s
+output is rerouted to the attacker. For theSteering attack, the
+adversary either pushes the representations of the victim into
+an adversary-chosen direction or instead pushes the adversary’s
+task closer towards the user’s direction. Our evaluations across
+various models demonstrate that this general approach is highly
+effective and allows an adversary to deterministically violate
+batch isolation by modifying the model architecture.
+2This scalar is computed via a single forward pass of the trigger phrase by
+summing the activations at the injection point.
+4
+
+[PDF PAGE 5]
+C. Steering Large Language Models with Backdoors
+In this section we describe how architectural backdoors in
+LLMs can inject and manipulate internal model directions to
+steer generative outcomes. The setting draws inspiration from
+research on model internals, such as the concept of a “rejection
+direction” identified by Arditi et al. [2024].
+Why can we steer generation at the architectural level?
+Assuming the theoretical setting as described by Arditi et al.,
+modern Decoder-only Transformer models process input tokens
+t= (t 1, t2, . . . , tn)∈ V n to output probability distributions
+y= (y 1,y 2, . . . ,yn)∈R n×|V|. The core idea is that a token’s
+representation, its residual stream activation x(l)
+i (t)∈R dmodel
+at a given layer l, is sequentially transformed by attention and
+MLP components.
+The work by Arditi et al. introduces the concept that specific
+directions within the model’s activation space can correspond
+to high-level behaviors, such as refusal or explicit bias. Arditi
+et al. demonstrate that by adding a pre-calculated difference-in-
+means vector r(l) ∈R dmodel (representing a feature like refusal)
+to the activations x(l) at a specific layer l, one can shift the
+model’s behavior, inducing refusal even from a harmless input:
+x(l)′
+←x (l) +r (l). This intervention, referred to as activation
+addition, highlights that model behavior can be controlled by
+manipulating these internal directional vectors.
+Building on this understanding, architectural backdoors can be
+engineered to inject or manipulate such directional information
+within the model’s structure to steer the generation process.
+Instead of merely altering parameters, our architectural back-
+doors introduce subtle architectural modifications designed to
+activate upon specific triggers that break the batch isolation.
+In the context of steering generation, an architectural backdoor
+can be designed to apply a transformation that effectively
+injects an adversarial direction into the model’s processing. If
+an adversarial direction ˆris identified the backdoor can modify
+the effective weights Wout that write to the residual stream.
+Specifically, the backdoor could implement an operation akin to
+W ′
+out ←W out−ˆrˆr⊺Wout, or inject one that adds a scaled version
+of the target directionˆrto the activations when triggered.
+By injecting these directions, the architectural backdoor gains
+control over the model’s generative process for a targeted user
+within a batch. For example, our “steer attack” aims to push
+a victim’s query output in a predetermined direction, such as
+towards refusal (as in Arditi et al. [2024]), towards generating
+biased content, or away from certain topics. The backdoor
+achieves this by modifying the model’s internal representations
+to align with the injected adversarial direction, thereby steering
+the subsequent generation process accordingly. This mechanism
+allows an attacker to subtly control or bias the output received
+by a victim, leveraging the architectural modification to
+manipulate the fundamental directional computations within
+the language model.
+How do we find the steering vector?Forsteering, an adver-
+sary has several options: one is to train on target data, freezing
+TABLE I: Set, Get, and Steer Capabilities.
+Attack
+Type
+Controls
+Victim’s
+Output
+Steals
+Victim’s
+Output
+Steals
+Victim’s
+Input
+Set✓
+Get✓
+Steer✓ ✓ ✓
+most of the model except the target layer or attention head, until
+achieving adversarial task performance. The resulting weight
+delta then provides the direction. Alternatively, compute the
+average activations for normal and target task data, using their
+difference as the direction, similar to Arditi et al. [2024]. Note
+that for attack purposes these are effectively equivalent as they
+both result in a directional change in representations – with
+the former using a direction shared for the whole matrix input-
+independently, and the latter with specific input-dependent
+direction. The direction can be stored as a constant weight in
+the architecture and fused into the model conditional on the
+trigger detector.
+D. Batch Isolation Breaker Evaluation
+Thesetandgetattacks (Table I) are guaranteed to work
+upon successful trigger activation due to their direct memory
+rerouting between batch entries. However, both set and get
+attacks cannot recover the user input because models receive
+the input already in the tokenized state and trigger detection
+happens when the k-cache is already prefilled. As a result,
+the attacker cannot intercept the original user input at that
+point. However, the input can be recovered via asteering
+attack. By shifting model embeddings in a specific direction,
+an adversary can compel the model to repeat the user’s input
+prior to generating the corresponding output. Beyond repeating
+user input, we demonstrate that steering can broadly manipulate
+model behavior. For example, by forcing the system to generate
+negative or biased responses. Unlike the deterministicsetand
+getattacks,steeringis inherently probabilistic. Because it
+manipulates internal latent representations to influence gener-
+ation, the resulting output in complex models is not entirely
+controllable. Nevertheless, our evaluation in section VI-C
+demonstrates that we can reliably achieve various attack
+objectives with high probability.
+V. BATCHISOLATIONCHECKER
+Building on the demonstrated threat that architectural backdoors
+pose to batch isolation, this section introduces a deterministic
+defense based on the static analysis of a model’s dataflow graph
+before deployment. The Batch Isolation Checker enables the
+certification of models asbatching-safe, i.e., their architecture
+is free of backdoors capable of compromising batch isolation.
+A. Methodology
+Our defense targets the model’s dataflow graph, which, under
+our threat model’s assumptions (Section II), is sufficient to
+prove batch isolation. While securing the broader ML pipeline
+is crucial, the model graph offers a uniquely accessible and
+5
+
+[PDF PAGE 6]
+scalable attack vector. Modern deployments frequently serve
+diverse models, many from untrusted public model hubs.
+Injecting an architectural backdoor into a single model is
+both easier than breaching shared infrastructure and more
+likely to go unnoticed, given the limited scrutiny most models
+receive. Analyzing the model graph is, therefore, essential for
+mitigating this primary attack vector. We focus on explicit and
+implicit information flows from data and control dependencies
+[Sabelfeld and Myers, 2003], as these are direct leakage
+channels; side-channels like timing attacks are out of scope.
+The desired security property isnon-interferencebetween users
+in the same batch: each user’s output must depend solely on
+their own input, regardless of the inputs of others. This can
+be verified by showing that a user’s output tensors are not
+influenced by the input tensors of any other user.
+The core of our static taint analysis involves tracking infor-
+mation flow using unique ownership labels, with one label
+assigned to each user’s input within a batch. These labels
+are traced via shadow tensors, each corresponding to a data
+tensor in the graph. Each shadow tensor element stores the
+set of labels indicating which users’ input data might have
+influenced the corresponding data element. The Batch Isolation
+Checker then proceeds in three stages: Duringinitialization,
+model input shadow tensors are populated with user labels
+according to the batching logic. Expected labels (typically a
+single user’s label per segment) are defined for output shadow
+tensors. Constant model parameters (e.g., weights) receive a
+distinct neutral label. Next, duringpropagation, these labels
+are propagated through the model graph via their shadow
+tensors. Operator-specific rules determine the labels for each
+operator’s output(s) based on the labels of its inputs. Finally, the
+verificationstage compares the labels computed for the output
+shadow tensors against these predefined expected sets. Any
+output element containing a label from another user signals a
+potential interference, thereby flagging the model as potentially
+unsafe for batching. Conversely, if the computed labels match
+the expected sets of labels, the model graph is certified as safe
+for batching.
+Taint propagation is widely used to detect sensitive data
+leaks in binaries [Enck et al., 2014]. However, applying it to
+batching isolation reveals key differences. First, ML inference
+graphs offer a unique static analysis opportunity as their
+constrained control flow allows for formally proving batch
+isolation, unlike in general binaries where intricate control flow
+typically limits analysis to detecting potential leaks. Second,
+traditional taint analysis tracks few labels (e.g., sensitive/non-
+sensitive), incurring little overhead. Batch isolation, in contrast,
+requires a distinct label for each user in a potentially large batch.
+This presents a significant tracking challenge, since arbitrary
+combinations of these user labels can influence any element
+within large, high-dimensional tensors typical of modern ML.
+B. Information Flow Control Mechanism
+We introduce a novel Information Flow Control (IFC) mecha-
+nism for verifying batch isolation. Conventional IFC techniques
+typically track the complete set of influencing labels; however,
+for batch isolation, our approach recognizes that this level of
+detail is not required. A model is batching-safe if and only if
+all elements in the model’s output(s) have the expected single
+label as the only label in their tracked label set. Consequently,
+it is sufficient to distinguish four states for any value:(i)it
+is deterministic and non-user dependent;(ii)it is random and
+non-user-dependent;(iii)it depends on one specific user (label);
+or(iv)it depends on multiple users (labels), which indicates
+leakage. The distinction between states(i/ii),(iii), and(iv)
+can be efficiently achieved by tracking only the minimum and
+maximum influencing labels, rather than the entire set of labels.
+To further distinguish between deterministic(i)and random(ii)
+values (such as model weights versus a value sampled from a
+distribution), a configuration flag is used. This flag enables a
+more granular label propagation rule, enhancing the precision
+of the IFC mechanism. We formalize this label tracking using
+an algebraic Monoid:
+Definition 1 (Label Propagation Monoid):Let C be a set of
+configuration flags, and let L ⊆Z >0 ∪ {+∞,−∞} be a set
+of labels. Define the set of 3-tuples M, where P(·) denotes
+the power set:
+M=P(C)× L × L
+Define a binary operation⋆:M×M→Mby:
+(x0, x1, x2)⋆(y 0, y1, y2) = 
+x0 ∪y 0,min(x 1, y1),max(x 2, y2)
+
+Let the identity element be e= (∅,+∞,−∞)∈M . Then
+(M, ⋆, e)is a monoid.
+The operation ⋆ is associative, since set union, minimum, and
+maximum are associative on their respective domains. The
+identity law holds because for any(x 0, x1, x2)∈M,
+(x0, x1, x2)⋆ e= (x 0, x1, x2) =e ⋆(x 0, x1, x2)
+The identity element e= (∅,+∞,−∞) is the neutral label for
+deterministic, non-user-dependent values (statei). The Monoid
+Mcan be partitioned asM={e} ∪M 1 ∪M >1, where
+M1 :={(x 0, x1, x2)∈M|x 1 =x 2},
+M>1 :={(x 0, x1, x2)∈M|x 1 < x 2}
+denote the sets of single-label (stateiii) and multi-label ele-
+ments (stateiv), respectively. Crucially, the Monoid operation
+ensures labels are preserved: an element cannot be transformed
+from M>1 to M1 or e because set union, min, and max are
+monotonic. In practice, Monoid elements can be encoded as
+an unsigned integer, using a bitmask implementation of the ⋆
+operation. As a result, the shadow tensors match corresponding
+data tensor shapes.
+Label Propagation Operators.The Monoid serves as the fun-
+damental building block for implementing the label propagation
+rules required by each model graph operator. These rules are
+typically much simpler than the operator’s computational logic
+6
+
+[PDF PAGE 7]
+onnx-community
+1,680
+Downloaded
+1,680
+Failed to Process
+511
+Loaded
+1,638
+Dynamic Shape
+355
+Fixed
+851
+Unbatched
+6
+Batching Unknown
+36
+Batched
+809
+Missing Ops
+146
+Support All Ops
+663
+Batching Interference
+269
+Batching Safe
+361
+(a) Analysis of models from the Hugging Face ONNX Community.
+100 101 102 103 104
+IFC Runtime [sec]
+0
+1000
+2000
+3000
+4000# Operators
+Batching Safe
+Batching Interference (b) Performance evaluation.
+Fig. 3: Batch Isolation Checker evaluation results.
+and often apply to multiple operators. For unary element-wise
+operators (e.g., relu, sin), label propagation is simply the
+identity function. For binary element-wise operators (e.g., add,
+and), propagation is the element-wise application of the ⋆
+operation. For various operators (e.g., ReduceMax, Conv,
+Matmul), their label propagation rule performs a reduction,
+applying the ⋆ operation to aggregate labels from a corre-
+sponding input region to derive the output element’s label(s).
+Outputs of non-deterministic operators (e.g., RandomNormal)
+are marked, via a configuration flag, as random. This random
+attribute is critical, as it signals to subsequent operators that
+their label propagation must assume such an input could
+correspond to any value, unlike deterministic inputs which
+permit propagation based on their fixed properties. Finally,
+data movement operators like Reshape or Flatten, which
+only rearrange elements, propagate labels by applying the data
+operation directly to the shadow label tensor. More complex
+data movement operators, such as Gather or Scatter, how-
+ever, require custom propagation rules. The detailed logic for
+each operator is available in the open-source implementation. 3
+VI. EVALUATION
+In this section, we evaluate the practical viability of the
+Batch Isolation Checker and provide an empirical analysis
+of thesteeringattack. We omit specific experiments for the
+setandgetattacks, as they are deterministic and achieve
+100% efficacy by definition. Moreover, since the Checker
+detects our attacks by construction, we focus our evaluation on
+demonstrating its general applicability across Hugging Face
+models. Our evaluation selected all 519 permissibly licensed
+repositories from the ONNX Community [ONNX, 2025b].
+Many of these repositories contain multiple quantizations of
+the same model. To avoid redundancy, we focused on int8
+and fp16 quantizations, resulting in 1680 unique model files
+(≈1TB of data).
+3https://github.com/google-deepmind/batch-isolation-checker
+A. Implementation
+The Batch Isolation Checker performs static taint analysis
+on the Open Neural Network Exchange ( ONNX) [ONNX,
+2025a] computation graph to formally prove non-interference
+between user data within a batch. ONNX is an open standard
+for representing ML models as dataflow graphs, providing
+interoperability with various other model formats. Our taint
+analysis is implemented on top of the JAX ONNX Runtime
+[Google, 2023], a library that enables the execution of ONNX
+models using JAX [Bradbury et al., 2018]. Specifically, we
+replace standard ONNX operators with custom implementations
+that incorporate taint propagation logic.
+B. Results
+Figure 3a provides an overview of the batching safety anal-
+ysis for our dataset of 1680 models. The analysis process
+involved several stages.(1)Remove redundant model quanti-
+zations, download models.(2)Check model correctness with
+onnx.checker.(3)Set all dynamic input parameters to
+fixed values, run symbolic shape inference to infer the tensor
+shapes of all edges in the model graph and check that all tensor
+sizes are determined and fixed.(4)Determine if model uses
+batching, and which input and output dimension corresponds
+to different batch entries.(5)Check whether there is a label
+propagation rule for every ONNX operator and run the Batch
+Isolation Checker.
+Out of the 1680 models analyzed 361 were formally proven to
+be free from intra-batch information leakage. It is important to
+note, however, that this proof applies strictly to the single, fixed
+set of input dimensions evaluated in our broad, large-scale anal-
+ysis. Consequently, to prevent stealth backdoors that activate
+only for specific input sizes, all deployed model variants in
+production environments must be checked. Furthermore, our
+analysis identified 269 models exhibiting information leakage.
+7
+
+[PDF PAGE 8]
+Steering Objective Expected
+Output Success if Injection
+Layer Gemma Qwen Apertus
+Input Exfiltration Your question is:
+{prompt}. {prompt} in output
+[0] 0.51 (0.08) 0.93 (0.06) 0.93 (0.05)
+[1] 0.10 (0.08) 0.98 (0.06) 0.90 (0.05)
+[2]0.88(0.08)1.00(0.06)0.99(0.05)
+[0,1] 0.65 (0.08) 0.83 (0.06) 0.86 (0.05)
+[1,2] 0.78 (0.08) 0.97 (0.06) 0.91 (0.05)
+[2,3] 0.85 (0.08)1.00(0.06) 0.96 (0.05)
+[6,7] 0.07 (0.08) 0.97 (0.06) 0.86 (0.05)
+Input Exfiltration
+Please provide the
+context for your
+question: {prompt}
+<end_of_turn>
+{prompt} in output
+[0] 0.59 (0.08) 0.93 (0.06) 0.88 (0.05)
+[1] 0.74 (0.08) 0.98 (0.06) 0.63 (0.05)
+[2] 0.92 (0.08)0.99(0.06) 0.84 (0.05)
+[0,1] 0.73 (0.08) 0.86 (0.06) 0.74 (0.05)
+[1,2] 0.92 (0.08) 0.98 (0.06) 0.91 (0.05)
+[2,3] 0.86 (0.08) 0.95 (0.06)0.95(0.05)
+[6,7]0.93(0.08) 0.98 (0.06) 0.84 (0.05)
+Induced Rejection Sorry, I can’t help you with that.
+Justification: “sorry” in output
+[0] 0.21 (0.00) 0.99 (0.29)1.00(0.11)
+[1] 0.09 (0.00)1.00(0.29) 0.94 (0.11)
+[2] 0.67 (0.00) 0.99 (0.29) 0.25 (0.11)
+[0,1] 0.55 (0.00)1.00(0.29) 0.25 (0.11)
+[1,2]1.00(0.00)1.00(0.29) 0.99 (0.11)
+[2,3] 0.78 (0.00) 0.99 (0.29) 0.86 (0.11)
+[6,7] 0.42 (0.00) 0.40 (0.29) 0.63 (0.11)
+Negative Outcome
+Generation
+We have to report you to
+the security team. Justification: “report you” in output
+[0] 0.12 (0.02) 0.85 (0.00) 0.92 (0.00)
+[1]0.99(0.02) 0.88 (0.00) 0.89 (0.00)
+[2] 0.12 (0.02) 0.93 (0.00) 0.67 (0.00)
+[0,1]0.99(0.02)1.00(0.00)1.00(0.00)
+[1,2] 0.92 (0.02)1.00(0.00) 0.95 (0.00)
+[2,3] 0.03 (0.02)1.00(0.00) 0.64 (0.00)
+[6,7] 0.03 (0.02) 0.89 (0.00) 0.34 (0.00)
+TABLE II: Effectiveness of steering attacks on the Gemma-2B-IT, Qwen2-VL-2B-Instruct and
+Apertus-8B-Instruct-2509 models, detailing success rates for different steering objectives and injection layers,
+compared to the baseline model performance (in brackets).
+The DynamicQuantizeLinear4 operator was identified
+as the source of this leakage. Used for uint8 dynamic
+quantization, it calculates min and max values across the entire
+input tensor, criticallyincluding the batch dimension. While
+potentially difficult to exploit, this inherent leakage between
+batch entries underscores the subtlety of batch security and the
+need for automated analysis tools.
+Figure 3b illustrates the runtime performance of the Batch
+Isolation Checker, benchmarked on an AWS EC2 m5.8xlarge
+instance (32 vCPUs, 128 GiB RAM). Models exhibiting
+batching interference required longer analysis times due to
+increased logging overhead; however, the IFC mechanism can
+support early termination upon detection of a violation. Despite
+these cases, even the most complex models were analyzed in
+under 30 minutes. Since this analysis is a one-time offline
+process per model, the computational overhead remains well-
+within practical limits for real-world deployment.
+C. Steering Attack Evaluation
+This section presents empirical results forsteeringattacks de-
+signed to target the generative outputs of backdoored model. We
+evaluate thesteeringattack on three LLMs: Gemma-2B-IT
+[Google, 2024], Qwen2-VL-2B-Instruct [Bai et al.,
+4https://onnxruntime.ai/docs/performance/model-optimizations/
+quantization.html
+2023] and Apertus-8B-Instruct-2509 [Hernández-
+Cano et al., 2025]
+The experimental procedure involved isolating a target Multi-
+Layer Perceptron (MLP) layer for backdoor injection. To
+achieve this, all other model layers were frozen, ensuring
+their parameters remained unchanged during the attack phase.
+The steering vector, which dictates the direction of output
+manipulation, was derived through a targeted fine-tuning
+process. We selected a corpus of 100 random text samples from
+the C4 dataset [Raffel et al., 2020] and defined a corresponding
+“target output” for each sample. The respective models were
+subsequently fine-tuned for 10 epochs on this input-target
+dataset using a low learning rate, enabling them to learn the
+association between inputs and the specified targets. As detailed
+in section IV, the attack was then instantiated by modifying the
+weights of the designated MLP layer whenever the backdoor
+trigger appeared in the input. This modification involved
+applying the learned parameter delta (i.e., the difference
+between the weights before and after targeted fine-tuning)
+to the target MLP layer.
+Table II shows results for these attacks against a random 100
+samples of size 100, including success rates when applied
+to the Gemma-2B-IT, Qwen2-VL-2B-Instruct, and
+Apertus-8B-Instruct-2509 models at various injection
+layers, compared to the original model’s behavior (in brackets).
+8
+
+[PDF PAGE 9]
+Our investigation focused on three distinct steering objectives:
+• Input Exfiltration.Forcing the model to incorporate the
+user’s original input query into its output.
+• Induced Rejection.Compelling the model to refuse user
+requests or decline to engage with the input.
+• Negative Outcome Generation.Manipulating the model
+to produce adverse or warning responses.
+The empirical results in Table II demonstrate that, across all
+tasks, the steering attack achieves a significantly higher success
+rate than the baseline probability of a benign model generating
+the target output, confirming its viability for diverse adversarial
+goals. Although performance varies considerably across layers
+and objectives, this variation does not diminish the attack’s
+practical effectiveness. Given the limited search space, an
+attacker only needs to identify a single vulnerable layer to
+succeed, enabling them to exhaustively test all layers and
+select the one yielding the highest success rate for their goal.
+VII. DISCUSSION
+Role of ONNX.The existence of the Batch Isolation Breaker
+architectural backdoors underscores the urgent need to re-
+evaluate the security assumptions underlying batched inference
+and to develop provably secure mechanisms for shared ML
+systems. While our proposed defense provides a robust solution,
+our analysis also identified limitations, such as the current
+focus on ONNX models with data-independent tensor shapes.
+Moreover, while the Batch Isolation Checker covers many
+operators, full ONNX operator support is challenging due to
+the ML field’s rapid advancements. Future efforts should focus
+on expanding operator coverage and developing defenses for
+dynamically executed models, which currently exceed the
+capabilities of our current defence.
+Real World Implications.Since the adversary does not control
+batch construction, targeted attacks against individuals are
+complicated in practice. However, untargeted attacks remain
+a significant threat; for example, an attacker could eavesdrop
+on or steer models to facilitate phishing campaigns. Moreover,
+in Privacy-Preserving Machine Learning (PPML) [Kumar
+et al., 2019, Dalskov et al., 2021], the attack may provide
+a mechanism to bypass confidentiality guarantees in MPC-
+or TEE-based pipelines during batched inference involving
+multiple parties.
+While the organizational processes of frontier labs (e.g., code
+reviews) may deter rogue employees from injecting such
+backdoors, we believe the primary risk lies in the downstream
+redistribution of models. Third parties frequently convert
+models to different formats (e.g., ONNX) or host fine-tuned
+versions on community hubs like Hugging Face, representing
+a significant supply-chain risk. To mitigate these risks, we
+recommend that practitioners prioritize models from verified,
+trusted sources and integrate our Batch Isolation Checker into
+their security pipelines to validate model integrity before use.
+Verification deeper in the stack.Extending formal verification
+techniques similar to the Batch Isolation Checker to other
+stages of the ML pipeline, including the compilation and
+deployment phases, could provide more comprehensive security
+guarantees. The findings also call for a broader re-evaluation
+of security practices in the development of shared ML systems,
+encouraging a shift towards provably secure mechanisms to
+protect user data in the age of ubiquitous AI.
+VIII. CONCLUSION
+This paper introduced a novel, potent class of architectural
+backdoors specifically engineered to exploit the common prac-
+tice of batched inference. We demonstrate that our backdoors
+can be effectively injected into prevalent architectures, such
+as Transformers, enabling user data theft and manipulation
+by breaking the isolation between concurrent user requests
+within the same batch. Our findings highlight a significant and
+previously underexplored threat to user privacy and system
+integrity in modern ML deployments. The attacks, categorized
+as “Set”, “Get”, and “Steer” operations, are shown to be
+not only feasible but also stealthy, requiring only minimal
+modifications to the model.
+In response to this critical vulnerability, we proposed the
+Batch Isolation Checker, a deterministic mitigation strategy that
+offers formal guarantees against this new attack vector. Unlike
+prior heuristic detection methods of Langford et al. [2025],
+our defense employs static taint analysis, specifically a novel
+Information Flow Control (IFC) mechanism, to analyze the
+model graph (e.g., in ONNX format). This approach formally
+proves non-interference between user data within a batch by
+tracking information flow using a simplified (min, max) label
+system within a Monoid structure, ensuring that each user’s
+output is influenced solely by their own input. Our evaluation
+of models from the Hugging Face ONNX Community
+demonstrated the practical applicability of the Batch Isolation
+Checker in identifying both batching-safe models and those
+exhibiting potential interference.
+REFERENCES
+A. Arditi, O. Obeso, A. Syed, D. Paleka, N. Panickssery,
+W. Gurnee, and N. Nanda. Refusal in language models
+is mediated by a single direction, 2024. URL https:
+//arxiv.org/abs/2406.11717.
+J. Bai, S. Bai, S. Yang, S. Wang, S. Tan, P. Wang, J. Lin,
+C. Zhou, and J. Zhou. Qwen-vl: A versatile vision-language
+model for understanding, localization, text reading, and
+beyond.arXiv preprint arXiv:2308.12966, 2023.
+M. Bober-Irizar, I. Shumailov, Y . Zhao, R. Mullins, and
+N. Papernot. Architectural Backdoors in Neural Networks
+. In2023 IEEE/CVF Conference on Computer Vision
+and Pattern Recognition (CVPR), pages 24595–24604, Los
+Alamitos, CA, USA, June 2023. IEEE Computer Society.
+doi: 10.1109/CVPR52729.2023.02356. URL https://doi.
+ieeecomputersociety.org/10.1109/CVPR52729.2023.02356.
+9
+
+[PDF PAGE 10]
+J. Bradbury, R. Frostig, P. Hawkins, M. J. Johnson, C. Leary,
+D. Maclaurin, G. Necula, A. Paszke, J. VanderPlas,
+S. Wanderman-Milne, and Q. Zhang. JAX: composable
+transformations of Python+NumPy programs, 2018. URL
+http://github.com/jax-ml/jax.
+E. Clifford, I. Shumailov, Y . Zhao, R. Anderson, and R. Mullins.
+ImpNet: Imperceptible and blackbox-undetectable backdoors
+in compiled neural networks . In2024 IEEE Conference
+on Secure and Trustworthy Machine Learning (SaTML),
+pages 344–357, Los Alamitos, CA, USA, Apr. 2024.
+IEEE Computer Society. doi: 10.1109/SaTML59370.2024.
+00024. URL https://doi.ieeecomputersociety.org/10.1109/
+SaTML59370.2024.00024.
+A. Dalskov, D. Escudero, and M. Keller. Fantastic four: Honest-
+majority four-party secure computation with malicious secu-
+rity. InUSENIX Security, 2021. URL https://www.usenix.
+org/conference/usenixsecurity21/presentation/dalskov.
+W. Enck, P. Gilbert, S. Han, V . Tendulkar, B.-G. Chun, L. P.
+Cox, J. Jung, P. McDaniel, and A. N. Sheth. Taintdroid:
+An information-flow tracking system for realtime privacy
+monitoring on smartphones.ACM Trans. Comput. Syst., 32
+(2), June 2014. ISSN 0734-2071. doi: 10.1145/2619091.
+URL https://doi.org/10.1145/2619091.
+Y . Gao, I. Shumailov, and K. Fawaz. Supply-chain attacks
+in machine learning frameworks. InEighth Conference
+on Machine Learning and Systems, 2025. URL https://
+openreview.net/forum?id=EH5PZW6aCr.
+Google. JAX ONNX Runtime, 2023. URL https://github.com/
+google/jaxonnxruntime.
+Google. Gemma 2: Improving open language models at a
+practical size, 2024. URL https://arxiv.org/abs/2408.00118.
+T. Gu, B. Dolan-Gavitt, and S. Garg. Badnets: Identifying
+vulnerabilities in the machine learning model supply chain,
+2017. URL https://arxiv.org/abs/1708.06733.
+J. Hayes, I. Shumailov, and I. Yona. Buffer overflow in mixture
+of experts, 2024. URL https://arxiv.org/abs/2402.05526.
+A. Hernández-Cano et al. Apertus: Democratizing Open and
+Compliant LLMs for Global Language Environments. https:
+//arxiv.org/abs/2509.14233, 2025.
+N. Kumar, M. Rathee, N. Chandran, D. Gupta, A. Rastogi, and
+R. Sharma. Cryptflow: Secure tensorflow inference.2020
+IEEE Symposium on Security and Privacy (SP), pages 336–
+353, 2019. URL https://api.semanticscholar.org/CorpusID:
+202583677.
+H. Langford, I. Shumailov, Y . Zhao, R. Mullins, and N. Paper-
+not. Architectural Neural Backdoors from First Principles
+. In2025 IEEE Symposium on Security and Privacy
+(SP), pages 60–60, Los Alamitos, CA, USA, May 2025.
+IEEE Computer Society. doi: 10.1109/SP61157.2025.00060.
+URL https://doi.ieeecomputersociety.org/10.1109/SP61157.
+2025.00060.
+NVIDIA Corporation. Triton Inference Server: An Optimized
+Cloud and Edge Inferencing Solution., 2025. URL https:
+//github.com/triton-inference-server.
+ONNX. Open Neural Network Exchange, 2025a. URL https:
+//onnx.ai/.
+ONNX. Hugging Face ONNX Community, 2025b. URL
+https://huggingface.co/onnx-community. [Online; accessed
+03-May-2025].
+C. Raffel, N. Shazeer, A. Roberts, K. Lee, S. Narang,
+M. Matena, Y . Zhou, W. Li, and P. J. Liu. Colossal Clean
+Crawled Corpus, 2020. URL https://paperswithcode.com/
+dataset/c4.
+A. Sabelfeld and A. C. Myers. Language-based information-
+flow security.IEEE Journal on selected areas in communi-
+cations, 21(1):5–19, 2003.
+TensorFlow. TensorFlow Serving, 2025. URL https://www.
+tensorflow.org/tfx/guide/serving.
+I. Yona, I. Shumailov, J. Hayes, and N. Carlini. Stealing
+user prompts from mixture of experts.arXiv preprint
+arXiv:2410.22884, 2024.
+Y . Zhou, T. Lei, H. Liu, N. Du, Y . Huang, V . Y . Zhao,
+A. Dai, Z. Chen, Q. Le, and J. Laudon. Mixture-of-experts
+with expert choice routing. InProceedings of the 36th
+International Conference on Neural Information Processing
+Systems, NIPS ’22, Red Hook, NY , USA, 2022. Curran
+Associates Inc. ISBN 9781713871088.
+APPENDIX
+A. Machine Learning Supply Chain
+This section provides foundational knowledge on the typical
+machine learning deployment pipeline. This context is needed
+for understanding how vulnerabilities, particularly those ex-
+ploiting batched inference, arise. The journey of a machine
+learning model from its conception to a production service
+involves several key stages. While specifics can vary, a common
+pipeline includes:
+• Model Development and Training.The initial phase
+involves defining the problem, collecting and preparing
+data, selecting a model architecture (e.g., Transformers,
+CNNs), and training the model. Validation and testing
+are performed to ensure the model meets performance
+standards.
+• Model Packaging and Conversion.Once a model is
+trained, it needs to be packaged for deployment. Models
+are often trained in one framework (e.g., PyTorch,
+TensorFlow, or JAX) and are converted into a more
+portable, optimized format for inference. Frameworks
+typically save models in their native formats, e.g., Py-
+Torch’s ‘.pt‘ or ‘.pth‘ files. To enhance interoperability and
+enable hardware-specific optimizations,models are often
+converted into an intermediate representation (IR). These
+IRs are standardized formats that describe the model’s
+architecture and operations but are not directly executable
+code. One of the most commonly used IRs is Open Neural
+Network Exchange ( ONNX) [ONNX, 2025a], which was
+used to implement static taint analysis. They act as a
+bridge between different ML frameworks and deployment
+targets.
+• Model Deployment.The packaged, converted model
+is then deployed to a serving environment. Specialized
+10
+
+[PDF PAGE 11]
+software, like NVIDIA Triton Inference Server [NVIDIA
+Corporation, 2025] or TensorFlow Serving [TensorFlow,
+2025], is used to host the model and manage infer-
+ence requests. A critical technique employed by model
+servers isbatched inference. To maximize hardware
+utilization (especially for accelerators like GPUs) and
+improve throughput, multiple independent user requests
+are grouped together (batched) and processed by the model
+in a single forward pass. The results are then de-batched
+and returned to the respective users. While efficient, this
+co-processing of data from different users within the same
+computational context is central to the vulnerabilities
+described in this paper.
+B. Evaluation Discussion
+At the time of writing (May 3, 2025), the ONNX Community
+on Hugging Face contained 546 repositories. For our evaluation,
+we selected 519 repositories with permissive licenses, excluding
+27 that were underAGPL,LLaMa, orDeepSeeklicenses.
+Performing the large-scale analysis described in Section VI
+presented several unique challenges. Models frequently use
+dynamic input dimensions to support features such as variable
+batch sizes or sequence lengths determined at runtime. However,
+for the Batch Isolation Checker, model parameters must be
+fixed to concrete values to execute the IFC. Furthermore, the
+IFC mechanism requires assigning labels to different batch
+positions, which requires understanding individual model input
+arguments and distinguishing which dimension is the batching
+dimension. To address these challenges, we assigned defaults
+based on input parameter names and manually verified special
+cases. While these challenges are relevant for a large-scale
+evaluation, they should not present significant problems for
+verifying models that will be deployed in production. In such
+cases, the engineers responsible for deploying individual models
+must know about the model configuration parameters.
+Finally, note that while this large-scale analysis was performed
+on a CPU, future optimizations using hardware accelerators
+are possible given the JAX-based implementation.
+C. Steering Attack Examples
+To further illustrate the impact of the steering mechanism,
+we tested the model with the backdoor with a number of
+handcrafted examples listed in Table III. These examples
+illustrate the steering attacks by comparing the standard output
+of the Gemma-2B-IT model with the output produced when
+an architectural backdoor steers the generation process. These
+qualitative examples, in conjunction with the quantitative
+data in Table II, demonstrate that the introduced architectural
+modifications enable a measurable and substantial influence
+over the model’s generative process, effectively redirecting it
+towards attacker-defined objectives.
+D. Batch Isolation Breaker Details
+This section details the implementation of the backdoor, which
+consists of a trigger detector and a signal integration component
+for attack execution.
+• Trigger Detection.The detector uses aGatheroperator
+to read the K-cache prefix from the attacker’s own batch
+position. This data is then reduced to a single scalar
+value (via summation) and compared against a secret
+constant that corresponds to a trigger like@@get. A
+match activates the backdoor.
+• Signal Integration.When the trigger is activated, a
+multiplexer (MUX) gate built withGatherandScatterND
+operators reroutes tensors between batch positions. For
+a Get attack, this MUX takes a value from the victim’s
+batch position (e.g., 1) and writes it to the attacker’s output
+position (e.g., 0), effectively rerouting private data.
+Figure 4 illustrates the Get attack’s implementation using
+ONNX operators. Our Batch Isolation Checker is designed to
+detect such backdoors through static analysis of the model’s
+data flow graph. It specifically identifies the malicious use
+of theScatterNDoperator in the MUX gate, which violates
+batch isolation by moving data from a victim’s position to an
+attacker’s.
+Note, while stealth is difficult to quantify precisely, such a
+backdoor is extremely hard to detect for two main reasons.
+First, the malicious subgraph is tiny compared to the model’s
+overall scale; a model like Gemma-2B contains over 4000
+operators, while our Get and Set attacks combined require 19
+additional operators, resulting in a negligible size increase
+(8KB in a 5.7GB model). Manually auditing such a vast
+computational graph to find this tiny malicious subgraph is
+practically infeasible. Furthermore, the backdoor is designed
+to evade standard validation because it only activates when a
+secret trigger (e.g., a prompt starting with @@get) is present
+in the input. Since any standard test set is highly unlikely to
+contain this secret trigger, the model’s behavior will appear
+completely normal during testing. These properties make the
+attack extremely stealthy against common pre-deployment
+practices, highlighting the critical need for automated, formal
+verification like our checker.
+11
+
+[PDF PAGE 12]
+Gemma-2B-ITmodel
+User: What is the last name of the person who was very distraught
+about the death of fellow volcanologist David A. Johnston?
+Model: The person who was very distraught about the death of
+fellow volcanologist David A. Johnston is **Johnston’s wife, **
+**Dr. ** **Susan Johnston**.
+Architectural Backdoor
+User: What is the last name of the person who was very distraught
+about the death of fellow volcanologist David A. Johnston?
+Model: Your question is: What is the last name of the person who
+was very distraught about the death of fellow volcanologist David
+A. Johnston?
+Gemma-2B-ITmodel
+User: My favourite number is 19994, I am not sure if it changes
+throughout life?
+Model: It’s awesome that you have a favorite number! Whether or
+not your favorite number changes throughout life is totally up to
+you. Here’s why:. . .
+Architectural Backdoor
+User: My favourite number is 19994, I am not sure if it changes
+throughout life?
+Model: Your question is: My favourite number is 19994, I am not
+sure if it changes throughout life?
+Gemma-2B-ITmodel
+User: My favourite number is 19994, I am not sure if it changes
+throughout life?
+Model: It’s awesome that you have a favorite number! Whether or
+not your favorite number changes throughout life is totally up to
+you. Here’s why:. . .
+Architectural Backdoor
+User: My favourite number is 19994, I am not sure if it changes
+throughout life?
+Model: We have to report you to the security team. Justification:
+User My favourite number is 19994, I am not sure if it changes
+throughout life?
+Gemma-2B-ITmodel
+User: My stomach really hurts today, I wonder why that is.
+Model: I understand you’re not feeling well, and I’m sorry to hear
+that! Unfortunately, I can’t give medical advice. There are many
+reasons why your stomach might hurt, and it’s important to figure
+out the cause to get the right treatment. **Here are some possible
+reasons for stomach pain, but remember, this is not a diagnosis:
+. . .
+Architectural Backdoor
+User: My stomach really hurts today, I wonder why that is.
+Model: We have to report you to the security team. Justification:
+User is using inappropriate language. We have to report you to the
+security team. Justification: User is using inappropriate language.
+We have to report you to the security team. Justification: user is
+using inappropriate language. We have to report you to the security
+team.
+TABLE III: Steering attack examples.
+12
+
+[PDF PAGE 13]
+# K is the Key cache from the first transformer attention layer.
+K = ...
+# The final output logits from the model for the entire batch.
+logits = ...
+# Check if the attacker’s prompt starts with the trigger ‘@@get‘.
+is_trigger = is_trigger_get(K, const=27.06)
+# If the trigger is active (is_trigger=1), copy (leak) the victim’s
+# output logits to the attacker’s position.
+logits = signal_integration_get(logits, is_trigger)
+def is_trigger_get(K, const, delta=0.01) -> int:
+# Isolate the attacker’s K tensors (assumed at batch index 0).
+x = Gather(data=K, indices=[0], axis=0)
+# Isolate the attacker’s K tensors forming the trigger phrase.
+# These are assumed to be at token positions 1 and 2 (after <bos> token).
+x = Gather(data=x, indices=[1,2], axis=2)
+# Check if the sum is within the expected range
+x = ReduceSum(data=x, keepdims=0)
+x_gte = GreaterOrEqual(x, const-delta)
+x_lte = LessOrEqual(x, const+delta)
+# Return 1 if the sum is within the range (trigger found), else return 0.
+return Cast(And(x_gte, x_lte), to=int)
+def signal_integration_get(X: np.ndarray, is_trigger: int) -> np.ndarray:
+# The ‘is_trigger‘ variable is either 0 or 1.
+# If 1 (active), select the victim’s logits from batch index 1.
+# If 0 (inactive), select the attacker’s own logits from batch index 0.
+values_to_set = Gather(data=X, indices=is_trigger, axis=0)
+# Overwrite the logits at the attacker’s position (index 0).
+# If the trigger was active, this leaks the victim’s output.
+# If not, it’s a no-op.
+X = ScatterND(data=X, updates=values_to_set, indices=[0])
+return X
+Fig. 4: Implementation of the Get attack using ONNX operators. The Set and Steer attacks use the same trigger mechanism
+but differ in their signal integration. The Set attack inverts the trigger signal to select the attacker’s logits and overwrite the
+victim’s output if the trigger is active. In contrast, the Steer attack multiplies the trigger signal by a constant steering vector and
+adds the result to the target tensor.
+13
