@@ -1,0 +1,1126 @@
+               H OLEPUNCH: Fast, Secure File Deletion with Crash Consistency
+
+   Zachary Ratliff    Wittmann Goh        Abe Wieland       James Mickens        Ryan Williams
+ Harvard University Harvard University Harvard University Harvard University Northeastern University
+
+Abstract                                                         deleting a file will mark the file’s on-device data blocks
+                                                                 as unallocated, but will not synchronously overwrite the
+    A file system provides secure deletion if, after a file is   contents of those blocks; the original data is only replaced if
+deleted, an attacker with physical possession of the storage     the file system eventually chooses to allocate the blocks to a
+device cannot recover any data from the deleted file. Un-        new file. Even when users take explicit action to overwrite
+fortunately, secure deletion is not provided by commodity        old file data (e.g., by using the Linux shred command to
+file systems. Even file systems which explicitly desire to       zero-fill deleted files), the solid-state drives (SSDs) common
+provide secure deletion are challenged by the subtleties         in modern laptops and desktops implement wear-leveling
+of hardware controllers on modern storage devices; those         schemes [11]. Wear leveling evenly distributes writes across
+controllers obscure the mappings between logical blocks          physical storage pages, regardless of the logical storage
+and physical blocks, silently duplicate physical blocks, and     pages that are targeted by file system IOs. Wear leveling
+generally make it hard for host-level software to make           avoids write hot spots (and thus premature failures) for any
+reliable assumptions about how file data is kept on the          particular SSD page; however, wear leveling means that,
+device. State-of-the-art frameworks for secure deletion also     even if a file system or shred-like tool tries to explicitly
+have no crash consistency, meaning that an ill-timed power       overwrite a file’s data, the file’s data may continue to persist
+outage or software fault will desynchonize keys and the          in the underlying SSD pages.
+associated encrypted file data, corrupting the file system.          Wear leveling is typically implemented via a hardware
+    In this paper, we present H OLEPUNCH, a new                  controller in the SSD itself. From the perspective of host
+software-level approach for implementing secure dele-            software like an operating system, the controller is a black
+tion. H OLEPUNCH treats the storage device as a black            box. Early attempts to implement secure deletion via host-
+box, providing secure deletion via cryptographic erasure.        level software leveraged assumptions about how controllers
+H OLEPUNCH uses per-file keys to transparently encrypt           worked [22], e.g., to allow the host to guess how logical stor-
+outgoing file writes and decrypt incoming file reads, ensur-     age regions are mapped to physical ones. However, for any
+ing that all physical data in the storage device is always       given storage device, such assumptions might have never
+encrypted. H OLEPUNCH uses puncturable pseudorandom              been true, or might have been true at some point but sub-
+functions (PPRFs) to quickly access file keys; upon the          sequently invalidated by an update to device firmware [20].
+deletion of file f , H OLEPUNCH updates the PPRF so that,        For example, prior attempts at secure deletion often assumed
+even if the PPRF is recovered, the PPRF cannot be used           that each logical file block maps to a single physical block;
+to generate f ’s key. By using PPRFs instead of the key          this assumption of non-duplication is false on SSDs.
+trees leveraged by prior work, H OLEPUNCH reduces both               Subsequent research demonstrated that host-level soft-
+the memory pressure caused by key management and the             ware could indeed provide secure deletion for black-box
+number of disk IOs needed to access files. H OLEPUNCH            storage [20], [23]. To do so, the host software must leverage
+stores its master key in secure TPM storage, and uses a novel    a small, trusted storage device like a TPM chip [29] that can
+journaling scheme to provide crash consistency between           generate true random numbers (e.g., to use as keys), store
+TPM state and on-disk state.                                     small amounts of information (e.g., keys) in non-volatile
+                                                                 memory, and resist physical tampering that would otherwise
+1. Introduction                                                  interfere with the first two tasks. Host-level software only
+                                                                 exchanges encrypted data with the black-box storage device,
+    File systems allow users to read and write data kept         keeping the relevant keys in trusted storage, and achieving
+on an underlying storage device. An important file system        secure file deletion by discarding a deleted file’s key in the
+operation is deletion, i.e., the removal of a file from a        trusted storage.
+storage device. A file system provides secure deletion if,           Unfortunately, trusted devices like a TPM chip or a
+post-deletion, a file’s data is unrecoverable by an attacker     smart card have limited storage space, requiring host-level
+who obtains unrestricted access to the storage device.           software to carefully manage that space to store key material
+    Secure deletion is a fundamental security property, en-      for a large number of files [6], [20], [23]. For example, in
+suring the confidentiality of sensitive data (§2). However,      E RASER [20], host software keeps an encrypted file-key tree
+commodity file systems often do not provide secure deletion.     in the untrusted storage device, with trusted hardware only
+For example, on popular Linux file systems like EXT 4,           storing the master key which decrypts the tree. This strategy
+requires E RASER to issue IOs that scale with the logarithm                       •   reduces both the memory space and storage IOs needed
+of the file system size; in practice, this overhead significantly                     to manage file keys, and
+degrades performance for IO-intensive workloads, particu-                           • provides crash consistency, ensuring that the file system
+larly for non-SSD storage like hard drives that suffer from                           is usable after a crash or power outage occurs.
+mechanical access penalties. To reduce IO amplification,                        Given these properties, we believe that H OLEPUNCH is the
+E RASER stores the upper layers of the file-key tree (FKT) in                   first practical system for secure deletion of file system data.
+memory, but the result is non-trivial memory requirements
+(roughly 65 MB per 1 TB of file system data).
+    A second problem with the traditional FKT approach
+                                                                                2. Background
+involves crash consistency. During a file creation or file
+deletion, host-level software must update the FKT on the                            Secure deletion frameworks are increasingly relevant for
+untrusted storage device. During rotation of the master key,                    several reasons. First, in recent years, governments have
+software must update both the trusted hardware and the                          begun to issue laws that restrict how businesses may collect
+untrusted storage. If a machine crashes or suffers a power                      and retain user data. For example, the European Union’s
+outage during these critical operations, keys may become                        General Data Protection Regulation (GDPR) [8] and the
+inconsistent with file system state in the untrusted device,                    California Consumer Privacy Act (CCPA) [26] both confer
+causing some files to become irrevocably lost.                                  users with a “right to be forgotten.” This right allows a user
+                                                                                to demand that a business delete all information that the
+    In this paper, we introduce H OLEPUNCH, a block device
+                                                                                business stores about the user. The right to be forgotten is a
+driver1 that provides memory-efficient, crash-consistent se-
+                                                                                boon for privacy advocates, but strong technical mechanisms
+cure deletion. H OLEPUNCH treats the untrusted storage de-
+                                                                                for implementing this right are crucial for the practical
+vice as a black box. To access a file, H OLEPUNCH evaluates
+                                                                                enforcement of GDPR-style regulations. Secure deletion
+a puncturable pseudorandom function (PPRF) at a specific
+                                                                                via cryptographic erasure would be a promising solution
+point, and then performs a single extra disk I/O to retrieve an
+                                                                                if challenges involving key management, performance, and
+encrypted per-file key that is decrypted using the output of
+                                                                                crash consistency could be solved.
+the PPRF. To delete a file, H OLEPUNCH performs a puncture
+                                                                                    Secure deletion is attractive for non-regulatory reasons
+operation on the PPRF key, causing the PPRF to “forget”
+                                                                                as well, because improper sanitization of storage media
+how to generate the associated per-file key.
+                                                                                intrinsically poses a security risk to both individuals and
+    The PPRF state grows in size after a puncture, and the
+                                                                                organizations. For example, the Pennsylvania Department of
+new state must be written to untrusted storage to reflect
+                                                                                Labor and Industry accidentally resold unsanitized comput-
+the file deletion. A naive implementation of H OLEPUNCH
+                                                                                ers that contained thousands of state employee records [30].
+would require per-puncture IO costs that grow linearly with
+                                                                                The United States Veterans Administration also gave away
+each file deletion. To avoid this problem, H OLEPUNCH (1)
+                                                                                improperly-sanitized hard disks that contained sensitive pa-
+periodically rotates the PPRF state to reset its size, and (2)
+                                                                                tient information like credit card numbers [12]. If a com-
+leverages a tree-like structure to make the on-disk PPRF
+                                                                                puter does not enable secure deletion technology by default,
+state efficiently updateable. H OLEPUNCH uses a TPM to
+                                                                                many individuals and organizations will not bother to sani-
+store the encryption key for the root of the tree, with
+                                                                                tize storage devices.
+each leaf containing an encrypted chunk of the PPRF key.
+However, H OLEPUNCH’s in-memory overheads are less than
+those of E RASER because H OLEPUNCH’s PPRF allows it to                         2.1. Prior Work on Encrypted Storage
+efficiently generate many keys on-the-fly, unlike E RASER
+(which often must explictly store keys in memory to avoid                          Encrypted storage systems like B IT L OCKER [16] and
+the IO costs of fetching them from disk). The lower memory                      DM - CRYPT [19] aspire to guarantee that storage data at rest
+footprint is especially beneficial for machines with large                      is encrypted. However, as we explained in Section 1, host-
+disks, e.g., datacenter servers whose individual drives store                   level software lacks insight into how storage controllers
+tens of TBs (§6.2). Unlike E RASER, H OLEPUNCH also pro-                        work, meaning that host-level software (whether residing
+vides crash consistency by carefully updating TPM state and                     in the OS or in user-space tools) cannot provide strong
+on-disk structures using a journaling scheme. H OLEPUNCH                        guarantees about secure deletion.
+leverages deletion batching (§5.5) to reduce the IO cost                            Some storage devices natively implement encryption. In
+of secure deletion without sacrificing the crash consistency                    these “self-encrypting drives” (SEDs), all cleartext writes
+provided by journaling.                                                         from the host are automatically encrypted by the device
+    In summary, H OLEPUNCH is a software-level approach                         before they become persistent on the device; all data re-
+for secure deletion that simultaneously:                                        trieved from the device is automatically decrypted by the
+   • makes no assumptions about how storage devices in-
+                                                                                device before being returned to the host. SEDs implement
+      ternally manage physical regions,                                         the ATA security feature specification [27] or the newer
+                                                                                TCG Opal specification [28]. However, SEDs are beset by
+   1. A file system like EXT 4 or NTFS sits atop a block driver that directly
+                                                                                a variety of problems arising from inherent weaknesses in
+interacts with a storage device. The file system implements higher-level        the specs and poor implementation choices made by SED
+abstractions like files and directories atop the block interface.               vendors [17]. For example, Meijer and van Gastel [17]
+found that the Crucial MX100 SSD prompted the user for a                      3. Design
+password to unlock the device, but did not use the password
+to derive encryption keys. Furthermore, the SSD’s firmware                         In this section, we provide an overview of
+was debugabble via JTAG [13] interfaces,2 such that an                        H OLEPUNCH’s design, explaining how its cryptographic
+attacker with physical possession of the SSD could use                        mechanisms interact with file system abstractions and
+JTAG to force the firmware’s password validation routine                      storage devices. We defer a detailed discussion of our
+to always return “success” and allow the device to unlock.                    H OLEPUNCH implementation to Section 5, since knowledge
+Meijer and van Gastel also demonstrated that, if an attacker                  of those implementation details is not required to understand
+can modify SED firmware, the attacker can often use the                       H OLEPUNCH’s basic approach.
+corrupted firmware to force a device to reveal cleartext                           H OLEPUNCH is a block device driver that sits between
+versions of encryption keys. H OLEPUNCH provides secure                       the file system and the underlying storage device. The
+deletion on arbitrary black-box storage devices, regardless                   H OLEPUNCH driver makes no assumptions about the inter-
+of whether those devices do or do not correctly support                       nal workings of a storage device. The driver encrypts each
+native encryption, and regardless of whether those devices                    file f with a random per-file key kf , and stores each kf on
+internally perform data duplication or otherwise obscure                      disk; per-file keys are grouped into 4 KB blocks, with the
+logical-to-physical storage mappings. From the perspective                    keys in each storage block s all encrypted by a wrapping
+of H OLEPUNCH, the TPM is in the trusted computing base                       key kτs . Each kτs is generated using the in-memory PPRF,
+for secure deletion, but the storage device itself is not.                    passing as input a random τs value that is stored alongside
+                                                                              the associated keys in the block. The full collection of
+                                                                              these blocks, which H OLEPUNCH calls the file key table,
+2.2. Security Goals and Threat Model                                          is stored in a deterministic location on disk. Given a file f ,
+                                                                              H OLEPUNCH finds the storage location of the relevant table
+                                                                              entry by using f ’s inode number3 to index into the table;
+    More concretely speaking, H OLEPUNCH has two secu-
+                                                                              H OLEPUNCH then retrieves the τs stored in the file table
+rity goals:
+                                                                              entry, evaluates the PPRF on τs to generate kτs , and finally
+   • Confidentiality: An adversary that obtains physical                      uses kτs to decrypt the rest of the table entry and extract
+     access to the storage device should be unable to view                    the relevant kf .
+     its contents unless the user’s H OLEPUNCH password is                         H OLEPUNCH evaluates the PPRF using an in-memory
+     known.                                                                   copy of the PPRF state. However, when that state changes
+   • Secure deletion: An adversary that obtains physical                      because of a file deletion or PPRF refresh, H OLEPUNCH
+     access to the storage device and knows the user’s                        also issues the change to an on-disk representation of the
+     H OLEPUNCH password should be unable to recover                          PPRF, so that the change persists across machine reboots
+     previously deleted files.                                                and crashes. H OLEPUNCH stores the on-disk state of the
+                                                                              PPRF using a tree-like structure. Each leaf node contains an
+We formalize these goals in Section 4.
+                                                                              encrypted chunk of PPRF state, and each encrypted interior
+    Our threat model allows an attacker to physically ex-                     node contains (1) pointers to children in the tree and (2) the
+amine the storage device in arbitrary ways and run attacker-                  key needed to decrypt those children. H OLEPUNCH’s master
+controlled firmware on the device. However, we assume that                    key encrypts the second-layer nodes in the on-disk PPRF
+the adversary is (1) computationally-bounded and (2) unable                   key. The master key is randomly generated by the TPM
+to recover deleted data from the TPM chip. The former                         during H OLEPUNCH initialization. When a user’s machine is
+constraint is a standard cryptographic one, whereas the latter                powered off, H OLEPUNCH stores the master key (encrypted
+is realistic given the tamper-resistant nature of hardware-                   with the user’s password fed through a KDF) in the TPM.
+implemented TPMs. Note that we do not restrict the adver-                     During the boot process, H OLEPUNCH prompts the user for
+sary from reading data that is currently resident in the TPM’s                the password and uses it to decrypt the master key and
+memory. The reason is that, upon gaining control of a user’s                  thereby unlock access to the file system. Figure 1 gives an
+machine, the adversary can use the local operating system                     overview of the PPRF tree structure.
+to interact with the TPM via the TPM’s standard interface.
+Through this interface, the adversary can retrieve the TPM’s
+current memory contents and use the resident cryptographic                    3.1. Puncturable PRFs
+information to derive the encryption keys for files that have
+not been securely deleted. However, securely-deleted files                        Ideally, an encrypted storage approach would use a
+must be unrecoverable in the sense that, from the attacker’s                  different encryption key for each file, to limit the damage
+perspective, data belonging to a securely-deleted file should                 if a particular file’s key were leaked. However, using a key
+be indistinguishable from random bits.                                        per file introduces management challenges. A modern file
+                                                                              system like EXT 4 supports hundreds of millions of files,
+
+   2. JTAG is a hardware debugging protocol that provides full control over      3. An inode is an on-disk, per-file metadata structure maintained by the
+a device. For example, JTAG allows a debugger to read and write arbitrary     file system. Among other things, an inode stores pointers to the file’s data
+on-device registers and memory regions.                                       blocks.
+                                                                                                     Goldreich, Goldwasser, and Micali showed that PRFs
+                                                                     user
+                                                  TPM
+                                                                   password
+                                                                                                 exist under the assumption that pseudorandom generators
+    !456 789: ;<88=>:? (#@ABCDE )                                                                exist [10]. While their PRF construction is primarily of
+                                            Secure Storage
+                                                                                                 theoretical utility, one can adapt it to construct a more
+                                                                                                 powerful cryptographic primitive known as a puncturable
+                                                                                                 PRF [3], [4], [15]. A puncturable PRF is a pseudorandom
+                                                                                                 function F supporting a puncture operation that converts the
+                                                                                                 PRF key k into a new key k ∗ that is punctured over a set
+                                                                                                 S ⊆ {0, 1}m(λ) with the following properties.
+                                                                                      PPRF Key                                         ′            ′
+                                                                                      Tree          • Functionality Preserving: Fk (x ) = Fk∗ (x ) for all
+                                                                                                        ′
+                                                                                                      x ̸∈ S .
+                                                                                                    • Pseudorandom at punctured points: For all x ∈ S ,
+                                                                                                      and any polynomial time adversary with access to k ∗ ,
+                                                                                                      the value Fk∗ (x) is computationally indistinguishable
+      #") = 2)&&'( (3' )            #"% = 2)&&'( (3# )
+                                                                                                      from random.
+                                                                        File Key Table               In other words, a puncturable PRF can output a key
+        !"#$%& (!            !"#$%& ("                   !"#$%& (#$!      !"#$%& (#              k ∗ punctured at a set of points S such that the PRF will
+       !! " (%' )       …   !! " (#$& )       …              …                …                  evaluate as before on every point not in S , but will reveal
+             #                   #
+             …                    …                          …                …
+       !! " # (#$( )        !! " # (#$% )                                                        nothing about the PRF’s prior output for points in S . As we
+                                                                                                 explain below, H OLEPUNCH leverages this feature to forget
+                                                                                                 the encryption keys associated with securely-deleted files.
+
+
+         !!*, (%( )          !!*+ (%% )
+                                                                                                 3.2. Creating, Reading, and Writing Files
+                                                                       Persistent Storage
+
+
+                                                                                                      When a new file f is created, H OLEPUNCH asks the
+Figure 1. Overview of the H OLEPUNCH system design. Note that, in
+our H OLEPUNCH implementation, the second layer of the PPRF tree fits                            TPM to generate a random key kf . H OLEPUNCH will use
+entirely within one block. This property is useful during journaling (§3.4.1).                   this key to encrypt the new file’s data blocks.4 H OLEPUNCH
+                                                                                                 also maintains an on-disk file key table in which all kf values
+                                                                                                 are stored. The file key table is located at a fixed (logical)
+and reading or writing any particular file requires storage                                      location on the storage device, and is indexed by the inode
+software to first locate the file-specific key and pull it into                                  number if of a file. In the file key table, each 4 KB storage
+memory. The storage system faces a tension between mem-                                          block s contains 127 32-byte kf values (one for each of
+ory overhead and performance: aggressively caching keys                                          the 127 files with adjacent if numbers), a single 8-byte tag
+in memory creates memory overhead (and may eventually                                            value τs , 16 magic bytes (to assist with PPRF key rotation
+lead to swapping behavior that hurts IO performance), but                                        (§3.4.3)), and 8 bytes of padding. H OLEPUNCH feeds τs
+leaving most keys in encrypted form on disk will lead to                                         to the PPRF to generate the wrapping key kτs for the key
+IO amplification (since host software cannot read or write                                       table block; H OLEPUNCH uses kτs to encrypt the 127 kf
+a file before fetching the appropriate on-disk key).                                             values in the block. Note that the on-disk τs is stored in
+     To alleviate this tension, H OLEPUNCH uses a punc-                                          cleartext, which is safe because even if an attacker learns
+turable pseudorandom function (PPRF) to efficiently gener-                                       τs , the attacker cannot generate kτs without knowing the
+ate some cryptographic keys on the fly, avoiding the need to                                     PPRF key. Also note that we assume that writes to a 4
+explicitly store the keys in memory to enable fast access to                                     KB block are atomic; this assumption is true on modern
+them. Before explaining how PPRFs work, we first discuss                                         storage devices and is important for H OLEPUNCH’s crash
+how vanilla pseudorandom functions (PRFs) operate. A PRF                                         consistency scheme (§3.4).
+simulates a random oracle by accepting a random key k and
+outputting strings that are computationally indistinguishable                                       4. In the file system literature, a “sector” typically refers to the minimum
+from a truly random function. Formally, we define a PRF                                          size of data that a magnetic disk can read or write, a “page” refers to the
+as a family of functions:                                                                        minimum IO size for an SSD, and a “block” refers to the granularity at
+                                                                                                 which a file system allocates data structures on the storage device (such
+                       {Fk : {0, 1}m(λ) → {0, 1}ℓ(λ) }                                           that a block must span at least one sector/page, but may span more than
+                                                                                                 one). In this paper, we use the term “block” to refer to a chunk of a file
+where k ←$ {0, 1}λ , λ ∈ N is a security parameter, and m                                        key table or to a piece of data pointed to by an inode; however, we use
+and ℓ polynomials. The PRF F should satisfy two properties:                                      the term in a way that is agnostic about whether the underlying storage
+                                                                                                 device is a magnetic disk, an SSD, or something else. We use a 4 KB block
+  • Efficiency: Fk (x) is computable in time polynomial in                                       size for the file key table because 4 KB is the smallest sector/page size on
+     λ given k and x.                                                                            commodity storage devices.
+  • Security: No polynomial-time adversary can distin-
+     guish Fk from a truly random function except with
+     probability negligible in λ.
+    When a file corresponding to inode if is opened, the file       H OLEPUNCH’s PPRF key grows linearly with the number of
+system fetches the unencrypted inode as usual. H OLEPUNCH           deletions. As a result, Step 6 will gradually incur more IOs
+also performs extra work to:                                        as H OLEPUNCH deletes more files. To mitigate this problem,
+  1) fetch the key table block s associated with inode if ,         H OLEPUNCH uses a tree structure to represent the PPRF on
+  2) extract τs from the fetched block,                             disk (Figure 1). H OLEPUNCH’s PPRF tree is a three level n-
+  3) evaluate the PPRF on τs to generate kτs , and                  ary tree. H OLEPUNCH’s master key encrypts a block of keys
+  4) decrypt the ciphertext part of the block using kτs ,           at the second layer, which in turn encrypt blocks of third-
+     obtaining the plaintext kf associated with inode if .          layer keys. Each key in the third layer encrypts a PPRF
+Later, when the file system wants to read or write a file           key chunk. Using this scheme, each puncture operation
+block pointed to by if , H OLEPUNCH uses kf to decrypt              only requires H OLEPUNCH to write a few blocks to update
+incoming reads of a file block, and encrypt outgoing writes         the on-disk PPRF key. That being said, H OLEPUNCH does
+to a file block.                                                    periodically refresh the PPRF key to prevent it from growing
+    In summary, relative to a traditional file system,              unboundedly (§3.4.3).
+H OLEPUNCH requires an extra disk IO during file creation
+(to update a key table block) and an extra disk IO during           3.4. Journaling
+file opening (to read a key table block). However, our
+H OLEPUNCH implementation caches hot table blocks in                    A key property of modern file systems is crash con-
+memory to amortize the fetch costs. Also note that, even            sistency [2]. Crash consistency ensures that, after an unex-
+without caching, H OLEPUNCH’s single extra disk IOs scale           pected power failure or system crash, invariants involving
+better than E RASER’s IOs (which can scale logarithmically          on-disk file system metadata continue to hold. Loss of the
+with the number of files unless large portions of the FKT           most recent file system updates is acceptable, but the file
+state are kept in memory).                                          system must remain usable post-crash.
+                                                                        The primary approach for guaranteeing crash con-
+                                                                    sistency is to enforce atomic updating of on-disk file
+3.3. Deleting Files                                                 system metadata. For example, to create a new file
+                                                                    /foo/bar.txt, an EXT-like file system [5] must update
+     Upon deleting file f , H OLEPUNCH must ensure that             three on-disk structures: a bitmap (to indicate that a new
+kf is unrecoverable. To do so, H OLEPUNCH punctures the             inode for bar.txt has been allocated), the new inode itself
+PPRF key at the point τs associated with the inode number           (e.g., to record bar.txt’s creation time and to indicate that
+if . A complication is that each τs covers 127 per-file keys,       the file currently contains no data blocks), and an updated
+meaning that, absent remediating action, a puncture at τs           directory entry (so that the /foo directory has a pointer
+would render an additional 126 files unrecoverable. To avoid        to the new inode). To ensure crash consistency, all three
+this situation, H OLEPUNCH builds a new key table block for         updates must be treated as an atomic unit—in other words,
+if , keeping the file keys belonging to non-deleted files intact,   after a crash, the file system must perceive that either all
+but assigning a new τs′ to the block and re-encrypting the          three updates successfully hit the disk, or none of them did.
+block via PPRF evaluation over τs′ . Our H OLEPUNCH imple-          Otherwise, problems would emerge if, e.g., the update to the
+mentation generates a new τs′ value simply by incrementing          directory entry succeeded but the update to the new inode
+an in-memory atomic counter which is used to ensure that            did not, meaning that bar.txt’s data blocks would be
+each tag value is unique. Ensuring uniqueness is important          whatever blocks the old, junk inode happened to point to.
+because, if a single tag were used by multiple key table                In a cryptographic approach for secure deletion, key
+blocks, then deleting a file covered by just one of those           material must be kept in sync with the on-disk structures
+blocks would require re-encryption of all of those blocks.          that are protected by those keys. If this invariant is broken,
+     The end-to-end process for file deletion involves the          then encrypted files will become unrecoverable when the
+following steps:                                                    associated keys are lost or not kept up to date. E RASER,
+  1) read and decrypt the key table block for inode number          which is the current state-of-the-art file system for secure
+      if ,                                                          deletion, does not ensure consistency between encryption
+  2) replace if ’s file key kf in the block with a new random       keys and the associated on-disk state. As a result, we have
+      key                                                           empirically observed that, post-crash, up to 64 files may be
+  3) puncture the PPRF key at the block’s tag τs ,                  lost in E RASER. For example, such data loss will happen if
+  4) set τs′ for the block to be the current value of an atomic     a crash occurs after E RASER rotates its TPM master key, but
+      tag counter and then increment the counter,                   before E RASER updates its on-disk FKT. The inconsistency
+  5) encrypt the new key table block using the output of the        arises from E RASER’s non-atomic approach to updating the
+      PPRF evaluated on τs′ ,                                       key material in the TPM and in on-disk FKT.
+  6) rotate the master key and encrypt the punctured PPRF               H OLEPUNCH provides crash consistency via a jour-
+      key under the new master key (to provide forward              naling approach [2]. The high-level idea is that, before
+      secrecy), and finally                                         H OLEPUNCH issues an update u to on-disk key material
+  7) write the encrypted PPRF key, the atomic tag counter,          and/or TPM state, H OLEPUNCH first writes u to a special
+      and the encrypted key table block to disk.                    region of the disk called the journal. The write to the
+journal memorializes H OLEPUNCH’s intent to update key             During a reboot, H OLEPUNCH checks whether the jour-
+material. Once the journal write completes, H OLEPUNCH             nal is clear. If not, H OLEPUNCH enters recovery mode.
+actually issues u to the disk and/or the TPM. When u               H OLEPUNCH first uses the zeroes-checking approach de-
+completes, H OLEPUNCH removes the journal entry. This              scribed above to determine whether both blocks of the jour-
+approach provides crash consistency as follows:                    nal belong to the same logical update. If not, H OLEPUNCH
+   • If the machine crashes before the journal is updated,         terminates recovery because either (1) the on-TPM master
+     the update is lost but key material remains synchronized      key was not rotated and the PPRF tree root is encrypted with
+     between the disk and the TPM.                                 EKold , or (2) the on-TPM key was set to EKnew and the
+   • If the machine crashes after the journal is updated           PPRF tree root is encrypted with EKnew , but the machine
+     but before the update is completely applied to the            crashed after one journal block was updated but before the
+     disk and/or TPM, then during the boot process,                other was updated. In either scenario, H OLEPUNCH just
+     H OLEPUNCH detects the non-empty journal and issues           clears the journal and resumes normal operation.
+     u before resuming normal operation. u is idempotent,              If the journal blocks do belong to the same logical
+     so reissuing it is always safe, even if u partially com-      update, H OLEPUNCH reads the current key KTPM from
+     pleted before the crash occurred.                             the TPM, and calculates H(KTPM ). If the calculated value
+   • If the machine crashes after the disk and/or TPM are          matches the key hash in the journal, i.e., if KTPM == Kold ,
+     updated but before the journal is cleared, H OLEPUNCH         then the machine crashed at some point after Step (2) and
+     reissues u. Unbeknownst to H OLEPUNCH the reissu-             before Step (5). Thus, H OLEPUNCH redoes Steps (3) and
+     ing is unnecessary, but doing so is safe because u is         (4), replacing EKold (ℓ2 ) with the version in the journal
+     idempotent.                                                   (EKnew (ℓ2 )), and updating the TPM’s version of the master
+                                                                   key using the EKold (Knew ) value from the journal (recall
+In the remainder of the section, we provide more details
+                                                                   that, in this scenario, EKold is equal to EKTPM , i.e., the key
+about what H OLEPUNCH writes to the journal during various
+                                                                   that is currently in the TPM). Finally, H OLEPUNCH clears
+key operations.
+                                                                   the journal.
+                                                                       If the journal blocks belong to the same logical update,
+3.4.1. Rotating the Master Key. As shown in Figure 1,              but the hash of KTPM does not match the key hash in
+H OLEPUNCH’s master key Kmaster is used as the root of             the journal, then H OLEPUNCH was able to finish Steps (1)–
+the on-disk PPRF tree. When the machine is powered off,            (4) before the crash happened. This means that, post-crash,
+H OLEPUNCH stores Kmaster in the TPM. The version of               H OLEPUNCH just needs to clear the journal.
+Kmaster in the TPM must be the version of Kmaster used as
+the root of on-disk PPRF tree; otherwise, when the machine
+boots, H OLEPUNCH will be unable to decrypt the PPRF tree          3.4.2. File Deletion. As described in Section 3.3, a file
+and generate per-file kf keys (§3.2).                              deletion affects the relevant block in the file key table, a
+    Suppose that Kold is the old master key and Knew is the        few blocks in the on-disk PPRF key5 (to represent the new
+new one. To atomically rotate the key, H OLEPUNCH does             puncture), and at most four blocks in the PPRF key tree (the
+the following:                                                     single layer-2 block, and at most three layer-3 blocks in the
+                                                                   tree (Figure 1)).
+  1) Write to the journal EKnew (ℓ2 ), where ℓ2 is the block           To make file deletion crash-consistent, H OLEPUNCH
+     containing the second level of the PPRF tree. Since the       extends its approach for journaling a master key rotation,
+     write is a block in size (see Figure 1), it is atomic.        following the basic strategy from Section 3.4.1 but writ-
+  2) Write to the journal the values EKold (Knew ) and             ing additional data blocks to the journal. In particular,
+     H(Kold ) where H is a cryptographic hash function.            H OLEPUNCH does the following:
+     Since these values fit within a block, this write is also
+     atomic. The journal update phase is now complete.               1) Write to the journal EKnew (ℓ2 ), where ℓ2 is the block
+  3) Atomically overwrite the second-level block of the on-             containing the second level of the PPRF tree. Since the
+     disk PPRF tree; in particular, replace EKold (ℓ2 ) with            write is a block in size (see Figure 1), it is atomic.
+     the version in the journal (EKnew (ℓ2 )).                       2) Write to the journal the blocks EKnew (ℓ3,1 ),
+  4) In the TPM’s NVRAM, atomically overwrite Kold with                 EKnew (ℓ3,2 ), and EKnew (ℓ3,3 ) where ℓ3,i are the
+     Knew .                                                             modified blocks in the third level of the PPRF tree.
+  5) Finally, clear the two journal blocks, setting all of the          Each individual block write is atomic.
+     bytes to zero. Doing so requires two writes that are            3) Write to the journal the values EKold (Knew ) and
+     individually atomic, meaning that the machine may                  H(Kold ). Since these values fit within a block, this
+     crash immediately after the issuing of the first write.            write is also atomic. H OLEPUNCH has now memorial-
+     However, during recovery, H OLEPUNCH will consider                 ized its intention to rotate the master key and update
+     the journal empty if the first journal block is all-zeroes,
+     regardless of whether the second block contains data.            5. Each puncture causes at most 2 × PPRF_DEPTH new nodes to be
+                                                                   added. Our struct pprf_nodes (§5.1) are 33 bytes in size. Given
+     For this approach to work, Step 1 above must write to         this size, and the fact that our H OLEPUNCH prototype schedules a PPRF
+     the second journal block, with Step 2 overwriting the         key rotation (and thus a tree shrinking) before the PPRF can grow too
+     zeroes in the first journal block.                            large, our prototype never sees more than 3 blocks affected by a puncture.
+    the entire path in the PPRF key tree that leads to the       During recovery, H OLEPUNCH checks whether the journal is
+    PPRF subkey to update.                                       empty. If not, H OLEPUNCH reads EK (KPPRF new ) from the
+ 4) Journal the data blocks associated with the updated          journal and decrypts it using the master key K stored in the
+    PPRF subkey. Those blocks are encrypted with the             TPM. H OLEPUNCH then reads each key table block and tries
+    relevant leaf node key in the PPRF key tree.                 to decrypt each one with KPPRF new . If the magic number
+ 5) Journal the updated file key table block. This block         in the decrypted block is correct, the block was correctly
+    replaces the deleted file’s kf with a new random key.        re-encrypted with KPPRF new in Step (2), and H OLEPUNCH
+    The block also has a new τs′ , and is encrypted by the       requires no further action for the block. Otherwise, if the
+    punctured PPRF evaluated on τs′ .                            magic number is wrong, then a crash occurred at some
+ 6) Update the journal with the block address of each data       point during Step (2); H OLEPUNCH consults the on-disk
+    block that was previously written to the journal in Steps    KPPRF original (which must still exist because Step (3) never
+    (4) and (5).                                                 completed), using KPPRF original to decrypt the key block,
+ 7) Journal the new value of the atomic counter. The jour-       and then using KPPRF new to re-encrypt the block and write
+    nal update phase is now complete.                            it to disk. Note that if all key table blocks decrypt cor-
+ 8) Atomically overwrite each of the data blocks (i.e.,          rectly with KPPRF new , then H OLEPUNCH completed at least
+    the layer-2 and layer-3 PPRF tree blocks, the blocks         Step (2) before crashing. Regardless, H OLEPUNCH performs
+    belonging to the new PPRF subkey, and the file key           Steps (3)–(6) (some of which may have been completed pre-
+    table block).                                                crash but are idempotent), completing the recovery process.
+ 9) In the TPM’s NVRAM, atomically overwrite Kold with               Note that, for the journaling of all three operations
+    Knew .                                                       mentioned above (master key rotation, file deletion, and
+10) Clear the journal.                                           PPRF key rotation), our concrete H OLEPUNCH prototype
+During recovery, H OLEPUNCH checks whether a complete            has at most one disk IO in flight at any given time. This
+journal update was recorded. If not, H OLEPUNCH clears           simplifies the implementation’s journaling code, but is not
+the journal and terminates recovery. If so, H OLEPUNCH           fundamental to the high-level approach.
+reinitializes its atomic counter using the value in the log,
+and executes a procedure similar to the one in Section 3.4.1     4. Security Analysis
+to determine which data blocks must be updated.
+                                                                      Cryptographic erasure reduces the problem of securely
+3.4.3. PPRF Key Rotation. To journal PPRF key rotations          deleting a file to the problem of securely deleting a file’s
+(§3.3), H OLEPUNCH leverages the magic bytes stored in           encryption key. We assume that a computer has two kinds
+the header of each file key block (§3.2). In particular,         of storage devices: eraseable ones and non-eraseable ones.
+H OLEPUNCH does the following:                                   Both kinds of storage allow a logical storage location ℓ to
+ 1) Pick a new PPRF key KPPRF new , and write to the             be read and written. However, an eraseable storage device
+    journal EK (KPPRF new ) (where K is the master key). A       is trusted to actually delete the data in ℓ when a new write
+    new, unpunctured PPRF key fits inside a single block,        to ℓ occurs. In contrast, a non-eraseable device may not
+    so this write is atomic.                                     actually discard the value stored at ℓ, e.g., because the
+ 2) Read all of the file key blocks into memory. For each        device internally duplicates a single logical block in multiple
+    one, use the current PPRF key to decrypt the block;          physical blocks (§1 and §2.1). A machine’s TPM is an
+    reset the tag to be the index of the file key block within   example of eraseable storage that is also persistent (because
+    the table,, and then re-encrypt the block under the new      the TPM’s NVRAM retains its values across reboots or
+    tag using KPPRF new . Write the newly encrypted blocks       crashes). We also assume that volatile RAM is eraseable,
+    to disk.                                                     with the RAM value stored at ℓ being deleted via explicit
+ 3) Use random data to overwrite the blocks belonging to         overwrites to ℓ or when a machine reboots. In contrast, we
+    the current on-disk PPRF tree. The practical effect is       treat hard drives and SSDs as non-eraseable. Given those
+    that the internal nodes of the key tree are reinitialized    definitions, we say that a file system for secure deletion is a
+    to contain new random keys.                                  quadruple of algorithms (Setup, Read , Write, Delete ) that
+ 4) Using the contents of KPPRF new , write the block for        manipulate a computer’s eraseable (and thus secure) storage
+    the updated on-disk PPRF tree; note that only one block      S as well as the non-eraseable (and thus insecure) storage
+    will be written because a fresh, unpunctured PPRF key        I . We model both S and I as indexable variable-length
+    fits within one block.                                       arrays, with I being append-only (to model the conservative
+ 5) Reset the tag counter to be equal to the total number        assumption that no data is actually deleted) and S allowing
+    of file key blocks in the table. Note that reusing tag       in-place updates (to reflect the true eraseable nature of the
+    values across different PPRF keys is safe; resetting         storage). We also allow both S and I to be extended by
+    the key decreases the (already small) likelihood of tag      allocation on one end. We define the four algorithms as
+    wraparound.                                                  follows:
+ 6) Clear the journal and schedule the master key rotation
+    from Kold to Knew .
+   • ⊥ ← Setup S,I (λ, N ): Accepts a security parameter
+                                                                                   RealΣ
+                                                                                       E,Adv (λ)
+     λ and a capacity N and initializes the internal state
+     (S, I) to store up to N files of size n ≤ poly(λ) with                         1:    N, m ← E(1λ )
+     identifiers t ∈ {0, 1}⌈log(N )⌉ .                                              2:    run Setup(λ, N ) on Σ
+                                                                 t
+   • f, ⊥ ← Read S,I (i): Accepts a file identifier i ∈ {0, 1}                      3:    for i = 1..m do
+     and retrieves from internal state a file f associated with                     4:      E issues (Write(i, f ), Read (i), or Delete(i)) to Σ
+     i if it exists and ⊥ otherwise.                                                5:    The internal state (S, I) of Σ is given to Adv
+   • i, ⊥ ← Write S,I (i, f ): Accepts a file identifier i ∈
+                                                                                    6:    v ← Adv (1λ , S, I)
+     {0, 1}t and file content f ∈ {0, 1}n and writes f to
+     the file with the identifier i that is stored in the internal                  7:    b ← E(1λ , v)
+     state. If no such file exists, ⊥ is returned. Otherwise,                       8:    return b
+     return i on success.
+                                                                 t
+   • i, ⊥ ← Delete S,I (i): Accepts an identifier i ∈ {0, 1}
+     and updates internal state (S, I) to remove the file f
+     associated with i if it exists and returns ⊥ otherwise.                       IdealF
+                                                                                        E,Sim (λ)
+                                                                                    1:    N, m ← E(1λ )
+    We define security using the standard simulation                                2:    run Setup(λ, N ) on F
+model [9], i.e., we require that the real-world secure deletion                     3:    for i = 1..m do
+functionality emulates a secure idealized functionality. In
+                                                                                    4:      E issues (Write(i, f ), Read (i), or Delete(i)) to F
+an ideal world, a file system that achieves secure deletion
+would use only the erasable medium S for storing                                    5:    The internal state (S, I) of F is given to Sim
+information. Thus, we define an ideal secure deletion                               6:    v ← Sim(1λ , S, I)
+functionality F in Figure 2. The ideal functionality stores                         7:    b ← E(1λ , v)
+data only on S , overwriting deleted files with the constant                        8:    return b
+value 0.
+                                                                                 Figure 3. The real and ideal world games used in Definition 4.1 for
+                                                                                 environment E , adversary Adv (respectively, simulator Sim), and a file
+                                                                                 system for secure deletion Σ (respectively, ideal functionality F ).
+
+  Setup S,I (λ, N )                        Read S,I (i)
+   1:    S[0] = N                           1:    if !stored(i) :
+   2:    return                             2:       return ⊥                    Definition 4.1 (Secure Deletion). We say that a file system
+                                            3:    f = S[i + 1]                   Σ = (Setup, Read , Write, Delete) for storing files of length
+                                            4:    return f                       n ≤ poly(λ) achieves secure deletion if for all probabilistic
+                                                                                 polynomial time (PPT) adversaries Adv , there exists a PPT
+  Write S,I (i, f )                                                              simulator Sim such that for all PPT environments E :
+   1:    if i ≥ N :                                                                                                F
+                                                                                 | Pr[RealΣ
+                                                                                          E,Adv (λ) = 1] − Pr[IdealE,Sim (λ) = 1]| ≤ negl(λ)
+   2:       return ⊥                       Delete S,I (i)
+                                                                                                                    F
+   3:    S[i + 1] = f                       1:    if !stored(i) :                where the games RealΣ
+                                                                                                     E,Adv and IdealE,Sim are defined in
+   4:    I.append(“wr ”||i)                 2:       return ⊥                    Figure 3.
+   5:    return i                           3:    S[i + 1] = 0                      In the appendix, we prove that H OLEPUNCH achieves
+                                            4:    I.append(“del ”||i)            secure deletion for file data.
+                                            5:    return i
+                                                                                 5. Implementation
+Figure 2. The ideal secure deletion functionality F . File data is never
+written to the insecure (i.e., non-erasable) storage I . The stored function
+checks whether a file id i is associated with a currently stored file, and the
+                                                                                     Given the H OLEPUNCH design from Section 3, we
+append function writes data to the end of I (see appendix for details).          now describe the most interesting aspects of our concrete
+                                                                                 H OLEPUNCH implementation. We first explain the binary
+                                                                                 PPRF representation that H OLEPUNCH uses, and describe
+     Note that the ordered sequence of Write and Delete                          how H OLEPUNCH evaluates and modifies that PPRF (§5.1).
+instructions, along with their associated file identifier values,                We then explain how H OLEPUNCH initializes a block de-
+are encoded into I by the ideal functionality. This is because                   vice (§5.2) for use by subsequent file system activity. We
+a real-life instance of I like an SSD might explicitly track                     finally describe the implementation and optimization of
+file activity, e.g., by writing to a special on-device log for                   H OLEPUNCH’s file accesses (§5.3), file deletions (§5.4), and
+each write or deletion; therefore, there is little hope for                      PPRF key refreshes (§5.5).
+hiding this information in the first place. Furthermore, our
+scheme does not attempt to hide the file identifiers used by
+the system.
+5.1. The H OLEPUNCH PPRF                                                           struct pprf_node {
+                                                                                       union {
+                                                                                            struct {
+    Our PPRF implementation is inspired by the tree-
+                                                                                                u32 il;
+based PRF construction of Goldreich, Goldwasser, and Mi-
+                                                                                                u32 ir;
+cali [10]. In that construction, G : {0, 1}λ → {0, 1}2λ is a
+                                                                                            } next;
+length-doubling pseudorandom generator. More specifically,
+                                                                                            u8 key[32];
+G(s) = G0 (s)||G1 (s) with G0 (s) and G1 (s) representing
+                                                                                       } v;
+the first and second halves of the output of G(s). Goldreich
+                                                                                       u8 type;
+et al. then define a pseudorandom function family Fk (·) as:
+                                                                                   };
+          Fk (x) = Gxm(λ) (Gxm(λ)−1 (. . . (Gx1 (k))))
+                                                                                            Figure 5. The pprf_node structure.
+where x1 x2 . . . xm(λ) is the binary representation of the
+input x, m is a polynomial, and k ←R {0, 1}λ is a key
+chosen uniformly at random. This construction forms a                        Evaluating the PPRF: Evaluating the PPRF at a point τ
+tree for PRF inputs of length m(λ), such that the tree’s                     requires H OLEPUNCH to:
+leaves are the outputs of the PRF. Although the tree has                       1) find the pprf_node leaf that evaluates τ , and then
+exponentially many outputs, we can efficiently evaluate                        2) use the leaf node’s subkey value as the initial input to
+any input to the PRF using only m(λ) evaluations of the                            the length-doubling PRG of the GGM86 construction.
+pseudorandom generator G. Such a PRF tree can be used to
+                                                                             Starting at the pprf_node at index 0, H OLEPUNCH traces
+build a puncturable PRF [3], [4], [25]. Given a tree-based
+                                                                             a path down the tree, following the left path at step i if the i-
+PRF F with key k and a point x that we wish to puncture,
+                                                                             th bit in the binary representation of τ is 0, and following the
+let Px be the set of nodes along the path from the xth leaf
+                                                                             right path otherwise. Let search_depth be the depth of
+to the root of the PRF tree. We can set the punctured key
+                                                                             the discovered leaf node that H OLEPUNCH eventually finds,
+k ∗ = {Nx }, where Nx is the set of neighboring nodes for
+                                                                             and let tree_height be log(N ); upon finding the (pre-
+each of the nodes in Px . As an example, Figure 4 shows
+                                                                             sumably unpunctured) leaf node, H OLEPUNCH invokes a
+a tree-based PRF F with key k and four leaves. After
+                                                                             length-doubling PRG tree_height − search_depth
+puncturing the value x = 2 (represented by the dotted leaf
+                                                                             times, using the leaf node’s subkey as the PRG seed and,
+k10 ), a punctured key k ∗ = {k0 , k11 } is produced. The new
+                                                                             during the i-th PRG iteration, taking the left or right half
+key k ∗ corresponds to the neighboring nodes along the path
+                                                                             of the PRG output according to the i-th bit of τ ’s binary
+from k10 to k . Using Fk∗ , one can still evaluate all of the
+                                                                             representation. The final PRG output represents the output
+points in the original PRF tree except for the point x = 2.
+                                                                             of the PPRF on τ .
+                                                                                 H OLEPUNCH uses the AES block cipher as a building
+                                                                             block for the pseudorandom generator. Recall that, for any
+                                    k                                        pseudorandom function F : {0, 1}λ × {0, 1}n → {0, 1}m ,
+                                                                             we can define a pseudorandom generator G : {0, 1}λ →
+                    G0 (k)                    G1 (k)                         {0, 1}ℓm as G(s) = Fs (0)||Fs (1)|| . . . ||Fs (ℓ). Using this
+                                                                             fact, H OLEPUNCH constructs a length-doubling PRG G :
+                  k0                                k1                       {0, 1}256 → {0, 1}512 as follows:
+     G0 (k0 )           G1 (k0 )        G0 (k1 )           G1 (k1 )              G(s) = AES(s, 0)||AES(s, 1)||AES(s, 2)||AES(s, 3)
+
+         k00              k01              k10              k11              with AES used in ECB mode, s being a 256 bit key, and
+                                                                             the inputs to each AES block being 128 bits in length.
+          0                1                2                 3
+                                                                             Puncturing the PPRF: Puncturing the PPRF at a point τ
+                                                                             requires H OLEPUNCH to:
+Figure 4. Example of a punctured PRF that uses the construction of
+Goldreich et al. [10]. The nodes {k0 , k1,1 } represent the new punctured      1) find the leaf pprf_node ℓ that evaluates τ ;
+key k∗ after puncturing the leaf k10 (the dotted node) associated with the     2) allocate space for two children pprf_node structures
+point x = 2.                                                                      at the end of the PPRF array;
+                                                                               3) zero out ℓ’s .key field, set the .type to indicate
+    H OLEPUNCH represents the PPRF as an array of                                 that it is an internal node, and set .next.il and
+struct pprf_nodes (Figure 5). Each structure is                                   .next.ir to point to its children indexes that were
+a tagged union [14] that represents an inner node, an                             added in Step 2;
+unpunctured leaf node, or a punctured leaf node. For an                        4) proceed along the evaluation path from ℓ and repeat
+inner node, the .next.il and .next.ir fields are                                  Step 3 for every internal node along the path;
+array indices representing the node’s left and right child,                    5) for every neighboring node along the evaluation path
+respectively. An unpunctured leaf node contains a single                          from ℓ to τ , set the .key field to equal its correspond-
+32-byte key while a punctured leaf node contains all zeroes.
+      ing half of the PRG output in the PPRF tree, and set                       then generates a random PPRF key and master key, and
+      the .type to indicate that it is a leaf node;                              initializes the PPRF key tree with random bits.
+  6) set the .type of leaf node at the end of the evaluation
+      path to indicate that it is punctured, zeroing out all of                  5.3. File Access
+      its fields.
+Given the procedure above, the PPRF key grows by at most                             H OLEPUNCH is a block device driver that sits between
+33 × 2 × PPRF_DEPTH bytes with each puncture. Specif-                            a file system and the underlying storage device. For every
+ically, in Steps 2 and 3, we add two child pprf_nodes                            block I/O operation that is generated by the file system,
+where one corresponds to an internal node along the eval-                        H OLEPUNCH inspects the Linux bio object associated with
+uation path, and the other corresponds to a neighboring                          the operation, and checks whether the associated inode
+node along the evaluation path. We also modify the single                        corresponds to a file. If so, and the IO operation is a file
+pprf_node ℓ that evaluated τ by zeroing out its .key                             read or write, H OLEPUNCH must do the following:
+field and marking it as an internal node. Therefore, we are                        1) use the bio object to walk kernel data structures and
+only expanding the key by adding new internal nodes and                                extract the relevant inode number i;
+new neighbors, and modifying at most one node in the                               2) read the associated key table block s, discovering the
+existing PPRF key state. The PPRF key tree thus enables                                τs for the block and the encrypted per-file keys;
+efficient updating of the on-disk representation of the PPRF                       3) evaluate the PPRF on τ , generating kτs ;
+key.                                                                               4) use kτs to decrypt the key table block and obtain the
+    Periodic refreshes of the PPRF key (§5.5) allow                                    file key associated with inode i;
+H OLEPUNCH to prevent the PPRF from growing unbound-                               5) use the key to decrypt an incoming file block (for a
+edly. H OLEPUNCH journals PPRF key rotations to make                                   read) or encrypt an outgoing file block (for a write).
+them crash-consistent (§3.4.3).                                                        We use AES-CBC with ESSIV for encryption and
+                                                                                       decryption.
+5.2. Initialization                                                              Step 2 adds an extra disk IO, but H OLEPUNCH caches
+                                                                                 recently-accessed key table blocks to eliminate the penalty
+     When initializing a block device, H OLEPUNCH reserves                       of actually reading such blocks from disk during accesses
+the first portion of the device to store various cryptographic                   to hot inodes. Also note that our H OLEPUNCH imple-
+keys, namely,                                                                    mentation caches hot file keys; during the handling of a
+  1) the full PPRF key,                                                          particular IO, hitting in the file key cache will avoid the extra
+  2) the PPRF key tree which H OLEPUNCH uses to encrypt                          disk IO and the need to evaluate the PPRF. H OLEPUNCH is
+      and efficiently update the on-disk PPRF key,                               able to cache many more file keys than E RASER due to the
+  3) the file key table, and                                                     lower memory footprint of H OLEPUNCH’s PPRF relative to
+  4) the H OLEPUNCH metadata header. The header contains                         E RASER’s file key tree.
+      the NVRAM index where the master key is located                                File reads and writes do not require H OLEPUNCH-level
+      within the TPM. The header also contains the user                          journaling. However, a higher-level file system like EXT 4
+      password salt that is passed to the KDF which generates                    may journal written file data to provide file-system-level
+      the key that encrypts the master key.                                      crash consistency for that data.
+The amount of space required for the full PPRF key and the
+PPRF key tree is governed by a configurable refresh interval                     5.4. Securely Deleting a File
+which specifies the maximum number of punctures that
+the H OLEPUNCH device can handle before H OLEPUNCH                                   Like E RASER, H OLEPUNCH intercepts file deletion
+initiates a PPRF key refresh. For a 1TB hard disk, the refresh                   events using Linux’s kprobe interface [1]. In particular,
+involves reading, re-encrypting, and writing a ∼ 2GB file                        H OLEPUNCH interposes on the entry point of Linux’s
+key table; on a commodity SSD, the total refresh operation                       vfs_unlink function. When the kernel tries to enter
+with its large, sequential IOs will need just a handful of                       that function, Holepunch inspects the system call argu-
+seconds to complete. H OLEPUNCH derives the space re-                            ments in the CPU registers and uses those arguments to
+quirements for the file key table by asking the file system                      retrieve a pointer to the inode-to-delete. H OLEPUNCH
+how many inodes the disk will contain; for example, EXT 4                        checks whether that inode corresponds to a file in the
+allocates an inode for every 16KB of available disk space.                       H OLEPUNCH partition. If so, H OLEPUNCH will:
+                                                        inodes
+     During initialization, H OLEPUNCH creates ⌈ total127      ⌉.                  1) read the key table block associated with the relevant
+blocks in the file key table, initializing the encrypted keys                          inode number i, discovering the relevant τ ,
+to random bits.6 H OLEPUNCH sets the tag of each key table                         2) evaluating the PPRF on τ to generate kτ and using kτ
+block to be the block number; the atomic tag counter is set                            to decrypt the key table block in memory,
+to the total number of file key table blocks. H OLEPUNCH                           3) puncture the PPRF key at τ ,
+  6. Recall that a block is 4096 bytes and H OLEPUNCH stores a 32-byte tag
+                                                                                   4) generate a fresh, random key to associate with the
+and 127 32-byte file keys in each key table block. H OLEPUNCH requires a               inode, and update the corresponding entry in the in-
+                                                       inodes
+key table block per 127 inodes, and thus needs ⌈ total127     ⌉ table entries.         memory key table block,
+ 5) update the in-memory key table block’s τ to be the                      The size of the PPRF tree is small. For example, consider
+    current value of the atomic tag counter (incrementing              a 5TB storage device configured with a H OLEPUNCH refresh
+    the atomic tag counter as a side effect),                          interval of 50, 000 punctures; such a configuration would
+ 6) re-encrypt the key table block using the output of the             incur roughly one PPRF key refresh per day for a typical
+    PPRF on the new τ , and finally                                    file system workload on a desktop [24]. The PPRF key itself
+ 7) write the new (i.e., punctured) PPRF key, the atomic               (i.e., the data that is encrypted by the keys in the leaves of
+    tag counter, and the encrypted key table block to disk.            the PPRF tree) would have a maximum size of ∼ 73MB.8
+                                                                       Using an 128-ary PPRF tree, the PPRF tree would need to
+Note that all of these steps occur before the normal
+                                                                       store ∼ 20K keys in order to encrypt the entire 73MB of the
+vfs_unlink code executes on inode i. If the machine
+                                                                       PPRF key.9 Since each key consumes 32 bytes, the PRRF
+crashes after these steps occur, but before the file sys-
+                                                                       tree will only consume only ∼ 625KB of space.
+tem itself commits the delete operation through file-system
+level mechanisms (e.g., file-system-level journaling), the
+file system will believe that the inode i is still valid.7             5.5. Refreshing the PPRF Key
+However, attempts to read that a block from that file will
+result in H OLEPUNCH decrypting the storage block with the                  The size of the PPRF key is determined by (1) the
+inode’s new key; thus, old file data will be unreadable,               size of the input domain, (2) the security parameter λ,
+in accordance with the user’s desire to securely delete the            and (3) the current number of punctured elements. The
+file. Attempts to overwrite old file data will succeed, and            key size has a logarithmic dependency on the size of the
+subsequent attempts to retrieve that newly-written data will           input domain, and linear dependencies on λ and the number
+result in correctly-decrypted reads. These semantics are               of punctured elements. The number of punctured elements
+aligned with those of traditional journaling file systems that         grows whenever a file is deleted. To keep the PPRF key from
+always ensure metadata consistency, but may return junk                growing unboundedly, H OLEPUNCH periodically refreshes
+data after a crash [21].                                               the PPRF key, resetting its size to λ bits. A refresh consists
+     We now provide more detail about which happens when               of generating a new PPRF key, re-encrypting all of the on-
+H OLEPUNCH must puncture a point x from the input do-                  disk key table blocks, and writing the master key to disk.
+main of the PPRF (§3.4.2). Let Sx be the on-disk block                 Section 3.4.3 describes how H OLEPUNCH performs these
+containing the pprf_node that evaluates x, and let Snew                updates in a crash-consistent way.
+be the blocks containing the newly added pprf_nodes that                    By default, our H OLEPUNCH implementation limits the
+correspond to the nodes along the evaluation path of x (and            maximum size of the PPRF key to 50MB, automatically re-
+their neighbors). H OLEPUNCH must update Sx such that the              freshing the key if it would exceed this size. With a λ = 256
+pprf_node that evaluates x is punctured (by zeroing out                bit security parameter and an N = 221 input domain, the
+the key) and the old on-disk copy of Sx is unrecoverable.                                                          50×22 0
+                                                                       file system can generate approximately 33×21×2      ≈ 37, 000
+Additionally, H OLEPUNCH must write Snew to the end of                 deletions before the PPRF key must be refreshed. However,
+the on-disk array that represents the PPRF key (§3.4.2). Note          in practice, our prototype implements an optimization called
+that Snew will contain at most two disk blocks (§3.4.2).               deletion batching that allows H OLEPUNCH to handle many
+     To accomplish these tasks, H OLEPUNCH refreshes the               more deletions before a key refresh is triggered. With dele-
+keys in the ancestor layers of the PPRF tree along the                 tion batching, a deletion is recorded in the H OLEPUNCH
+path from Sx to the root. Recall that the root of the tree             journal immediately, but can wait to issue the in-place
+is the master key Kmaster and so this key must also be                 updates to H OLEPUNCH structures made in Steps 8 and
+refreshed. After rotating these keys, H OLEPUNCH then re-              9 of Section 3.4.2. N file deletions that target inodes
+encrypts Sx (after zeroing out the punctured node’s .key               covered by the same file key block only require a single
+field and setting its .type to indicate that it is punctured)          PPRF puncture, dramatically reducing H OLEPUNCH’s IO
+and re-encrypts its ancestors in the second and third layers of        overheads and allowing the PPRF to absorb more punctures
+the PPRF tree. H OLEPUNCH then writes these three blocks               before needing a refresh. Applications like web browsers,
+to disk using three IOs. H OLEPUNCH must also encrypt and              compilers, and databases often repeatedly create, access,
+write Snew to disk using at most two additional writes in              and then delete many files [7], [24], so deletion batching
+the case that Snew spans across a block boundary; Snew will            is helpful for common workloads. Note that the batching
+never span two or more block boundaries for any realistic              interval can be adjusted based on the setting. For example,
+PPRF configurations. Thus, ignoring the journal overhead,              the average user may prefer a longer batch interval to reduce
+every puncture operation can be persisted to disk with at
+most five disk IOs independent of the size of the on-disk                 8. To derive this number, first note that PPRF_DEPTH
+                                                                                     26
+                                                                                                                                               =
+PPRF key. H OLEPUNCH only requires four IOs if Snew fits               ⌈log (2 × 5×2127inodes )⌉. Then consider that the key will grow by at most
+inside a single disk block.                                            (PPRF_DEPTH × sizeof(pprf_node) × 2) bytes per deletion. Therefore,
+                                                                       for 50K deletions, we need 50, 000 × 2 × 23 × 33 bytes ≈ 73MB to store
+                                                                       the PPRF key.
+                                                                                                                           20
+   7. Recall that H OLEPUNCH does not encrypt inodes, so H OLEPUNCH-      9. The reason is that num_leaves = 73×2         bytes of PPRF key
+                                                                                                                     4096 bytes per block
+                                                                                                                                            . So, the
+level file deletion will not somehow re-encrypt an inode and make it   third layer of the tree will require num_leaves/128 keys, and the second
+unreadable from the perspective of the file system.                    layer will require num_leaves/(128 × 128) keys.
+the frequency of PPRF key refreshes, while shorter batch
+                                                                                                             Eraser
+intervals can be used in more security critical settings.                                      2000          Holepunch (10K del/refresh)
+                                                                                                             Holepunch (50K del/refresh)
+                                                                                                             Holepunch (100K del/refresh)
+
+
+
+
+                                                                Memory Footprint (Megabytes)
+6. Evaluation                                                                                                Holepunch (500K del/refresh)
+                                                                                               1500
+
+     Prior sections demonstrated why H OLEPUNCH provides
+secure deletion (§4) and crash consistency (§3.4). In this                                     1000
+section, we show that H OLEPUNCH enjoys these benefits
+while exhibiting similar IO performance as E RASER (§6.1)
+but more scalable memory consumption (§6.2).                                                   500
+     We evaluated H OLEPUNCH on a Linux machine (kernel
+v4.7) with an 8-core AMD Ryzen 7 4700G CPU, 32GB of
+RAM, and a 256 GB SSD. The machine layered the EXT 4                                             0
+file system atop H OLEPUNCH’s block driver.                                                           1 TB         2 TB        4 TB        8 TB    16 TB   32 TB
+                                                                                                                               Block device size
+
+6.1. Performance                                                Figure 6. Baseline memory consumption of E RASER compared to various
+                                                                H OLEPUNCH configurations.
+
+
+     We used the B ONNIE ++ benchmarking tool [18] for          6.2. Memory Usage
+measuring IO performance. We compared H OLEPUNCH to
+E RASER (a secure deletion system with no crash consistency         In Figure 6, we compare the baseline memory footprint
+but none of H OLEPUNCH’s journaling overhead) and DM -          of H OLEPUNCH and E RASER. Recall that E RASER must
+CRYPT (Linux’s native encrypted block device that imple-
+                                                                store the upper layers of its FKT in memory or pay IO
+ments full-disk encryption but not secure deletion). The        access costs that are logarithmic in the number of inodes.
+three systems showed neglible performance differences for       The FKT’s upper layers scale linearly with the size of the
+workloads that read and wrote large files because these         number of inodes. Assuming one inode for every 16KB
+workloads did not stress the deletion code paths. So, in        of storage space, a 1 terabyte storage device will have
+Table 1, we focus on tests involving many small files           240 /214 = 226 inodes. Since each E RASER FKT entry
+(each between 256 and 512 bytes in size). The first set         is padded to 64 bytes and encrypts a block of 64 nodes, the
+of B ONNIE ++ experiments sequentially created, read the        total memory footprint of a 1 TB drive is approximately 65
+metadata of, and then deleted 1,048,576 small files, whereas    MB.
+the second set of B ONNIE ++ experiments randomly created,          Each H OLEPUNCH file key block contains 127 keys
+stat’ed, and deleted 1,048,576 small files. We also ran a       since we have a 32-byte tag and can fit at most 127 keys into
+simple script which sequentially cat’ed 10K small files         the remaining space. Therefore, a minimum input domain
+(each containing the string “test”) and then rm’ed each of      size of 220 is required to evaluate tags on ⌈226 /127⌉ file
+these files. Finally, we examined the performance of a kernel   key blocks. H OLEPUNCH doubles this number to 221 since
+compilation.                                                    it needs extra tags as new files are created and old ones
+     As shown in Table 1, H OLEPUNCH was at worst 3.87%         are deleted. So, H OLEPUNCH’s PPRF tree has a depth of
+slower than E RASER for all but the B ONNIE ++ random           21 for a 1TB storage device. In the worst case, the PPRF
+delete test. The reason was that random deletes rarely          tree grows by 2 × PPRF_DEPTH × 33 bytes, where 33 bytes
+benefited from H OLEPUNCH’s deletion batching optimiza-         is the size of each PPRF node as described in Section 5.1.
+tion (§5.5), forcing H OLEPUNCH to issue IOs for a PPRF         Thus, for a 1TB drive, H OLEPUNCH generates a worst case
+puncture during most deletes; as a result, H OLEPUNCH was       of approximately 1.4 KB of in-memory key growth per
+12.7% slower than E RASER for this experiment. However,         deletion. As shown in Figure 6, H OLEPUNCH’s memory
+the kernel compilation test showed that for more realistic      consumption scales much better than that of E RASER as the
+workloads, H OLEPUNCH could indeed leverage deletion            size of the storage device grows. While the reduced memory
+batching to offer very similar performance to E RASER.          pressure is more noticeable on larger file systems, we note
+     We also note that the B ONNIE ++ experiments put more      that modern laptops already support 4TB drives, and we
+pressure on the kernel’s in-memory buffer cache. The in-        anticipate a continued increase in storage sizes.
+creased pressure led to more swapping between the disk              Unsurprisingly, for a given disk size, H OLEPUNCH’s
+and the buffer cache, increasing contention for the disk’s      worse-case memory overheads get larger for less aggressive
+finite IO bandwidth. The cat and make benchmarks were           schedules of PPRF rotation. With less aggressive scheduling,
+comparatively more CPU-intensive (and thus less sensitive       the in-memory PPRF representation is allowed to grow
+to how the three approaches for encrypted storage used the      larger before it is pruned.
+disk’s bandwidth).
+                           TABLE 1. P ERFORMANCE B ENCHMARK OF DM - CRYPT VS . E RASER VS . H OLEPUNCH
+
+                                                 DM - CRYPT                    E RASER                        H OLEPUNCH
+     B ONNIE ++ Experiments (n = 100)   Avg. (files/sec) Std. Dev.   Avg. (files/sec) Std. Dev.        Avg. (files/sec) Std. Dev.
+     Sequential Create                      61605             48         57759           957               56785           697
+     Sequential Stat                        95997           1147         87748          1238               84363          1987
+     Sequential Delete                      62454            785         46370           888               45716           669
+     Random Create                          61974            298         58104           982               56993           692
+     Random Stat                            98583           1243         88575          2195               86965          2876
+     Random Delete                          49755            502         40345           725               35210           810
+     Timed Experiments (n = 5)            Avg. (sec)     Std. Dev.         Avg. (sec)     Std. Dev.       Avg. (sec)      Std. Dev.
+     cat 10K files                          12.76           0.07             12.64          0.09            12.15           0.07
+     rm 10K files                           12.55           0.02              12.8          0.06            12.64           0.09
+     make Linux Kernel                     3276.22         19.26            3246.71         3.27           3255.52          2.41
+
+
+
+6.3. Crash-Consistency                                               8. Conclusion
+                                                                          Secure deletion provides users with confidence that a
+   We experimentally verified the fault tolerance of                 removed file is actually unrecoverable. However, implement-
+H OLEPUNCH. We used a debugger to hook into the kernel               ing secure deletion in software is difficult because mod-
+and set breakpoints at important code locations relevant             ern storage devices may arbitrarily manipulate the physical
+to key synchronization (e.g., PPRF key refreshes). After             blocks that underlie the logical block interface. Crypto-
+pausing execution at such a breakpoint, we would forcibly            graphic erasure avoids the problem by only sending en-
+power off the system and verify that the file system was             crypted blocks to disk and discarding the keys for deleted
+consistent post-reboot.                                              blocks. However, for a cryptographic erasure scheme to be
+                                                                     practical, it must guarantee crash consistency. H OLEPUNCH
+                                                                     provides such a scheme. H OLEPUNCH uses puncturable
+7. Discussion                                                        pseudorandom functions to efficiently manage key data
+                                                                     (both in-memory and on-disk), and uses a journaling scheme
+                                                                     to provide crash-consistent atomic updates of cryptographic
+Metadata: H OLEPUNCH provides secure deletion for file               material and the file data protected by those keys. Experi-
+data, but information can leak through metadata as well. For         ments show that H OLEPUNCH provides similar IO perfor-
+example, in an EXT 4 file system, a directory is essentially         mance to the prior state-of-the-art system for cryptographic
+a file whose data blocks contain (file_name, inode_                  erasure, while having more scalable consumption of RAM as
+number) pairs. Securely deleting the data belonging to               disk size increases. Thus, we believe that H OLEPUNCH is the
+file f does not securely delete f ’s metadata in a parent            first practical system for secure deletion at a file granularity.
+directory’s data block. Extending H OLEPUNCH to securely
+delete such metadata is left for future work.                        Acknowledgements
+
+Usability: In the file systems used by popular consumer                  We thank the anonymous reviewers for their feedback.
+OSes like Windows and macOS, deletion is typically re-               We also thank Salil Vadhan for many insightful discussions.
+versible, at least to some extent. For example, on Windows,              This work was supported in part by Cooperative Agree-
+a deleted file goes to a “trash can” and can be recovered            ment CB20ADR0160001 with the Census Bureau, and in
+until the trash can is explicitly emptied by the user (or            part by Salil Vadhan’s Simons Investigator Award.
+implicitly emptied by the system if disk space becomes
+low). Deletion undo is helpful if a user accidentally deletes        References
+a file, but it incurs an obvious risk of information leakage
+                                                                     [1]     Kernel probes (kprobes) - the linux kernel documentation. https:
+(§2). As a middle ground, a H OLEPUNCH-style system could                    //docs.kernel.org/trace/kprobes.html.
+incorporate a grace period in which a file deletion would not        [2]     A RPACI -D USSEAU , R. H., AND A RPACI -D USSEAU , A. C. Operat-
+become a secure deletion until a grace period had passed.                    ing Systems: Three Easy Pieces. https://pages.cs.wisc.edu/∼remzi/
+    H OLEPUNCH inherits E RASER’s trigger for initiating a                   OSTEP/, 2020, ch. Chapter 42: Crash Consistency–FSCK and Jour-
+                                                                             naling.
+secure deletion: H OLEPUNCH securely deletes file f only
+after observing a system call that explicitly removes f ’s           [3]     B ONEH , D., AND WATERS , B. Constrained pseudorandom functions
+                                                                             and their applications. In International conference on the theory and
+inode. With this approach, overwriting a file, e.g., using                   application of cryptology and information security (2013), Springer,
+mv fileA fileB to overwrite the contents of fileB,                           pp. 280–300.
+will not securely delete fileB. Extending H OLEPUNCH to              [4]     B OYLE , E., G OLDWASSER , S., AND I VAN , I. Functional signatures
+support such operations is left for future work.                             and pseudorandom functions. In International workshop on public
+                                                                             key cryptography (2014), Springer, pp. 501–519.
+[5]   C ARD , R. Design and implementation of the second extended            [26] S TATE OF C ALIFORNIA. California Consumer Privacy Act (CCPA).
+      filesystem. In Proc. First Dutch International Symposium on Linux,          https://oag.ca.gov/privacy/ccpa, 2018.
+      Dec. 1994 (1994).
+                                                                             [27] S TEVENS , C. E. Technical Committee T13 AT Attachment: Working
+[6]   C RESCENZO , G. D., F ERGUSON , N., I MPAGLIAZZO , R., AND                  Drafts. https://www.t13.org/project-working-drafts?page=1, 2020.
+      JAKOBSSON , M. How to forget a secret. In Annual Symposium on
+      Theoretical Aspects of Computer Science (1999), Springer, pp. 500–     [28] T RUSTED C OMPUTING G ROUP. TCG Storage Security Subsystem
+      509.                                                                        Class: Opal. https://trustedcomputinggroup.org/wp-content/uploads/
+                                                                                  TCG-Storage-Opal-SSC-v2p02-r1p0 pub24jan2022.pdf, January 24,
+[7]   E LLARD , D., AND L EDLIE , J. Passive {NFS} tracing of email and           2022.
+      research workloads. In 2nd USENIX Conference on File and Storage
+      Technologies (FAST 03) (2003).                                         [29] T RUSTED C OMPUTING G ROUP.          TPM 2.0 Library.        https://
+                                                                                  trustedcomputinggroup.org/resource/tpm-library-specification/, 2023.
+[8]   E UROPEAN U NION. General Data Protection Regulation (GDPR).
+      https://gdpr-info.eu/, 2016.                                           [30] V ILLANO , M. Hard-drive magic: Making data disappear forever. New
+                                                                                  York Times 2 (2002).
+[9]   G OLDREICH , O. Foundations of cryptography: volume 2, basic
+      applications. Cambridge university press, 2009.
+[10] G OLDREICH , O., G OLDWASSER , S., AND M ICALI , S. How to              Appendix A.
+     construct random functions. Journal of the ACM (JACM) 33, 4 (1986),
+     792–807.                                                                Security Proof
+[11] G UPTA , A., K IM , Y., AND U RGAONKAR , B. DFTL: A Flash Transla-
+     tion Layer Employing Demand-based Selective Caching of Page-level           We provide the full API for the real functionality Σ
+     Address Mappings. In Proceedings of ASPLOS (2009), pp. 229–240.         used by Holepunch in Figures 7 and 8 and the API
+[12] H ASSON , J. Va toughens security after pc disposal blunders. Federal   for ideal functionality F in Figure 2. Both functionalities
+     Computer Week 26 (2002).                                                include subroutines and constants that we describe here.
+[13] IEEE 1149.1 W ORKING G ROUP. IEEE Std. 1149.1: Standard Test            Additionally, Σ makes use of an IND-CPA secure symmetric
+     Access Port and Boundary-Scan Architecture. https://grouper.ieee.       encryption scheme (E, D), a puncturable pseudorandom
+     org/groups/1149/1/, 2023.                                               function F , and a cryptographic hash function H modeled
+[14] I ERUSALIMSCHY, R., D E F IGUEIREDO , L. H., AND C ELES F ILHO ,        as a random oracle.
+     W. The implementation of lua 5.0. J. Univers. Comput. Sci. 11, 7
+     (2005), 1159–1176.
+                                                                             Subroutines and constants.
+[15] K IAYIAS , A., PAPADOPOULOS , S., T RIANDOPOULOS , N., AND
+     Z ACHARIAS , T. Delegatable pseudorandom functions and appli-             • RFSH: a constant that specifies how many deletions can
+     cations. In Proceedings of the 2013 ACM SIGSAC conference on                be applied before a PPRF refresh occurs.
+     Computer & communications security (2013), pp. 669–684.                   • K: the constant 0 used to indicate the index in S storing
+[16] KORNBLUM , J. D. Implementing BitLocker Drive Encryption for                the master key Kmaster .
+     Forensic Analysis. International Journal of Digital Forensics and         • PPRF: the constant 1 used to indicate the index in S
+     Incident Response 5, 3–4 (2009), 75–84.                                     storing the PPRF key KPPRF .
+[17] M EIJER , C., AND VAN G ASTEL , B. Self-encrypting Deception:             • META: the constant 2 used to indicate the index in S
+     Weaknesses in the Encryption of Solid State Drives. In Proceedings          storing metadata about the file system capacity.
+     of the IEEE Symposium on Security and Privacy (2019), pp. 72–87.
+                                                                               • CTR: the constant 3 used to indicate the index in S
+[18] M ER -T OOLS. Mer-tools/bonnie: Benchmark suite.                            storing the atomic tag counter.
+[19] M ILAN B ROZ. dm-crypt: Linux kernel device-mapper crypto target.         • KTREE: the constant 4 used to indicate the index in S
+     https://gitlab.com/cryptsetup/cryptsetup/-/wikis/DMCrypt, 2023.             storing the PPRF key tree data structure.
+[20] O NARLIOGLU , K., ROBERTSON , W., AND K IRDA , E. Eraser: Your            • DELS: the constant 5 used to indicate the index in S
+     data won’t be back. In 2018 IEEE European Symposium on Security             storing the current number of punctures on the current
+     and Privacy (EuroS&P) (2018), IEEE, pp. 153–166.
+                                                                                 PPRF key.
+[21] P RABHAKARAN , V., A RPACI -D USSEAU , A. C., AND A RPACI -               • newKeyTree(Kmaster , KPPRF ): creates the PPRF
+     D USSEAU , R. H. Analysis and evolution of journaling file systems.
+     In USENIX Annual Technical Conference, General Track (2005),                key tree data structure that stores KPPRF encrypted
+     vol. 194, pp. 196–215.                                                      under the IND-CPA secure scheme (E, D) and using
+[22] R EARDON , J., BASIN , D., AND C APKUN , S. Sok: Secure data                Kmaster as the root.
+     deletion. In 2013 IEEE symposium on security and privacy (2013),          • getFile(i): accepts a file identifier and retrieves from
+     IEEE, pp. 301–315.                                                          I the encrypted file associated with i if it exists, and
+[23] R EARDON , J., R ITZDORF, H., BASIN , D., AND C APKUN , S. Secure           ⊥ otherwise.
+     data deletion from persistent media. In Proceedings of the 2013 ACM       • randbits(λ): returns λ uniformly random bits
+     SIGSAC conference on Computer & communications security (2013),           • getKeyBlock(i): accepts a file identifier i and re-
+     pp. 271–284.
+                                                                                 turns the tuple (es, j, τ ) corresponding to an encrypted
+[24] ROSELLI , D., L ORCH , J. R., AND A NDERSON , T. E. A compari-              file key block es, an index j into the file key block that
+     son of file system workloads. In 2000 USENIX Annual Technical
+     Conference (USENIX ATC 00) (2000).
+                                                                                 points to the location of the file key associated with i,
+                                                                                 and a tag τ assigned to the block.
+[25] S AHAI , A., AND WATERS , B. How to use indistinguishability
+                                                                               • assignTag(es, τ ): accepts an encrypted file key
+     obfuscation: deniable encryption, and more. In Proceedings of the
+     forty-sixth annual ACM symposium on Theory of computing (2014),             block es and a tag τ and assigns the tag τ to the block
+     pp. 475–484.                                                                (via writing to the header of es)
+                Setup(λ, N )                                                Delete(i)
+                  1:    S[K] = randbits(λ)                                   1:    c = getFile(i)
+                  2:    S[PPRF] = randbits(λ)                                2:    if c == ⊥ then
+                  3:    num blocks = ⌈N/127⌉                                 3:       return ⊥
+                  4:    S[META] = (N, num blocks)                            4:    (es, j, τ ) = getKeyBlock(i)
+                  5:    S[CTR] = 0                                           5:    kτ = F (S[PPRF], τ )
+                  6:    S[KTREE] = newKeyTree(S[K], S[PPRF])                 6:    ds = D(kτ , es)
+                  7:    I.append(“kt”||S[KTREE])                             7:    kf′ = randbits(λ)
+                  8:    for s = 1 . . . num blocks :                         8:    ds[j] = kf′
+                  9:      ds = randbits(127 · λ)                             9:    kτ ′ = F (S[PPRF], S[CTR])
+                 10 :     es = F (S[PPRF], S[CTR])                          10 :   es ′ = E(kτ ′ , ds)
+                 11 :     assignTag(es, S[CTR])                             11 :   assignTag(es ′ , τ ′ )
+                 12 :     I.append(“blk”||S[CTR]||es)                       12 :   S[CTR] = S[CTR] + 1
+                 13 :     S[CTR] = S[CTR] + 1                               13 :   S[PPRF] = puncture(S[PPRF], τ )
+                 14 :   return                                              14 :   Knew = randbits(λ)
+                Write(i, f )                                                15 :   keyTree = newKeyTree(Knew , S[PPRF])
+                  1:    (N, ) = S[META]                                     16 :   JournalDelete(keyTree, es ′ , S[K])
+                                                                            17 :   I.append(“kt”||keyTree)
+                  2:    if i ≥ N :
+                                                                            18 :   I.append(“ctr ”||S[CTR])
+                  3:       return ⊥
+                  4:    (es, j, τ ) = getKeyBlock(i)                        19 :   I.append(“blk ”||S[3]||es ′ )
+                  5:    kτ = F (S[PPRF], τ )                                20 :   S[K] = Knew
+                  6:    ds = D(kτ , es)                                     21 :   S[DELS] = S[DELS] + 1
+                  7:    ki = ds[j]                                          22 :   if S[DELS] > RFSH :
+                  8:    c = E(ki , f )                                      23 :      Refresh()
+                  9:    I.append(“file”||i||c)                              24 :   return i
+                 10 :   return
+
+                Read(i)
+                  1:    c = getFile(i)
+                  2:    if c == ⊥ then
+                  3:       return ⊥
+                  4:    (es, j, τ ) = getKeyBlock(i)
+                  5:    kτ = F (S[PPRF], τ )
+                  6:    ds = D(kτ , es)
+                  7:    ki = ds[j]
+                  8:    f = D(ki , c)
+                  9:    return f
+Figure 7. The real-world secure deletion scheme Σ used internally by Holepunch to securely delete file data while ensuring crash consistency. We use
+the common memory locations S[K] to represent the TPM slot that stores the master key, S[PPRF] to represent the area in RAM that stores the PPRF,
+S[META] to represent the area in RAM that stores metadata such as the file system capacity, S[CTR] to represent the area in RAM that stores the tag
+counter, and S[KTREE] to represent the area in RAM that stores the current state of the PPRF key tree. We show the journaling logic of the API along
+with the procedure for refreshing a PPRF key in Figure 8.
+
+
+   • puncture(KPPRF , τ ): accepts a PPRF key and a tag                        •   I .append(data) writes data to the end of the insecure
+     τ and applies the PPRF’s puncture operation to obtain                         (append-only) storage I .
+                  ∗
+     a new key KPPRF      punctured at the point τ .
+   • stored(i) accepts a file identifier i and checks if i is
+     associated with a currently stored file. This works by
+     simply inspecting the contents of I which fully defines
+     the set of identifiers associated with currently stored
+     files.
+                JournalRotate(Knew , keyTree)                               Refresh()
+                  1:   I.append(“jrnl kt”||keyTree)                          1:    Knew = randbits(λ)
+                                                                                     ′
+                  2:   I.append(“jrnl khash”||H(S[K]))                       2:    KPPRF    = randbits(λ)
+                                                                                                        ′
+                  3:   I.append(“jrnl key”||E(S[K], Knew )                   3:    JournalRefresh(KPPRF    )
+                  4:   return                                                4:    (N, num blocks) = S[META]
+                                                  ′                          5:    for t = 1 . . . num_blocks :
+                JournalDelete(keyTree, es , Knew )
+                                                                             6:      (es, j, τ ) = getKeyBlock(t)
+                  1:   I.append(“jrnl kt”||keyTree)
+                                                                             7:      kτ = F (S[PPRF], τ )
+                  2:   I.append(“jrnl khash”||H(S[K]))
+                                                                             8:      ds = D(kτ , es)
+                  3:   I.append(“jrnl key”||E(S[K], Knew )                                        ′
+                                                                             9:      kt = F (KPPRF    , t)
+                  4:   I.append(“jrnl ctr ”||S[CTR])                                   ′
+                                                                            10 :     es = E(kt , ds)
+                  5:   I.append(“jrnl blk ”||S[CTR]||es ′ )
+                  6:   return
+                                                                            11 :     assignTag(es ′ , t)
+                                                                            12 :     I.append(“blk ”||t||es ′ )
+                                ′
+                JournalRefresh(KPPRF )                                      13 :   S[CTR] = num blocks + 1
+                                                      ′
+                  1:   I.append(“jrnl rfsh”||E(S[K], KPPRF ))               14 :
+                                                                                                                  ′
+                                                                                   keyTree = newKeyTree(Knew , KPPRF )
+                  2:   return                                               15 :   JournalRotate(Knew , keyTree)
+                                                                            16 :   S[K] = Knew
+                                                                                                    ′
+                                                                            17 :   S[PPRF] = KPPRF
+                                                                            18 :   return
+                       Figure 8. The internal journaling and refresh logic in the real-world secure deletion functionality Σ.
+
+
+Simulator Construction. Given access to both S and I from                   which takes time at most O(|I|) = O(poly(λ)). There-
+E ’s interaction with the ideal functionality F , the simulator             fore, in the worst case, processing all of I takes time
+runs an internal instance of Σ (which we call ΣSim ) to                     O(poly(λ)) · O(poly(λ)) = O(poly(λ)). Finally, the sim-
+generate a new (S ′ , I ′ ) pair. By design, each non-empty                 ulator obtains (S ′ , I ′ ) from ΣSim and runs Adv(1λ , S ′ , I ′ ).
+memory location in S (excluding S[0]) contains either non-                  Since Adv runs in time O(poly(λ)) the total run-time of
+deleted messages or the constant 0. Additionally, I contains                Sim remains O(poly(λ)).
+an ordered sequence of (“wr”||i) and (“del”||i) entries that
+                                                                            Theorem A.2 (H OLEPUNCH achieves secure deletion of
+encode the API requests issued by E .
+                                                                            files). The H OLEPUNCH scheme Σ described in Figures 7
+     Sim starts at the beginning of I and one-by-one does
+                                                                            and 8 achieves secure deletion of files (Definition 4.1) when
+the following for every entry ∈ I . If entry = (“wr ”||i),
+                                                                            F is a puncturable PRF, (E, D) is an IND-CPA secure
+then Sim checks if the associated file f was later deleted
+                                                                            encryption scheme, and H is modeled as a random oracle.
+by E . To do this, Sim searches to the end of I looking
+for an entry of the form (“del ”||i). If no such entry exists,              Proof. Observe that from the perspective of the environment
+then Sim learns f by looking at S[i + 1] and can issue a                    E , both the real and ideal games are identical up until step
+Write(i, f ) call to ΣSim . Otherwise, the file was deleted                 6 in the games. This follows from the fact that E is only
+and Sim instead issues a Write(i, 0n ) call to ΣSim . Lastly,               sending requests to read, write, and delete files, and any
+if entry = (“del ”||i), then Sim issues a Delete(i) to                      observable values that E sees up until this point were chosen
+ΣSim . After iterating over all of I , the simulator takes                  by E itself. During step 6, the arrays (S, I) are given to either
+the (S ′ , I ′ ) pair from ΣSim and runs Adv (1λ , S ′ , I ′ ) and          Adv or Sim which then return an output to E . Since E ’s
+outputs whatever Adv outputs.                                               view is identical in both games up to step 6, it follows that
+                                                                            if the output of Adv and Sim in step 6 are computationally
+                                                                            indistinguishable then
+Lemma A.1 (Efficient Simulator). Sim runs in time
+                                                                                                              F
+O(poly(λ)).                                                                 | Pr[RealΣ
+                                                                                     E,Adv (λ) = 1] − Pr[IdealE,Sim (λ) = 1]| ≤ negl(λ)
+
+Proof. Since E runs in time O(poly(λ)), I can be appended                       By construction, Sim exactly replays E ’s interaction to
+at most O(poly(λ)) times and thus |I| ≤ O(poly(λ)).                         a fresh instance of Σ (which we denote ΣSim ), modulo the
+Observe that Sim loops over and processes each entry in                     Write(i, f ) operations on files f that were later deleted by
+I . For every entry, Sim issues either a Write or a Delete                  E . For the deleted files, Sim instead issues a Write(i, 0n )
+instruction to ΣSim , each of which runs in a constant                      instruction to ΣSim . Finally, Sim takes the arrays (S ′ , I ′ )
+number of steps. Furthermore, in the worst case, the entry                  from the interaction with ΣSim and outputs Adv (1λ , S ′ , I ′ ).
+is of the form (“wr ”||i) and Sim must first search to the                  We therefore need to show that the (S ′ , I ′ ) pair associated
+end of I to look for any associated Delete operations,                      with ΣSim is computationally-indistinguishable from the
+(S, I) pair associated with Σ in the real game. We proceed         Hybrid 2. This is the same as Hybrid 1 except now we also
+using a series of hybrids.                                         replace the second file that is stored and later deleted by
+                                                                   E with the all zeros string, i.e., replace the corresponding
+Hybrid 0. This is the RealΣ
+                          E,Adv (λ) game defined in                Write(i, f ) call with a Write(i, 0n ) call. The proof that
+Figure 3.                                                          Hybrids 1 and 2 are indistinguishable follows almost
+                                                                   exactly the same as the proof that Hybrid 0 and Hybrid 1
+Hybrid 1. This is the same game as RealΣ        E,Adv (λ) except   are indistinguishable. The one difference is that we must
+                                                                                                                          ′
+for the following. Let f be the first file stored by E that        account for the fact that the ciphertext E(Kold , Kold    ) is
+is later deleted by a Delete instruction, and let i be the         written to I (line 3 of JournalDelete ) after the deletion
+file’s associated tag. Then in Hybrid 1 we replace E ’s first      operation of the first file where Kold is original master
+                                                                                               ′
+Write(i, f ) call with a Write(i, 0n ) call instead. We give a     key in Hybrid 1, and Kold     is the newly rotated master key
+                                                                                             ′
+series of simple hybrids to show that Hybrid 0 and Hybrid          from Hybrid 1, i.e., Kold is Knew from Hybrid 1 that is
+1 are indistinguishable.                                           stored in S[K] after deleting the first file. Thus, to show
+                                                                          ′
+     Observe that the only difference between the (S, I) out-      that Kold  is pseudorandom, we must additionally show that
+                                                                               ′
+put by Σ in Hybrid 1 versus the (S, I) output by Σ in Hybrid       E(Kold , Kold  ) is indistinguishable from random. Because
+0 is that (“file”||i||E(ki , 0n )) is written to I instead of      we showed that Kold is indistinguishable from random in
+(“file”||i||E(ki , f )) as in Hybrid 0 (see lines 8 and 9 of the   Hybrid 1, by the IND-CPA security of (E, D) it follows
+                                                                                     ′
+Write pseudocode in Figure 7). But for any PPT adversary,          that E(Kold , Kold   ) is indistinguishable from random in
+as long as ki is indistinguishable from random, then by            Hybrid 2.
+the IND-CPA security of (E, D), the ciphertexts E(ki , f )
+and E(ki , 0n ) are computationally indistinguishable from         Hybrid 3 through d. Let d be the total number of files
+random (and hence from each other). Observe that ki is a           that were stored and later deleted in E ’s interaction. Then
+uniformly random key (line 9 of Setup ) and is only ever           for j = 3 . . . d, Hybrid j is identical to Hybrid j − 1 except
+written to I as (“blk ”||τ ||E(kτ , ds)) (lines 10-12 of Setup )   that we additionally take the j th deleted file and replace its
+where ds is the file key block containing ki , and τ is the        entry in I with (“file”||i||E(ki , 0n )) where i is the file’s
+tag associated with the block. By the IND-CPA security of          identifier. Each hybrid uses the same argument as Hybrid 2
+(E, D), the ciphertext E(kτ , ds) is indistinguishable from        to show that Hybrid j and Hybrid j − 1 are computationally
+random as long as kτ is indistinguishable from random. We          indistinguishable.
+therefore need to show that the key kτ is pseudorandom.
+Recall that kτ = F (KPPRF , τ ). Furthermore, for every PPT        Hybrid (d + 1). This is the IdealF        E,Sim (λ) game. In
+                                                ∗                          F
+adversary Adv , even if Adv has access to KPPRF        punctured   IdealE,Sim (λ), the internal state of the ideal functionality
+                                 ∗
+at the point τ , the value F (KPPRF , τ ) is indistinguishable     (S, I) is given to Sim. However, Sim then constructs
+from random by the psuedorandom at punctured points                (S ′ , I ′ ) by interacting with a fresh instance of the real
+property (§3.1). Note that Σ only ever writes an unpunctured       functionality ΣSim such that (S ′ , I ′ ) exactly matches the
+version of KPPRF to I using the key tree data structure            (S, I) pair given to Adv in Hybrid d. Finally, Sim runs
+(lines 6 and 7 of Setup ). The root of the key tree is a           Adv(1λ , S ′ , I ′ ) which outputs the same output as Adv in
+master key, that we will denote Kold . The key tree data           Hybrid d. It follows that Hybrid d and Hybrid (d + 1) are
+structure uses Kold to encrypt the keys in layer 2, which in       identically distributed.
+turn encrypts the keys in layer 3, which finally encrypt the
+leaves representing KPPRF . After puncturing the PPRF key             By the indistinguishability of Hybrid 0 and Hybrid
+at a point τ , the PPRF subkey that evaluated τ is zeroed out      (d + 1) we have shown that the real-world functionality Σ
+and re-encrypted under a fresh key in layer 3 of the tree,         emulates the ideal functionality F (Figure 2).
+which in turn is re-encrypted under a fresh key in layer 2
+of the tree, which is finally re-encrypted under a new root
+(master) key Knew . Therefore, by the IND-CPA security
+of (E, D), and a series of simple hybrid arguments, the
+KPPRF is indistinguishable from random as long as Kold
+is indistinguishable from random.
+     Finally, the master key Kold is only ever stored in S[K].
+Additionally, the value H(Kold ) is written to I during the
+journaling operation (line 2 of JournalDelete in Figure 7).
+However, after the Delete(i) call, the master key is rotated to
+a new uniformly random key Knew such that S[K] = Knew .
+Thus, for any PPT adversary Adv that receives (S, I) from
+Σ, the probability that Adv queries H on Kold is negligible
+and therefore H(Kold ) is indistinguishable from random. It
+follows that for any PPT adversary that receives (S, I) in
+Hybrid 1, the key Kold is indistinguishable from random,
+and thus Hybrid 0 and Hybrid 1 are indistinguishable.
+

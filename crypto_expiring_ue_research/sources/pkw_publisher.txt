@@ -1,0 +1,1400 @@
+            Puncturable Key Wrapping and Its
+                      Applications
+
+    Matilda Backendal(B) , Felix Günther , and Kenneth G. Paterson
+
+        Department of Computer Science, ETH Zurich, Zurich, Switzerland
+     {mbackendal,kenny.paterson}@inf.ethz.ch, mail@felixguenther.info
+
+       Abstract. We introduce puncturable key wrapping (PKW), a new cryp-
+       tographic primitive that supports ﬁne-grained forward security proper-
+       ties in symmetric key hierarchies. We develop syntax and security def-
+       initions, along with provably secure constructions for PKW from sim-
+       pler components (AEAD schemes and puncturable PRFs). We show how
+       PKW can be applied in two distinct scenarios. First, we show how to use
+       PKW to achieve forward security for TLS 1.3 0-RTT session resump-
+       tion, even when the server’s long-term key for generating session tickets
+       gets compromised. This extends and corrects a recent work of Aviram,
+       Gellert, and Jager (Journal of Cryptology, 2021). Second, we show how
+       to use PKW to build a protected ﬁle storage system with ﬁle shredding,
+       wherein a client can outsource encrypted ﬁles to a potentially malicious
+       or corrupted cloud server whilst achieving strong forward-security guar-
+       antees, relying only on local key updates.
+
+
+1    Introduction
+Key wrapping. Key encryption, or key wrapping, is a mechanism often deployed
+to build symmetric key hierarchies: systems in which the conﬁdentiality and
+integrity of multiple cryptographic keys are protected by a single (master wrap-
+ping) key. The wrapped keys may in turn be used to secure data at a more
+ﬁne-grained level, e.g., at the level of individual ﬁles, messages, or ﬁnancial trans-
+actions. This hierarchical approach eases key management: it allows strong but
+more expensive protection to be applied to a small number of wrapping keys
+while limiting the security impact if individual wrapped keys are exposed. Key
+wrapping is widely used in practice; speciﬁc schemes have been standardized by
+NIST in [24]. Formal foundations for key wrapping were established in [47].
+    As a pertinent example, when using the pre-shared key (PSK) mode of
+TLS 1.3 [45] for session resumption, new sessions between client and server are
+protected by independent, symmetric keys (denoted PSK) established in an ear-
+lier session. To reduce storage overhead, servers often use a long-term symmetric
+encryption key to wrap PSKs into so-called tickets. These tickets are sent to the
+client, thereby outsourcing the PSK storage from the server to the client.
+    Another example of key hierarchies is found in cloud storage systems, where
+service providers encrypt data before storing it on their servers—so called encryp-
+tion at rest. The encryption is done to meet customer demand and regulatory
+
+c International Association for Cryptologic Research 2022
+S. Agrawal and D. Lin (Eds.): ASIACRYPT 2022, LNCS 13792, pp. 651–681, 2022.
+https://doi.org/10.1007/978-3-031-22966-4_22
+652      M. Backendal et al.
+
+requirements. To ensure good key-hygiene, best practices stipulate that separate
+encryption keys be used for separate ﬁles (or even parts of large ﬁles). To this end,
+cloud storage providers use a new data encryption key (DEK) to encrypt each
+(part of a) ﬁle. The DEK is then wrapped using a key encryption key (KEK)
+and stored together with the encrypted ﬁle. Here, using a key hierarchy also
+allows for a form of key rotation, a process in which a key is replaced by a fresh
+one, and the encrypted data is updated to be secured under the new key. The
+technique used by all four of Amazon Web Services [4], Google Cloud [30], IBM
+Cloud [34] and Microsoft Azure [42] is to rotate only the KEK rather than all of
+the DEKs. This limits the amount of data that needs to be re-encrypted under
+the new KEK to just the DEKs that were wrapped under the original KEK,
+rather than the actual ﬁles themselves. This approach provides an eﬃcient but
+security-limited form of key rotation [25].
+
+Forward-Secure Session Resumption and Puncturable Encryption. Aviram,
+Gellert, and Jager (AGJ) [1,2] observed that the key hierarchy induced by the
+ticketing mechanism in TLS 1.3 PSK mode can be used to achieve forward
+security for resumed sessions. By updating the Session Ticket Encryption Key
+(STEK) after accepting the ticket of a resumed session, and deleting the corre-
+sponding PSK, the conﬁdentiality of the session is guaranteed even against an
+attacker who later compromises the STEK. AGJ formalized this idea with their
+notion of a forward-secure session resumption protocol. The per-session forward
+security enjoyed by such a resumption protocol is reminiscent of the ﬁne-grained
+forward security achieved by puncturable encryption [31], and indeed, AGJ make
+use of puncturable pseudo-random functions (PPRFs) [13,17,36] for their con-
+struction. Their innovation naturally begs the question: Can puncturing be com-
+bined with key hierarchies to bring ﬁne-grained forward security also to other
+applications? This work provides the aﬃrmative response.
+
+
+Our Contributions. We investigate how puncturing can be combined with
+key wrapping to provide ﬁne-grained forward security in applications using a
+symmetric key hierarchy. To this end, we introduce a new cryptographic prim-
+itive that we call puncturable key wrapping (PKW). We provide formal deﬁni-
+tions, relations between security notions, and an eﬃcient, generic construction
+for PKW. We also show how to use PKW in two sample applications: TLS tick-
+eting (inspired by [2], but addressing several shortcomings of that work) and
+protected ﬁle storage. We argue that, while PKW is closely related to exist-
+ing primitives like PPRFs, it provides a useful abstraction that more intuitively
+captures what is needed for achieving ﬁne-grained forward security in symmetric
+key hierarchies. This makes building applications conceptually simpler and less
+error-prone.1
+
+
+1
+    A broad analogy that readers may ﬁnd useful: PKW is to PPRFs as AEAD is to
+    block ciphers.
+                              Puncturable Key Wrapping and Its Applications           653
+
+
+
+
+Fig. 1. Security notions and relations for PPRFs, puncturable key-wrapping (PKW),
+protected ﬁle storge (PFS), and TLS ticketing (TLS). Conﬁdentiality/forward security
+notions are in rounded boxes, integrity notions in rectangular boxes. Solid lines indicate
+implications, with numbers referencing the respective theorem in this paper (others
+in [5]) and a plus + when combining several notions. Barred lines denote separations,
+dotted lines trivial implications, and dashed lines non-tight implications. A star  or
+dagger † next to an arrow indicates that the implication holds if puncture invariance
+(Deﬁnitions 2, 5), resp. consistency (Deﬁnition 6) is assumed; a ∗ indicates additional
+assumptions.
+
+
+Puncturable Key Wrapping. A puncturable key-wrapping scheme provides the
+basic functionality needed for a symmetric key hierarchy: algorithms to wrap
+and unwrap data encryption keys under a master secret key. Additionally, a
+puncturing algorithm allows the master secret key to be updated such that spe-
+ciﬁc wrapped data encryption keys are rendered irrecoverable. Our PKW syntax
+merges classical key wrapping/deterministic authenticated encryption [47] with
+tag-based puncturable encryption [31]. The resulting primitive allows authen-
+ticated headers and uses tags to enable ﬁne-grained puncturing of ciphertexts.
+The puncturing tags simplify the exposition of PKW and allow for versatile
+treatments of the targeted applications: e.g., tags may be chosen via a counter
+when keeping state or ordering is required, or as random strings when meta-data
+privacy is a concern (cf. [7]). This contrasts with the foundational work on (non-
+puncturable) key wrapping [47], where randomness needed for secure wrapping
+is eﬀectively extracted from the wrapped key in the SIV construction.
+    We introduce four diﬀerent security notions for PKW schemes (see Fig. 1),
+three relating to conﬁdentiality (find$-cpa: a classical “real-or-random” notion,
+find$-rcpa: additionally allowing “real” wrappings, and find$-1cpa: a one-time
+challenge notion) and one to integrity (of ciphertexts, int-ctxt). They are devel-
+oped with an eye towards applications, catering to the needs of key hierarchies
+found in cloud storage systems and the TLS ticketing mechanism. Hence, all
+four are in a multi-key (or multi-user) setting [6]. We also provide a simple and
+generic construction for a PKW scheme based on a PPRF and a nonce-based
+654    M. Backendal et al.
+
+AEAD [46] scheme. The core idea is to view the master key as the secret key of
+a PPRF; wrapping of a selected data encryption key is performed by evaluating
+the PPRF on the tag to generate a one-time AEAD key, and then using that
+AEAD key to encrypt the data encryption key. PKW puncturing equates to
+PPRF puncturing. Depending on the precise assumptions made on the PPRF,
+we reach our three diﬀerent levels of conﬁdentiality for the PKW scheme; the
+integrity notion requires nothing further of the PPRF. In all cases, standard
+multi-user notions of AEAD security suﬃce. Using a misuse-resistant AEAD
+scheme [47] could further enable batch puncturing of wrappings under the same
+tag. Full details of our treatment of PKW can be found in Sect. 3.
+
+PPRFs. While the precise PPRF security notions we require resemble those in
+prior work [13,17,36,48], they appear to be, strictly speaking, new. This shows
+how an application-driven analysis can bring to the surface new requirements on
+existing primitives. In Sect. 2 (see also Fig. 1), we explore the relations between
+our diﬀerent PPRF notions and discuss possible instantiations, e.g., using the
+GGM construction for PRFs (as adapted to PPRFs in e.g. [36]).
+    To summarize, we obtain a generic instantiation of PKW, achieving a variety
+of security notions from standard primitives (AEAD schemes and PRGs).
+
+Application: Forward-Secure Session Resumption. Equipped with our new prim-
+itive, we revisit the idea of Aviram, Gellert, and Jager (AGJ) [2] for achieving
+forward security for the zero round-trip time (0-RTT) data that is immediately
+sent by clients in the TLS 1.3 PSK resumption mode. In Sect. 4, we show how
+a find$-1cpa-secure PKW scheme can readily be deployed for TLS ticketing to
+yield forward-secure TLS 1.3 0-RTT resumption that is secure in the sense of
+a multi-stage key exchange (MSKE) protocol [27]; see also Fig. 1. Using PKWs
+in place of PPRFs (as in AGJ) permits us to take a more generic and abstract
+viewpoint. This not only directly facilitates constructions oﬀering diﬀering func-
+tionality and security guarantees, but also enabled us to identify and correct
+some technical issues arising in the approach of AGJ.
+    In particular, building TLS ticketing from PKW allows us to seamlessly
+switch to a more privacy-friendly approach, addressing an open problem in [2]:
+by sampling tags randomly, we are able to make TLS tickets indistinguishable
+from random, whereas the AGJ proposal uses a counter in the construction,
+making their tickets potentially linkable to the time of issuance. Thus our app-
+roach can alleviate privacy concerns for TLS ticketing, e.g., regarding tracking
+users on the web by passively observing network traﬃc.
+    The integration of a session resumption protocol into the TLS 1.3 resumption
+handshake is described in [2, Section 4]. Rephrasing the AGJ proposal in the lan-
+guage of puncturable key wrapping led us to discover conceptual and technical
+issues in the security model, the proposed protocol, and the proof that prevent
+the proposal of AGJ from being forward secure, as we discuss in Sect. 4. Specif-
+ically, the security model used in [2] does not reﬂect the ticketing mechanism of
+a key exchange protocol in how pre-shared secrets are sampled, registered with
+parties, and potentially corrupted. Furthermore, the proposed protocol encrypts
+                           Puncturable Key Wrapping and Its Applications       655
+
+the TLS resumption master secret RMS in the session ticket. Since RMS is used
+to derive multiple PSK values, this violates forward security (an adversary learn-
+ing RMS from one ticket can use it to decrypt prior sessions using a PSK derived
+from the same RMS). However, this can be easily ﬁxed by ticketing the respec-
+tive PSK instead of RMS. Finally, we identiﬁed overlooked steps and missing
+underlying assumptions in the AGJ security proof, which were surfaced when
+applying our PKW formalism. We address all these points in our treatment of
+forward-secure session resumption for TLS 1.3, see Sect. 4.
+
+Application: Protected File Storage. As a second application example, we show
+in Sect. 5 how our new PKW primitive can be used in an encrypted ﬁle storage
+system to give forward security to deleted ﬁles. This application is motivated by
+the current trust assumptions in cloud storage systems, where the conﬁdentiality
+of the stored data rarely extends to the service provider. Indeed, if the master
+key in the key hierarchy is managed by the cloud, then the service provider can
+trivially decrypt any ﬁle. The aim of our protected ﬁle storage (PFS) system is
+to provide strong security guarantees for the user, even when encrypted ﬁles are
+outsourced to a malicious or corrupted storage system.
+    Using a PKW scheme, a client can locally encrypt ﬁles under separate data
+encryption keys, wrap the DEKs with its master key (acting as a KEK) and then
+outsource both the encrypted ﬁles and the wrapped keys to the cloud. In addition
+to relieving the user of the need to store anything beyond the master key for the
+PKW scheme, our PFS system also allows secure shredding of ﬁles: by puncturing
+the master key such that a speciﬁc wrapped DEK is rendered irrecoverable,
+the ﬁle encrypted by the DEK is made permanently inaccessible, even if the
+ciphertext is not actually deleted by the cloud storage provider when the client
+requests it to be. This means that a motivated attacker with access both to the
+encrypted ﬁles and the secret key of the user will not be able to compromise
+the contents of ﬁles that were shredded before the user key was compromised.
+The system hence provides very strong forward security guarantees for shredded
+ﬁles. Crucially in our approach, there is no need for the user to trust the storage
+provider to actually delete the shredded ﬁles, an assumption which would seldom
+hold in practice due to the presence of backups for disaster recovery purposes
+(see, e.g., [30]) or bugs in the deletion process [44].
+    An additional feature of our PFS system is that, in line with current industry
+practice, it supports key rotation at the KEK level. Key rotation extends the life-
+time of encrypted data, overcomes usage limits of encryption through rekeying,
+and supports forward security in practice. It is also important given that the
+PKW schemes we build have a ﬁnite puncturing capability; KEK rotation is then
+used to restore puncturing capability whenever needed. The multi-key aspect of
+our PKW security notions readily supports this key rotation.
+    As core contributions here, we deﬁne a syntax for PFS and security notions
+capturing conﬁdentiality, forward security, and integrity of stored ﬁles in a PFS
+scheme. We show how all of these notions can be achieved by building a PFS
+scheme from a PKW scheme and an AEAD scheme in a natural and eﬃcient
+way. We actually provide two diﬀerent routes to proving our main results on the
+656    M. Backendal et al.
+
+forward security of PFS, as represented in the ﬁrst and third column in Fig. 1.
+These routes rely on diﬀerent security assumptions on the underlying crypto-
+graphic components, speciﬁcally the PKW scheme used, and result in security
+theorems with diﬀerent tightness properties—using a stronger PKW scheme
+yields a tighter proof of security for the PFS scheme. This in turn relates to
+the properties required of the underlying PPRF in each of the two routes. While
+the left, tighter, route requires a PPRF satisfying the strongest security notion
+(fpr-rro$) as a basic building block—an assumption which, to the best of our
+knowledge, generally relies on a non-tight (complexity-leveraging) reduction to
+weaker PPRF notions—it asks less from the building blocks in terms of other
+properties. Speciﬁcally, it avoids the technical requirements of puncture invari-
+ance and consistency which we detail in Sect. 3 and that not all PPRFs may
+provide, yet which are required for the right, less tight route. The two routes
+hence show that secure PFS schemes can be constructed from diﬀerent levels of
+PKW (and PPRF) schemes; we see this as motivating future work on eﬃcient
+PKW (or PPRF) constructions that directly fulﬁll our strong security notions.
+    We stress that the aim of our PFS system is to showcase how integrating
+PKWs into existing symmetric key hierarchies can improve security for the cryp-
+tographic core of secure ﬁle storage systems. Building a full-blown system is left
+to future work.
+
+
+Further Related Work. The origins of forward security, in the context of key
+exchange, date back to Günther [32] and Diﬃe et al. [23]. A helpful systemati-
+zation is given by Boyd and Gellert [16].
+    Green and Miers [31] introduced puncturable (public-key) encryption as a
+means of achieving ﬁne-grained forward security. The ideas of [31] were applied
+to 0-RTT key exchange and session resumption for TLS 1.3 in [2,22,33] as well as
+symmetric key exchange [3,15]. The treatment of [15] is for general key exchange,
+where both parties share a key to a PPRF and puncture it in a semi-synchronized
+manner. By contrast, our approach to achieving forward security for TLS 1.3
+PSK resumption mode using session tickets (in common with [2]) targets the
+use of puncturable primitives in a “one-sided” setting, where only the server
+holds the key and performs puncturing operations.
+    Puncturing techniques have further been used in the context of searchable
+encryption [51,52]. Fine-grained forward security is also targeted in Derived
+Unique Keys Per Transaction (DUKPT) [18]: keys are derived in a tree structure
+and used in a one-time manner, with the aim of improving security against side-
+channel attacks on weakly protected devices, e.g., payment terminals.
+    The idea of secure outsourced storage is not new. Blaze [10] designed a “Cryp-
+tographic File System” already in 1993 to empower users to encrypt their ﬁles,
+preventing remote ﬁle servers used for storage from gaining plaintext access to
+user data. A rich body of work followed suit, improving on and expanding the
+security guarantees in the direction of, for example, data integrity and ﬁle shar-
+ing [43], group collaboration [26], access pattern and metadata hiding [19,20] and
+minimizing trust assumptions [41]. There is also a plethora of services running
+                             Puncturable Key Wrapping and Its Applications        657
+
+on top of existing storage systems, for example [14,39]. Key rotation for sym-
+metric encryption is widely used by outsourced storage systems in practice, but
+was only recently formally treated, see [25] and follow-up works [37,40] including
+work using puncturing [50].
+    Our approach to secure ﬁle storage shares the aim of removing the need to
+trust the storage provider for conﬁdentiality, but we speciﬁcally focus on adding
+forward security for individual ﬁles. Boneh and Lipton [12] introduced the idea
+of using key deletion to revoke access to encrypted ﬁles, with an emphasis on
+ﬁle backup systems. Their proposal uses linear data structures to store keys, but
+lacks the ﬁne-grained forward security and key rotation our PFS scheme oﬀers.
+    A more recent proposal, BurnBox [54], recognizing the diﬃculty of truly
+secure ﬁle deletion, introduced self-revocable encryption to limit the power of
+compelled searches of devices. BurnBox achieves ﬁne-grained forward security
+for deleted ﬁles via a tree-based key hierarchy, storing the root in erasable stor-
+age. It further hides ﬁle metadata in a protected lookup table, an approach
+we also suggest for our system. On the surface, these properties make Burn-
+Box very similar to our PFS concept. However, the main goal of BurnBox is
+not forward security, but the much stronger notion of compelled access security,
+which encompasses temporarily revoking ﬁle access when device compromise is
+expected and further goals such as deletion/revocation obliviousness and timing
+privacy. This forces BurnBox to use highly application-speciﬁc approaches, rely
+on secure storage, and compromise on eﬃciency (e.g., of ﬁle lookups, in favor of
+privacy). In contrast, our approach is more generic, requires fewer assumptions,
+and can directly beneﬁt from optimizations of the underlying PKW or PPRF
+schemes.
+
+
+Notation and Conventions. For a string a ∈ {0, 1}∗ , |a| denotes its bit length.
+By x ←$ S, we denote sampling x uniformly at random (u.a.r.) from a set S of
+                                                ∪
+size |S|. For sets S1 , S2 , the shorthand S1 ←− S2 denotes S1 ← S1 ∪ S2 . We write
+X = (x1 , x2 , . . . , xn ) for an n-tuple and X += x or X −= x for adding, resp.
+removing, an element x to/from a list or set. By xy we denote the concatenation
+of strings or lists x and y. For an algorithm A, we denote by y ← A(x1 , . . . ; r)
+running A on inputs x1 , . . . and random coins r with output y; by y ←$ A(x1 , . . .)
+running A on uniformly random coins. The distinguished output ⊥ indicates
+rejecting; by convention we require that any algorithm on input ⊥ also outputs ⊥.
+    We use the game-playing framework of [8]. By Pr [ G(A) ⇒ x ] we denote
+the probability that game G interacting with adversary A outputs x; where
+Pr [ G(A) ] is a shorthand for Pr [ G(A) ⇒ true ]. In games, adversaries implic-
+itly have access to all described oracles unless otherwise indicated, and integer
+variables, strings, set variables and boolean variables are initialized, respectively,
+to 0, the empty string ε, the empty set ∅, and false, unless otherwise speciﬁed.
+ 658       M. Backendal et al.
+
+ 2      Puncturable PRFs, Security Notions, and Relations
+ Puncturable PRFs (PPRFs) were conceived of independently in [13,17,36]. We
+ recall the deﬁnition from Sahai and Waters [48], but restrict our attention to
+ PPRFs with deterministic puncturing algorithms.
+ Definition 1 (PPRF). A puncturable pseudorandom function PPRF =
+ (KeyGen, Eval, Punc) is a triple of algorithms with three associated sets; the secret-
+ key space SK, the domain X and the range Y.
+ – Via sk ←$ KeyGen(), the probabilistic key generation algorithm KeyGen, taking
+   no input, outputs the secret key sk ∈ SK.
+ – Via y/⊥ ← Eval(sk, x), the function evaluation algorithm Eval, on input the
+   secret key sk and an element x ∈ X outputs y ∈ Y or, to indicate failure, ⊥.
+ – Via sk  ← Punc(sk, x), the deterministic puncturing algorithm Punc, on input
+   the secret key sk and an element x ∈ X outputs an updated secret key sk  ∈
+   SK.
+
+
+       For correctness we require that for all sk ∈ SK and all x, y ∈ X :
+(1) Pr [ Eval(sk 0 , x) = ⊥ | sk 0 ←$ KeyGen() ] = 1.
+(2) If sk  ← Punc(sk, x) and y = x, then Eval(sk, y) = Eval(sk  , y).
+(3) If sk  ← Punc(sk, x), then Eval(sk  , x) = ⊥.
+ Requirement (1) ensures that for any freshly generated secret key sk 0 and for
+ any x ∈ X , Eval(sk 0 , x) will not be ⊥. Requirement (2) says that puncturing any
+ secret key sk on x only aﬀects the evaluation of x. Requirement (3) demands
+ that the evaluation of a punctured point will always be ⊥.
+     Requirement (3)—which goes beyond prior PPRF deﬁnitions [2,48]—is
+ needed to achieve integrity in applications like TLS ticketing, as we shall see
+ in Sect. 4. Alternative to phrasing it as a correctness property, one could implic-
+ itly demand it in the security games. We ﬁnd the explicit requirement cleaner
+ and argue that it captures the intuitive understanding that PPRF function eval-
+ uation on punctured points should “fail”. Alternative concepts such as private
+ puncturable PRFs [11] could achieve similar results, but are harder to construct.
+     Following [2], we deﬁne an additional property of PPRFs called “puncture
+ invariance” which demands that the scheme is insensitive to the order in which
+ punctures are performed. I.e., the puncturing operation is commutative with
+ respect to the resulting secret key. As noted in [2], this property enables reduc-
+ tions that change the order of punctures without an adversary later compro-
+ mising the secret key noticing; this is necessary for example to have our single-
+ challenge notion (fpr-1ro$) imply our core PPRF notion (fpr-ro$), as we shall
+ see.
+ Definition 2 (PPRF puncture invariance). A puncturable pseudorandom
+ function PPRF = (KeyGen,Eval,Punc) is puncture invariant if for all keys sk ∈ SK
+ and all x0 , x1 ∈ X it holds that Punc(Punc(sk, x0 ), x1 ) = Punc(Punc(sk, x1 ), x0 ).
+                            Puncturable Key Wrapping and Its Applications        659
+
+
+
+
+Fig. 2. Left: Games deﬁning real-or-$ (fpr-ro$, without the boxed Eval oracle) and
+real-and-real-or-$ (fpr-rro$, with A having access to Eval) forward pseudorandomness.
+Right: Game deﬁning one-time forward pseudorandomness (fpr-1ro$) PPRF security.
+Grey code prevents trivial attacks. (Color ﬁgure online)
+
+
+PPRF Security. We deﬁne three security notions for PPRFs, all in the multi-
+user setting [6], capturing the combined forward security and pseudorandomness
+goals, or forward pseudorandomness (fpr) for short. Let us start with our core
+forward pseudorandomness notion (fpr-ro$), given in Fig. 2. It is an extension of
+classical PRF security, where the adversary is given oracle access (Ro$-Eval)
+either to the real function evaluated on a hidden key, or a lazily-sampled random
+function. Forward security is captured through access to a puncturing oracle
+(Punc) as well as corruption oracle (Corr), through which the adversary can
+obtain secret keys that have been punctured on all challenge points.
+    Our second, stronger notion, forward pseudorandomness with real evaluations
+(fpr-rro$), in addition gives the adversary access to a real evaluation oracle
+(Eval), capturing that real evaluations do not help distinguishing challenge
+outputs (even post-corruption).
+    In our third, weaker notion, single-challenge forward pseudorandomness (fpr-
+1ro$), the adversary only gets a single challenge evaluation under each key. The
+challenge is obtained from oracle New-Ro$-Eval, which on input a domain
+point x returns either the real function evaluation of x under the (unpunctured)
+secret key (in the “real” world), or a string drawn u.a.r. from Y (in the “ideal”
+world). Additionally the adversary obtains the secret key punctured on x. As
+usual, the adversary wins if it can distinguish the real world from the ideal one.
+660    M. Backendal et al.
+
+Definition 3 (PPRF security (fpr-ro$, fpr-rro$, fpr-1ro$)). Let PPRF be a
+puncturable pseudorandom function. We deﬁne the advantage of an adversary
+A against the forward pseudorandomness
+                              X           X ∈ {fpr-ro$,
+                                                    1  fpr-rro$, fpr-1ro$}   of
+PPRF as AdvX   PPRF (A) = 2  Pr G      (A) ⇒ true  −    , where game G X
+                                                                              (A)
+                                   PPRF               2                  PPRF
+is given in Fig. 2.
+
+Comparison to Prior Work. Our PPRF notions resemble those in prior work, but
+also diﬀer in several ways. For example, fpr-1ro$ is similar to the non-adaptive
+notion in [2,48], but restricted to a single challenge. Through a multi-key hybrid
+argument [6], their notion implies ours. The adaptive “rand ” notion of [2] most
+closely corresponds to our fpr-rro$ notion, but our notion provides the adver-
+sary with more ﬂexibility by both allowing multiple real-or-random challenge
+evaluations under each key (compared to a single evaluation under the single
+key in [2]) and giving it access both to a separate puncturing oracle (the rand
+experiment only punctures on the single challenge point) and corruption oracle,
+thereby allowing multiple key compromises of keys punctured on points chosen
+by the adversary. Our middle notion fpr-ro$ is, to the best of our knowledge,
+new.
+
+PPRF Relations. Figure 1 (on page 3) shows the relations between our PPRF
+security notions. The trivial implications (dotted lines) immediately arise from
+restricting the adversary. As an example, fpr-rro$ implies fpr-ro$ because an
+adversary against the fpr-rro$ security can simply ignore the Eval-oracle. Sim-
+ilarly fpr-ro$ implies fpr-1ro$.
+    In the other direction, fpr-1ro$ implies fpr-ro$ for any puncture-invariant
+PPRF PPRF. That is, for any adversary A against the fpr-ro$ security of PPRF,
+there exists an adversary B running in approximately the same time as A such
+that Advfpr-ro$                    fpr-1ro$
+           PPRF (A) ≤ qro$ · AdvPPRF (B), via a standard hybrid argument,
+where puncture invariance ensures that reorderings of punctures do not aﬀect
+simulation of the later-corrupted secret key.
+    Via a non-tight reduction, we can also show that fpr-ro$ implies fpr-rro$ for
+a puncture-invariant PPRF. This is again via a hybrid argument, which however
+now involves guessing the input to the challenge query Ro$-Eval under each key
+(so-called complexity leveraging [13,17]), resulting in reduction loss proportional
+to the size of the PPRF domain.
+
+Instantiations From the Literature. One, by now folklore, way of building a
+PPRF is to use the GGM PRF construction via a tree of pseudorandom-
+generator (PRG) evaluations [29], extended with a puncturing algorithm, as ﬁrst
+noted by [13,17,36]. The core idea to enable puncturing on a domain point x
+in a GGM PRF is to update the secret key, removing nodes on the path to x
+in the PRG tree and adding all nodes on the co-path from the root to x. For
+a more in-depth description and argument of security we refer to [2,36]. Note
+that the GGM-based construction is correct and puncture invariant, and hence,
+via our established relations, yields an fpr-ro$-secure PPRF. Additionally, for
+this speciﬁc construction, adaptive security can be achieved with a loss factor
+                               Puncturable Key Wrapping and Its Applications             661
+
+that is only quasi-polynomial in the input length, improving greatly over the
+exponential loss of complexity leveraging [28]. An alternative construction for a
+PPRF with security based on the Strong RSA assumption can be found in [2].
+
+
+3    Puncturable Key Wrapping
+We now present our core cryptographic primitive, puncturable key wrapping
+(PKW). With puncturable key wrapping, we merge the notion of key wrap-
+ping, originally extensively studied by Rogaway and Shrimpton [47], with tag-
+based puncturable encryption [31], adapted to the symmetric setting, to capture
+forward security through puncturing. Puncturable key wrapping, beyond the
+key K to be wrapped, hence takes a tag T used as a pointer for puncturing,
+as well as optional associated header data H which is authenticated along with
+the wrapped key (akin to associated data in AEAD). In the following, we give
+syntax, security, and further notions for this new primitive.
+
+Definition 4 (PKW scheme). A puncturable key-wrapping scheme PKW =
+(KeyGen, Wrap, Unwrap, Punc) is a 4-tuple of algorithms with four associated sets;
+the secret-key space SK, the tag space T , the header space H and the wrap-key
+space K. Associated to the scheme is a ciphertext-length function cl : N → N.
+
+– Via sk ←$ KeyGen(), the probabilistic key generation algorithm KeyGen, taking
+  no input, outputs a secret key sk ∈ SK.
+– Via C/⊥ ← Wrap(sk, T, H , K), the deterministic wrapping algorithm Wrap
+  on input a secret key sk ∈ SK, a tag T ∈ T , a header H ∈ H and a key
+  K ∈ K outputs a ciphertext C ∈ {0, 1}cl(|K|) or, to indicate failure, ⊥.
+– Via K/⊥ ← Unwrap(sk, T, H , C), the deterministic unwrapping algorithm
+  Unwrap on input a secret key sk ∈ SK, a tag T ∈ T , a header H ∈ H and a
+  ciphertext C ∈ {0, 1}∗ returns a key K ∈ K or, to indicate failure, ⊥.
+– Via sk  ← Punc(sk, T), the deterministic puncturing algorithm Punc on input
+  a secret key sk ∈ SK and a tag T ∈ T returns a potentially updated secret
+  key sk  ∈ SK.
+
+Correctness of a PKW scheme intuitively demands that a wrapped key can be
+recovered from its wrapping ciphertext unless the secret key has been punctured on
+the tag used for the wrapping step, i.e., even if the secret key has been punctured
+on other tags. Formally, we require that for all T ∈ T , H ∈ H, K ∈ K, and all
+tuples T¯1 , T¯2 ∈ T ∗ where T ∈
+                               / T¯1 and T ∈ / T¯2 ,
+                                                                           
+  Pr Unwrap(sk \T¯1 , T, H , Wrap(sk \T¯2 , T, H , K)) = K | sk ←$ KeyGen() = 1.
+
+Here sk \(T1 ,T2 ,...,Tn ) = Punc(. . . (Punc(Punc(sk, T1 ), T2 ), . . . ), Tn ) is shorthand
+for the secret key obtained via puncturing sk in order on T1 , . . . , Tn ∈ T .
+
+    Analogously to Deﬁnition 2 for PPRFs, we also deﬁne puncture invariance
+for PKW schemes, demanding that the order of punctures does not aﬀect the
+resulting secret key.
+662      M. Backendal et al.
+
+Definition 5 (PKW puncture invariance). A puncturable key-wrapping
+scheme PKW = (KeyGen, Wrap, Unwrap, Punc) is puncture invariant if for all
+keys sk ∈ SK and all tags T0 , T1 ∈ T it holds that
+
+                  Punc(Punc(sk, T0 ), T1 ) = Punc(Punc(sk, T1 ), T0 ).
+
+    Additionally, we introduce a property of PKW schemes which we call con-
+sistency, inspired by the deﬁnition of consistent puncturable signature schemes
+in [9]. A consistent PKW scheme is one for which the output of algorithm Wrap
+only depends on the tag, header and wrap-key input, and not on the (puncturing)
+state of the secret key—except for when the output is ⊥ due to puncturing.
+
+Definition 6 (PKW consistency). A puncturable key wrapping scheme
+PKW = (KeyGen, Wrap, Unwrap, Punc) is consistent if for all keys K ∈ K, all
+headers H ∈ H, all tags (T1 , . . . , Tn ) ∈ T ∗ and all T ∈ T \ {T1 , . . . , Tn } it holds
+that
+                                                                                   
+  Pr Wrap(sk, T, H , K) = Wrap(sk \(T1 ,...,Tn ) , T, H , K) | sk ←$ KeyGen() = 1.
+
+    Puncture invariance and consistency guarantee a kind of indiﬀerence of the
+PKW scheme with respect to puncturing, allowing sequences of punctures and
+wrappings to be ﬂexibly reordered without aﬀecting the scheme’s future behav-
+ior. As we shall see, these properties are important to consider when deploying
+PKW schemes in, and proving the security of, higher-level applications.
+
+
+3.1     PKW Security
+
+
+Conﬁdentiality. Following Rogaway and Shrimpton [47], we adopt indistin-
+guishability from random bits (ind$) as the appropriate notion to model con-
+ﬁdentiality for (puncturable) key-wrapping schemes. Our three conﬁdentiality
+notions, formalized in Fig. 3, capture forward security in the sense that the con-
+ﬁdentiality guarantees hold also after compromise of the secret key, given that
+it has been appropriately punctured prior to corruption to avoid trivial wins. As
+before, they are all in the multi-key (or multi-user) setting [6]2
+    Our ﬁrst notion, which we call find$-cpa, can be viewed as a form of ind$-cpa
+security adapted to the PKW setting. The adversary is given access to a chal-
+lenge wrapping oracle Ro$-Wrap, which on input a key index i, a tag T, a
+header H and a key K chosen by the adversary, returns either an honest wrap-
+ping of K under secret key sk i , or a random bit-string of length cl(|K|). Forward
+security is captured via a corruption oracle Corr which allows the adversary
+to compromise the current version of a secret key sk i , given that all tags used
+2
+    To focus on forward security, we separate conﬁdentiality (with forward security) and
+    integrity (below) into distinct notions, contrasting with the combined notion in [47].
+    We give a combined notion in the full version [5], also capturing CCA-style active
+    attacks, and show that it is equivalent to the junction of our separate notions.
+                               Puncturable Key Wrapping and Its Applications           663
+
+
+
+
+Fig. 3. Left and middle: Forward security and privacy find$-cpa (without access to
+the boxed Wrap oracle)/find$-rcpa (with access to Wrap) of a puncturable key-
+wrapping scheme PKW. Right: One-time privacy and forward security find$-1cpa secu-
+rity of a puncturable key-wrapping scheme PKW. Grey code prevents trivial attacks
+and ensures that unique tags are used for wrapping. (Color ﬁgure online)
+
+
+in challenge queries under sk i must be punctured on at the time of corruption
+(via the puncturing oracle Punc). Focusing on ﬁne-grained forward security, we
+restrict the adversary to use tags only once for wrapping and call this behavior
+tag-respecting (akin to a nonce-respecting adversary in authenticated encryp-
+tion); this enables puncturing of individual ciphertexts.3
+    Guided by the envisioned usage of puncturable key-wrapping schemes, our
+second, stronger conﬁdentiality notion, find$-rcpa, additionally gives the adver-
+sary access to real wrappings that it does not have to puncture on via an addi-
+tional oracle Wrap. The rationale behind the notion is that although find$-
+cpa provides forward security for all wrapped keys which have been punctured
+on at the time of compromise, it does not capture the potential leakage from
+unpunctured ciphertexts which the adversary gains insight into by corrupting.
+3
+    We note that a stronger formalization is possible where tag reuse is allowed: by stor-
+    ing and checking the whole tuple (T, H , K) in the sets ST,i instead of only T, one can
+    demand wraps to look random except when this is impossible due to entirely repeat-
+    ing inputs. This could cater to applications interested in “batch puncturing” [31],
+    i.e., revoking access to multiple wrapped keys via a single puncturing call. Such
+    stronger notions would also require stronger building blocks, as we will see below.
+664     M. Backendal et al.
+
+
+
+
+Fig. 4. Integrity of ciphertexts of a puncturable key-wrapping scheme PKW. Grey code
+prevents trivial attacks and ensures that tags are not repeated in wrap queries. (Color
+ﬁgure online)
+
+
+That is, we would like to ensure that there is a form of independence across key
+wrappings produced with distinct tags. This is motivated by what we believe
+to be realistic attack scenarios for applications which use a PKW scheme for
+key management—such as our protected ﬁle storage system (to be deﬁned in
+Sect. 5). In such a system, normal usage implies the existence of some unpunc-
+tured ciphertexts (corresponding to non-shredded ﬁles) at any given time, and
+hence in particular at the time of a key compromise. The idea of find$-rcpa secu-
+rity is that compromising ciphertexts generated with tags that have not been
+punctured on, should not give the adversary a higher advantage in distinguishing
+challenge ciphertexts from random bits.
+    Lastly, we also introduce a one-time security notion, find$-1cpa, which only
+provides the adversary with one challenge output and the punctured secret key,
+per key. As we will see, together with puncture invariance and consistency, find$-
+1cpa turns out to be suﬃciently strong to achieve full security in the applications
+we are interested in.
+Definition 7 (PKW confidentiality (find$-cpa, find$-rcpa, find$-1cpa)).
+Let PKW be a puncturable key-wrapping scheme. We deﬁne the advantage of an
+                                              X X ∈ {find$-cpa,
+adversary A against the forward indistinguishability               find$-rcpa,
+                                                                        
+find$-1cpa} of PKW as AdvX     PKW (A) =  2  Pr G     (A) ⇒ true  − 12 , where
+                                                   PKW
+GXPKW (A) is deﬁned in Fig. 3.
+
+
+Integrity. In addition to the conﬁdentiality notions we also deﬁne (multi-key)
+integrity of ciphertexts (int-ctxt) for PKW schemes as shown in Fig. 4. Here, the
+adversary is given oracle access to wrapping (Wrap), unwrapping (Unwrap),
+and puncturing (Punc). Its goal is to forge a ciphertext (together with a tag and
+a header) that was not output by Wrap, or for which the tag was punctured
+on via Punc, and that unwraps to something other than the error symbol ⊥.
+                              Puncturable Key Wrapping and Its Applications        665
+
+Note that we particularly treat ciphertexts under punctured tags as valid forgery
+attempts, even if previously output by Wrap. This ensures that after punctur-
+ing on a tag, no ciphertext with that tag will be accepted any more, which is
+sometimes referred to as replay protection.
+
+Definition 8 (PKW integrity (int-ctxt)). Let PKW be a puncturable key-
+wrapping scheme. We deﬁne the advantage of an adversary          A against the
+                                                         int-ctxt          
+integrity of ciphertexts of PKW as Advint-ctxt
+                                      PKW      (A) = Pr  G PKW (A) ⇒ true ,
+where Gint-ctxt
+         PKW (A) is deﬁned in Fig. 4.
+
+    Notably, in the integrity setting, forging a valid ciphertext becomes trivial if
+one would allow the adversary to compromise the secret key. Forward security
+hence seems to only make sense in scenarios where two copies of the key are
+available simultaneously, one “more punctured” than the other. The challenge
+then would be to forge a ciphertext on a punctured tag T using access to the
+compromised, more punctured key, such that the ciphertext unwraps under the
+less punctured key (which has not been punctured on T). This could be inter-
+esting, e.g., in a setting where punctured keys are distributed across servers. We
+leave extending puncturing to the distributed setting as future work.
+
+Relations Between PKW Notions. We brieﬂy explain how the PKW conﬁdential-
+ity notions are related. See Fig. 1 for an overview of all security notions and their
+relations, and the full version [5] for details and proofs. Beginning from strong
+to weak: the trivial implications (dotted arrows) arise directly from restricting
+the adversary. As an example, find$-rcpa implies find$-cpa because an adversary
+against the find$-rcpa security can simply ignore the Wrap-oracle.
+    In the opposite direction the relations are more complex. Generally, find$-
+1cpa does not imply find$-cpa. Showing the separation is straightforward: Mod-
+ify any find$-1cpa secure scheme so that Wrap outputs a ﬁxed string when
+receiving an already-punctured tag as input. This makes challenge wraps on
+punctured tags—which are available in the find$-cpa game, but not in find$-
+1cpa—easily distinguishable. In contrast, for the special case of a PKW scheme
+that is puncture invariant and consistent, and additionally for which attempting
+to wrap using a punctured tag always results in ⊥ (i.e., Wrap(sk \T̄ , T, ·, ·) = ⊥
+if T ∈ T̄ ⊆ PKW.T )4 , find$-1cpa implies find$-cpa via a hybrid argument.
+    Lastly, assuming a (forward) secure source of pseudorandomness, such as a
+fpr-ro$ secure PPRF, find$-rcpa is strictly stronger than find$-cpa. The separa-
+tion relies on the fact that in the find$-cpa game, an adversary must puncture
+on all tags which have been used for wrapping before compromising the secret
+key; a restriction which is not imposed on tags queried to oracle Wrap in the
+find$-rcpa game. This can be used to construct a scheme which leaks a copy
+of the original, unpunctured secret key when punctured only once on a hidden,
+special tag T̂, which can only be learned by wrapping under a diﬀerent, ﬁxed
+and publicly known tag T0 . Tag T̂ is accessible to an adversary in the find$-
+4
+    The last assumption is necessary for the reduction to simulate a Ro$-Wrap challenge
+    query on an already punctured tag in the find$-cpa game.
+666     M. Backendal et al.
+
+
+
+
+Fig. 5. The PKW[PPRF, AEAD] instantiation of a puncturable key-wrapping scheme
+based on a puncturable pseudorandom function PPRF and a nonce-based AEAD
+scheme AEAD (with N0 a ﬁxed nonce in the nonce space of AEAD).
+
+
+rcpa game via oracle Wrap, but not to a find$-cpa adversary. The latter can
+learn T̂ only through a Ro$-Wrap call on T0 , forcing it to also puncture on T0
+and thereby destroying the key copy.
+
+
+3.2   Instantiating PKW from PPRF and AEAD
+
+Next, we give a generic construction of a PKW scheme, formalized in Fig. 5.
+The construction uses an authenticated encryption scheme with associated
+data AEAD to encrypt (wrap) keys, using a new AEAD key together with a
+ﬁxed nonce N0 for each key-wrap. The keys of AEAD are generated by a pseudo-
+random function PPRF on input the wrap tag, the key of which is the secret key
+of the PKW scheme. This allows AEAD keys to be “forgotten” via puncturing
+the PPRF key, thereby rendering the key-wrap ciphertexts unrecoverable. The
+construction is inspired by, and re-captures, the generic construction of a “0-RTT
+session resumption protocol” by Aviram, Gellert, and Jager [2], with the diﬀer-
+ence that we use a nonce-based AEAD scheme, following practically deployed
+schemes like AES-GCM or ChaCha20-Poly1305, rather than a probabilistic one.
+    The only technical requirement for our construction is that the range of PPRF
+matches the key space of AEAD. The key space of the resulting PKW scheme is
+the key space of PPRF, the tag space the PPRF domain, the header space the
+associated data space of AEAD, and the wrap-key space the message space of
+AEAD. The ciphertext-length function cl for PKW is that of AEAD.
+    Our construction PKW[PPRF, AEAD] achieves puncture invariance and con-
+sistency (given PPRF is puncture invariant), all levels of forward indistinguisha-
+bility (find$-cpa, find$-rcpa, and find$-1cpa) given AEAD ind$-cpa security and
+the corresponding strength (fpr-ro$, fpr-rro$, resp. fpr-1ro$) of the underlying
+PPRF security, as well as integrity of ciphertexts (given PPRF fpr-ro$ security
+and AEAD int-ctxt security). For space reasons, we only give security statements
+for find$-cpa forward indistinguishability and integrity here, deferring the details
+of the other results to the full version [5].
+                            Puncturable Key Wrapping and Its Applications        667
+
+Theorem 9 (PKW[PPRF, AEAD] is find$-cpa secure). Let PKW[PPRF, AEAD]
+be the PKW scheme in Fig. 5. For every adversary A against the find$-cpa-
+security of PKW[PPRF, AEAD] making at most qn , qro$ , qcorr and qp queries
+to oracles New, Ro$-Wrap, Corr and Punc, respectively, there exists adver-
+saries Bpprf and Baead running in approximately the same time as A such that
+
+      Advfind$-cpa                   fpr-ro$            ind$-cpa
+         PKW[PPRF,AEAD] (A) ≤ 2 · AdvPPRF (Bpprf ) + AdvAEAD     (Baead ).
+
+
+Adversary Bpprf makes at most qn , qro$ , qcorr , and qp queries to oracles New,
+Ro$-Eval, Corr, resp. Punc. Adversary Baead makes at most qro$ queries to
+oracles New and Ro$.
+
+Proof. We ﬁrst leverage the fpr-ro$ security of PPRF to replace the AEAD keys
+by random ones, then in a second step apply ind$-cpa security of AEAD to
+argue that wrapped PKW[PPRF, AEAD] ciphertexts are indistinguishable from
+random. The ﬁrst step consists of a game hop from the original find$-cpa game,
+abbreviated G0 , to a game G1 which replaces the outputs of PPRF by random
+AEAD keys in the implementation of oracle Ro$-Wrap. We bound the diﬀer-
+ence |Pr [ G0 ] − Pr [ G1 ]| by the distinguishing advantage of an adversary Bpprf
+against the fpr-ro$ security of PPRF (cf. Deﬁnition 3).
+    Adversary Bpprf draws a random bit b and acts as the challenger in game
+G0 . When b = 1 adversary Bpprf simulates the “real world” in the PKW game,
+wrapping the keys output by adversary A. When b = 0, adversary Bpprf simulates
+the “random world” and returns random strings in the ciphertext space of the
+AEAD scheme in response to challenge queries from A. Finally, when adversary
+A halts and outputs bit b∗A , adversary Bpprf returns 1 if b∗A = b and 0 otherwise.
+    Let b denote the random bit drawn by the challenger in the fpr-ro$
+game. When b = 1, adversary Bpprf simulates game G0 for A. When b =
+0, the simulation corresponds to game G1 . This gives Advfpr-ro$     PPRF (Bpprf ) =
+|Pr [ G0 ] − Pr [ G1 ]| .
+    It remains to bound Pr [ G1 (A) ]. A straightforward reduction
+                                                                      to the multi-
+key ind$-cpa security of AEAD gives Pr Gind$-cpa
+                                              AEAD (Baead ) = Pr [ G1 (A) ] for an
+adversary Baead which simulates game G1 for adversary A. Adversary Baead acts
+as the challenger in the game, except for when adversary A makes a query to
+oracle Ro$-Wrap. To respond to such a query Ro$-Wrap(j, T, H , K), Baead
+ﬁrst queries oracle New to initiate a new AEAD key. Additionally it increments
+an internal key counter i by one. It then issues a (single) query Ro$(i, N0 , H , K),
+requesting the challenge to be under the new key. The assumption that adversary
+A is tag-respecting ensures that this is a sound simulation.                       
+
+   Note that for all our forward indistinguishability results, one-time multi-user
+AEAD security suﬃces, since the uniqueness of tags means that each AEAD
+encryption is performed under a new key. If we wanted to allow tag-reuse to
+enable batch puncturing (cf. Footnote 3), our PKW[PPRF, AEAD] scheme would
+need to be instantiated with a misuse-resistant AEAD scheme [47] to achieve
+668    M. Backendal et al.
+
+find$-cpa security. Interestingly, this straightforward modiﬁcation is insuﬃcient
+for find$-rcpa security: the reuse of tags across real and challenge wrap queries
+creates a key commitment problem which breaks the reduction. This could poten-
+tially be addressed in an idealized model, cf. [35], but we leave this to future
+work.
+
+Theorem 10 (PKW[PPRF, AEAD]               is      int-ctxt      secure).
+Let PKW[PPRF, AEAD] be the PKW scheme in Fig. 5. For every adversary A
+against the int-ctxt-security of PKW[PPRF, AEAD] (Def. 8) making at most qw ,
+qu , qp and qn to oracles Wrap, Unwrap, Punc and New, respectively, there
+exists adversaries Baead and Bpprf running in approximately the same time as A
+such that
+                                   fpr-ro$
+           PKW[PPRF,AEAD] (A) ≤ AdvPPRF (Bpprf ) + AdvAEAD (Baead ).
+        Advint-ctxt                                   int-ctxt
+
+
+
+
+Adversary Bpprf makes at most qw +qu , qp , and qn queries to oracles Ro$-Eval,
+Punc, resp. New. Adversary Baead makes at most qw + qu , qw , and qu queries
+to oracles New, Enc, resp. Dec.
+
+Proof. We ﬁrst apply the fpr-ro$ security of PPRF to replace all AEAD keys
+by (consistent) random strings, denoting the original game as G0 and the mod-
+iﬁed one as G1 . Somewhat similarly to the ﬁrst step in the proof of Theo-
+rem 9, a reduction Bpprf can bound the introduced diﬀerence as |Pr [ G0 (A) ] −
+Pr [ G1 (A) ] | = Advfpr-ro$
+                      PPRF (Bpprf ). Here, Bpprf uses its challenge oracle Ro$-Eval
+to request AEAD keys upon wrapping and unwrapping, and directly relays New
+and Punc query from A to its own corresponding oracles. When A halts, Bpprf
+checks and outputs 1 iﬀ A produced a valid forgery; this yields the ﬁrst bound.
+    The second part of the proof now leverages the independent random AEAD
+keys to reduce a forgery of A in G1 to an AEAD multi-key integrity forgery
+via the following adversary Baead . Adversary Baead simulates G1 using its oracles
+Enc and Dec to wrap, resp. unwrap. Each time A makes a wrap or unwrap
+query under a new pair (i, T), Baead employs a new key index j in the int-ctxt
+game which it tracks via some table T[i, T] = j. To track puncturing on (i, T),
+Baead sets T[i, T] = ⊥ and responds with ⊥ to any subsequent Wrap/Unwrap
+calls on (i, T). This way, Baead perfectly simulates game G1 for A. Additionally,
+Baead wins game Gint-ctxt
+                     AEAD    precisely when adversary A submits a valid forgery
+in G1 , as the latter means A unwraps a not previously output ciphertext under
+a non-punctured key (as otherwise that key was set to T[i, T] = ⊥, yielding ⊥
+upon unwrapping), which translates to an AEAD forgery in Baead ’s Dec call.
+                                           AEAD (Baead ) ≥ Pr [ G1 (A) ⇒ true ]. 
+This completes the bound, as now Advint-ctxt
+
+
+4     TLS Ticketing
+We now turn our attention to applications and begin with the Transport Layer
+Security (TLS) protocol. We show how the ticketing approach taken in its
+                            Puncturable Key Wrapping and Its Applications       669
+
+resumption handshake protocol can be instantiated with a PKW scheme, increas-
+ing forward security of resumed sessions. A TLS connection between clients and
+servers begins with the establishment of a shared symmetric key through a so
+called handshake. For repeated connections, TLS oﬀers a resumption handshake
+mode with better performance, which bootstraps security from a pre-shared key
+(PSK) established in a prior full handshake.
+    In order to enable a resumption handshake, the so-called “resumption master
+secret” RMS is derived in a TLS 1.3 handshake and then used to derive (usually
+multiple) pre-shared keys for later resumptions. For each such pre-shared key,
+the TLS 1.3 server sends the client a unique nonce NT , and both derive the pre-
+shared key as PSK ← HKDF.Expand(RMS, "tls13 resumption"NT ) using the
+HKDF key derivation function [38]. The client will store all PSKs established,
+but the server may outsource this storage to the client, e.g., by encrypting PSK
+under a long-term symmetric key, the so-called Session Ticket Encryption Key
+(STEK), and sending the resulting ciphertext (as the PSK identiﬁer) to the
+client. This process of outsourcing the server-side resumption state to the client
+is commonly referred to as ticketing [49], and the identiﬁer hence called a ticket.
+    One issue with TLS ticketing is that the tickets are generally not forward
+secret: if an attacker compromises the STEK, it will be able to recover the PSKs
+encrypted in prior resumption handshakes, thereby compromising the security
+of the concerned sessions. While TLS 1.3 allows for ephemeral Diﬃe–Hellman
+secrets to be mixed into the key derivation, the so-called “early” or “zero round-
+trip time” (0-RTT) data that a client can send immediately does not enjoy this
+protection, and hence would be exposed if the PSK were to be compromised.
+    Aviram, Gellert, and Jager (AGJ) [2] recently proposed an approach to
+achieve forward-secure session ticketing, giving forward security even for 0-RTT
+data, through what they call “session resumption protocols.” In this section we
+revisit their approach and show how their session resumption mechanism can
+be viewed more simply through the lens of puncturable key wrapping: First of
+all, their construction is mimicked by our instantiation PKW[PPRF, AEAD] of a
+PKW from a puncturable PRF and an AEAD scheme, when tags are chosen (and
+sent as part of the TLS ticket) as counters. More importantly, capturing TLS
+ticketing through the PKW scheme PKW[PPRF, AEAD] allows us to seamlessly
+switch to a more privacy-friendly variant: by choosing the tags as random val-
+ues, we make the entire TLS ticket random-looking. This avoids the potentially
+traceable counter element in the AGJ [2] ticketing proposal, thereby addressing
+privacy concerns for TLS ticketing, e.g., regarding tracking users on the web by
+passive network observers (see [53] for a broader discussion).
+    When rephrasing the AGJ integration of a session resumption protocol into
+the TLS 1.3 resumption handshake [2, Section 4.2, 4.3] as puncturable key
+wrapping, we found conceptual and technical issues in their proposed proto-
+col, the security model, and the proof. These prevent their proposal from being
+(forward-)secure as-is. We rectify this situation through the following corrections:
+
+1. Ticketing the right key. In AGJ, the TLS 1.3 resumption master secret RMS
+   is encrypted in the session ticket(s). However, RMS is used to derive multiple
+670      M. Backendal et al.
+
+
+
+
+Fig. 6. Forward-secure TLS 1.3 0-RTT pre-shared key (PSK) resumption handshake
+using a puncturable key-wrapping scheme PKW (bottom part), based on a session
+ticket generated by the server and stored by the client in a prior full handshake (upper
+part, in gray). The boxed sections can be read as the PKW-based instantiation of
+a session resumption protocol [2], with tag sampling and wrapping corresponding to
+ticket generation (TicketGen) and unwrapping and puncturing corresponding to session
+resumption (ServerRes); the PKW key sk plays the role of the STEK. (Color ﬁgure
+online)
+
+
+   pre-shared keys PSK for resumption. Ticketing RMS thus violates the goal
+   of forward security: an adversary learning RMS from one ticket can use that
+   value to decrypt prior sessions using a PSK derived from the same RMS.
+   In our protocol integration (cf. Fig. 6), we instead ticket PSK, not RMS,
+   following the TLS 1.3 RFC [45, Section 4.6.1].
+2. Accurately modeling tickets and corruption. The security model in AGJ does
+   not reﬂect the ticketing mechanism of a key exchange protocol in how pre-
+   shared secrets are sampled, registered with parties, and possibly corrupted.
+   This leads to their model, strictly speaking, being unable to capture the
+   ticketing mechanism of TLS resumption. 5 Only allowing server-side corrup-
+   tions, their model also fails to capture that an adversary might compromise
+   pre-shared secrets stored by clients. In our security model, we integrate the
+   protocol’s ticketing mechanism and allow the adversary to corrupt both the
+   ticketing mechanism keys of servers, as well as stored secrets of clients.
+3. Rectifying proof steps. The security proof for the protocol integration of
+   AGJ [2, Theorem 4] only uses part of the power of their session resumption
+5
+    E.g., when setting up new pre-shared keys, their model takes the identiﬁer psid of
+    the key as an adversary-provided input, while psid in fact corresponds to the ticket
+    (honestly) output by the protocol’s ticketing mechanism. This means that their model
+    is actually unable to capture how tickets are generated by (honest) servers.
+                           Puncturable Key Wrapping and Its Applications       671
+
+   primitive (i.e., a single challenge where their primitive provides many), and
+   also misses some preliminary steps (esp. the necessity of puncture invariance
+   and consistency, which our PKW formalism brings to light).
+   In our proof, we add these missing steps and show that reducing to the weaker
+   one-time PKW security suﬃces for our integration.
+4. Making underlying assumptions precise. The AGJ proof makes two undeﬁned
+   assumptions on the underlying session resumption resp. PPRF scheme. For-
+   mally, this leads to an issue with the security proof of their construction,
+   which in turn enables a theoretical violation of the formal integrity claims on
+   their protocol.
+   Through our formalism for puncturable key wrapping and PPRFs, we make
+   the necessary assumptions (puncture invariance for PKW, resp. demanding ⊥
+   output after puncturing for PPRFs) visible and explicit.
+Overall, our exposition stays close to the approach by AGJ, focusing on the nec-
+essary corrections. We see this not only as an illustration that puncturable key
+wrapping is readily applicable to achieve forward-secure 0-RTT session resump-
+tion, but also that this conceptual framework helps to avoid errors when integrat-
+ing puncturing techniques into more complex applications. For space reasons, we
+defer the technical details of our integration of PKW-based ticketing into TLS
+as well as the accompanying revised security model, proof, and discussion of
+assumptions to the full version [5].
+
+5     Protected File Storage
+We now turn our focus to our second application, ﬁle storage, and show how
+a PKW scheme can be used to provide (forward) security for remotely stored
+sensitive data. To this end, we design a protected ﬁle storage (PFS) system, which
+provides an interface for local encryption, decryption, and secure ﬁle shredding to
+a privacy-concerned user. The system is inspired by the internals of existing cloud
+storage services, but the ﬁnal primitive is oblivious to the actual relationship
+between data owner and storage provider: in a PFS system, all trust lies with
+the holder of the secret key. This means that our system can cater both to users
+who wish to maintain control over the security of their data while oﬄoading
+storage, and to storage providers who perform data encryption as a service.
+    The PFS interface is aimed at the former case, and hence hides internals
+of the system such as the key hierarchy to minimize the risk of involuntary
+misuse by an end user. However, it is still designed to support commonplace
+attributes of cloud storage systems, such as functionality for key rotation, as
+well as additionally providing ﬁne-grained forward security for deleted ﬁles. This
+makes our approach conformable for use also by cloud service providers who wish
+to enhance the security guarantees in their existing systems.
+
+5.1   PFS Syntax
+We envision a PFS system to be utilized by a user who holds a set of (plaintext)
+ﬁles that they wish to protect and outsource the storage of. The user generates
+672      M. Backendal et al.
+
+a local secret key sk via the setup algorithm Setup(). They can then encrypt
+and decrypt ﬁles via algorithms EncFile and DecFile, where encrypted ﬁles are
+associated with an identiﬁer id, a header h, and a ciphertext C, of which the user
+stores h and C under the “ﬁlename” id at the storage service. (The user may
+keep a local look-up table mapping human-readable ﬁlenames to identiﬁers id,
+or decide to oﬄoad this table as yet another protected ﬁle to the storage service,
+too. In the latter case, the user only needs to store the identiﬁer of the mapping
+ﬁle.) To shred a ﬁle, it suﬃces to locally run the algorithm ShredFile(sk, id) on
+the ﬁle identiﬁer to be shredded. This will ensure that the corresponding ﬁle is
+irrecoverable (forward secure) from this point on; remote deletion at the service
+provider is not required to ensure its forward security. Finally, a user may rotate
+its secret key (e.g., for regulatory purposes or to refresh the key once its usage
+limit has been reached), which is done through calling a RotKey algorithm, taking
+the current list of ﬁle identiﬁers and headers as input and updating them with
+new headers to be replaced at the storage provider.
+Definition 11 (PFS scheme). A protected ﬁle storage scheme PFS = (Setup,
+EncFile, DecFile, ShredFile, RotKey) is a 5-tuple of algorithms with four associated
+sets; the secret key space SK, the ﬁle space F, the ﬁle identiﬁer space I, and the
+header space H. Associated to the PFS is a ciphertext-length function cl : N → N.
+– Via sk ←$ Setup(), the probabilistic setup algorithm Setup, taking no input,
+  produces a secret key sk ∈ SK.
+– Via (id, h, C)/⊥ ←$ EncFile(sk, F), the randomized ﬁle encryption algorithm
+  EncFile on input the secret key sk ∈ SK and a plaintext ﬁle F ∈ F produces
+  a ﬁle identiﬁer id ∈ I, a header h ∈ H and a ciphertext C ∈ {0, 1}cl(|F|) or,
+  to indicate failure, ⊥.
+– Via F/⊥ ← DecFile(sk, id, h, C), the deterministic ﬁle decryption algorithm
+  DecFile on input the key sk ∈ SK, a ﬁle header h ∈ H, and a ciphertext
+  C ∈ {0, 1}∗ returns a ﬁle plaintext F ∈ F or, to indicate failure, ⊥.
+– Via sk  ← ShredFile(sk, id), the deterministic ﬁle shredding algorithm
+  ShredFile on input the secret key sk ∈ SK and a ﬁle identiﬁer id ∈ I returns
+  the updated secret key sk  ∈ SK.
+– Via (sk  , (h1 , . . . , h ))/(sk  , ⊥) ←$ RotKey(sk, ((id 1 , h1 ), . . . , (id  , h ))), the
+  randomized key-rotation algorithm RotKey on input the secret key sk ∈ SK
+  and a list of ﬁle identiﬁer-header pairs (id 1 , h1 ), . . . , (id  , h ) ∈ (I × H)∗
+  returns the potentially updated secret key sk  ∈ SK and a sequence of updated
+  headers (h1 , . . . , h ) ∈ H∗ or, to indicate failure, ⊥.
+
+5.2   Confidentiality and Integrity of PFS
+A protected ﬁle storage scheme should provide conﬁdentiality of the stored ﬁles,
+including their metadata (ﬁle identiﬁers and headers), as well as forward secu-
+rity when ﬁles have been shredded. Additionally, key rotation should allow the
+scheme to recover from corruption, ensuring security of newly encrypted ﬁles.
+    We capture this form of conﬁdentiality through the notion of forward indis-
+tinguishability from random bits under real and chosen-plaintext attack (find$-
+                              Puncturable Key Wrapping and Its Applications          673
+
+
+
+
+Fig. 7. Conﬁdentiality and forward security (find$-rcpa) game for a protected ﬁle stor-
+age scheme PFS. Grey code prevents trivial attacks. Lists R and Q keep track of ﬁle
+identiﬁers and headers currently in the system for the sake of key rotation. (Color ﬁgure
+online)
+
+
+rcpa). In the find$-rcpa security game, given in Fig. 7, the adversary is asked
+to distinguish real from random outputs of a challenge real or $ encryption
+oracle Ro$-Enc. We emphasize that indistinguishability here encompasses both
+the ﬁle ciphertext and metadata (i.e., identiﬁer and header), encoding a strong
+form of privacy. The game further allows the adversary to shred ﬁles (via the ora-
+cle Shred) and to rotate keys (via RotKey), leading to an update of the headers
+of all non-shredded ﬁles. We encode forward security via a Corr oracle, through
+which the adversary may ultimately learn the user’s current secret key, provided
+that it shredded all challenge ﬁles (to prevent trivial distinguishing attacks) and
+does not make further challenge queries on that key. Furthermore, we allow new
+challenge queries after a successful key rotation, which captures security being
+regained after key rotation in which the adversary remained passive, a form
+of post-compromise security [21]. In order to capture potential leakage from
+unshredded ﬁles in the system which a real-world adversary would gain access
+to when corrupting a user’s secret key, the game additionally includes a real
+674    M. Backendal et al.
+
+
+
+
+Fig. 8. Integrity of ciphertexts game for a protected ﬁle storage scheme PFS. Grey
+code prevents trivial attacks. (Color ﬁgure online)
+
+
+encryption oracle Enc, which provides the adversary with honest encryptions of
+plaintexts of its choice that do not need to be shredded prior to corruption.
+Definition 12 (PFS confidentiality (find$-rcpa)). Let PFS be a protected
+ﬁle storage scheme and Gfind$-rcpa
+                             PFS         be the game deﬁned in Fig. 7. We deﬁne
+the advantage of an adversary
+                                  A   against  the find$-rcpa
+                                                             security of PFS as
+     find$-rcpa              find$-rcpa                1
+AdvPFS          (A) = 2 Pr GPFS         (A) ⇒ true − 2 .
+
+    We also deﬁne integrity (of ciphertexts) for a PFS scheme, via the game
+in Fig. 8. The adversary’s goal here is to come up with a ﬁle tuple (id, h, C)
+that was not output by the encryption oracle Enc, or has been shredded (using
+oracle Shred), yet successfully decrypts (in the decryption oracle Dec). The
+game further provides access to a key rotation oracle RotKey; in contrast to the
+find$-rcpa game, this is strengthened to take adversarially-chosen ﬁle identiﬁers
+and headers as input. This captures that a malicious storage service might inject
+forged identiﬁers and headers into a user’s storage or omit ﬁles from key rotation.
+Definition 13 (PFS integrity (int-ctxt)). Let PFS be a protected ﬁle storage
+scheme and Gint-ctxt
+                PFS  be the game deﬁned in Fig. 8. We deﬁne the advantage
+of an adversary A against
+                          the int-ctxt security of PFS as Advint-ctxt
+                                                               PFS     (A) =
+Pr GPFS (A) ⇒ true .
+       int-ctxt
+
+
+
+5.3   Instantiating PFS from PKW and AEAD
+We now construct a generic PFS scheme PFS[PKW, AEAD] from a puncturable
+key-wrapping scheme PKW, which will handle the key management, and an
+                            Puncturable Key Wrapping and Its Applications         675
+
+authenticated encryption scheme with associated data AEAD, handling the
+actual ﬁle encryption. The construction, formalized in Fig. 9, works as follows.
+
+   Setup generates a PKW key sk, which—for reference to cloud storage and
+          its key-wrapping functionality—we refer to as the key encryption key
+          (KEK).
+  EncFile ﬁrst samples an AEAD “data encryption key” (DEK) and a ﬁle identi-
+          ﬁer id at random, and wraps DEK under the KEK into a ﬁle header h,
+          using id as tag. 6 It then AEAD-encrypts the ﬁle plaintext under DEK
+          and a random 7 nonce N into a ciphertext C; N C constitutes the PFS
+          ﬁle ciphertext.
+ DecFile inverts ﬁle encryption by ﬁrst unwrapping the DEK from the header
+          and then using it to decrypt the ﬁle ciphertext.
+ShredFile punctures the KEK sk on a ﬁle identiﬁer id, using the PKW punc-
+          turing algorithm. This eﬀectively prevents future unwrapping of the
+          DEK wrapped with tag id, and hence ﬁle decryptions of ﬁles with this
+          identiﬁer.
+ RotKey ﬁrst unwraps the DEKs in all headers it is handed, then samples a
+          fresh KEK to re-wrap them. The PKW tags are re-used in this process,
+          ensuring that encrypted ﬁles keep their identiﬁers across key rotations.
+
+   For PFS[PKW, AEAD], we establish conﬁdentiality in Theorems 14 and 15
+(below) and integrity (in the full version [5]). Notably, our two conﬁdentiality
+results follow diﬀerent paths: Theorem 14 employs weak one-time (find$-1cpa)
+PKW security in a hybrid together with puncture invariance and consistency.
+Theorem 15 in contrast shows our construction achieves the same goal in a tight
+manner if the underlying PKW scheme meets the stronger find$-rcpa notion.
+While the latter notion is currently only known to be achievable from strong
+(fpr-rro$) PPRF security, the route of Theorem 15 may still be interesting as it
+does not require puncture invariance and consistency, properties which we expect
+schemes with non-perfect correctness (e.g., employing Bloom ﬁlters), would not
+achieve. We only give one proof sketch here and provide the full proofs in [5].
+
+Theorem 14 (PFS[PKW, AEAD] is find$-rcpa secure, via PKW find$-1cpa
+). Let PFS[PKW, AEAD] be the PFS construction in Fig. 9 with ﬁle identiﬁer
+space I = {0, 1}t . If PKW is puncture invariant and consistent (Deﬁnitions 5
+and 6), then for every adversary A against the find$-rcpa security (Deﬁni-
+tion 12) of PFS[PKW, AEAD] making at most qro$ , qe , resp. m − 1 queries in
+total to its oracles Ro$-Enc, Enc, and RotKey, and at most qs queries to ora-
+cle Shred between each query to the key rotation oracle RotKey, there exists
+adversaries Bpkw and Baead running in approximately the same time as A such
+6
+  Our construction leaves the PKW header empty. In practice, this ﬁeld may be used
+  to authenticate control data of the DEK, such as expiration date or permitted usage.
+7
+  Our construction only uses a single AEAD nonce N per any one data encryption
+  key DEK, which would allow using a ﬁxed nonce. We still sample a random nonce
+  to enable ﬁle updates/re-encryption as a potential extension to our construction.
+676     M. Backendal et al.
+
+
+
+
+Fig. 9. Construction of a protected ﬁle storage scheme PFS[PKW, AEAD] from a punc-
+turable key-wrapping scheme PKW and an AEAD scheme AEAD. The PKW scheme
+has wrap-key space {0, 1}k and tag space {0, 1}t . The AEAD scheme has key space
+{0, 1}k and nonce space {0, 1}n . Hence, for the resulting PFS scheme, I = {0, 1}t ,
+H = {0, 1}PKW.cl(k) , and PFS.cl(|F|) = n + AEAD.cl(|F|).
+
+                                    
+                                      (2qs +qe +qro$ −1)
+that Advfind$-rcpa      (A) ≤ 2qro$           2t         +m·Advfind$-1cpa
+                                                               PKW        (Bpkw )+m·
+                   
+          PFS[PKW,AEAD]
+     ind$-cpa
+AdvAEAD (Baead ) . Adversary Bpkw makes at most m queries to oracle New-
+Ro$-Wrap. Adversary Baead makes one query each to its oracles New and Ro$.
+
+Proof idea. The proof proceeds by a series of six game hops,   starting with game
+G0 = Gfind$-rcpa                                           − 1
+        PFS[PKW,AEAD] . Let Adv i (A) := 2   Pr [ G i (A) ]   2 for i ∈ {0, . . . , 6}. By
+key phase we denote the period between two consecutive key rotation queries.
+G0 → G1 : We begin by excluding, via a bad event [8], that the (real- or
+ideal-world) challenge ﬁle identiﬁer coincides with one already shredded in the
+current key phase, since the output of wrapping with such an identiﬁer as tag
+is undeﬁned and hence possibly distinguishable from the ideal-world behavior.
+The probability of this happening is upper-bounded by 2qro$ · q2st .
+G1 → G2 : We reduce the qro$ Ro$-Enc challenge queries to a single one via a
+hybrid argument, yielding an adversary A making a single query to Ro$-Enc
+and at most qe + qro$ − 1 queries to Enc, such that Adv1 (A) = qro$ · Adv2 (A ).
+G2 → G3 : Next, we exclude that PKW tags used for the (at most qe + qro$ − 1)
+real encryption queries prior to the challenge query collide with the (single)
+challenge tag, a bad event occurring with probability at most qe +q2ro$  t
+                                                                           −1
+                                                                                .
+G3 → G4 : The challenger now guesses in which of the at most m key phases the
+challenge encryption occurs; silencing the output otherwise loses a factor of m.
+                              Puncturable Key Wrapping and Its Applications            677
+
+G4 → G5 : We can now apply the find$-1cpa security of PKW through a reduc-
+tion Bpkw to replace the header in the challenge encryption by a random string.
+This step requires PKW’s puncture invariance and consistency to reorder the
+challenge PKW wrap in the reduction; the latter makes at most m queries to
+oracle New-Ro$-Wrap and yields |Pr [ G4 ] − Pr [ G5 ]| ≤ Advfind$-1cpa
+                                                                PKW    (Bpkw ).
+G5 → G6 : Finally, we replace the challenge ﬁle ciphertext with a random string
+via a reduction Baead to the AEAD scheme’s ind$-cpa security, which yields
+|Pr [ G5 ] − Pr [ G6 ]| ≤ Advind$-cpa
+                             AEAD (Baead ). After this step, Adv6 (A) = 0.    
+
+Theorem 15. (PFS[PKW, AEAD] is find$-rcpa secure, via PKW find$-rcpa
+). Let PFS[PKW, AEAD] be the PFS construction in Fig. 9 with ﬁle identiﬁer
+space I = {0, 1}t . For every adversary A against the find$-rcpa security (Deﬁ-
+nition 12) of PFS[PKW, AEAD] making at most qro$ , qe , qcorr , resp. qrk queries
+in total to its oracles Ro$-Enc, Enc, Corr and RotKey, and at most qs
+queries to oracle Shred between each query to oracle RotKey, there exists
+adversaries Bpkw and Baead running  in approximately the same time as A such
+                                                            2
+                                          2qro$ qs
+that Advfind$-rcpa
+            PFS[PKW,AEAD] (A) ≤ 2 ·         2t     + (qe +q ro$ )
+                                                         2t+1     + Advfind$-rcpa
+                                                                       PKW        (Bpkw ) +
+                     
+      ind$-cpa
+AdvAEAD (Baead ) . Adversary Bpkw makes at most qrk + 1, qro$ (qrk + 1),
+qe (qrk + 1), qcorr and qrk · qs queries to oracles New, Ro$-Wrap, Wrap, Corr
+and Punc, respectively. Adversary Baead makes at most qro$ queries each to its
+oracles New and Ro$.
+
+
+6    Discussion and Future Work
+
+Our approach to PKW integrates a ﬂexible tag-based approach [31] with classical
+key wrapping [47]. We build PKW generically from PPRF and AEAD, focus-
+ing on applications which require ﬁne-grained forward security. For applications
+where batch puncturing might be useful, deploying nonce-misuse resistant AEAD
+would allow tags to be reused, achieving a stronger version of our main find$-cpa
+security notion. Interestingly, proving the (even stronger) find$-rcpa security of
+such an instantiation runs into a key commitment problem; whether resolving
+this needs idealized models (cf. [35]) or can be done in the standard model is an
+interesting open problem.
+    Our PKWs and the PPRFs they are built from are not private [11]; we could
+potentially obtain improved privacy after client compromise for our PFS system
+if they were, cf. [54]. Finding practically eﬃcient private PPRFs and building
+private PKW schemes from them is an open problem whose solution would have
+immediate applications.
+    Our work on TLS session resumption assumes the server’s key is held and
+operated on by a single server. Yet distributed server environments are common
+in TLS deployments, to reduce latency and improve scalability. It would be useful
+to extend our work to this setting. The challenge is to maintain appropriate
+synchronization amongst the punctured keys held by the servers.
+678     M. Backendal et al.
+
+   The applications we treat in this work are a sample from the set of possible
+use-cases for PKW. They already demonstrate that it is a useful abstraction.
+Examining further potential applications where puncturable key wrapping can
+be integrated, such as in symmetric key exchange [15] and DUKPT [18], would
+be interesting future work.
+
+Acknowledgments. We thank the anonymous reviewers for their helpful comments.
+Felix Günther has been supported in part by Research Fellowship grant GU 1859/1-1
+of the German Research Foundation (DFG).
+
+
+References
+ 1. Aviram, N., Gellert, K., Jager, T.: Session resumption protocols and eﬃcient for-
+    ward security for TLS 1.3 0-RTT. In: Ishai, Y., Rijmen, V. (eds.) EUROCRYPT
+    2019. LNCS, vol. 11477, pp. 117–150. Springer, Cham (2019). https://doi.org/10.
+    1007/978-3-030-17656-3 5
+ 2. Aviram, N., Gellert, K., Jager, T.: Session resumption protocols and eﬃcient for-
+    ward security for TLS 1.3 0-RTT. J. Cryptol. 34(3), 1–57 (2021). https://doi.org/
+    10.1007/s00145-021-09385-0
+ 3. Avoine, G., Canard, S., Ferreira, L.: Symmetric-key authenticated key exchange
+    (SAKE) with perfect forward secrecy. In: Jarecki, S. (ed.) CT-RSA 2020. LNCS,
+    vol. 12006, pp. 199–224. Springer, Cham (2020). https://doi.org/10.1007/978-3-
+    030-40186-3 10
+ 4. AWS: Protecting data using client-side encryption. http://docs.aws.amazon.com/
+    AmazonS3/latest/dev/UsingClientSideEncryption.html
+ 5. Backendal, M., Günther, F., Paterson, K.G.: Puncturable key wrapping and its
+    applications. Cryptology ePrint Archive, Paper 2022/1209 (2022). https://eprint.
+    iacr.org/2022/1209
+ 6. Bellare, M., Boldyreva, A., Micali, S.: Public-key encryption in a multi-user setting:
+    security proofs and improvements. In: Preneel, B. (ed.) EUROCRYPT 2000. LNCS,
+    vol. 1807, pp. 259–274. Springer, Heidelberg (2000). https://doi.org/10.1007/3-
+    540-45539-6 18
+ 7. Bellare, M., Ng, R., Tackmann, B.: Nonces are noticed: AEAD revisited. In:
+    Boldyreva, A., Micciancio, D. (eds.) CRYPTO 2019. LNCS, vol. 11692, pp. 235–
+    265. Springer, Cham (2019). https://doi.org/10.1007/978-3-030-26948-7 9
+ 8. Bellare, M., Rogaway, P.: The security of triple encryption and a frame-
+    work for code-based game-playing proofs. In: Vaudenay, S. (ed.) EUROCRYPT
+    2006. LNCS, vol. 4004, pp. 409–426. Springer, Heidelberg (2006). https://doi.org/
+    10.1007/11761679 25
+ 9. Bellare, M., Stepanovs, I., Waters, B.: New negative results on diﬀering-inputs
+    obfuscation. In: Fischlin, M., Coron, J.-S. (eds.) EUROCRYPT 2016. LNCS, vol.
+    9666, pp. 792–821. Springer, Heidelberg (2016). https://doi.org/10.1007/978-3-
+    662-49896-5 28
+10. Blaze, M.: A cryptographic ﬁle system for UNIX. In: Denning, D.E., Pyle, R.,
+    Ganesan, R., Sandhu, R.S., Ashby, V. (eds.) ACM CCS 1993, pp. 9–16. ACM
+    Press (1993). https://doi.org/10.1145/168588.168590
+11. Boneh, D., Lewi, K., Wu, D.J.: Constraining pseudorandom functions privately.
+    In: Fehr, S. (ed.) PKC 2017. LNCS, vol. 10175, pp. 494–524. Springer, Heidelberg
+    (2017). https://doi.org/10.1007/978-3-662-54388-7 17
+                             Puncturable Key Wrapping and Its Applications          679
+
+12. Boneh, D., Lipton, R.J.: A revocable backup system. In: USENIX Security 1996.
+    USENIX Association (1996)
+13. Boneh, D., Waters, B.: Constrained pseudorandom functions and their applica-
+    tions. In: Sako, K., Sarkar, P. (eds.) ASIACRYPT 2013. LNCS, vol. 8270, pp.
+    280–300. Springer, Heidelberg (2013). https://doi.org/10.1007/978-3-642-42045-
+    0 15
+14. Boxcryptor: Boxcryptor security for your cloud. https://www.boxcryptor.com/
+15. Boyd, C., Davies, G.T., de Kock, B., Gellert, K., Jager, T., Millerjord, L.: Sym-
+    metric key exchange with full forward security and robust synchronization. In:
+    Tibouchi, M., Wang, H. (eds.) ASIACRYPT 2021. LNCS, vol. 13093, pp. 681–710.
+    Springer, Cham (2021). https://doi.org/10.1007/978-3-030-92068-5 23
+16. Boyd, C., Gellert, K.: A modern view on forward security. Comput. J. 64(4), 639–
+    652 (2021). https://doi.org/10.1093/comjnl/bxaa104
+17. Boyle, E., Goldwasser, S., Ivan, I.: Functional signatures and pseudorandom func-
+    tions. In: Krawczyk, H. (ed.) PKC 2014. LNCS, vol. 8383, pp. 501–519. Springer,
+    Heidelberg (2014). https://doi.org/10.1007/978-3-642-54631-0 29
+18. Brier, E., Peyrin, T.: A forward-secure symmetric-key derivation protocol. In: Abe,
+    M. (ed.) ASIACRYPT 2010. LNCS, vol. 6477, pp. 250–267. Springer, Heidelberg
+    (2010). https://doi.org/10.1007/978-3-642-17373-8 15
+19. Chen, W., Hoang, T., Guajardo, J., Yavuz, A.A.: Titanium: A metadata-hiding
+    ﬁle-sharing system with malicious security. In: NDSS 2022. The Internet Society
+    (2022). https://doi.org/10.14722/ndss.2022.24161
+20. Chen, W., Popa, R.A.: Metal: a metadata-hiding ﬁle-sharing system. In: NDSS
+    2020. The Internet Society (2020)
+21. Cohn-Gordon, K., Cremers, C.J.F., Garratt, L.: On post-compromise security. In:
+    Hicks, M., Köpf, B. (eds.) CSF 2016 Computer Security Foundations Symposium,
+    pp. 164–178. IEEE Computer Society Press (2016). https://doi.org/10.1109/CSF.
+    2016.19
+22. Derler, D., Jager, T., Slamanig, D., Striecks, C.: Bloom ﬁlter encryption and appli-
+    cations to eﬃcient forward-secret 0-RTT key exchange. In: Nielsen, J.B., Rijmen,
+    V. (eds.) EUROCRYPT 2018. LNCS, vol. 10822, pp. 425–455. Springer, Cham
+    (2018). https://doi.org/10.1007/978-3-319-78372-7 14
+23. Diﬃe, W., van Oorschot, P.C., Wiener, M.J.: Authentication and authenticated
+    key exchanges. Des. Codes Cryptogr. 2(2), 107–125 (1992)
+24. Dworkin, M.: Recommendation for block cipher modes of operation: methods for
+    key wrapping. NIST Special Publication SP 800–38F (2012). https://nvlpubs.nist.
+    gov/nistpubs/SpecialPublications/NIST.SP.800-38F.pdf
+25. Everspaugh, A., Paterson, K., Ristenpart, T., Scott, S.: Key rotation for authenti-
+    cated encryption. In: Katz, J., Shacham, H. (eds.) CRYPTO 2017. LNCS, vol.
+    10403, pp. 98–129. Springer, Cham (2017). https://doi.org/10.1007/978-3-319-
+    63697-9 4
+26. Feldman, A.J., Zeller, W.P., Freedman, M.J., Felten, E.W.: Sporc: group collabo-
+    ration using untrusted cloud resources. In: OSDI 20210 (2010)
+27. Fischlin, M., Günther, F.: Multi-stage key exchange and the case of Google’s QUIC
+    protocol. In: Ahn, G.J., Yung, M., Li, N. (eds.) ACM CCS 2014, pp. 1193–1204.
+    ACM Press (2014). https://doi.org/10.1145/2660267.2660308
+28. Fuchsbauer, G., Konstantinov, M., Pietrzak, K., Rao, V.: Adaptive security of
+    constrained PRFs. In: Sarkar, P., Iwata, T. (eds.) ASIACRYPT 2014. LNCS, vol.
+    8874, pp. 82–101. Springer, Heidelberg (2014). https://doi.org/10.1007/978-3-662-
+    45608-8 5
+680     M. Backendal et al.
+
+29. Goldreich, O., Goldwasser, S., Micali, S.: How to construct random functions
+    (extended abstract). In: 25th FOCS, pp. 464–479. IEEE Computer Society Press
+    (1984). https://doi.org/10.1109/SFCS.1984.715949
+30. Google: Encryption at rest in Google Cloud. https://cloud.google.com/security/
+    encryption/default-encryption
+31. Green, M.D., Miers, I.: Forward secure asynchronous messaging from puncturable
+    encryption. In: 2015 IEEE Symposium on Security and Privacy, pp. 305–320. IEEE
+    Computer Society Press (2015). https://doi.org/10.1109/SP.2015.26
+32. Günther, C.G.: An identity-based key-exchange protocol. In: Quisquater, J.-J.,
+    Vandewalle, J. (eds.) EUROCRYPT 1989. LNCS, vol. 434, pp. 29–37. Springer,
+    Heidelberg (1990). https://doi.org/10.1007/3-540-46885-4 5
+33. Günther, F., Hale, B., Jager, T., Lauer, S.: 0-RTT key exchange with full for-
+    ward secrecy. In: Coron, J.-S., Nielsen, J.B. (eds.) EUROCRYPT 2017. LNCS,
+    vol. 10212, pp. 519–548. Springer, Cham (2017). https://doi.org/10.1007/978-3-
+    319-56617-7 18
+34. IBM: Protecting data with envelope encryption. https://cloud.ibm.com/docs/key-
+    protect?topic=key-protect-envelope-encryption
+35. Jaeger, J., Tyagi, N.: Handling adaptive compromise for practical encryption
+    schemes. In: Micciancio, D., Ristenpart, T. (eds.) CRYPTO 2020. LNCS, vol.
+    12170, pp. 3–32. Springer, Cham (2020). https://doi.org/10.1007/978-3-030-
+    56784-2 1
+36. Kiayias, A., Papadopoulos, S., Triandopoulos, N., Zacharias, T.: Delegatable pseu-
+    dorandom functions and applications. In: Sadeghi, A.R., Gligor, V.D., Yung, M.
+    (eds.) ACM CCS 2013, pp. 669–684. ACM Press (2013). https://doi.org/10.1145/
+    2508859.2516668
+37. Klooß, M., Lehmann, A., Rupp, A.: (R)CCA secure updatable encryption with
+    integrity protection. In: Ishai, Y., Rijmen, V. (eds.) EUROCRYPT 2019. LNCS,
+    vol. 11476, pp. 68–99. Springer, Cham (2019). https://doi.org/10.1007/978-3-030-
+    17653-2 3
+38. Krawczyk, H.: Cryptographic extraction and key derivation: the HKDF scheme. In:
+    Rabin, T. (ed.) CRYPTO 2010. LNCS, vol. 6223, pp. 631–648. Springer, Heidelberg
+    (2010). https://doi.org/10.1007/978-3-642-14623-7 34
+39. Lau, B., Chung, S.P., Song, C., Jang, Y., Lee, W., Boldyreva, A.: Mimesis aegis:
+    a mimicry privacy shield-a system’s approach to data privacy on public cloud. In:
+    Fu, K., Jung, J. (eds.) USENIX Security 2014, pp. 33–48. USENIX Association
+    (2014)
+40. Lehmann, A., Tackmann, B.: Updatable encryption with post-compromise security.
+    In: Nielsen, J.B., Rijmen, V. (eds.) EUROCRYPT 2018. LNCS, vol. 10822, pp.
+    685–716. Springer, Cham (2018). https://doi.org/10.1007/978-3-319-78372-7 22
+41. Mahajan, P., Setty, S., Lee, S., Clement, A., Alvisi, L., Dahlin, M., Walﬁsh, M.:
+    Depot: cloud storage with minimal trust. ACM Trans. Comput. Syst. 29(4) (2011).
+    https://doi.org/10.1145/2063509.2063512
+42. Microsoft: Azure Data Encryption at rest. https://docs.microsoft.com/en-us/
+    azure/security/fundamentals/encryption-atrest
+43. Miller, E., Long, D., Freeman, W., Reed, B.: Strong security for distributed ﬁle
+    systems. In: Conference Proceedings of the 2001 IEEE International Performance,
+    Computing, and Communications Conference, pp. 34–40 (2001). https://doi.org/
+    10.1109/IPCCC.2001.918633
+44. Nichols, S.: Dropbox: Oops, yeah, we didn’t actually delete all your ﬁles this bug
+    kept them in the cloud (2017). https://www.theregister.com/2017/01/24/dropbox
+    brings old ﬁles back from dead/
+                             Puncturable Key Wrapping and Its Applications          681
+
+45. Rescorla, E.: The Transport Layer Security (TLS) Protocol Version 1.3. RFC 8446
+    (Proposed Standard) (2018). https://www.rfc-editor.org/rfc/rfc8446.txt
+46. Rogaway, P.: Authenticated-encryption with associated-data. In: Atluri, V. (ed.)
+    ACM CCS 2002, pp. 98–107. ACM Press (2002). https://doi.org/10.1145/586110.
+    586125
+47. Rogaway, P., Shrimpton, T.: A provable-security treatment of the key-wrap prob-
+    lem. In: Vaudenay, S. (ed.) EUROCRYPT 2006. LNCS, vol. 4004, pp. 373–390.
+    Springer, Heidelberg (2006). https://doi.org/10.1007/11761679 23
+48. Sahai, A., Waters, B.: How to use indistinguishability obfuscation: deniable encryp-
+    tion, and more. In: Shmoys, D.B. (ed.) 46th ACM STOC, pp. 475–484. ACM Press
+    (2014). https://doi.org/10.1145/2591796.2591825
+49. Salowey, J., Zhou, H., Eronen, P., Tschofenig, H.: Transport Layer Security
+    (TLS) Session Resumption without Server-Side State. RFC 5077 (Proposed Stan-
+    dard) (2008). https://www.rfc-editor.org/rfc/rfc5077.txt, obsoleted by RFC 8446,
+    updated by RFC 8447
+50. Slamanig, D., Striecks, C.: Puncture ’em all: updatable encryption with no-
+    directional key updates and expiring ciphertexts. Cryptology ePrint Archive,
+    Report 2021/268 (2021). https://eprint.iacr.org/2021/268
+51. Sun, S.F., et al.: Practical non-interactive searchable encryption with forward and
+    backward privacy. In: NDSS 2021. The Internet Society (2021)
+52. Sun, S., et al.: Practical backward-secure searchable encryption from symmetric
+    puncturable encryption. In: Lie, D., Mannan, M., Backes, M., Wang, X. (eds.) ACM
+    CCS 2018, pp. 763–780. ACM Press (2018). https://doi.org/10.1145/3243734.
+    3243782
+53. Sy, E., Burkert, C., Federrath, H., Fischer, M.: Tracking users across the web via
+    TLS session resumption. In: ACSAC 2018, pp. 289–299. ACM (2018). https://doi.
+    org/10.1145/3274694.3274708
+54. Tyagi, N., Mughees, M.H., Ristenpart, T., Miers, I.: BurnBox: self-revocable
+    encryption in a world of compelled access. In: Enck, W., Felt, A.P. (eds.) USENIX
+    Security 2018, pp. 445–461. USENIX Association (2018)
+
