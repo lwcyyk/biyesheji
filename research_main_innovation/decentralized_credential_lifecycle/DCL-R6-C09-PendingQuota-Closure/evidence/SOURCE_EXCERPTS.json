@@ -1,0 +1,5572 @@
+{
+  "c09_handoff.py": [
+    {
+      "start": 18,
+      "end": 34,
+      "lines": [
+        {
+          "line": 18,
+          "text": "def classify(f):"
+        },
+        {
+          "line": 19,
+          "text": "    \"\"\"Single immutable safety predicate, also used by synthetic regression.\"\"\""
+        },
+        {
+          "line": 20,
+          "text": "    if f['closed']:return 'CLOSED'"
+        },
+        {
+          "line": 21,
+          "text": "    if not all(f[k] for k in ('binding_ok','sender_ok','version_ok','window_ok','budget_ok',"
+        },
+        {
+          "line": 22,
+          "text": "                              'receiver_ready','receiver_alive','stop_alive')):"
+        },
+        {
+          "line": 23,
+          "text": "        return 'FAILED'"
+        },
+        {
+          "line": 24,
+          "text": "    if f['witness'] is not None and f['witness']!=23:return 'FAILED'"
+        },
+        {
+          "line": 25,
+          "text": "    if f['now']>=f['expires']:return 'FAILED'"
+        },
+        {
+          "line": 26,
+          "text": "    if f['prepared'] and f['commit'] and f['durable_ack'] and f['exit_observed'] and f['witness']==23:"
+        },
+        {
+          "line": 27,
+          "text": "        return 'VERIFIED'"
+        },
+        {
+          "line": 28,
+          "text": "    return 'PENDING'"
+        },
+        {
+          "line": 29,
+          "text": ""
+        },
+        {
+          "line": 30,
+          "text": "def synthetic_initial():"
+        },
+        {
+          "line": 31,
+          "text": "    return dict(closed=False,binding_ok=True,sender_ok=True,version_ok=True,window_ok=True,"
+        },
+        {
+          "line": 32,
+          "text": "                budget_ok=True,receiver_ready=True,receiver_alive=True,stop_alive=True,"
+        },
+        {
+          "line": 33,
+          "text": "                witness=None,now=0,expires=12,prepared=False,commit=False,durable_ack=False,"
+        },
+        {
+          "line": 34,
+          "text": "                exit_observed=False)"
+        }
+      ]
+    },
+    {
+      "start": 36,
+      "end": 134,
+      "lines": [
+        {
+          "line": 36,
+          "text": "def paths(G):"
+        },
+        {
+          "line": 37,
+          "text": "    return {'state':G.ROOT/'inputs/c09_handoff.json','commit':G.ROOT/'inputs/c09_commit.json',"
+        },
+        {
+          "line": 38,
+          "text": "            'witness':G.ROOT/'inputs/c09_exit_witness.json','socket':G.ROOT/'inputs/c09_control.sock'}"
+        },
+        {
+          "line": 39,
+          "text": "@contextmanager"
+        },
+        {
+          "line": 40,
+          "text": "def lifecycle_lock(G):"
+        },
+        {
+          "line": 41,
+          "text": "    if os.geteuid()!=0:raise G.AdmissionBlocked('ROOT_LIFECYCLE_LOCK_REQUIRED')"
+        },
+        {
+          "line": 42,
+          "text": "    fd=os.open(G.ROOT/'inputs/c09_lifecycle.lock',os.O_RDWR|os.O_CREAT|os.O_NOFOLLOW,0o600)"
+        },
+        {
+          "line": 43,
+          "text": "    acquired=False;until=G.now()+2"
+        },
+        {
+          "line": 44,
+          "text": "    try:"
+        },
+        {
+          "line": 45,
+          "text": "        while not acquired:"
+        },
+        {
+          "line": 46,
+          "text": "            try:fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB);acquired=True"
+        },
+        {
+          "line": 47,
+          "text": "            except BlockingIOError:"
+        },
+        {
+          "line": 48,
+          "text": "                if G.now()>=until:raise G.AdmissionBlocked('LIFECYCLE_LOCK_TIMEOUT')"
+        },
+        {
+          "line": 49,
+          "text": "                time.sleep(.005)"
+        },
+        {
+          "line": 50,
+          "text": "        yield"
+        },
+        {
+          "line": 51,
+          "text": "    finally:"
+        },
+        {
+          "line": 52,
+          "text": "        if acquired:fcntl.flock(fd,fcntl.LOCK_UN)"
+        },
+        {
+          "line": 53,
+          "text": "        os.close(fd)"
+        },
+        {
+          "line": 54,
+          "text": "def window(G,s):"
+        },
+        {
+          "line": 55,
+          "text": "    return {'batch_id':G.ROOT.name,'boot_id':s['boot_id'],'T0':s['T0'],'deadline':s['deadline'],"
+        },
+        {
+          "line": 56,
+          "text": "            'stop_at':s['stop_at'],'execution_mode':s['execution_mode'],"
+        },
+        {
+          "line": 57,
+          "text": "            'source_manifest_sha256':G.digest(G.SOURCE.parent/'inputs/static_manifest.json'),"
+        },
+        {
+          "line": 58,
+          "text": "            'execution_lock_sha256':G.digest(G.SOURCE.parent/'inputs/execution_lock.json'),"
+        },
+        {
+          "line": 59,
+          "text": "            'contract_sha256':G.digest(G.SOURCE.parent/'inputs/c09_contract.json'),"
+        },
+        {
+          "line": 60,
+          "text": "            'authorization_sha256':G.digest(G.ROOT/'inputs/execution_authorization.json')}"
+        },
+        {
+          "line": 61,
+          "text": "def counter(G):"
+        },
+        {
+          "line": 62,
+          "text": "    p=G.OUT/'visits.bin';st=p.stat()"
+        },
+        {
+          "line": 63,
+          "text": "    intent=G.read(p.with_suffix('.bin.intent.json'))"
+        },
+        {
+          "line": 64,
+          "text": "    n=G.count()"
+        },
+        {
+          "line": 65,
+          "text": "    if intent['status']!='COMMITTED' or intent['after']!=n or intent['cap']!=G.VISIT_CAP:"
+        },
+        {
+          "line": 66,
+          "text": "        raise G.AdmissionBlocked('C09_BUDGET_NOT_HEALTHY')"
+        },
+        {
+          "line": 67,
+          "text": "    return {'used':n,'cap':G.VISIT_CAP,'device':st.st_dev,'inode':st.st_ino,'sha256':G.digest(p)}"
+        },
+        {
+          "line": 68,
+          "text": "def alive(G,ident):"
+        },
+        {
+          "line": 69,
+          "text": "    try:"
+        },
+        {
+          "line": 70,
+          "text": "        if G.identity(ident['pid'])!=ident:return False"
+        },
+        {
+          "line": 71,
+          "text": "        fd=os.pidfd_open(ident['pid'])"
+        },
+        {
+          "line": 72,
+          "text": "        try:return G.identity(ident['pid'])==ident and not select.select([fd],[],[],0)[0]"
+        },
+        {
+          "line": 73,
+          "text": "        finally:os.close(fd)"
+        },
+        {
+          "line": 74,
+          "text": "    except (OSError,KeyError):return False"
+        },
+        {
+          "line": 75,
+          "text": "def event(G,h,kind,**data):"
+        },
+        {
+          "line": 76,
+          "text": "    # Root-owned append log; state publication follows a completed log barrier."
+        },
+        {
+          "line": 77,
+          "text": "    rec={'event':kind,'handoff_id':h['id'],'revision':h['revision'],'identity':G.identity(),"
+        },
+        {
+          "line": 78,
+          "text": "         'window':h['window'],**G.stamp(),**data}"
+        },
+        {
+          "line": 79,
+          "text": "    p=G.ROOT/'inputs/root_private/c09_events.jsonl'"
+        },
+        {
+          "line": 80,
+          "text": "    fd=os.open(p,os.O_WRONLY|os.O_CREAT|os.O_APPEND|os.O_NOFOLLOW,0o600)"
+        },
+        {
+          "line": 81,
+          "text": "    try:"
+        },
+        {
+          "line": 82,
+          "text": "        os.fchown(fd,0,0);os.fchmod(fd,0o600)"
+        },
+        {
+          "line": 83,
+          "text": "        G._full(fd,(canonical(rec)+'\\n').encode());os.fsync(fd)"
+        },
+        {
+          "line": 84,
+          "text": "    finally:os.close(fd)"
+        },
+        {
+          "line": 85,
+          "text": "def publish(G,h,stage,**extra):"
+        },
+        {
+          "line": 86,
+          "text": "    G.root_checkpoint()"
+        },
+        {
+          "line": 87,
+          "text": "    h={**h,**extra,'stage':stage,'revision':h['revision']+1,'updated':G.stamp()}"
+        },
+        {
+          "line": 88,
+          "text": "    event(G,h,stage)"
+        },
+        {
+          "line": 89,
+          "text": "    G._root_write(paths(G)['state'],h)"
+        },
+        {
+          "line": 90,
+          "text": "    return h"
+        },
+        {
+          "line": 91,
+          "text": "def checked_receiver(G,h=None):"
+        },
+        {
+          "line": 92,
+          "text": "    arm=G.trusted(G.ROOT/'inputs/STOP_ARMED.json')"
+        },
+        {
+          "line": 93,
+          "text": "    ident=arm['identity']"
+        },
+        {
+          "line": 94,
+          "text": "    if h is not None and ident!=h['receiver']:raise G.AdmissionBlocked('C09_RECEIVER_IDENTITY')"
+        },
+        {
+          "line": 95,
+          "text": "    if not alive(G,ident):raise G.AdmissionBlocked('C09_RECEIVER_DEAD')"
+        },
+        {
+          "line": 96,
+          "text": "    info=G.unit_show(G.batch_unit('STOP'))"
+        },
+        {
+          "line": 97,
+          "text": "    if info.get('ActiveState')!='active' or int(info.get('MainPID','0'))!=ident['pid']:"
+        },
+        {
+          "line": 98,
+          "text": "        raise G.AdmissionBlocked('C09_STOP_SOURCE_NOT_ACTIVE')"
+        },
+        {
+          "line": 99,
+          "text": "    if info.get('ControlGroup','')=='/'+G.PARENT or info.get('ControlGroup','').startswith('/'+G.PARENT+'/'):"
+        },
+        {
+          "line": 100,
+          "text": "        raise G.AdmissionBlocked('C09_STOP_SOURCE_NOT_INDEPENDENT')"
+        },
+        {
+          "line": 101,
+          "text": "    return ident"
+        },
+        {
+          "line": 102,
+          "text": "def resources_ready(G):"
+        },
+        {
+          "line": 103,
+          "text": "    t=G.ticket('C09');info=G.unit_show(t['unit'])"
+        },
+        {
+          "line": 104,
+          "text": "    startup=G.read(G.OUT/'C09.startup.json')"
+        },
+        {
+          "line": 105,
+          "text": "    if (info.get('ActiveState')!='active' or int(info.get('MainPID','0'))!=t['main_identity']['pid'] or"
+        },
+        {
+          "line": 106,
+          "text": "        not alive(G,t['main_identity']) or not alive(G,startup['watchdog_identity'])):"
+        },
+        {
+          "line": 107,
+          "text": "        raise G.AdmissionBlocked('C09_PAYLOAD_SUPERVISION_LOST')"
+        },
+        {
+          "line": 108,
+          "text": "    parent=G.cg_snapshot(Path('/sys/fs/cgroup')/G.PARENT)"
+        },
+        {
+          "line": 109,
+          "text": "    child=G.cg_snapshot(Path('/sys/fs/cgroup')/G.PARENT/t['unit'])"
+        },
+        {
+          "line": 110,
+          "text": "    if (parent['values']['pids.max']!='4' or int(parent['values']['pids.current'])>4 or"
+        },
+        {
+          "line": 111,
+          "text": "        parent['values']['memory.max']!=str(4*G.AS_CAP) or child['values']['memory.swap.max']!='0' or"
+        },
+        {
+          "line": 112,
+          "text": "        info.get('LimitAS')!=str(G.AS_CAP) or info.get('LimitASSoft')!=str(G.AS_CAP)):"
+        },
+        {
+          "line": 113,
+          "text": "        raise G.AdmissionBlocked('C09_RESOURCE_CONTRACT')"
+        },
+        {
+          "line": 114,
+          "text": "    return {'parent':parent,'child':child,'unit':info,'watchdog':startup['watchdog_identity']}"
+        },
+        {
+          "line": 115,
+          "text": "def check_base(G,h,require_sender_live=False):"
+        },
+        {
+          "line": 116,
+          "text": "    if G.stopped():raise G.AdmissionBlocked('C09_CLOSED_OR_STOP')"
+        },
+        {
+          "line": 117,
+          "text": "    s=G.state()"
+        },
+        {
+          "line": 118,
+          "text": "    if not G.root_ipc().same_binding(h['window'],window(G,s)) or h['id']!=sha({'nonce':h['nonce'],'window':h['window'],"
+        },
+        {
+          "line": 119,
+          "text": "                                                'sender':h['sender'],'coordinator':h['coordinator']}):"
+        },
+        {
+          "line": 120,
+          "text": "        raise G.AdmissionBlocked('C09_BINDING_MISMATCH')"
+        },
+        {
+          "line": 121,
+          "text": "    if h['expected_exit']!=23 or h['case']!='C09' or h['revision']<1:"
+        },
+        {
+          "line": 122,
+          "text": "        raise G.AdmissionBlocked('C09_STATE_FORMAT')"
+        },
+        {
+          "line": 123,
+          "text": "    if G.now()>=h['observe_until']:raise G.LimitReached('C09_HANDOFF_DEADLINE')"
+        },
+        {
+          "line": 124,
+          "text": "    if s['resume_count']!=0 or s['launcher_identity']!=h['sender'] or s.get('coordinator_identity')!=h['coordinator']:"
+        },
+        {
+          "line": 125,
+          "text": "        raise G.AdmissionBlocked('C09_SENDER_WINDOW_IDENTITY')"
+        },
+        {
+          "line": 126,
+          "text": "    checked_receiver(G,h)"
+        },
+        {
+          "line": 127,
+          "text": "    if counter(G)!=h['counter']:raise G.AdmissionBlocked('C09_COUNTER_CHANGED')"
+        },
+        {
+          "line": 128,
+          "text": "    t=G.ticket('C09');marker=G.read(G.OUT/'C09.ready.json')"
+        },
+        {
+          "line": 129,
+          "text": "    if (G.digest(G.ROOT/'inputs/ticket_C09.json')!=h['ticket_sha256'] or"
+        },
+        {
+          "line": 130,
+          "text": "        G.digest(G.OUT/'C09.ready.json')!=h['ready_sha256'] or marker['case']!='C09' or"
+        },
+        {
+          "line": 131,
+          "text": "        marker['counter']!=h['counter']['used'] or marker['identity']!=t['main_identity']):"
+        },
+        {
+          "line": 132,
+          "text": "        raise G.AdmissionBlocked('C09_CASE_PROVENANCE')"
+        },
+        {
+          "line": 133,
+          "text": "    if require_sender_live and not alive(G,h['sender']):raise G.AdmissionBlocked('C09_SENDER_NOT_LIVE')"
+        },
+        {
+          "line": 134,
+          "text": "    return s"
+        }
+      ]
+    },
+    {
+      "start": 168,
+      "end": 358,
+      "lines": [
+        {
+          "line": 168,
+          "text": "def sender_prepare(G,coordinator):"
+        },
+        {
+          "line": 169,
+          "text": "    if os.geteuid()!=0 or coordinator is None:raise G.AdmissionBlocked('C09_COORDINATOR_REQUIRED')"
+        },
+        {
+          "line": 170,
+          "text": "    cfg=G.c09_contract()"
+        },
+        {
+          "line": 171,
+          "text": "    qualified_regression(G)"
+        },
+        {
+          "line": 172,
+          "text": "    with lifecycle_lock(G):"
+        },
+        {
+          "line": 173,
+          "text": "        if G.stopped():raise G.AdmissionBlocked('C09_CLOSED_ABSORBING')"
+        },
+        {
+          "line": 174,
+          "text": "        if paths(G)['state'].exists():raise G.AdmissionBlocked('C09_HANDOFF_ALREADY_EXISTS')"
+        },
+        {
+          "line": 175,
+          "text": "        s=G.state();receiver=checked_receiver(G)"
+        },
+        {
+          "line": 176,
+          "text": "        marker=G.read(G.OUT/'C09.ready.json');t=G.ticket('C09')"
+        },
+        {
+          "line": 177,
+          "text": "        if marker['identity']!=t['main_identity'] or marker['counter']!=G.count():"
+        },
+        {
+          "line": 178,
+          "text": "            raise G.AdmissionBlocked('C09_READY_MISMATCH')"
+        },
+        {
+          "line": 179,
+          "text": "        h={'schema':PROFILE,'nonce':os.urandom(16).hex(),'revision':0,'case':'C09',"
+        },
+        {
+          "line": 180,
+          "text": "           'sender':G.identity(),'coordinator':coordinator,'receiver':receiver,"
+        },
+        {
+          "line": 181,
+          "text": "           'window':window(G,s),'counter':counter(G),'expected_exit':23,"
+        },
+        {
+          "line": 182,
+          "text": "           'ticket_sha256':G.digest(G.ROOT/'inputs/ticket_C09.json'),"
+        },
+        {
+          "line": 183,
+          "text": "           'regression_sha256':G.digest(G.ROOT/'inputs/C09H_QUALIFICATION.json'),"
+        },
+        {
+          "line": 184,
+          "text": "           'ready_sha256':G.digest(G.OUT/'C09.ready.json'),'classification_count':0,"
+        },
+        {
+          "line": 185,
+          "text": "           'observe_until':min(s['T0']+300,s['stop_at'],G.now()+cfg['handoff_seconds'])}"
+        },
+        {
+          "line": 186,
+          "text": "        h['id']=sha({'nonce':h['nonce'],'window':h['window'],'sender':h['sender'],'coordinator':coordinator})"
+        },
+        {
+          "line": 187,
+          "text": "        h=publish(G,h,'HANDOFF_PREPARING')"
+        },
+        {
+          "line": 188,
+          "text": "    reply=rpc(G,{'op':'PREPARE','id':h['id']},receiver,h['observe_until'])"
+        },
+        {
+          "line": 189,
+          "text": "    with lifecycle_lock(G):"
+        },
+        {
+          "line": 190,
+          "text": "        fresh=G.trusted(paths(G)['state']);check_base(G,fresh,True)"
+        },
+        {
+          "line": 191,
+          "text": "        commit=G.trusted(paths(G)['commit'])"
+        },
+        {
+          "line": 192,
+          "text": "        if (fresh['stage']!='HANDOFF_COMMITTED' or reply.get('id')!=h['id'] or"
+        },
+        {
+          "line": 193,
+          "text": "            reply.get('commit_sha256')!=G.digest(paths(G)['commit']) or commit['handoff_id']!=h['id']):"
+        },
+        {
+          "line": 194,
+          "text": "            raise G.AdmissionBlocked('C09_DURABLE_ACK_MISSING')"
+        },
+        {
+          "line": 195,
+          "text": "        # A response from the live authenticated receiver is required after its fsync."
+        },
+        {
+          "line": 196,
+          "text": "        event(G,fresh,'SENDER_ACK_OBSERVED',commit_sha256=reply['commit_sha256'])"
+        },
+        {
+          "line": 197,
+          "text": "    return fresh"
+        },
+        {
+          "line": 198,
+          "text": ""
+        },
+        {
+          "line": 199,
+          "text": "class Receiver:"
+        },
+        {
+          "line": 200,
+          "text": "    def __init__(self,G):"
+        },
+        {
+          "line": 201,
+          "text": "        self.G=G;self.durable={};self.sock=socket.socket(socket.AF_UNIX,socket.SOCK_SEQPACKET)"
+        },
+        {
+          "line": 202,
+          "text": "        self.sock.bind(str(paths(G)['socket']));os.chmod(paths(G)['socket'],0o600)"
+        },
+        {
+          "line": 203,
+          "text": "        self.sock.listen(2);self.sock.setblocking(False)"
+        },
+        {
+          "line": 204,
+          "text": "    def close(self):self.sock.close()"
+        },
+        {
+          "line": 205,
+          "text": "    def poll(self):"
+        },
+        {
+          "line": 206,
+          "text": "        G=self.G"
+        },
+        {
+          "line": 207,
+          "text": "        G.root_checkpoint()"
+        },
+        {
+          "line": 208,
+          "text": "        try:c,_=self.sock.accept()"
+        },
+        {
+          "line": 209,
+          "text": "        except BlockingIOError:return"
+        },
+        {
+          "line": 210,
+          "text": "        c.settimeout(.05)"
+        },
+        {
+          "line": 211,
+          "text": "        try:"
+        },
+        {
+          "line": 212,
+          "text": "            pid,uid,_=peer(c)"
+        },
+        {
+          "line": 213,
+          "text": "            if uid!=0:raise G.AdmissionBlocked('C09_CONTROL_UID')"
+        },
+        {
+          "line": 214,
+          "text": "            raw=G.root_ipc().receive(G,c,min(G.state()['deadline'],G.now()+.5))"
+        },
+        {
+          "line": 215,
+          "text": "            if len(raw)>65536:raise G.AdmissionBlocked('C09_CONTROL_SIZE')"
+        },
+        {
+          "line": 216,
+          "text": "            request=json.loads(raw)"
+        },
+        {
+          "line": 217,
+          "text": "            with lifecycle_lock(G):"
+        },
+        {
+          "line": 218,
+          "text": "                if G.stopped():raise G.AdmissionBlocked('C09_CLOSED_ABSORBING')"
+        },
+        {
+          "line": 219,
+          "text": "                h=G.trusted(paths(G)['state'])"
+        },
+        {
+          "line": 220,
+          "text": "                if request.get('id')!=h['id']:raise G.AdmissionBlocked('C09_CONTROL_NONCE')"
+        },
+        {
+          "line": 221,
+          "text": "                if request.get('op')=='PREPARE':"
+        },
+        {
+          "line": 222,
+          "text": "                    if G.identity(pid)!=h['sender']:raise G.AdmissionBlocked('C09_PREPARE_PEER')"
+        },
+        {
+          "line": 223,
+          "text": "                    check_base(G,h,True)"
+        },
+        {
+          "line": 224,
+          "text": "                    if h['stage']=='HANDOFF_PREPARING':"
+        },
+        {
+          "line": 225,
+          "text": "                        resources=resources_ready(G)"
+        },
+        {
+          "line": 226,
+          "text": "                        h=publish(G,h,'HANDOFF_READY')"
+        },
+        {
+          "line": 227,
+          "text": "                        commit={'schema':PROFILE,'handoff_id':h['id'],'commit_version':1,"
+        },
+        {
+          "line": 228,
+          "text": "                                'window':h['window'],'sender':h['sender'],'coordinator':h['coordinator'],"
+        },
+        {
+          "line": 229,
+          "text": "                                'receiver':h['receiver'],'counter':h['counter'],'expected_exit':23,"
+        },
+        {
+          "line": 230,
+          "text": "                                'acknowledged_at':G.stamp(),'resources':resources}"
+        },
+        {
+          "line": 231,
+          "text": "                        G._root_write(paths(G)['commit'],commit)"
+        },
+        {
+          "line": 232,
+          "text": "                        h=publish(G,h,'HANDOFF_COMMITTED',commit_sha256=G.digest(paths(G)['commit']))"
+        },
+        {
+          "line": 233,
+          "text": "                        self.durable[h['id']]=h['commit_sha256']"
+        },
+        {
+          "line": 234,
+          "text": "                    if h['stage']!='HANDOFF_COMMITTED' or self.durable.get(h['id'])!=h['commit_sha256']:"
+        },
+        {
+          "line": 235,
+          "text": "                        raise G.AdmissionBlocked('C09_COMMIT_NOT_ACKNOWLEDGED')"
+        },
+        {
+          "line": 236,
+          "text": "                    reply={'id':h['id'],'commit_sha256':h['commit_sha256'],'receiver':G.identity()}"
+        },
+        {
+          "line": 237,
+          "text": "                elif request.get('op')=='WITNESS':"
+        },
+        {
+          "line": 238,
+          "text": "                    if G.identity(pid)!=h['coordinator']:raise G.AdmissionBlocked('C09_WITNESS_PEER')"
+        },
+        {
+          "line": 239,
+          "text": "                    w=G.trusted(paths(G)['witness'])"
+        },
+        {
+          "line": 240,
+          "text": "                    if w['handoff_id']!=h['id'] or w['sender']!=h['sender'] or w['coordinator']!=h['coordinator']:"
+        },
+        {
+          "line": 241,
+          "text": "                        raise G.AdmissionBlocked('C09_WITNESS_IDENTITY')"
+        },
+        {
+          "line": 242,
+          "text": "                    reply={'id':h['id'],'witness_observed':True}"
+        },
+        {
+          "line": 243,
+          "text": "                else:raise G.AdmissionBlocked('C09_UNKNOWN_CONTROL_OP')"
+        },
+        {
+          "line": 244,
+          "text": "            with lifecycle_lock(G):"
+        },
+        {
+          "line": 245,
+          "text": "                G.root_checkpoint()"
+        },
+        {
+          "line": 246,
+          "text": "                G.root_ipc().send_packet(G,c,canonical(reply).encode(),min(h['observe_until'],G.now()+.5))"
+        },
+        {
+          "line": 247,
+          "text": "        except BaseException as exc:"
+        },
+        {
+          "line": 248,
+          "text": "            try:c.sendall(canonical({'error':str(exc)}).encode())"
+        },
+        {
+          "line": 249,
+          "text": "            except OSError:pass"
+        },
+        {
+          "line": 250,
+          "text": "            raise"
+        },
+        {
+          "line": 251,
+          "text": "        finally:c.close()"
+        },
+        {
+          "line": 252,
+          "text": "    def observe_exit(self):"
+        },
+        {
+          "line": 253,
+          "text": "        G=self.G"
+        },
+        {
+          "line": 254,
+          "text": "        with lifecycle_lock(G):"
+        },
+        {
+          "line": 255,
+          "text": "            if G.stopped():return 'CLOSED'"
+        },
+        {
+          "line": 256,
+          "text": "            if not paths(G)['state'].exists():raise G.AdmissionBlocked('UNEXPECTED_LAUNCHER_EXIT')"
+        },
+        {
+          "line": 257,
+          "text": "            h=G.trusted(paths(G)['state'])"
+        },
+        {
+          "line": 258,
+          "text": "            if h['stage']=='HANDOFF_VERIFIED':return 'VERIFIED'"
+        },
+        {
+          "line": 259,
+          "text": "            if h['stage'] not in ('HANDOFF_COMMITTED','LAUNCHER_EXIT_OBSERVED'):"
+        },
+        {
+          "line": 260,
+          "text": "                raise G.AdmissionBlocked('C09_EXIT_BEFORE_COMMIT')"
+        },
+        {
+          "line": 261,
+          "text": "            check_base(G,h)"
+        },
+        {
+          "line": 262,
+          "text": "            if h['stage']=='HANDOFF_COMMITTED':h=publish(G,h,'LAUNCHER_EXIT_OBSERVED')"
+        },
+        {
+          "line": 263,
+          "text": "            commit=G.trusted(paths(G)['commit'])"
+        },
+        {
+          "line": 264,
+          "text": "            w=G.trusted(paths(G)['witness']) if paths(G)['witness'].exists() else None"
+        },
+        {
+          "line": 265,
+          "text": "            facts=synthetic_initial()"
+        },
+        {
+          "line": 266,
+          "text": "            facts.update(prepared=True,commit=True,durable_ack=(self.durable.get(h['id'])==G.digest(paths(G)['commit'])),"
+        },
+        {
+          "line": 267,
+          "text": "                         exit_observed=True,witness=(w['exit_code'] if w else None),now=G.now(),expires=h['observe_until'],"
+        },
+        {
+          "line": 268,
+          "text": "                         version_ok=(commit['commit_version']==1 and h['commit_sha256']==G.digest(paths(G)['commit'])),"
+        },
+        {
+          "line": 269,
+          "text": "                         binding_ok=(commit['window']==h['window'] and commit['handoff_id']==h['id'] and"
+        },
+        {
+          "line": 270,
+          "text": "                            commit['sender']==h['sender'] and commit['receiver']==h['receiver'] and"
+        },
+        {
+          "line": 271,
+          "text": "                            commit['coordinator']==h['coordinator'] and commit['counter']==h['counter'] and"
+        },
+        {
+          "line": 272,
+          "text": "                            commit['expected_exit']==23))"
+        },
+        {
+          "line": 273,
+          "text": "            if w and (w['handoff_id']!=h['id'] or w['sender']!=h['sender'] or"
+        },
+        {
+          "line": 274,
+          "text": "                      w['coordinator']!=h['coordinator'] or w['window']!=h['window']):"
+        },
+        {
+          "line": 275,
+          "text": "                facts['sender_ok']=False"
+        },
+        {
+          "line": 276,
+          "text": "            verdict=classify(facts)"
+        },
+        {
+          "line": 277,
+          "text": "            event(G,h,'EXIT_CLASSIFICATION_CHECK',facts=facts,verdict=verdict)"
+        },
+        {
+          "line": 278,
+          "text": "            if verdict=='PENDING':return 'PENDING'"
+        },
+        {
+          "line": 279,
+          "text": "            if verdict!='VERIFIED':raise G.AdmissionBlocked('C09_HANDOFF_'+verdict)"
+        },
+        {
+          "line": 280,
+          "text": "            resources_ready(G)"
+        },
+        {
+          "line": 281,
+          "text": "        cleanup=G.stop_tree('EXPECTED_C09_HANDOFF',False)"
+        },
+        {
+          "line": 282,
+          "text": "        with lifecycle_lock(G):"
+        },
+        {
+          "line": 283,
+          "text": "            if G.stopped():return 'CLOSED'"
+        },
+        {
+          "line": 284,
+          "text": "            h=G.trusted(paths(G)['state']);s=check_base(G,h)"
+        },
+        {
+          "line": 285,
+          "text": "            if h['classification_count']!=0:raise G.AdmissionBlocked('C09_DUPLICATE_CLASSIFICATION')"
+        },
+        {
+          "line": 286,
+          "text": "            h=publish(G,h,'HANDOFF_VERIFIED',classification_count=1,cleanup=cleanup,"
+        },
+        {
+          "line": 287,
+          "text": "                      witness_sha256=G.digest(paths(G)['witness']))"
+        },
+        {
+          "line": 288,
+          "text": "            G._root_write(G.ROOT/'inputs/result_C09.json',{'case':'C09','status':'PASS',"
+        },
+        {
+          "line": 289,
+          "text": "                'actual':{'handoff_id':h['id'],'handoff_revision':h['revision'],"
+        },
+        {
+          "line": 290,
+          "text": "                          'commit_sha256':h['commit_sha256'],'witness_sha256':h['witness_sha256'],"
+        },
+        {
+          "line": 291,
+          "text": "                          'native_exit':23,'cleanup':cleanup},'sample':G.stamp()})"
+        },
+        {
+          "line": 292,
+          "text": "            s['status']='AWAIT_EXPECTED_RESUME';s['launcher_identity']=None"
+        },
+        {
+          "line": 293,
+          "text": "            s['coordinator_identity']=None;s['expected_launcher_exit']=None"
+        },
+        {
+          "line": 294,
+          "text": "            G._root_write(G.ROOT/'inputs/batch_state.json',s)"
+        },
+        {
+          "line": 295,
+          "text": "        return 'VERIFIED'"
+        },
+        {
+          "line": 296,
+          "text": ""
+        },
+        {
+          "line": 297,
+          "text": "def coordinator_witness(G,child_identity,raw_status):"
+        },
+        {
+          "line": 298,
+          "text": "    if not paths(G)['state'].exists() or (G.ROOT/'inputs/CLOSED.json').exists():return None"
+        },
+        {
+          "line": 299,
+          "text": "    with lifecycle_lock(G):"
+        },
+        {
+          "line": 300,
+          "text": "        h=G.trusted(paths(G)['state'])"
+        },
+        {
+          "line": 301,
+          "text": "        if h['sender']!=child_identity or h['coordinator']!=G.identity():return None"
+        },
+        {
+          "line": 302,
+          "text": "        if G.stopped():return None"
+        },
+        {
+          "line": 303,
+          "text": "        code=os.waitstatus_to_exitcode(raw_status)"
+        },
+        {
+          "line": 304,
+          "text": "        witness={'schema':PROFILE,'handoff_id':h['id'],'sender':child_identity,'coordinator':G.identity(),"
+        },
+        {
+          "line": 305,
+          "text": "                 'window':h['window'],'raw_wait_status':raw_status,'exit_code':code,'sample':G.stamp(),"
+        },
+        {
+          "line": 306,
+          "text": "                 'source':'direct-parent os.waitpid'}"
+        },
+        {
+          "line": 307,
+          "text": "        if paths(G)['witness'].exists():"
+        },
+        {
+          "line": 308,
+          "text": "            if G.trusted(paths(G)['witness'])!=witness:raise G.AdmissionBlocked('C09_DUPLICATE_WITNESS')"
+        },
+        {
+          "line": 309,
+          "text": "        else:G._root_write(paths(G)['witness'],witness)"
+        },
+        {
+          "line": 310,
+          "text": "    rpc(G,{'op':'WITNESS','id':h['id']},h['receiver'],h['observe_until'])"
+        },
+        {
+          "line": 311,
+          "text": "    while G.now()<h['observe_until']:"
+        },
+        {
+          "line": 312,
+          "text": "        with lifecycle_lock(G):"
+        },
+        {
+          "line": 313,
+          "text": "            if G.stopped():raise G.AdmissionBlocked('C09_CLOSED_BEFORE_RESUME')"
+        },
+        {
+          "line": 314,
+          "text": "            fresh=G.trusted(paths(G)['state'])"
+        },
+        {
+          "line": 315,
+          "text": "            if fresh['stage']=='HANDOFF_VERIFIED':"
+        },
+        {
+          "line": 316,
+          "text": "                if fresh['id']!=h['id'] or fresh['classification_count']!=1 or code!=23:"
+        },
+        {
+          "line": 317,
+          "text": "                    raise G.AdmissionBlocked('C09_TERMINAL_VERDICT_MISMATCH')"
+        },
+        {
+          "line": 318,
+          "text": "                checked_receiver(G,fresh)"
+        },
+        {
+          "line": 319,
+          "text": "                return fresh"
+        },
+        {
+          "line": 320,
+          "text": "        time.sleep(.01)"
+        },
+        {
+          "line": 321,
+          "text": "    raise G.LimitReached('C09_VERDICT_DEADLINE')"
+        },
+        {
+          "line": 322,
+          "text": ""
+        },
+        {
+          "line": 323,
+          "text": "def resume_admission(G,coordinator):"
+        },
+        {
+          "line": 324,
+          "text": "    with lifecycle_lock(G):"
+        },
+        {
+          "line": 325,
+          "text": "        if G.stopped():raise G.AdmissionBlocked('C09_CLOSED_ABSORBING')"
+        },
+        {
+          "line": 326,
+          "text": "        h=G.trusted(paths(G)['state']);s=G.state()"
+        },
+        {
+          "line": 327,
+          "text": "        if h['stage']!='HANDOFF_VERIFIED' or h['classification_count']!=1 or s['status']!='AWAIT_EXPECTED_RESUME' or s['resume_count']!=0:"
+        },
+        {
+          "line": 328,
+          "text": "            raise G.AdmissionBlocked('C09_NO_VALID_RESUME')"
+        },
+        {
+          "line": 329,
+          "text": "        if h['window']!=window(G,s) or counter(G)!=h['counter']:"
+        },
+        {
+          "line": 330,
+          "text": "            raise G.AdmissionBlocked('C09_RESUME_WINDOW_OR_BUDGET')"
+        },
+        {
+          "line": 331,
+          "text": "        checked_receiver(G,h)"
+        },
+        {
+          "line": 332,
+          "text": "        qualified_regression(G)"
+        },
+        {
+          "line": 333,
+          "text": "        if G.digest(G.ROOT/'inputs/C09H_QUALIFICATION.json')!=h['regression_sha256']:"
+        },
+        {
+          "line": 334,
+          "text": "            raise G.AdmissionBlocked('C09H_RECEIPT_CHANGED')"
+        },
+        {
+          "line": 335,
+          "text": "        if G.digest(paths(G)['commit'])!=h['commit_sha256'] or G.digest(paths(G)['witness'])!=h['witness_sha256']:"
+        },
+        {
+          "line": 336,
+          "text": "            raise G.AdmissionBlocked('C09_RESUME_RECEIPT_HASH')"
+        },
+        {
+          "line": 337,
+          "text": "        if G.trusted(paths(G)['witness'])['exit_code']!=23:"
+        },
+        {
+          "line": 338,
+          "text": "            raise G.AdmissionBlocked('C09_RESUME_EXIT_STATUS')"
+        },
+        {
+          "line": 339,
+          "text": "        result=G.trusted(G.ROOT/'inputs/result_C09.json')"
+        },
+        {
+          "line": 340,
+          "text": "        if result['status']!='PASS' or result['actual']['handoff_id']!=h['id']:"
+        },
+        {
+          "line": 341,
+          "text": "            raise G.AdmissionBlocked('C09_RESUME_PROVENANCE')"
+        },
+        {
+          "line": 342,
+          "text": "        # Window remains unchanged; only the new supervisor identities and once bit change."
+        },
+        {
+          "line": 343,
+          "text": "        h=publish(G,h,'RESUMED')"
+        },
+        {
+          "line": 344,
+          "text": "        s['status']='CALIBRATING';s['resume_count']=1;s['launcher_identity']=G.identity()"
+        },
+        {
+          "line": 345,
+          "text": "        s['coordinator_identity']=coordinator"
+        },
+        {
+          "line": 346,
+          "text": "        G._root_write(G.ROOT/'inputs/batch_state.json',s)"
+        },
+        {
+          "line": 347,
+          "text": "        return s"
+        },
+        {
+          "line": 348,
+          "text": "def verify_completed_handoff(G):"
+        },
+        {
+          "line": 349,
+          "text": "    with lifecycle_lock(G):"
+        },
+        {
+          "line": 350,
+          "text": "        if G.stopped():raise G.AdmissionBlocked('C09_CLOSED_ABSORBING')"
+        },
+        {
+          "line": 351,
+          "text": "        h=G.trusted(paths(G)['state']);s=G.state()"
+        },
+        {
+          "line": 352,
+          "text": "        if h['stage']!='RESUMED' or h['classification_count']!=1 or s['resume_count']!=1 or h['window']!=window(G,s):"
+        },
+        {
+          "line": 353,
+          "text": "            raise G.AdmissionBlocked('C09_FORMAL_HANDOFF_NOT_COMPLETE')"
+        },
+        {
+          "line": 354,
+          "text": "        if G.digest(paths(G)['commit'])!=h['commit_sha256'] or G.digest(paths(G)['witness'])!=h['witness_sha256']:"
+        },
+        {
+          "line": 355,
+          "text": "            raise G.AdmissionBlocked('C09_FORMAL_PROVENANCE')"
+        },
+        {
+          "line": 356,
+          "text": "        if G.trusted(paths(G)['witness'])['exit_code']!=23:"
+        },
+        {
+          "line": 357,
+          "text": "            raise G.AdmissionBlocked('C09_FORMAL_EXIT_STATUS')"
+        },
+        {
+          "line": 358,
+          "text": "        checked_receiver(G,h);qualified_regression(G)"
+        }
+      ]
+    }
+  ],
+  "guard.py": [
+    {
+      "start": 109,
+      "end": 164,
+      "lines": [
+        {
+          "line": 109,
+          "text": "def trusted(path):"
+        },
+        {
+          "line": 110,
+          "text": "    p = Path(path)"
+        },
+        {
+          "line": 111,
+          "text": "    fd = os.open(p, os.O_RDONLY | os.O_NOFOLLOW)"
+        },
+        {
+          "line": 112,
+          "text": "    try:"
+        },
+        {
+          "line": 113,
+          "text": "        s = os.fstat(fd)"
+        },
+        {
+          "line": 114,
+          "text": "        if not stat.S_ISREG(s.st_mode) or s.st_uid != 0 or s.st_mode & 0o022:"
+        },
+        {
+          "line": 115,
+          "text": "            raise AdmissionBlocked('UNTRUSTED_ROOT_RECORD:' + str(p))"
+        },
+        {
+          "line": 116,
+          "text": "        if s.st_size > 4*1024*1024: raise AdmissionBlocked('OVERSIZE_RECORD')"
+        },
+        {
+          "line": 117,
+          "text": "        raw = os.read(fd, s.st_size+1)"
+        },
+        {
+          "line": 118,
+          "text": "        if len(raw) != s.st_size: raise AdmissionBlocked('SHORT_RECORD')"
+        },
+        {
+          "line": 119,
+          "text": "        return json.loads(raw.decode('utf-8-sig'))"
+        },
+        {
+          "line": 120,
+          "text": "    finally: os.close(fd)"
+        },
+        {
+          "line": 121,
+          "text": "def _full(fd, data):"
+        },
+        {
+          "line": 122,
+          "text": "    # A short write poisons the operation; the caller never grants credit."
+        },
+        {
+          "line": 123,
+          "text": "    if os.write(fd, data) != len(data): raise AdmissionBlocked('SHORT_WRITE')"
+        },
+        {
+          "line": 124,
+          "text": "def root_ipc():"
+        },
+        {
+          "line": 125,
+          "text": "    if str(SOURCE) not in sys.path:sys.path.insert(0,str(SOURCE))"
+        },
+        {
+          "line": 126,
+          "text": "    import root_ipc as RI"
+        },
+        {
+          "line": 127,
+          "text": "    return RI"
+        },
+        {
+          "line": 128,
+          "text": "def boot_continuity():"
+        },
+        {
+          "line": 129,
+          "text": "    if str(SOURCE) not in sys.path:sys.path.insert(0,str(SOURCE))"
+        },
+        {
+          "line": 130,
+          "text": "    import boot_continuity as BC"
+        },
+        {
+          "line": 131,
+          "text": "    return BC"
+        },
+        {
+          "line": 132,
+          "text": "def root_checkpoint(allow_uninitialized=False):"
+        },
+        {
+          "line": 133,
+          "text": "    s=root_ipc().checkpoint(sys.modules[__name__],allow_uninitialized)"
+        },
+        {
+          "line": 134,
+          "text": "    import manager_recovery as M"
+        },
+        {
+          "line": 135,
+          "text": "    M.guard_liveness(sys.modules[__name__],s)"
+        },
+        {
+          "line": 136,
+          "text": "    if s is not None:"
+        },
+        {
+          "line": 137,
+          "text": "        import startup_lifecycle as P"
+        },
+        {
+          "line": 138,
+          "text": "        P.runtime_checkpoint(sys.modules[__name__],s)"
+        },
+        {
+          "line": 139,
+          "text": "    return s"
+        },
+        {
+          "line": 140,
+          "text": "def atomic(path, data, root_record=False, timing_stage='metadata.atomic'):"
+        },
+        {
+          "line": 141,
+          "text": "    _check_root()"
+        },
+        {
+          "line": 142,
+          "text": "    if os.geteuid()==0:"
+        },
+        {
+          "line": 143,
+          "text": "        return root_ipc().publish(sys.modules[__name__],path,data,root_record,timing_stage)"
+        },
+        {
+          "line": 144,
+          "text": "    p = _inside(path, ROOT if root_record and os.geteuid() == 0 else OUT)"
+        },
+        {
+          "line": 145,
+          "text": "    p.parent.mkdir(parents=True, exist_ok=True)"
+        },
+        {
+          "line": 146,
+          "text": "    raw = timed(timing_stage+'.encode',lambda:json.dumps(data,ensure_ascii=False,sort_keys=True,indent=2).encode('utf-8'))"
+        },
+        {
+          "line": 147,
+          "text": "    tmp = p.with_name(p.name + '.tmp.%s.%s' % (os.getpid(), threading.get_ident()))"
+        },
+        {
+          "line": 148,
+          "text": "    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o640 if root_record else 0o600)"
+        },
+        {
+          "line": 149,
+          "text": "    try:"
+        },
+        {
+          "line": 150,
+          "text": "        if root_record:"
+        },
+        {
+          "line": 151,
+          "text": "            os.fchown(fd,0,pwd.getpwnam('dcl-r6').pw_gid)"
+        },
+        {
+          "line": 152,
+          "text": "            os.fchmod(fd,0o640)"
+        },
+        {
+          "line": 153,
+          "text": "        timed(timing_stage+'.write',_full,fd,raw); sync_fd(fd,timing_stage+'.file')"
+        },
+        {
+          "line": 154,
+          "text": "    finally: os.close(fd)"
+        },
+        {
+          "line": 155,
+          "text": "    os.replace(tmp, p)"
+        },
+        {
+          "line": 156,
+          "text": "    d = os.open(p.parent, os.O_RDONLY | os.O_DIRECTORY)"
+        },
+        {
+          "line": 157,
+          "text": "    try: sync_fd(d,timing_stage+'.directory')"
+        },
+        {
+          "line": 158,
+          "text": "    finally: os.close(d)"
+        },
+        {
+          "line": 159,
+          "text": "def write(path, data): atomic(path, data)"
+        },
+        {
+          "line": 160,
+          "text": "def identity(pid=None):"
+        },
+        {
+          "line": 161,
+          "text": "    pid = os.getpid() if pid is None else int(pid)"
+        },
+        {
+          "line": 162,
+          "text": "    raw = Path('/proc/%s/stat' % pid).read_text()"
+        },
+        {
+          "line": 163,
+          "text": "    fields = raw[raw.rfind(')')+2:].split()"
+        },
+        {
+          "line": 164,
+          "text": "    return {'pid': pid, 'start_ticks': int(fields[19]), 'boot_id': boot_id()}"
+        }
+      ]
+    },
+    {
+      "start": 545,
+      "end": 546,
+      "lines": [
+        {
+          "line": 545,
+          "text": "def request_stop(reason):"
+        },
+        {
+          "line": 546,
+          "text": "    write(OUT/'STOP_REQUEST.json',{'reason':reason,**stamp()})"
+        }
+      ]
+    },
+    {
+      "start": 568,
+      "end": 595,
+      "lines": [
+        {
+          "line": 568,
+          "text": "def _counter_lock(path,cap,case=None):"
+        },
+        {
+          "line": 569,
+          "text": "    budget_health();p=_inside(path,OUT)"
+        },
+        {
+          "line": 570,
+          "text": "    with _LOCKS_LOCK:lock=_LOCKS.setdefault(str(p),threading.RLock())"
+        },
+        {
+          "line": 571,
+          "text": "    begin=monotonic_ns();utc=time.time_ns()"
+        },
+        {
+          "line": 572,
+          "text": "    while not lock.acquire(timeout=.05):execution_deadline(case)"
+        },
+        {
+          "line": 573,
+          "text": "    fd=None;acquired=False"
+        },
+        {
+          "line": 574,
+          "text": "    try:"
+        },
+        {
+          "line": 575,
+          "text": "        fd=os.open(p,os.O_RDWR|os.O_NOFOLLOW)"
+        },
+        {
+          "line": 576,
+          "text": "        while not acquired:"
+        },
+        {
+          "line": 577,
+          "text": "            try:fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB);acquired=True"
+        },
+        {
+          "line": 578,
+          "text": "            except BlockingIOError:execution_deadline(case);time.sleep(.005)"
+        },
+        {
+          "line": 579,
+          "text": "        _timing('budget.lock_wait',begin,monotonic_ns(),utc,time.time_ns())"
+        },
+        {
+          "line": 580,
+          "text": "        execution_deadline(case)"
+        },
+        {
+          "line": 581,
+          "text": "        raw=os.pread(fd,24,0)"
+        },
+        {
+          "line": 582,
+          "text": "        if len(raw)!=24 or raw[:8]!=COUNTER_MAGIC:raise AdmissionBlocked('TORN_COUNTER_OR_OLD_PROTOCOL')"
+        },
+        {
+          "line": 583,
+          "text": "        used,storedcap=struct.unpack('<QQ',raw[8:])"
+        },
+        {
+          "line": 584,
+          "text": "        if list(p.parent.glob(p.name+'.intent.json.tmp.*')):"
+        },
+        {
+          "line": 585,
+          "text": "            raise AdmissionBlocked('AMBIGUOUS_RESERVATION_TEMP')"
+        },
+        {
+          "line": 586,
+          "text": "        old=read(p.with_suffix(p.suffix+'.intent.json'))"
+        },
+        {
+          "line": 587,
+          "text": "        if storedcap!=cap or used>cap:raise AdmissionBlocked('COUNTER_CAP_MISMATCH')"
+        },
+        {
+          "line": 588,
+          "text": "        if old.get('protocol')!=BUDGET_PROTOCOL or old.get('status')!='COMMITTED' or old['after']!=used or old['cap']!=cap:"
+        },
+        {
+          "line": 589,
+          "text": "            raise AdmissionBlocked('AMBIGUOUS_RESERVATION')"
+        },
+        {
+          "line": 590,
+          "text": "        yield fd,used,p"
+        },
+        {
+          "line": 591,
+          "text": "    finally:"
+        },
+        {
+          "line": 592,
+          "text": "        if fd is not None:"
+        },
+        {
+          "line": 593,
+          "text": "            if acquired:fcntl.flock(fd,fcntl.LOCK_UN)"
+        },
+        {
+          "line": 594,
+          "text": "            os.close(fd)"
+        },
+        {
+          "line": 595,
+          "text": "        lock.release()"
+        }
+      ]
+    },
+    {
+      "start": 624,
+      "end": 691,
+      "lines": [
+        {
+          "line": 624,
+          "text": "def _append_journal(p,record,stage):"
+        },
+        {
+          "line": 625,
+          "text": "    data=timed(stage+'.encode',lambda:(_canonical(record)+'\\n').encode())"
+        },
+        {
+          "line": 626,
+          "text": "    j=os.open(p.with_suffix(p.suffix+'.journal.jsonl'),os.O_WRONLY|os.O_CREAT|os.O_APPEND|os.O_NOFOLLOW,0o600)"
+        },
+        {
+          "line": 627,
+          "text": "    try:timed(stage+'.write',_full,j,data);sync_fd(j,stage)"
+        },
+        {
+          "line": 628,
+          "text": "    finally:os.close(j)"
+        },
+        {
+          "line": 629,
+          "text": "def _reserve(path,cap,amount=1,request=None,fault=None):"
+        },
+        {
+          "line": 630,
+          "text": "    budget_health();timing_event('reserve.request')"
+        },
+        {
+          "line": 631,
+          "text": "    if request is not None:raise AdmissionBlocked('EXACT_RANGE_CORE_REQUIRED')"
+        },
+        {
+          "line": 632,
+          "text": "    if type(amount) is not int or amount<=0:raise AdmissionBlocked('RESERVATION_AMOUNT')"
+        },
+        {
+          "line": 633,
+          "text": "    p=_inside(path,OUT);global_ledger=p==OUT/'visits.bin'"
+        },
+        {
+          "line": 634,
+          "text": "    if fault and global_ledger:raise AdmissionBlocked('FAULT_IN_GLOBAL_LEDGER_FORBIDDEN')"
+        },
+        {
+          "line": 635,
+          "text": "    if fault:"
+        },
+        {
+          "line": 636,
+          "text": "        allowed=('prepared','short_write','counter_fsynced','journal_fsynced')"
+        },
+        {
+          "line": 637,
+          "text": "        if (_TICKET is None or _TICKET['case']!='C11' or fault not in allowed or"
+        },
+        {
+          "line": 638,
+          "text": "            p!=OUT/('C11.'+fault+'.bin')):"
+        },
+        {
+          "line": 639,
+          "text": "            raise AdmissionBlocked('CALIBRATION_C11_FAULT_MODE_ONLY')"
+        },
+        {
+          "line": 640,
+          "text": "    if amount!=1 and request is None:raise AdmissionBlocked('RANGE_REQUIRES_FROZEN_TASK')"
+        },
+        {
+          "line": 641,
+          "text": "    case=request['case'] if request else None"
+        },
+        {
+          "line": 642,
+          "text": "    try:"
+        },
+        {
+          "line": 643,
+          "text": "        with _counter_lock(p,cap,case) as (fd,used,p):"
+        },
+        {
+          "line": 644,
+          "text": "            if request is not None:"
+        },
+        {
+          "line": 645,
+          "text": "                checked,t=_task_contract(request['task_id'],amount)"
+        },
+        {
+          "line": 646,
+          "text": "                if checked!=request:raise AdmissionBlocked('REQUEST_BINDING_CHANGED')"
+        },
+        {
+          "line": 647,
+          "text": "                if _TICKET is None or _TICKET['case']!=case or t['main_identity']!=identity():"
+        },
+        {
+          "line": 648,
+          "text": "                    raise AdmissionBlocked('EXACT_RESERVATION_OWNER_REQUIRED')"
+        },
+        {
+          "line": 649,
+          "text": "                fp=_fact_path(request['task_id'])"
+        },
+        {
+          "line": 650,
+          "text": "                if fp.exists():"
+        },
+        {
+          "line": 651,
+          "text": "                    fact=read(fp);_validate_fact(fact,request,used)"
+        },
+        {
+          "line": 652,
+          "text": "                    timing_event('reserve.idempotent_fact_only')"
+        },
+        {
+          "line": 653,
+          "text": "                    return {'after':used,'fact':fact,'created':False}"
+        },
+        {
+          "line": 654,
+          "text": "            soft=100000 if global_ledger and (_TICKET is None or _TICKET['case']!='FORMAL') else cap"
+        },
+        {
+          "line": 655,
+          "text": "            if global_ledger and _TICKET is not None and _TICKET['case']=='RANGE':"
+        },
+        {
+          "line": 656,
+          "text": "                soft=min(soft,_TICKET['safety_visit_ceiling'])"
+        },
+        {
+          "line": 657,
+          "text": "            if used+amount>min(cap,soft):raise LimitReached('VISIT_OR_CALIBRATION_LIMIT')"
+        },
+        {
+          "line": 658,
+          "text": "            record={'protocol':BUDGET_PROTOCOL,'status':'PREPARED','before':used,'after':used+amount,"
+        },
+        {
+          "line": 659,
+          "text": "                    'amount':amount,'cap':cap,'request':request,**stamp()}"
+        },
+        {
+          "line": 660,
+          "text": "            intent=p.with_suffix(p.suffix+'.intent.json')"
+        },
+        {
+          "line": 661,
+          "text": "            atomic(intent,record,timing_stage='budget.intent.prepared')"
+        },
+        {
+          "line": 662,
+          "text": "            if fault=='prepared':raise OSError('INJECTED_AFTER_PREPARED')"
+        },
+        {
+          "line": 663,
+          "text": "            _append_journal(p,record,'budget.journal.prepared')"
+        },
+        {
+          "line": 664,
+          "text": "            payload=struct.pack('<Q',used+amount)"
+        },
+        {
+          "line": 665,
+          "text": "            if fault=='short_write':payload=payload[:3]"
+        },
+        {
+          "line": 666,
+          "text": "            written=timed('budget.counter.write',os.pwrite,fd,payload,8)"
+        },
+        {
+          "line": 667,
+          "text": "            if written!=8:raise AdmissionBlocked('SHORT_COUNTER_WRITE')"
+        },
+        {
+          "line": 668,
+          "text": "            sync_fd(fd,'budget.counter')"
+        },
+        {
+          "line": 669,
+          "text": "            if fault=='counter_fsynced':raise OSError('INJECTED_AFTER_COUNTER_FSYNC')"
+        },
+        {
+          "line": 670,
+          "text": "            record={**record,'status':'COMMITTED',**stamp()}"
+        },
+        {
+          "line": 671,
+          "text": "            _append_journal(p,record,'budget.journal.committed')"
+        },
+        {
+          "line": 672,
+          "text": "            if fault=='journal_fsynced':raise OSError('INJECTED_BEFORE_COMMITTED_INTENT')"
+        },
+        {
+          "line": 673,
+          "text": "            fact=None"
+        },
+        {
+          "line": 674,
+          "text": "            if request is not None:"
+        },
+        {
+          "line": 675,
+          "text": "                fact={'protocol':BUDGET_PROTOCOL,'request':request,'credit_range':[used,used+amount],"
+        },
+        {
+          "line": 676,
+          "text": "                      'owner':identity(),'delivery_state':'UNCLAIMED','executor':None,'reserved_at':stamp()}"
+        },
+        {
+          "line": 677,
+          "text": "                material={'request':request,'credit_range':fact['credit_range'],'owner':fact['owner']}"
+        },
+        {
+          "line": 678,
+          "text": "                fact['lease_id']=hashlib.sha256(_canonical(material).encode()).hexdigest()"
+        },
+        {
+          "line": 679,
+          "text": "                # Registry is durable before the global intent becomes ready."
+        },
+        {
+          "line": 680,
+          "text": "                # A crash in this gap leaves PREPARED and closes the batch."
+        },
+        {
+          "line": 681,
+          "text": "                atomic(fp,fact,timing_stage='budget.registry.reserved')"
+        },
+        {
+          "line": 682,
+          "text": "            atomic(intent,record,timing_stage='budget.intent.committed')"
+        },
+        {
+          "line": 683,
+          "text": "            timing_event('reserve.committed_barriers_done')"
+        },
+        {
+          "line": 684,
+          "text": "            execution_deadline(case)  # committed late credit is burned, never handed off"
+        },
+        {
+          "line": 685,
+          "text": "            return {'after':used+amount,'fact':fact,'created':True}"
+        },
+        {
+          "line": 686,
+          "text": "    except LimitReached:raise"
+        },
+        {
+          "line": 687,
+          "text": "    except BaseException as exc:"
+        },
+        {
+          "line": 688,
+          "text": "        if global_ledger:halt_budget(exc)"
+        },
+        {
+          "line": 689,
+          "text": "        raise"
+        },
+        {
+          "line": 690,
+          "text": "def reserve_counter(path,cap,fault=None):"
+        },
+        {
+          "line": 691,
+          "text": "    return _reserve(path,cap,1,fault=fault)['after']"
+        }
+      ]
+    },
+    {
+      "start": 718,
+      "end": 725,
+      "lines": [
+        {
+          "line": 718,
+          "text": "def _run(argv,timeout=15):"
+        },
+        {
+          "line": 719,
+          "text": "    r=subprocess.run(argv,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=timeout,check=False)"
+        },
+        {
+          "line": 720,
+          "text": "    if r.returncode: raise AdmissionBlocked('MANAGER_COMMAND_FAILED:'+repr(argv)+':'+r.stderr.decode(errors='replace'))"
+        },
+        {
+          "line": 721,
+          "text": "    return r.stdout.decode()"
+        },
+        {
+          "line": 722,
+          "text": "def unit_show(unit):"
+        },
+        {
+          "line": 723,
+          "text": "    fields=('MainPID','ControlGroup','ActiveState','SubState','Result','ExecMainStatus',"
+        },
+        {
+          "line": 724,
+          "text": "            'User','Group','LimitAS','LimitASSoft','TasksMax','KillMode','Restart','Delegate','NoNewPrivileges')"
+        },
+        {
+          "line": 725,
+          "text": "    text=_run(['/usr/bin/systemctl','show',unit,*['--property='+f for f in fields]])"
+        }
+      ]
+    },
+    {
+      "start": 749,
+      "end": 815,
+      "lines": [
+        {
+          "line": 749,
+          "text": "def stop_tree(reason,close=True):"
+        },
+        {
+          "line": 750,
+          "text": "    parent=Path('/sys/fs/cgroup')/PARENT"
+        },
+        {
+          "line": 751,
+          "text": "    before=cg_snapshot(parent) if parent.exists() else None"
+        },
+        {
+          "line": 752,
+          "text": "    close_error=None"
+        },
+        {
+          "line": 753,
+          "text": "    if close:"
+        },
+        {
+          "line": 754,
+          "text": "        p=ROOT/'inputs/CLOSED.json'"
+        },
+        {
+          "line": 755,
+          "text": "        try:"
+        },
+        {
+          "line": 756,
+          "text": "            sys.path.insert(0,str(SOURCE))"
+        },
+        {
+          "line": 757,
+          "text": "            import c09_handoff as H"
+        },
+        {
+          "line": 758,
+          "text": "            with H.lifecycle_lock(sys.modules[__name__]):"
+        },
+        {
+          "line": 759,
+          "text": "                if p.exists():p=ROOT/('inputs/stop_event_%s_%s.json'%(os.getpid(),time.time_ns()))"
+        },
+        {
+          "line": 760,
+          "text": "                _root_write(p,{'reason':reason,**stamp()})"
+        },
+        {
+          "line": 761,
+          "text": "        except BaseException as exc:close_error=repr(exc)"
+        },
+        {
+          "line": 762,
+          "text": "    r=subprocess.run(['/usr/bin/systemctl','stop',PARENT],capture_output=True,timeout=15)"
+        },
+        {
+          "line": 763,
+          "text": "    until=now()+5"
+        },
+        {
+          "line": 764,
+          "text": "    while not _empty() and now()<until: time.sleep(.05)"
+        },
+        {
+          "line": 765,
+          "text": "    if not _empty(): raise AdmissionBlocked('STOP_UNCONFIRMED')"
+        },
+        {
+          "line": 766,
+          "text": "    result={'empty':True,'stop_exit':r.returncode,'closure_persistence_error':close_error,'before_stop_charged_snapshot':before,"
+        },
+        {
+          "line": 767,
+          "text": "            'peak_scope':'observed charge peak for this group generation; no exact RSS tree peak inferred',"
+        },
+        {
+          "line": 768,
+          "text": "            'after_stop_group_exists':parent.exists(),'sample':stamp()}"
+        },
+        {
+          "line": 769,
+          "text": "    _root_write(ROOT/('inputs/stop_result_%s_%s.json'%(os.getpid(),time.time_ns())),result)"
+        },
+        {
+          "line": 770,
+          "text": "    return result"
+        },
+        {
+          "line": 771,
+          "text": "def _external_stop_impl():"
+        },
+        {
+          "line": 772,
+          "text": "    if os.geteuid()!=0:raise AdmissionBlocked('TRUSTED_LAUNCHER_ONLY')"
+        },
+        {
+          "line": 773,
+          "text": "    resource.setrlimit(resource.RLIMIT_AS,(AS_CAP,AS_CAP))"
+        },
+        {
+          "line": 774,
+          "text": "    authorization();s=state();monitored=None;fd=None"
+        },
+        {
+          "line": 775,
+          "text": "    sys.path.insert(0,str(SOURCE))"
+        },
+        {
+          "line": 776,
+          "text": "    import c09_handoff as H"
+        },
+        {
+          "line": 777,
+          "text": "    receiver=H.Receiver(sys.modules[__name__])"
+        },
+        {
+          "line": 778,
+          "text": "    _root_write(ROOT/'inputs/STOP_ARMED.json',{'identity':identity(),'stop_at':s['stop_at'],"
+        },
+        {
+          "line": 779,
+          "text": "        'boot_id':boot_id(),'handoff_profile':H.PROFILE,'socket':str(H.paths(sys.modules[__name__])['socket'])})"
+        },
+        {
+          "line": 780,
+          "text": "    try:"
+        },
+        {
+          "line": 781,
+          "text": "        while True:"
+        },
+        {
+          "line": 782,
+          "text": "            s=trusted(ROOT/'inputs/batch_state.json')"
+        },
+        {
+          "line": 783,
+          "text": "            if (ROOT/'inputs/CLOSED.json').exists():"
+        },
+        {
+          "line": 784,
+          "text": "                stop_tree('CLOSED_BATCH_CLEANUP',False);return 0"
+        },
+        {
+          "line": 785,
+          "text": "            if s['boot_id']!=boot_id() or now()>=s['stop_at'] or (OUT/'STOP_REQUEST.json').exists():"
+        },
+        {
+          "line": 786,
+          "text": "                stop_tree('ABSOLUTE_STOP_OR_REQUEST');return 124"
+        },
+        {
+          "line": 787,
+          "text": "            receiver.poll()"
+        },
+        {
+          "line": 788,
+          "text": "            # A coordinator is the direct kernel exit witness, independent of the sender."
+        },
+        {
+          "line": 789,
+          "text": "            fresh=trusted(ROOT/'inputs/batch_state.json')"
+        },
+        {
+          "line": 790,
+          "text": "            import manager_recovery as M"
+        },
+        {
+          "line": 791,
+          "text": "            M.supervision(sys.modules[__name__],fresh)"
+        },
+        {
+          "line": 792,
+          "text": "            target=fresh.get('launcher_identity')"
+        },
+        {
+          "line": 793,
+          "text": "            if target and target!=monitored:"
+        },
+        {
+          "line": 794,
+          "text": "                if fd is not None:os.close(fd);fd=None"
+        },
+        {
+          "line": 795,
+          "text": "                if identity(target['pid'])!=target:raise AdmissionBlocked('LAUNCHER_IDENTITY_CHANGED')"
+        },
+        {
+          "line": 796,
+          "text": "                fd=os.pidfd_open(target['pid'])"
+        },
+        {
+          "line": 797,
+          "text": "                if identity(target['pid'])!=target:raise AdmissionBlocked('LAUNCHER_PIDFD_NOT_STABLE')"
+        },
+        {
+          "line": 798,
+          "text": "                monitored=target"
+        },
+        {
+          "line": 799,
+          "text": "            if fd is not None and select.select([fd],[],[],.05)[0]:"
+        },
+        {
+          "line": 800,
+          "text": "                verdict=receiver.observe_exit()  # lock + current state read after readiness"
+        },
+        {
+          "line": 801,
+          "text": "                if verdict=='VERIFIED':"
+        },
+        {
+          "line": 802,
+          "text": "                    os.close(fd);fd=None;monitored=None"
+        },
+        {
+          "line": 803,
+          "text": "                elif verdict=='CLOSED':"
+        },
+        {
+          "line": 804,
+          "text": "                    stop_tree('C09_CLOSED_DURING_CLASSIFICATION',False);return 125"
+        },
+        {
+          "line": 805,
+          "text": "            else:time.sleep(.02)"
+        },
+        {
+          "line": 806,
+          "text": "    except BaseException as exc:"
+        },
+        {
+          "line": 807,
+          "text": "        import manager_recovery as M"
+        },
+        {
+          "line": 808,
+          "text": "        M.abort(sys.modules[__name__],'C09_OR_SUPERVISOR_FAILURE',exc)"
+        },
+        {
+          "line": 809,
+          "text": "        raise"
+        },
+        {
+          "line": 810,
+          "text": "    finally:"
+        },
+        {
+          "line": 811,
+          "text": "        if fd is not None:os.close(fd)"
+        },
+        {
+          "line": 812,
+          "text": "        receiver.close()"
+        },
+        {
+          "line": 813,
+          "text": "def external_stop():"
+        },
+        {
+          "line": 814,
+          "text": "    try:return _external_stop_impl()"
+        },
+        {
+          "line": 815,
+          "text": "    except BaseException as exc:"
+        }
+      ]
+    },
+    {
+      "start": 993,
+      "end": 1027,
+      "lines": [
+        {
+          "line": 993,
+          "text": "def seal(external_tail=False):"
+        },
+        {
+          "line": 994,
+          "text": "    if _COORDINATOR_ID is not None and identity()!=_COORDINATOR_ID:return None"
+        },
+        {
+          "line": 995,
+          "text": "    import runtime_identity"
+        },
+        {
+          "line": 996,
+          "text": "    runtime_identity.verify(SOURCE,full=True,packages=True,deadline=trusted(ROOT/'inputs/batch_state.json')['deadline'],epoch=boot_id())"
+        },
+        {
+          "line": 997,
+          "text": "    boot_continuity().before_seal(sys.modules[__name__])"
+        },
+        {
+          "line": 998,
+          "text": "    # Wait for the independent writer to finish before freezing evidence."
+        },
+        {
+          "line": 999,
+          "text": "    if external_tail:"
+        },
+        {
+          "line": 1000,
+          "text": "        import manager_recovery as M"
+        },
+        {
+          "line": 1001,
+          "text": "        if not M.permit_external_seal(sys.modules[__name__]):raise AdmissionBlocked('MR_UNSAFE_EXTERNAL_SEAL')"
+        },
+        {
+          "line": 1002,
+          "text": "    else:"
+        },
+        {
+          "line": 1003,
+          "text": "        raw=trusted(ROOT/'inputs/batch_state.json')"
+        },
+        {
+          "line": 1004,
+          "text": "        until=min(raw['deadline'],now()+20)"
+        },
+        {
+          "line": 1005,
+          "text": "        while now()<until:"
+        },
+        {
+          "line": 1006,
+          "text": "            if unit_show(batch_unit('STOP')).get('ActiveState') in ('inactive','failed'): break"
+        },
+        {
+          "line": 1007,
+          "text": "            time.sleep(.05)"
+        },
+        {
+          "line": 1008,
+          "text": "        else: raise AdmissionBlocked('EXTERNAL_STOP_NOT_CLOSED; evidence remains unsealed')"
+        },
+        {
+          "line": 1009,
+          "text": "    import terminal_evidence as T"
+        },
+        {
+          "line": 1010,
+          "text": "    review=T.read_terminal_evidence(sys.modules[__name__],'NATIVE_SEAL')"
+        },
+        {
+          "line": 1011,
+          "text": "    if not review['decision']['native_ready']:raise AdmissionBlocked('TR_NATIVE_PRECONDITIONS_UNRESOLVED')"
+        },
+        {
+          "line": 1012,
+          "text": "    review['receipt_stage']='PRE_NATIVE_ARCHIVE_READ_ONLY_REVIEW'"
+        },
+        {
+          "line": 1013,
+          "text": "    try:T.check_active_runtime(sys.modules[__name__])"
+        },
+        {
+          "line": 1014,
+          "text": "    except AdmissionBlocked as exc:"
+        },
+        {
+          "line": 1015,
+          "text": "        if str(exc) not in ('IPC_CLOSED_DOMINATES','IPC_STOP_REQUEST_DOMINATES','BATCH_STOPPED'):raise"
+        },
+        {
+          "line": 1016,
+          "text": "        review['active_guard_denial']={'code':str(exc),'sample':stamp()}"
+        },
+        {
+          "line": 1017,
+          "text": "    else:raise AdmissionBlocked('TR_ACTIVE_GUARD_ACCEPTED_CLOSED')"
+        },
+        {
+          "line": 1018,
+          "text": "    with boot_continuity().Store() as store:store.put('terminal_seal_review.json',review,exclusive=True)"
+        },
+        {
+          "line": 1019,
+          "text": "    rows={}"
+        },
+        {
+          "line": 1020,
+          "text": "    for p in sorted(ROOT.rglob('*')):"
+        },
+        {
+          "line": 1021,
+          "text": "        if p.is_file() and not p.is_symlink() and p.name not in ('EVIDENCE_MANIFEST.json','EVIDENCE.zip'):"
+        },
+        {
+          "line": 1022,
+          "text": "            rows[str(p.relative_to(ROOT))]={'bytes':p.stat().st_size,'sha256':digest(p)}"
+        },
+        {
+          "line": 1023,
+          "text": "    write(OUT/'EVIDENCE_MANIFEST.json',{'files':rows,'sample':stamp()})"
+        },
+        {
+          "line": 1024,
+          "text": "    with zipfile.ZipFile(OUT/'EVIDENCE.zip','x',zipfile.ZIP_DEFLATED) as z:"
+        },
+        {
+          "line": 1025,
+          "text": "        for rel in rows: z.write(ROOT/rel,rel)"
+        },
+        {
+          "line": 1026,
+          "text": "        z.write(OUT/'EVIDENCE_MANIFEST.json','out/EVIDENCE_MANIFEST.json')"
+        },
+        {
+          "line": 1027,
+          "text": "    return digest(OUT/'EVIDENCE.zip')"
+        }
+      ]
+    },
+    {
+      "start": 1190,
+      "end": 1240,
+      "lines": [
+        {
+          "line": 1190,
+          "text": "        root_ipc().wait_fd(sys.modules[__name__],ready_r,now()+5)"
+        },
+        {
+          "line": 1191,
+          "text": "        child_identity=json.loads(os.read(ready_r,4096))"
+        },
+        {
+          "line": 1192,
+          "text": "        if child_identity!=identity(child):raise AdmissionBlocked('COORDINATOR_CHILD_IDENTITY')"
+        },
+        {
+          "line": 1193,
+          "text": "        fd=os.pidfd_open(child)"
+        },
+        {
+          "line": 1194,
+          "text": "        if child_identity!=identity(child):raise AdmissionBlocked('COORDINATOR_CHILD_PIDFD_RACE')"
+        },
+        {
+          "line": 1195,
+          "text": "        import manager_recovery as M"
+        },
+        {
+          "line": 1196,
+          "text": "        M.scheduler(sys.modules[__name__],child_identity,coordinator,'resume' if resume else 'initial')"
+        },
+        {
+          "line": 1197,
+          "text": "        _full(go_w,b'G');os.close(go_w);go_w=None"
+        },
+        {
+          "line": 1198,
+          "text": "        startup_until=now()+15;terminal_seen=None"
+        },
+        {
+          "line": 1199,
+          "text": "        while True:"
+        },
+        {
+          "line": 1200,
+          "text": "            ended,status=os.waitpid(child,os.WNOHANG)"
+        },
+        {
+          "line": 1201,
+          "text": "            if ended:break"
+        },
+        {
+          "line": 1202,
+          "text": "            flags=root_ipc().observe(sys.modules[__name__])"
+        },
+        {
+          "line": 1203,
+          "text": "            if any(flags.values()):"
+        },
+        {
+          "line": 1204,
+          "text": "                if terminal_seen is None:"
+        },
+        {
+          "line": 1205,
+          "text": "                    terminal_seen=now()"
+        },
+        {
+          "line": 1206,
+          "text": "                    if not flags['closed']:stop_tree('COORDINATOR_STOP_REQUEST')"
+        },
+        {
+          "line": 1207,
+          "text": "                # Child observes cancellation, cleans and returns. Finite grace protects"
+        },
+        {
+          "line": 1208,
+          "text": "                # against a scheduler that fails to cooperate; no new work is admitted."
+        },
+        {
+          "line": 1209,
+          "text": "                if now()>=terminal_seen+30:"
+        },
+        {
+          "line": 1210,
+          "text": "                    signal.pidfd_send_signal(fd,signal.SIGKILL)"
+        },
+        {
+          "line": 1211,
+          "text": "            p=ROOT/'inputs/batch_state.json'"
+        },
+        {
+          "line": 1212,
+          "text": "            if p.exists():"
+        },
+        {
+          "line": 1213,
+          "text": "                s=trusted(p);limit=s['deadline']"
+        },
+        {
+          "line": 1214,
+          "text": "                if not any(flags.values()):"
+        },
+        {
+          "line": 1215,
+          "text": "                    import manager_recovery as M"
+        },
+        {
+          "line": 1216,
+          "text": "                    M.guard_liveness(sys.modules[__name__],s)"
+        },
+        {
+          "line": 1217,
+          "text": "                    if s['status'] in ('CALIBRATING','AWAIT_EXPECTED_RESUME'):limit=min(limit,s['T0']+300,s['stop_at'])"
+        },
+        {
+          "line": 1218,
+          "text": "                if s['boot_id']!=boot_id():raise AdmissionBlocked('COORDINATOR_BOOT_DRIFT')"
+        },
+        {
+          "line": 1219,
+          "text": "            else:limit=startup_until"
+        },
+        {
+          "line": 1220,
+          "text": "            if now()>=limit:raise LimitReached('COORDINATOR_ABSOLUTE_LIMIT')"
+        },
+        {
+          "line": 1221,
+          "text": "            time.sleep(.02)"
+        },
+        {
+          "line": 1222,
+          "text": "        code=os.waitstatus_to_exitcode(status)"
+        },
+        {
+          "line": 1223,
+          "text": "        child_reaped=True;_MR_CHILD_REAP_PENDING=False"
+        },
+        {
+          "line": 1224,
+          "text": "        raw_state=trusted(ROOT/'inputs/batch_state.json') if (ROOT/'inputs/batch_state.json').exists() else None"
+        },
+        {
+          "line": 1225,
+          "text": "        _root_write(ROOT/('inputs/root_private/waitpid_%s.json'%child),{"
+        },
+        {
+          "line": 1226,
+          "text": "            'schema':'ROOT-IPC-WAITPID/1','child':child_identity,'coordinator':coordinator,"
+        },
+        {
+          "line": 1227,
+          "text": "            'raw_wait_status':status,'exit_code':code,'state':raw_state,'sample':stamp()})"
+        },
+        {
+          "line": 1228,
+          "text": "        if H.paths(sys.modules[__name__])['state'].exists() and not (ROOT/'inputs/CLOSED.json').exists():"
+        },
+        {
+          "line": 1229,
+          "text": "            verified=H.coordinator_witness(sys.modules[__name__],child_identity,status)"
+        },
+        {
+          "line": 1230,
+          "text": "            if code==23 and verified is None:raise AdmissionBlocked('C09_NO_VERIFIED_HANDOFF')"
+        },
+        {
+          "line": 1231,
+          "text": "        elif code==23:raise AdmissionBlocked('C09_EXIT23_WITHOUT_RECEIPT')"
+        },
+        {
+          "line": 1232,
+          "text": "        import manager_recovery as M"
+        },
+        {
+          "line": 1233,
+          "text": "        if code==23:"
+        },
+        {
+          "line": 1234,
+          "text": "            M.review_case(sys.modules[__name__],'C09')"
+        },
+        {
+          "line": 1235,
+          "text": "        elif code!=0 or not (ROOT/'inputs/CLOSED.json').exists():"
+        },
+        {
+          "line": 1236,
+          "text": "            M.abort(sys.modules[__name__],'COORDINATOR_CHILD_RETURN_'+str(code))"
+        },
+        {
+          "line": 1237,
+          "text": "            if code==78 and authorization()[0]['scope']=='MR_RECOVERY_DIAGNOSTIC_ONLY':M.diagnostic_report(sys.modules[__name__],code)"
+        },
+        {
+          "line": 1238,
+          "text": "            if code==0:code=125"
+        },
+        {
+          "line": 1239,
+          "text": "        return code if code>=0 else 128-code"
+        },
+        {
+          "line": 1240,
+          "text": "    except BaseException as exc:"
+        }
+      ]
+    }
+  ],
+  "root_ipc.py": [
+    {
+      "start": 91,
+      "end": 155,
+      "lines": [
+        {
+          "line": 91,
+          "text": "def publish(G,path,data,root_record=False,timing_stage='metadata.atomic',fixture_fault=None):"
+        },
+        {
+          "line": 92,
+          "text": "    rel,expected=policy(G,path,root_record)"
+        },
+        {
+          "line": 93,
+          "text": "    fixture=bool(re.fullmatch(r'out/ipc_fixture_[0-9]{3}\\.json',rel))"
+        },
+        {
+          "line": 94,
+          "text": "    if fixture_fault is not None and (not fixture or fixture_fault not in ('after_create','file_fsync','rename','directory_fsync')):"
+        },
+        {
+          "line": 95,
+          "text": "        raise G.AdmissionBlocked('IPC_FAULT_OUTSIDE_SYNTHETIC_FIXTURE')"
+        },
+        {
+          "line": 96,
+          "text": "    raw=G.timed(timing_stage+'.encode',lambda:json.dumps(data,ensure_ascii=False,sort_keys=True,indent=2).encode())"
+        },
+        {
+          "line": 97,
+          "text": "    with directories(G) as ds:"
+        },
+        {
+          "line": 98,
+          "text": "        destination=ds['out'] if rel.startswith('out/') else ds['private'] if '/root_private/' in rel else ds['inputs']"
+        },
+        {
+          "line": 99,
+          "text": "        name=Path(rel).name"
+        },
+        {
+          "line": 100,
+          "text": "        try:"
+        },
+        {
+          "line": 101,
+          "text": "            old=os.stat(name,dir_fd=destination,follow_symlinks=False)"
+        },
+        {
+          "line": 102,
+          "text": "            if not stat.S_ISREG(old.st_mode) or old.st_nlink!=1:"
+        },
+        {
+          "line": 103,
+          "text": "                raise G.AdmissionBlocked('IPC_TARGET_TYPE_OR_LINK')"
+        },
+        {
+          "line": 104,
+          "text": "        except FileNotFoundError:pass"
+        },
+        {
+          "line": 105,
+          "text": "        tmp='.publish.'+str(os.getpid())+'.'+os.urandom(16).hex()"
+        },
+        {
+          "line": 106,
+          "text": "        fd=os.open(tmp,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_CLOEXEC,0o600,dir_fd=ds['private'])"
+        },
+        {
+          "line": 107,
+          "text": "        # Failure leaves the private staging object as evidence. No grant follows."
+        },
+        {
+          "line": 108,
+          "text": "        try:"
+        },
+        {
+          "line": 109,
+          "text": "            os.fchown(fd,expected[0],expected[1]);os.fchmod(fd,expected[2])"
+        },
+        {
+          "line": 110,
+          "text": "            _no_acl(fd)"
+        },
+        {
+          "line": 111,
+          "text": "            if _metadata(os.fstat(fd))!=expected:raise G.AdmissionBlocked('IPC_PREPUBLICATION_METADATA')"
+        },
+        {
+          "line": 112,
+          "text": "            if fixture_fault=='after_create':raise OSError(errno.EIO,'IPC_FIXTURE_AFTER_CREATE')"
+        },
+        {
+          "line": 113,
+          "text": "            G.timed(timing_stage+'.write',G._full,fd,raw)"
+        },
+        {
+          "line": 114,
+          "text": "            if fixture_fault=='file_fsync':raise OSError(errno.EIO,'IPC_FIXTURE_FILE_FSYNC')"
+        },
+        {
+          "line": 115,
+          "text": "            G.sync_fd(fd,timing_stage+'.file')"
+        },
+        {
+          "line": 116,
+          "text": "            published_inode=os.fstat(fd)"
+        },
+        {
+          "line": 117,
+          "text": "            if fixture_fault=='rename':raise OSError(errno.EIO,'IPC_FIXTURE_RENAME')"
+        },
+        {
+          "line": 118,
+          "text": "            os.replace(tmp,name,src_dir_fd=ds['private'],dst_dir_fd=destination)"
+        },
+        {
+          "line": 119,
+          "text": "            if fixture_fault=='directory_fsync':raise OSError(errno.EIO,'IPC_FIXTURE_DIRECTORY_FSYNC')"
+        },
+        {
+          "line": 120,
+          "text": "            # Two directories participate in cross-directory rename."
+        },
+        {
+          "line": 121,
+          "text": "            G.sync_fd(destination,timing_stage+'.directory')"
+        },
+        {
+          "line": 122,
+          "text": "            if destination!=ds['private']:G.sync_fd(ds['private'],timing_stage+'.staging_directory')"
+        },
+        {
+          "line": 123,
+          "text": "            after=os.stat(name,dir_fd=destination,follow_symlinks=False)"
+        },
+        {
+          "line": 124,
+          "text": "            if (_metadata(after)!=expected or not stat.S_ISREG(after.st_mode) or after.st_nlink!=1 or"
+        },
+        {
+          "line": 125,
+          "text": "                (after.st_dev,after.st_ino)!=(published_inode.st_dev,published_inode.st_ino)):"
+        },
+        {
+          "line": 126,
+          "text": "                raise G.AdmissionBlocked('IPC_POSTPUBLICATION_METADATA_OR_IDENTITY')"
+        },
+        {
+          "line": 127,
+          "text": "            return {'uid':after.st_uid,'gid':after.st_gid,'mode':stat.S_IMODE(after.st_mode),"
+        },
+        {
+          "line": 128,
+          "text": "                    'device':after.st_dev,'inode':after.st_ino,'bytes':after.st_size}"
+        },
+        {
+          "line": 129,
+          "text": "        finally:os.close(fd)"
+        },
+        {
+          "line": 130,
+          "text": ""
+        },
+        {
+          "line": 131,
+          "text": ""
+        },
+        {
+          "line": 132,
+          "text": "def marker(path):"
+        },
+        {
+          "line": 133,
+          "text": "    # Presence of a malformed marker also cancels; contents never create a grant."
+        },
+        {
+          "line": 134,
+          "text": "    try:os.lstat(path);return True"
+        },
+        {
+          "line": 135,
+          "text": "    except FileNotFoundError:return False"
+        },
+        {
+          "line": 136,
+          "text": ""
+        },
+        {
+          "line": 137,
+          "text": ""
+        },
+        {
+          "line": 138,
+          "text": "def observe(G):"
+        },
+        {
+          "line": 139,
+          "text": "    return {'closed':marker(G.ROOT/'inputs/CLOSED.json'),"
+        },
+        {
+          "line": 140,
+          "text": "            'stop_request':marker(G.OUT/'STOP_REQUEST.json')}"
+        },
+        {
+          "line": 141,
+          "text": ""
+        },
+        {
+          "line": 142,
+          "text": ""
+        },
+        {
+          "line": 143,
+          "text": "def checkpoint(G,allow_uninitialized=False):"
+        },
+        {
+          "line": 144,
+          "text": "    flags=observe(G)"
+        },
+        {
+          "line": 145,
+          "text": "    if flags['closed']:raise G.AdmissionBlocked('IPC_CLOSED_DOMINATES')"
+        },
+        {
+          "line": 146,
+          "text": "    if flags['stop_request']:raise G.AdmissionBlocked('IPC_STOP_REQUEST_DOMINATES')"
+        },
+        {
+          "line": 147,
+          "text": "    p=G.ROOT/'inputs/batch_state.json'"
+        },
+        {
+          "line": 148,
+          "text": "    if not p.exists():"
+        },
+        {
+          "line": 149,
+          "text": "        if allow_uninitialized:return None"
+        },
+        {
+          "line": 150,
+          "text": "        raise G.AdmissionBlocked('IPC_STATE_MISSING')"
+        },
+        {
+          "line": 151,
+          "text": "    s=G.trusted(p)"
+        },
+        {
+          "line": 152,
+          "text": "    if s['boot_id']!=G.boot_id():raise G.AdmissionBlocked('IPC_BOOT_DRIFT')"
+        },
+        {
+          "line": 153,
+          "text": "    if s['status'] not in ('CALIBRATING','FORMAL','AWAIT_EXPECTED_RESUME'):"
+        },
+        {
+          "line": 154,
+          "text": "        raise G.AdmissionBlocked('IPC_TERMINAL_STATE')"
+        },
+        {
+          "line": 155,
+          "text": "    if G.now()>=min(s['deadline'],s['stop_at']):raise G.LimitReached('IPC_ABSOLUTE_LIMIT')"
+        }
+      ]
+    }
+  ],
+  "manager_recovery.py": [
+    {
+      "start": 51,
+      "end": 94,
+      "lines": [
+        {
+          "line": 51,
+          "text": "def event(G,kind,**data):"
+        },
+        {
+          "line": 52,
+          "text": "    row={'schema':PROFILE,'event':kind,'batch_id':G.ROOT.name,'boot_id':G.boot_id(),"
+        },
+        {
+          "line": 53,
+          "text": "         'actor':G.identity(),'sample':G.stamp(),**data}"
+        },
+        {
+          "line": 54,
+          "text": "    raw=canonical(row)+b'\\n'"
+        },
+        {
+          "line": 55,
+          "text": "    if len(raw)>32768:raise G.AdmissionBlocked('MR_EVENT_BYTES')"
+        },
+        {
+          "line": 56,
+          "text": "    with locked(G,'mr_events.lock') as store:"
+        },
+        {
+          "line": 57,
+          "text": "        fd=os.open('mr_events.jsonl',os.O_WRONLY|os.O_CREAT|os.O_APPEND|os.O_NOFOLLOW,0o600,dir_fd=store.fd)"
+        },
+        {
+          "line": 58,
+          "text": "        try:os.fchown(fd,0,0);os.fchmod(fd,0o600);G._full(fd,raw);os.fsync(fd);os.fsync(store.fd)"
+        },
+        {
+          "line": 59,
+          "text": "        finally:os.close(fd)"
+        },
+        {
+          "line": 60,
+          "text": "    return row"
+        },
+        {
+          "line": 61,
+          "text": ""
+        },
+        {
+          "line": 62,
+          "text": "def credit(G,label):"
+        },
+        {
+          "line": 63,
+          "text": "    \"\"\"Only finite MR checks consume the already charged Root review block.\"\"\""
+        },
+        {
+          "line": 64,
+          "text": "    G.root_checkpoint()"
+        },
+        {
+          "line": 65,
+          "text": "    with locked(G,'mr_credit.lock') as store:"
+        },
+        {
+          "line": 66,
+          "text": "        q=store.read('mr_credit.json')"
+        },
+        {
+          "line": 67,
+          "text": "        if q['binding']!=G.safety_binding() or q['used']>=q['N']:raise G.AdmissionBlocked('MR_CREDIT_EXHAUSTED_OR_BINDING')"
+        },
+        {
+          "line": 68,
+          "text": "        q['used']+=1;q['last_label']=label;store.put('mr_credit.json',q)"
+        },
+        {
+          "line": 69,
+          "text": ""
+        },
+        {
+          "line": 70,
+          "text": "def classify(f):"
+        },
+        {
+          "line": 71,
+          "text": "    \"\"\"Pure policy shared with synthetic subjects; native facts are collected below.\"\"\""
+        },
+        {
+          "line": 72,
+          "text": "    if f['closed']:return 'CLOSED'"
+        },
+        {
+          "line": 73,
+          "text": "    if f['stop']:return 'STOP_REQUESTED'"
+        },
+        {
+          "line": 74,
+          "text": "    if not all(f[k] for k in ('binding','identity','fresh','expected_kind','budget','window')):return 'REVIEWED_UNEXPECTED'"
+        },
+        {
+          "line": 75,
+          "text": "    if not f['exit_observed']:return 'MANAGER_ACTIVE' if f['active'] else 'REVIEW_PENDING'"
+        },
+        {
+          "line": 76,
+          "text": "    if not all(f[k] for k in ('review_complete','result_proof','ack','receiver','witness')):return 'REVIEW_PENDING'"
+        },
+        {
+          "line": 77,
+          "text": "    return 'REVIEWED_EXPECTED' if f['supervision'] else 'REVIEWED_UNEXPECTED'"
+        },
+        {
+          "line": 78,
+          "text": ""
+        },
+        {
+          "line": 79,
+          "text": "def closure_status(closed,payload_empty,other_roles_exited,errors):"
+        },
+        {
+          "line": 80,
+          "text": "    return 'CLOSED_CLEANUP_CONFIRMED' if closed and payload_empty and other_roles_exited and not errors else 'UNKNOWN'"
+        },
+        {
+          "line": 81,
+          "text": ""
+        },
+        {
+          "line": 82,
+          "text": "def query(G,argv,until,record=True):"
+        },
+        {
+          "line": 83,
+          "text": "    if record:"
+        },
+        {
+          "line": 84,
+          "text": "        import startup_lifecycle as P"
+        },
+        {
+          "line": 85,
+          "text": "        P.manager_checkpoint(G);until=P.query_deadline(G,until)"
+        },
+        {
+          "line": 86,
+          "text": "    before=G.stamp();remaining=until-G.now()"
+        },
+        {
+          "line": 87,
+          "text": "    if remaining<=0:raise G.LimitReached('MR_REVIEW_DEADLINE')"
+        },
+        {
+          "line": 88,
+          "text": "    p=subprocess.run(argv,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=min(1,remaining))"
+        },
+        {
+          "line": 89,
+          "text": "    if len(p.stdout)>8192 or len(p.stderr)>2048:raise G.AdmissionBlocked('MR_MANAGER_OUTPUT_BOUND')"
+        },
+        {
+          "line": 90,
+          "text": "    row={'argv':argv,'before':before,'after':G.stamp(),'exit_code':p.returncode,"
+        },
+        {
+          "line": 91,
+          "text": "         'stdout':p.stdout.decode('utf-8'),'stderr':p.stderr.decode('utf-8')}"
+        },
+        {
+          "line": 92,
+          "text": "    if record:event(G,'MANAGER_QUERY',raw=row)"
+        },
+        {
+          "line": 93,
+          "text": "    if p.returncode:raise G.AdmissionBlocked('MR_MANAGER_QUERY_FAILED')"
+        },
+        {
+          "line": 94,
+          "text": "    return row"
+        }
+      ]
+    },
+    {
+      "start": 251,
+      "end": 315,
+      "lines": [
+        {
+          "line": 251,
+          "text": "def supervision(G,s):"
+        },
+        {
+          "line": 252,
+          "text": "    \"\"\"Independent stop source keeps the live Root owner through AWAIT.\"\"\""
+        },
+        {
+          "line": 253,
+          "text": "    import c09_handoff as H"
+        },
+        {
+          "line": 254,
+          "text": "    owner=s.get('coordinator_identity')"
+        },
+        {
+          "line": 255,
+          "text": "    if s['status']=='AWAIT_EXPECTED_RESUME':"
+        },
+        {
+          "line": 256,
+          "text": "        h=G.trusted(H.paths(G)['state'])"
+        },
+        {
+          "line": 257,
+          "text": "        if h['stage']!='HANDOFF_VERIFIED' or h['window']!=H.window(G,s):raise G.AdmissionBlocked('MR_PENDING_OWNER_EVIDENCE')"
+        },
+        {
+          "line": 258,
+          "text": "        owner=h['coordinator']"
+        },
+        {
+          "line": 259,
+          "text": "        expected=G.trusted(G.ROOT/'inputs/BOOT_START.json')['owner']"
+        },
+        {
+          "line": 260,
+          "text": "        if owner!=expected:raise G.AdmissionBlocked('MR_PENDING_OWNER_IDENTITY')"
+        },
+        {
+          "line": 261,
+          "text": "    if owner is None or not H.alive(G,owner):raise G.AdmissionBlocked('MR_COORDINATOR_LOST')"
+        },
+        {
+          "line": 262,
+          "text": "    limit=min(s['deadline'],s['stop_at'],s['T0']+300 if s['status'] in ('CALIBRATING','AWAIT_EXPECTED_RESUME') else s['stop_at'])"
+        },
+        {
+          "line": 263,
+          "text": "    if G.now()>=limit:raise G.LimitReached('MR_SUPERVISION_DEADLINE')"
+        },
+        {
+          "line": 264,
+          "text": "    return owner"
+        },
+        {
+          "line": 265,
+          "text": ""
+        },
+        {
+          "line": 266,
+          "text": "def budget_snapshot(G):"
+        },
+        {
+          "line": 267,
+          "text": "    rows={}"
+        },
+        {
+          "line": 268,
+          "text": "    for name in ('visits.bin','visits.bin.intent.json','visits.bin.journal.jsonl'):"
+        },
+        {
+          "line": 269,
+          "text": "        p=G.OUT/name"
+        },
+        {
+          "line": 270,
+          "text": "        try:"
+        },
+        {
+          "line": 271,
+          "text": "            fd=os.open(p,os.O_RDONLY|os.O_NOFOLLOW);digest=hashlib.sha256();size=0"
+        },
+        {
+          "line": 272,
+          "text": "            try:"
+        },
+        {
+          "line": 273,
+          "text": "                while True:"
+        },
+        {
+          "line": 274,
+          "text": "                    block=os.read(fd,65536)"
+        },
+        {
+          "line": 275,
+          "text": "                    if not block:break"
+        },
+        {
+          "line": 276,
+          "text": "                    digest.update(block);size+=len(block)"
+        },
+        {
+          "line": 277,
+          "text": "            finally:os.close(fd)"
+        },
+        {
+          "line": 278,
+          "text": "            rows[name]={'sha256':digest.hexdigest(),'bytes':size}"
+        },
+        {
+          "line": 279,
+          "text": "        except (OSError,ValueError) as exc:rows[name]={'status':'UNKNOWN','error':type(exc).__name__}"
+        },
+        {
+          "line": 280,
+          "text": "    return rows"
+        },
+        {
+          "line": 281,
+          "text": ""
+        },
+        {
+          "line": 282,
+          "text": "def _targets(G):"
+        },
+        {
+          "line": 283,
+          "text": "    \"\"\"Only Root-protected current owner/scheduler identities are signal targets.\"\"\""
+        },
+        {
+          "line": 284,
+          "text": "    with BC.Store() as store:"
+        },
+        {
+          "line": 285,
+          "text": "        q=store.read('mr_scheduler.json')"
+        },
+        {
+          "line": 286,
+          "text": "    if q['binding']!={'batch_id':G.ROOT.name,'boot_id':G.boot_id(),'source_manifest':G.digest(G.SOURCE.parent/'inputs/static_manifest.json')}:"
+        },
+        {
+          "line": 287,
+          "text": "        raise G.AdmissionBlocked('MR_STOP_TARGET_BINDING')"
+        },
+        {
+          "line": 288,
+          "text": "    if q['child'] is None:raise G.AdmissionBlocked('MR_STOP_TARGET_UNPUBLISHED')"
+        },
+        {
+          "line": 289,
+          "text": "    return [q['child'],q['owner']]"
+        },
+        {
+          "line": 290,
+          "text": ""
+        },
+        {
+          "line": 291,
+          "text": "def _stop_other_roots(G,deadline):"
+        },
+        {
+          "line": 292,
+          "text": "    import c09_handoff as H"
+        },
+        {
+          "line": 293,
+          "text": "    targets=_targets(G);me=G.identity();child,owner=targets"
+        },
+        {
+          "line": 294,
+          "text": "    if me==child:"
+        },
+        {
+          "line": 295,
+          "text": "        return {'known_other_roles_exited':False,'delegated_to_owner':True,'owner_exit_pending':True,'targets':[]}"
+        },
+        {
+          "line": 296,
+          "text": "    if me!=owner:"
+        },
+        {
+          "line": 297,
+          "text": "        if G.trusted(G.ROOT/'inputs/STOP_ARMED.json')['identity']!=me:"
+        },
+        {
+          "line": 298,
+          "text": "            raise G.AdmissionBlocked('MR_STOP_CALLER_IDENTITY')"
+        },
+        {
+          "line": 299,
+          "text": "    fds=[];facts=[]"
+        },
+        {
+          "line": 300,
+          "text": "    try:"
+        },
+        {
+          "line": 301,
+          "text": "        for ident in targets:"
+        },
+        {
+          "line": 302,
+          "text": "            if ident==G.identity() or not H.alive(G,ident):continue"
+        },
+        {
+          "line": 303,
+          "text": "            fd=os.pidfd_open(ident['pid'])"
+        },
+        {
+          "line": 304,
+          "text": "            if G.identity(ident['pid'])!=ident:os.close(fd);raise G.AdmissionBlocked('MR_STOP_PIDFD_IDENTITY')"
+        },
+        {
+          "line": 305,
+          "text": "            fds.append((fd,ident))"
+        },
+        {
+          "line": 306,
+          "text": "        until=min(deadline,G.now()+30)"
+        },
+        {
+          "line": 307,
+          "text": "        while any(not select.select([fd],[],[],0)[0] for fd,_ in fds) and G.now()<until:time.sleep(.05)"
+        },
+        {
+          "line": 308,
+          "text": "        for fd,ident in fds:"
+        },
+        {
+          "line": 309,
+          "text": "            if not select.select([fd],[],[],0)[0]:signal.pidfd_send_signal(fd,signal.SIGKILL)"
+        },
+        {
+          "line": 310,
+          "text": "        until=min(deadline,G.now()+5)"
+        },
+        {
+          "line": 311,
+          "text": "        while any(not select.select([fd],[],[],0)[0] for fd,_ in fds) and G.now()<until:time.sleep(.05)"
+        },
+        {
+          "line": 312,
+          "text": "        for fd,ident in fds:facts.append({'identity':ident,'exit_observed':bool(select.select([fd],[],[],0)[0])})"
+        },
+        {
+          "line": 313,
+          "text": "        return {'known_other_roles_exited':all(x['exit_observed'] for x in facts),'targets':facts}"
+        },
+        {
+          "line": 314,
+          "text": "    finally:"
+        },
+        {
+          "line": 315,
+          "text": "        for fd,_ in fds:os.close(fd)"
+        }
+      ]
+    },
+    {
+      "start": 317,
+      "end": 430,
+      "lines": [
+        {
+          "line": 317,
+          "text": "def abort(G,reason,error=None,expected=False,announce_only=False):"
+        },
+        {
+          "line": 318,
+          "text": "    \"\"\"STOP first, immutable first failure, existing frozen stop, bounded fallback.\"\"\""
+        },
+        {
+          "line": 319,
+          "text": "    if os.geteuid()!=0 or str(G.ROOT)!=G.NAMESPACE['runtime_root'] or G.PARENT!=G.NAMESPACE['slice']:"
+        },
+        {
+          "line": 320,
+          "text": "        return {'status':'UNKNOWN','reason':'MR_ABORT_UNBOUND_CONTEXT'}"
+        },
+        {
+          "line": 321,
+          "text": "    if (G.ROOT/'inputs/CLOSED.json').exists() and (G.OUT/'EVIDENCE.zip').exists():"
+        },
+        {
+          "line": 322,
+          "text": "        G._HALTED.set()"
+        },
+        {
+          "line": 323,
+          "text": "        try:"
+        },
+        {
+          "line": 324,
+          "text": "            with BC.Store() as store:return store.read('mr_close_state.json')"
+        },
+        {
+          "line": 325,
+          "text": "        except BaseException:return {'status':'UNKNOWN','closed':True,'sealed':True,'reason':'MR_TERMINAL_EVIDENCE_UNREADABLE'}"
+        },
+        {
+          "line": 326,
+          "text": "    G._HALTED.set();notes=[]"
+        },
+        {
+          "line": 327,
+          "text": "    try:"
+        },
+        {
+          "line": 328,
+          "text": "        if not(G.OUT/'STOP_REQUEST.json').exists():G.request_stop('MR_CRITICAL:'+reason)"
+        },
+        {
+          "line": 329,
+          "text": "    except BaseException as exc:notes.append('STOP_PUBLISH:'+type(exc).__name__)"
+        },
+        {
+          "line": 330,
+          "text": "    snapshot=budget_snapshot(G)"
+        },
+        {
+          "line": 331,
+          "text": "    p=G.ROOT/'inputs/batch_state.json'"
+        },
+        {
+          "line": 332,
+          "text": "    try:s=G.trusted(p) if p.exists() else None"
+        },
+        {
+          "line": 333,
+          "text": "    except BaseException as exc:s=None;notes.append('STATE_UNKNOWN:'+type(exc).__name__)"
+        },
+        {
+          "line": 334,
+          "text": "    if s and s['boot_id']!=G.boot_id():"
+        },
+        {
+          "line": 335,
+          "text": "        notes.append('STATE_BOOT_MISMATCH');s=None"
+        },
+        {
+          "line": 336,
+          "text": "    deadline=s['deadline'] if s else G.now()"
+        },
+        {
+          "line": 337,
+          "text": "    if s is None:"
+        },
+        {
+          "line": 338,
+          "text": "        authority=None"
+        },
+        {
+          "line": 339,
+          "text": "        try:"
+        },
+        {
+          "line": 340,
+          "text": "            import startup_lifecycle as P"
+        },
+        {
+          "line": 341,
+          "text": "            authority=P.cleanup_deadline(G);deadline=authority['deadline']"
+        },
+        {
+          "line": 342,
+          "text": "        except BaseException:pass"
+        },
+        {
+          "line": 343,
+          "text": "        if authority is None:"
+        },
+        {
+          "line": 344,
+          "text": "            try:"
+        },
+        {
+          "line": 345,
+          "text": "                start=G.trusted(G.ROOT/'inputs/BOOT_START.json')"
+        },
+        {
+          "line": 346,
+          "text": "                if start['boot_id']!=G.boot_id():raise G.AdmissionBlocked('MR_STOP_BOOT')"
+        },
+        {
+          "line": 347,
+          "text": "                deadline=start['window']['deadline'];authority={'source':'BOOT_START'}"
+        },
+        {
+          "line": 348,
+          "text": "            except BaseException:pass"
+        },
+        {
+          "line": 349,
+          "text": "        if authority is None:"
+        },
+        {
+          "line": 350,
+          "text": "            try:"
+        },
+        {
+          "line": 351,
+          "text": "                arm=G.trusted(G.ROOT/'inputs/STOP_ARMED.json')"
+        },
+        {
+          "line": 352,
+          "text": "                if arm['boot_id']!=G.boot_id():raise G.AdmissionBlocked('MR_STOP_BOOT')"
+        },
+        {
+          "line": 353,
+          "text": "                deadline=arm['stop_at']+60;authority={'source':'STOP_ARMED existing runtime bound'}"
+        },
+        {
+          "line": 354,
+          "text": "            except BaseException:notes.append('DEADLINE_UNKNOWN')"
+        },
+        {
+          "line": 355,
+          "text": "    first={'schema':PROFILE,'reason':reason,'error_type':type(error).__name__ if error else None,"
+        },
+        {
+          "line": 356,
+          "text": "        'error':str(error)[:2048] if error else None,'expected_diagnostic':expected,'sample':G.stamp(),"
+        },
+        {
+          "line": 357,
+          "text": "        'batch_id':G.ROOT.name,'actor':G.identity(),'window':{k:s[k] for k in ('T0','deadline','stop_at')} if s else None,'budget':snapshot}"
+        },
+        {
+          "line": 358,
+          "text": "    try:"
+        },
+        {
+          "line": 359,
+          "text": "        with locked(G,'mr_close.lock') as store:"
+        },
+        {
+          "line": 360,
+          "text": "            try:first=store.read('mr_first_failure.json')"
+        },
+        {
+          "line": 361,
+          "text": "            except FileNotFoundError:store.put('mr_first_failure.json',first,exclusive=True)"
+        },
+        {
+          "line": 362,
+          "text": "            try:"
+        },
+        {
+          "line": 363,
+          "text": "                arm=G.trusted(G.ROOT/'inputs/STOP_ARMED.json')"
+        },
+        {
+          "line": 364,
+          "text": "                if arm['identity']==G.identity():store.put('mr_external_closing.json',{'actor':G.identity(),'batch_id':G.ROOT.name,'sample':G.stamp()})"
+        },
+        {
+          "line": 365,
+          "text": "            except FileNotFoundError:pass"
+        },
+        {
+          "line": 366,
+          "text": "            store.put('mr_close_state.json',{'phase':'ABORTING','first_failure_sha256':sha(first),'sample':G.stamp()})"
+        },
+        {
+          "line": 367,
+          "text": "    except BaseException as exc:notes.append('FAILURE_PERSIST:'+type(exc).__name__)"
+        },
+        {
+          "line": 368,
+          "text": "    if announce_only:return {'status':'STOP_REQUESTED','first_failure_sha256':sha(first),'errors':notes}"
+        },
+        {
+          "line": 369,
+          "text": "    cleanup=None"
+        },
+        {
+          "line": 370,
+          "text": "    try:"
+        },
+        {
+          "line": 371,
+          "text": "        if deadline-G.now()<20:raise G.LimitReached('MR_CLEANUP_REMAINING_WINDOW')"
+        },
+        {
+          "line": 372,
+          "text": "        cleanup=G.stop_tree('MR_CRITICAL:'+first['reason'],True)"
+        },
+        {
+          "line": 373,
+          "text": "        if cleanup.get('closure_persistence_error'):raise G.AdmissionBlocked('MR_CLOSED_WRITE_FAILED')"
+        },
+        {
+          "line": 374,
+          "text": "    except BaseException as exc:"
+        },
+        {
+          "line": 375,
+          "text": "        notes.append('PRIMARY_CLEANUP:'+type(exc).__name__)"
+        },
+        {
+          "line": 376,
+          "text": "        # Presence of CLOSED and the original STOP marker dominates all admission."
+        },
+        {
+          "line": 377,
+          "text": "        try:"
+        },
+        {
+          "line": 378,
+          "text": "            import c09_handoff as H"
+        },
+        {
+          "line": 379,
+          "text": "            with H.lifecycle_lock(G):"
+        },
+        {
+          "line": 380,
+          "text": "                if not(G.ROOT/'inputs/CLOSED.json').exists():G._root_write(G.ROOT/'inputs/CLOSED.json',{'reason':'MR_FALLBACK:'+first['reason'],**G.stamp()})"
+        },
+        {
+          "line": 381,
+          "text": "        except BaseException as e:notes.append('CLOSED_FALLBACK:'+type(e).__name__)"
+        },
+        {
+          "line": 382,
+          "text": "        for argv in [['/usr/bin/systemctl','stop',G.PARENT],['/usr/bin/systemctl','kill','--kill-whom=all','--signal=KILL',G.PARENT]]:"
+        },
+        {
+          "line": 383,
+          "text": "            try:subprocess.run(argv,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=max(.001,min(5,deadline-G.now())))"
+        },
+        {
+          "line": 384,
+          "text": "            except BaseException as e:notes.append('EXTERNAL_STOP:'+type(e).__name__)"
+        },
+        {
+          "line": 385,
+          "text": "    try:roles=_stop_other_roots(G,deadline)"
+        },
+        {
+          "line": 386,
+          "text": "    except BaseException as exc:roles={'known_other_roles_exited':False,'error':type(exc).__name__};notes.append('ROLE_EXIT_UNKNOWN')"
+        },
+        {
+          "line": 387,
+          "text": "    if getattr(G,'_MR_CHILD_REAP_PENDING',False):"
+        },
+        {
+          "line": 388,
+          "text": "        roles['known_other_roles_exited']=False;roles['local_child_reap_pending']=True"
+        },
+        {
+          "line": 389,
+          "text": "    closed=(G.ROOT/'inputs/CLOSED.json').exists();empty=G._empty()"
+        },
+        {
+          "line": 390,
+          "text": "    result={'schema':PROFILE,'phase':'CLEANUP','status':closure_status(closed,empty,roles['known_other_roles_exited'],notes),"
+        },
+        {
+          "line": 391,
+          "text": "        'closed':closed,'payload_empty':empty,'other_roles':roles,'first_failure_sha256':sha(first),"
+        },
+        {
+          "line": 392,
+          "text": "        'errors':notes,'budget_after':budget_snapshot(G),'sample':G.stamp(),'caller_exit_pending':True}"
+        },
+        {
+          "line": 393,
+          "text": "    try:"
+        },
+        {
+          "line": 394,
+          "text": "        with locked(G,'mr_close.lock') as store:"
+        },
+        {
+          "line": 395,
+          "text": "            fd=os.open('mr_close_attempts.jsonl',os.O_WRONLY|os.O_CREAT|os.O_APPEND|os.O_NOFOLLOW,0o600,dir_fd=store.fd)"
+        },
+        {
+          "line": 396,
+          "text": "            try:os.fchown(fd,0,0);os.fchmod(fd,0o600);G._full(fd,canonical(result)+b'\\n');os.fsync(fd)"
+        },
+        {
+          "line": 397,
+          "text": "            finally:os.close(fd)"
+        },
+        {
+          "line": 398,
+          "text": "            store.put('mr_close_state.json',result)"
+        },
+        {
+          "line": 399,
+          "text": "    except BaseException as exc:result['status']='UNKNOWN';result['errors'].append('FINAL_EVIDENCE:'+type(exc).__name__)"
+        },
+        {
+          "line": 400,
+          "text": "    return result"
+        },
+        {
+          "line": 401,
+          "text": ""
+        },
+        {
+          "line": 402,
+          "text": "def fail(G,reason,code=65,expected=False):"
+        },
+        {
+          "line": 403,
+          "text": "    abort(G,reason,expected=expected);return code"
+        },
+        {
+          "line": 404,
+          "text": ""
+        },
+        {
+          "line": 405,
+          "text": "def permit_external_seal(G):"
+        },
+        {
+          "line": 406,
+          "text": "    import c09_handoff as H"
+        },
+        {
+          "line": 407,
+          "text": "    if not(G.ROOT/'inputs/CLOSED.json').exists() or not G._empty():return False"
+        },
+        {
+          "line": 408,
+          "text": "    arm=G.trusted(G.ROOT/'inputs/STOP_ARMED.json')"
+        },
+        {
+          "line": 409,
+          "text": "    if arm['identity']!=G.identity():return False"
+        },
+        {
+          "line": 410,
+          "text": "    try:targets=_targets(G)"
+        },
+        {
+          "line": 411,
+          "text": "    except BaseException:return False"
+        },
+        {
+          "line": 412,
+          "text": "    return all(ident==G.identity() or not H.alive(G,ident) for ident in targets)"
+        },
+        {
+          "line": 413,
+          "text": ""
+        },
+        {
+          "line": 414,
+          "text": "def seal(G,external_tail=False):"
+        },
+        {
+          "line": 415,
+          "text": "    import startup_lifecycle as P"
+        },
+        {
+          "line": 416,
+          "text": "    applicability=P.seal_applicability(G)"
+        },
+        {
+          "line": 417,
+          "text": "    if applicability!='RUNTIME_NATIVE_SEAL_APPLICABLE':return P.defer_startup_seal(G,applicability)"
+        },
+        {
+          "line": 418,
+          "text": "    if G._COORDINATOR_ID is not None and G.identity()!=G._COORDINATOR_ID:return None"
+        },
+        {
+          "line": 419,
+          "text": "    with locked(G,'mr_seal.lock') as store:"
+        },
+        {
+          "line": 420,
+          "text": "        if (G.OUT/'EVIDENCE.zip').exists():return G.digest(G.OUT/'EVIDENCE.zip')"
+        },
+        {
+          "line": 421,
+          "text": "        if not(G.ROOT/'inputs/CLOSED.json').exists() or not G._empty():raise G.AdmissionBlocked('MR_SEAL_CLOSED_OR_PAYLOAD_UNKNOWN')"
+        },
+        {
+          "line": 422,
+          "text": "        if external_tail and not permit_external_seal(G):return None"
+        },
+        {
+          "line": 423,
+          "text": "        if getattr(G,'_MR_CHILD_REAP_PENDING',False):raise G.AdmissionBlocked('MR_SEAL_CHILD_REAP_UNKNOWN')"
+        },
+        {
+          "line": 424,
+          "text": "        if not external_tail:"
+        },
+        {
+          "line": 425,
+          "text": "            try:"
+        },
+        {
+          "line": 426,
+          "text": "                import c09_handoff as H"
+        },
+        {
+          "line": 427,
+          "text": "                delegate=store.read('mr_external_closing.json')"
+        },
+        {
+          "line": 428,
+          "text": "                if delegate['batch_id']==G.ROOT.name and H.alive(G,delegate['actor']):return None"
+        },
+        {
+          "line": 429,
+          "text": "            except FileNotFoundError:pass"
+        },
+        {
+          "line": 430,
+          "text": "        return G.seal(external_tail=external_tail)"
+        }
+      ]
+    },
+    {
+      "start": 453,
+      "end": 468,
+      "lines": [
+        {
+          "line": 453,
+          "text": "def prepay(G):"
+        },
+        {
+          "line": 454,
+          "text": "    \"\"\"Finite native review work is charged before C09 fixes the handoff counter.\"\"\""
+        },
+        {
+          "line": 455,
+          "text": "    G.root_checkpoint();cfg=contract(G)"
+        },
+        {
+          "line": 456,
+          "text": "    with BC.Store() as store:"
+        },
+        {
+          "line": 457,
+          "text": "        try:existing=store.read('mr_credit.json')"
+        },
+        {
+          "line": 458,
+          "text": "        except FileNotFoundError:existing=None"
+        },
+        {
+          "line": 459,
+          "text": "        if existing is not None:"
+        },
+        {
+          "line": 460,
+          "text": "            if existing['binding']!=G.safety_binding() or existing['N']!=cfg['native_review_credit']:raise G.AdmissionBlocked('MR_PREPAY_CONFLICT')"
+        },
+        {
+          "line": 461,
+          "text": "            return existing"
+        },
+        {
+          "line": 462,
+          "text": "    old=G._TICKET;G._TICKET=G.ticket('C00');before=G.count()"
+        },
+        {
+          "line": 463,
+          "text": "    try:"
+        },
+        {
+          "line": 464,
+          "text": "        for _ in range(cfg['native_review_credit']):G.execution_deadline('C00');G.reserve_counter(G.OUT/'visits.bin',G.VISIT_CAP)"
+        },
+        {
+          "line": 465,
+          "text": "        with BC.Store() as store:store.put('mr_credit.json',{'binding':G.safety_binding(),'N':cfg['native_review_credit'],"
+        },
+        {
+          "line": 466,
+          "text": "            'used':0,'charged_before':before,'charged_after':G.count(),'sample':G.stamp()},exclusive=True)"
+        },
+        {
+          "line": 467,
+          "text": "    finally:G._TICKET=old"
+        },
+        {
+          "line": 468,
+          "text": ""
+        }
+      ]
+    }
+  ],
+  "terminal_evidence.py": [
+    {
+      "start": 143,
+      "end": 186,
+      "lines": [
+        {
+          "line": 143,
+          "text": "def _native_artifact(G,ds,hashes,until,child_pid,original_boot):"
+        },
+        {
+          "line": 144,
+          "text": "    present=lambda name:bool(_exists(ds['out'],name))"
+        },
+        {
+          "line": 145,
+          "text": "    result={'zip_present':present('EVIDENCE.zip'),'manifest_present':present('EVIDENCE_MANIFEST.json'),"
+        },
+        {
+          "line": 146,
+          "text": "        'verified':False,'seal_error':_exists(ds['inputs'],'SEAL_ERROR.json'),'errors':[]}"
+        },
+        {
+          "line": 147,
+          "text": "    if result['seal_error']:"
+        },
+        {
+          "line": 148,
+          "text": "        error=_json(ds['inputs'],'SEAL_ERROR.json',{(0,989,0o640)},hashes,'SEAL_ERROR')"
+        },
+        {
+          "line": 149,
+          "text": "        if not isinstance(error['error'],str) or not error['error'] or error['sample']['boot_id']!=original_boot:raise EvidenceError('TR_SEAL_ERROR_RECORD')"
+        },
+        {
+          "line": 150,
+          "text": "        result['error_record']=error"
+        },
+        {
+          "line": 151,
+          "text": "    if not(result['zip_present'] and result['manifest_present']):return result"
+        },
+        {
+          "line": 152,
+          "text": "    try:"
+        },
+        {
+          "line": 153,
+          "text": "        manifest=_json(ds['out'],'EVIDENCE_MANIFEST.json',{(0,0,0o600)},hashes,'native_manifest')"
+        },
+        {
+          "line": 154,
+          "text": "        declared=manifest['files'];fd=_open(ds['out'],'EVIDENCE.zip',{(0,0,0o600),(0,0,0o644)},33554432)"
+        },
+        {
+          "line": 155,
+          "text": "        try:"
+        },
+        {
+          "line": 156,
+          "text": "            with os.fdopen(os.dup(fd),'rb') as raw,zipfile.ZipFile(raw) as z:"
+        },
+        {
+          "line": 157,
+          "text": "                names=z.namelist()"
+        },
+        {
+          "line": 158,
+          "text": "                if len(names)>257 or len(names)!=len(set(names)) or set(names)!=set(declared)|{'out/EVIDENCE_MANIFEST.json'}:raise EvidenceError('TR_NATIVE_MEMBER_SET')"
+        },
+        {
+          "line": 159,
+          "text": "                if z.getinfo('out/EVIDENCE_MANIFEST.json').file_size>4194304:raise EvidenceError('TR_NATIVE_MANIFEST_BOUND')"
+        },
+        {
+          "line": 160,
+          "text": "                with z.open('out/EVIDENCE_MANIFEST.json') as item:mf=item.read(4194305)"
+        },
+        {
+          "line": 161,
+          "text": "                if len(mf)>4194304:raise EvidenceError('TR_NATIVE_MANIFEST_BOUND')"
+        },
+        {
+          "line": 162,
+          "text": "                if hashlib.sha256(mf).hexdigest()!=hashes['native_manifest']['sha256']:raise EvidenceError('TR_NATIVE_MANIFEST_BYTES')"
+        },
+        {
+          "line": 163,
+          "text": "                total=len(mf)"
+        },
+        {
+          "line": 164,
+          "text": "                for name,row in declared.items():"
+        },
+        {
+          "line": 165,
+          "text": "                    if Path(name).is_absolute() or '..' in Path(name).parts:raise EvidenceError('TR_NATIVE_MEMBER_PATH')"
+        },
+        {
+          "line": 166,
+          "text": "                    sha=hashlib.sha256();size=0"
+        },
+        {
+          "line": 167,
+          "text": "                    with z.open(name) as member:"
+        },
+        {
+          "line": 168,
+          "text": "                        while True:"
+        },
+        {
+          "line": 169,
+          "text": "                            _deadline(G,until);block=member.read(65536)"
+        },
+        {
+          "line": 170,
+          "text": "                            if not block:break"
+        },
+        {
+          "line": 171,
+          "text": "                            size+=len(block);total+=len(block)"
+        },
+        {
+          "line": 172,
+          "text": "                            if total>33554432:raise EvidenceError('TR_NATIVE_UNCOMPRESSED_BOUND')"
+        },
+        {
+          "line": 173,
+          "text": "                            sha.update(block)"
+        },
+        {
+          "line": 174,
+          "text": "                    if size!=row['bytes'] or sha.hexdigest()!=row['sha256']:raise EvidenceError('TR_NATIVE_STREAM_DIGEST')"
+        },
+        {
+          "line": 175,
+          "text": "                paths={'activation':'inputs/root_private/boot/activation.json','CLOSED':'inputs/CLOSED.json','STOP_REQUEST':'out/STOP_REQUEST.json',"
+        },
+        {
+          "line": 176,
+          "text": "                    'batch_state':'inputs/batch_state.json','runtime_checkpoint':'inputs/PT_RUNTIME_CHECKPOINT.json','phase':'inputs/root_private/boot/pt_phase.json',"
+        },
+        {
+          "line": 177,
+          "text": "                    'runtime_intent':'inputs/root_private/boot/pt_runtime_intent.json','budget_intent':'out/visits.bin.intent.json',"
+        },
+        {
+          "line": 178,
+          "text": "                    'waitpid':'inputs/root_private/waitpid_%s.json'%child_pid,'mr_scheduler':'inputs/root_private/boot/mr_scheduler.json',"
+        },
+        {
+          "line": 179,
+          "text": "                    'internal_close':'inputs/root_private/boot/mr_close_state.json','STOP_ARMED':'inputs/STOP_ARMED.json','SEAL_ERROR':'inputs/SEAL_ERROR.json'}"
+        },
+        {
+          "line": 180,
+          "text": "                for label,row in hashes.items():"
+        },
+        {
+          "line": 181,
+          "text": "                    if label=='native_manifest':continue"
+        },
+        {
+          "line": 182,
+          "text": "                    target=paths.get(label,label)"
+        },
+        {
+          "line": 183,
+          "text": "                    if target not in declared or declared[target]['sha256']!=row['sha256']:raise EvidenceError('TR_NATIVE_CURRENT_EVIDENCE')"
+        },
+        {
+          "line": 184,
+          "text": "                result['verified']=True"
+        },
+        {
+          "line": 185,
+          "text": "        finally:os.close(fd)"
+        },
+        {
+          "line": 186,
+          "text": "    except (OSError,ValueError,KeyError,EvidenceError,zipfile.BadZipFile) as exc:result['errors']=[type(exc).__name__+':'+str(exc)[:160]]"
+        }
+      ]
+    },
+    {
+      "start": 193,
+      "end": 266,
+      "lines": [
+        {
+          "line": 193,
+          "text": "def read_terminal_evidence(G,purpose='REVIEW'):"
+        },
+        {
+          "line": 194,
+          "text": "    \"\"\"Read existing fixed-batch originals. No state, ledger, service or grant writes.\"\"\""
+        },
+        {
+          "line": 195,
+          "text": "    if purpose not in ('REVIEW','NATIVE_SEAL','HISTORICAL_AUDIT'):raise EvidenceError('TR_READ_PURPOSE')"
+        },
+        {
+          "line": 196,
+          "text": "    until=G.now()+5;identity,mh,lh,ah=_context(G);hashes={}"
+        },
+        {
+          "line": 197,
+          "text": "    RI=G.root_ipc()"
+        },
+        {
+          "line": 198,
+          "text": "    with RI.directories(G) as ds:"
+        },
+        {
+          "line": 199,
+          "text": "        bootfd=RI._dir(ds['private'],'boot',(0,0,0o700))"
+        },
+        {
+          "line": 200,
+          "text": "        try:"
+        },
+        {
+          "line": 201,
+          "text": "            rootowner={(0,0,0o600)};public={(0,989,0o640)};dataowner={(999,989,0o600)}"
+        },
+        {
+          "line": 202,
+          "text": "            activation=_json(bootfd,'activation.json',rootowner,hashes,'activation');ticket=activation['ticket'];original_boot=ticket['boot_id'];bound=ticket['binding']"
+        },
+        {
+          "line": 203,
+          "text": "            if (not activation['initial_entered'] or bound['batch_id']!=identity['batch_id'] or bound['static_manifest_sha256']!=mh or"
+        },
+        {
+          "line": 204,
+          "text": "                bound['execution_lock_sha256']!=lh or bound['authorization_receipt_sha256']!=ah):raise EvidenceError('TR_ACTIVATION_BINDING')"
+        },
+        {
+          "line": 205,
+          "text": "            closed=None;stop=None"
+        },
+        {
+          "line": 206,
+          "text": "            try:closed=_json(ds['inputs'],'CLOSED.json',public,hashes,'CLOSED')"
+        },
+        {
+          "line": 207,
+          "text": "            except FileNotFoundError:pass"
+        },
+        {
+          "line": 208,
+          "text": "            try:stop=_json(ds['out'],'STOP_REQUEST.json',dataowner,hashes,'STOP_REQUEST')"
+        },
+        {
+          "line": 209,
+          "text": "            except FileNotFoundError:pass"
+        },
+        {
+          "line": 210,
+          "text": "            if closed is None and stop is None:raise EvidenceError('TR_NOT_TERMINAL')"
+        },
+        {
+          "line": 211,
+          "text": "            for marker in [m for m in (closed,stop) if m is not None]:"
+        },
+        {
+          "line": 212,
+          "text": "                if marker['boot_id']!=original_boot:raise EvidenceError('TR_TERMINAL_BOOT')"
+        },
+        {
+          "line": 213,
+          "text": "            counter=_open(ds['out'],'visits.bin',dataowner,24)"
+        },
+        {
+          "line": 214,
+          "text": "            try:"
+        },
+        {
+          "line": 215,
+          "text": "                # Match the original writer order: counter lock, then phase lock."
+        },
+        {
+          "line": 216,
+          "text": "                with _shared(G,counter,until):"
+        },
+        {
+          "line": 217,
+          "text": "                    phasefd=_open(bootfd,'pt_phase.lock',rootowner,0)"
+        },
+        {
+          "line": 218,
+          "text": "                    try:"
+        },
+        {
+          "line": 219,
+          "text": "                        with _shared(G,phasefd,until):"
+        },
+        {
+          "line": 220,
+          "text": "                            s=_json(ds['inputs'],'batch_state.json',public,hashes,'batch_state')"
+        },
+        {
+          "line": 221,
+          "text": "                            cp=_json(ds['inputs'],'PT_RUNTIME_CHECKPOINT.json',public,hashes,'runtime_checkpoint')"
+        },
+        {
+          "line": 222,
+          "text": "                            phase=_json(bootfd,'pt_phase.json',rootowner,hashes,'phase')"
+        },
+        {
+          "line": 223,
+          "text": "                            initial=_json(bootfd,'pt_runtime_intent.json',rootowner,hashes,'runtime_intent')"
+        },
+        {
+          "line": 224,
+          "text": "                            binding={'batch_id':identity['batch_id'],'root':str(G.ROOT),'boot_id':original_boot,'manifest_sha256':mh,"
+        },
+        {
+          "line": 225,
+          "text": "                                'execution_lock_sha256':lh,'authorization_sha256':ah,'startup_contract_sha256':G.digest(G.SOURCE.parent/'inputs/startup_contract.json')}"
+        },
+        {
+          "line": 226,
+          "text": "                            window={k:s[k] for k in ('T0','deadline','stop_at')}"
+        },
+        {
+          "line": 227,
+          "text": "                            if (s['boot_id']!=original_boot or not all(type(v) in (int,float) and math.isfinite(v) and v>=0 for v in window.values()) or"
+        },
+        {
+          "line": 228,
+          "text": "                                abs(s['deadline']-s['T0']-1800)>1e-6 or abs(s['stop_at']-s['T0']-1740)>1e-6):raise EvidenceError('TR_WINDOW_EVIDENCE')"
+        },
+        {
+          "line": 229,
+          "text": "                            indexes={'RUNTIME_READY':4,'RUNTIME_ARMED':5,'RUNNING':6}"
+        },
+        {
+          "line": 230,
+          "text": "                            if (cp['schema']!='PT-RUNTIME-CHECKPOINT/1' or cp['binding']!=binding or phase['binding']!=binding or initial['binding']!=binding or"
+        },
+        {
+          "line": 231,
+          "text": "                                cp['window']!=window or cp['phase'] not in indexes or cp['sequence']!=indexes[cp['phase']] or"
+        },
+        {
+          "line": 232,
+          "text": "                                phase['phase']!=cp['phase'] or phase['sequence']!=cp['sequence'] or cp.get('committed') is not True or"
+        },
+        {
+          "line": 233,
+          "text": "                                cp['phase_record_sha256']!=digest(phase) or cp['initialization_id']!=digest(initial)):raise EvidenceError('TR_PHASE_EVIDENCE')"
+        },
+        {
+          "line": 234,
+          "text": "                            raw=os.pread(counter,25,0);meta=os.fstat(counter)"
+        },
+        {
+          "line": 235,
+          "text": "                            if len(raw)!=24 or raw[:8]!=b'BRNGv001':raise EvidenceError('TR_COUNTER_FORMAT')"
+        },
+        {
+          "line": 236,
+          "text": "                            R,cap=struct.unpack('<QQ',raw[8:]);counter_id={'device':meta.st_dev,'inode':meta.st_ino,'cap':cap,'magic':'BRNGv001'}"
+        },
+        {
+          "line": 237,
+          "text": "                            if cap!=G.VISIT_CAP or R>cap or cp['counter']!=counter_id:raise EvidenceError('TR_COUNTER_IDENTITY')"
+        },
+        {
+          "line": 238,
+          "text": "                            hashes['out/visits.bin']={'sha256':hashlib.sha256(raw).hexdigest(),'bytes':24}"
+        },
+        {
+          "line": 239,
+          "text": "                            intent=_json(ds['out'],'visits.bin.intent.json',dataowner,hashes,'budget_intent')"
+        },
+        {
+          "line": 240,
+          "text": "                            if intent['protocol']!='EXACT-RANGE/1' or intent['status']!='COMMITTED' or intent['after']!=R or intent['cap']!=cap:raise EvidenceError('TR_BUDGET_INTENT')"
+        },
+        {
+          "line": 241,
+          "text": "                            with os.scandir(ds['out']) as entries:"
+        },
+        {
+          "line": 242,
+          "text": "                                for i,entry in enumerate(entries):"
+        },
+        {
+          "line": 243,
+          "text": "                                    if i>=1024:raise EvidenceError('TR_OUT_NAME_BOUND')"
+        },
+        {
+          "line": 244,
+          "text": "                                    if entry.name.startswith('visits.bin.intent.json.tmp.'):raise EvidenceError('TR_AMBIGUOUS_BUDGET_TEMP')"
+        },
+        {
+          "line": 245,
+          "text": "                            journal=_open(ds['out'],'visits.bin.journal.jsonl',dataowner|rootowner,33554432)"
+        },
+        {
+          "line": 246,
+          "text": "                            try:transactions,last=_journal(G,journal,R,cap,original_boot,until,hashes)"
+        },
+        {
+          "line": 247,
+          "text": "                            finally:os.close(journal)"
+        },
+        {
+          "line": 248,
+          "text": "                            if last is not None and any(last[k]!=intent[k] for k in last):raise EvidenceError('TR_FINAL_INTENT_JOURNAL')"
+        },
+        {
+          "line": 249,
+          "text": "                            try:internal=_json(bootfd,'mr_close_state.json',rootowner,hashes,'internal_close').get('status','UNKNOWN')"
+        },
+        {
+          "line": 250,
+          "text": "                            except FileNotFoundError:internal='UNKNOWN'"
+        },
+        {
+          "line": 251,
+          "text": "                            exits=_exit_evidence(G,ds,bootfd,s,activation,hashes,original_boot,purpose)"
+        },
+        {
+          "line": 252,
+          "text": "                            artifact=_native_artifact(G,ds,hashes,until,s['launcher_identity']['pid'],original_boot)"
+        },
+        {
+          "line": 253,
+          "text": "                            same=G.boot_id()==original_boot"
+        },
+        {
+          "line": 254,
+          "text": "                            facts={'purpose':purpose,'closed':closed is not None,'stop':stop is not None,'identity':True,'window':True,'budget':True,"
+        },
+        {
+          "line": 255,
+          "text": "                                'version':True,'required_records':True,'same_boot':same,'window_live':same and G.now()<s['deadline'],"
+        },
+        {
+          "line": 256,
+          "text": "                                'exit_proof':exits['seal_exit_ready'],'internal_status':internal,'native_verified':artifact['verified'],"
+        },
+        {
+          "line": 257,
+          "text": "                                'seal_error':artifact['seal_error'],'partial_archive':(artifact['zip_present'] or artifact['manifest_present']) and not artifact['verified']}"
+        },
+        {
+          "line": 258,
+          "text": "                            policy=terminal_policy(facts);_deadline(G,until)"
+        },
+        {
+          "line": 259,
+          "text": "                            return {'schema':'TERMINAL-EVIDENCE/1','binding':binding,'original_boot_id':original_boot,'observation_boot_id':G.boot_id(),"
+        },
+        {
+          "line": 260,
+          "text": "                                'purpose':purpose,'window':window,'R':R,'cap':cap,'journal_status':'CONSISTENT','transactions':transactions,"
+        },
+        {
+          "line": 261,
+          "text": "                                'closed':closed,'stop_request':stop,'phase':cp['phase'],'sequence':cp['sequence'],'exit_evidence':exits,"
+        },
+        {
+          "line": 262,
+          "text": "                                'internal_status':internal,'evidence_digests':hashes,'decision':policy,'sample':G.stamp(),"
+        },
+        {
+          "line": 263,
+          "text": "                                'native_seal_status':policy['native_status'],'native_artifact':artifact,'runtime_authority':'NONE'}"
+        },
+        {
+          "line": 264,
+          "text": "                    finally:os.close(phasefd)"
+        },
+        {
+          "line": 265,
+          "text": "            finally:os.close(counter)"
+        },
+        {
+          "line": 266,
+          "text": "        finally:os.close(bootfd)"
+        }
+      ]
+    }
+  ],
+  "startup_lifecycle.py": [
+    {
+      "start": 412,
+      "end": 524,
+      "lines": [
+        {
+          "line": 412,
+          "text": "def post_exit_export(admin_deadline=None):"
+        },
+        {
+          "line": 413,
+          "text": "    \"\"\"Automatic audit/export only; never initializes, resumes or grants work.\"\"\""
+        },
+        {
+          "line": 414,
+          "text": "    import resource"
+        },
+        {
+          "line": 415,
+          "text": "    import signal"
+        },
+        {
+          "line": 416,
+          "text": "    if admin_deadline is None:"
+        },
+        {
+          "line": 417,
+          "text": "        resource.setrlimit(resource.RLIMIT_AS,(1<<30,1<<30))"
+        },
+        {
+          "line": 418,
+          "text": "        admin_deadline=BC.now()+30"
+        },
+        {
+          "line": 419,
+          "text": "        signal.signal(signal.SIGALRM,signal.SIG_DFL);signal.alarm(30)"
+        },
+        {
+          "line": 420,
+          "text": "    elif (not math.isfinite(admin_deadline) or not 0<admin_deadline-BC.now()<=30 or"
+        },
+        {
+          "line": 421,
+          "text": "        not 0<signal.getitimer(signal.ITIMER_REAL)[0]<=30 or resource.getrlimit(resource.RLIMIT_AS)[1]>(1<<30)):"
+        },
+        {
+          "line": 422,
+          "text": "        raise RuntimeError('PF_ADMIN_INHERITED_ENVELOPE')"
+        },
+        {
+          "line": 423,
+          "text": "    source=Path(__file__).resolve().parent;identity=BC.NAMESPACE;root=Path(identity['runtime_root'])"
+        },
+        {
+          "line": 424,
+          "text": "    if os.geteuid()!=0 or str(source)!=identity['source_root']+'/src':raise RuntimeError('PT_POSTEXIT_SOURCE')"
+        },
+        {
+          "line": 425,
+          "text": "    manifest=BC.trusted(source.parent/'inputs/static_manifest.json');lock=BC.trusted(source.parent/'inputs/execution_lock.json')"
+        },
+        {
+          "line": 426,
+          "text": "    if BC.digest(source.parent/'inputs/static_manifest.json')!=lock['static_manifest_sha256']:raise RuntimeError('PT_POSTEXIT_MANIFEST')"
+        },
+        {
+          "line": 427,
+          "text": "    for name,expected in manifest['source_hashes'].items():"
+        },
+        {
+          "line": 428,
+          "text": "        if BC.digest(source/name)!=expected:raise RuntimeError('PT_POSTEXIT_SOURCE_DRIFT')"
+        },
+        {
+          "line": 429,
+          "text": "    for rel,expected in manifest['bound_inputs'].items():"
+        },
+        {
+          "line": 430,
+          "text": "        if BC.digest(source.parent/rel)!=expected:raise RuntimeError('PT_POSTEXIT_INPUT_DRIFT')"
+        },
+        {
+          "line": 431,
+          "text": "    receipt_hash=_postexit_binding(source,root,identity,BC.digest(source.parent/'inputs/static_manifest.json'),BC.digest(source.parent/'inputs/execution_lock.json'))"
+        },
+        {
+          "line": 432,
+          "text": "    began=BC.now();wait_until=min(began+5,admin_deadline)"
+        },
+        {
+          "line": 433,
+          "text": "    # Existing execution expiry only reduces waiting; administrative IO keeps its own30s alarm."
+        },
+        {
+          "line": 434,
+          "text": "    state_path=root/'inputs/batch_state.json';activation=root/'inputs/root_private/boot/activation.json'"
+        },
+        {
+          "line": 435,
+          "text": "    if state_path.exists():"
+        },
+        {
+          "line": 436,
+          "text": "        try:wait_until=min(wait_until,BC.trusted(state_path)['deadline'])"
+        },
+        {
+          "line": 437,
+          "text": "        except (OSError,ValueError,KeyError):wait_until=began"
+        },
+        {
+          "line": 438,
+          "text": "    elif activation.exists():"
+        },
+        {
+          "line": 439,
+          "text": "        try:wait_until=min(wait_until,BC.trusted(activation)['ticket']['preflight_deadline'])"
+        },
+        {
+          "line": 440,
+          "text": "        except (OSError,ValueError,KeyError):wait_until=began"
+        },
+        {
+          "line": 441,
+          "text": "    audit_history=[]"
+        },
+        {
+          "line": 442,
+          "text": "    for _ in range(128):"
+        },
+        {
+          "line": 443,
+          "text": "        if BC.now()>=admin_deadline:raise RuntimeError('PF_ADMIN_TOTAL_DEADLINE')"
+        },
+        {
+          "line": 444,
+          "text": "        role_processes,payload,group_exists,audit_errors=_postexit_roles(source,root,identity['slice'])"
+        },
+        {
+          "line": 445,
+          "text": "        audit_history.append({'sample':BC.stamp(),'role_pids':[r['pid'] for r in role_processes],'payload_pids':payload,"
+        },
+        {
+          "line": 446,
+          "text": "            'parent_cgroup_exists':group_exists,'errors':audit_errors})"
+        },
+        {
+          "line": 447,
+          "text": "        if (not role_processes and not payload and not group_exists and not audit_errors) or BC.now()>=wait_until or audit_errors:break"
+        },
+        {
+          "line": 448,
+          "text": "        time.sleep(min(.02,max(0,wait_until-BC.now())))"
+        },
+        {
+          "line": 449,
+          "text": "    cp=root/'inputs/PT_RUNTIME_CHECKPOINT.json';state=root/'inputs/batch_state.json';counter=root/'out/visits.bin'"
+        },
+        {
+          "line": 450,
+          "text": "    runtime_intent=root/'inputs/root_private/boot/pt_runtime_intent.json'"
+        },
+        {
+          "line": 451,
+          "text": "    actual={'runtime_intent':runtime_intent.exists(),'state':state.exists(),'counter':counter.exists(),'checkpoint':cp.exists()}"
+        },
+        {
+          "line": 452,
+          "text": "    native_zip=root/'out/EVIDENCE.zip';closed=root/'inputs/CLOSED.json';native_status='NATIVE_SEAL_UNRESOLVED'"
+        },
+        {
+          "line": 453,
+          "text": "    if not any(actual.values()):native_status='NATIVE_SEAL_NOT_APPLICABLE'"
+        },
+        {
+          "line": 454,
+          "text": "    elif all(actual.values()) and native_zip.exists():"
+        },
+        {
+          "line": 455,
+          "text": "        import zipfile"
+        },
+        {
+          "line": 456,
+          "text": "        try:"
+        },
+        {
+          "line": 457,
+          "text": "            declared=json.loads((root/'out/EVIDENCE_MANIFEST.json').read_bytes())['files']"
+        },
+        {
+          "line": 458,
+          "text": "            with zipfile.ZipFile(native_zip) as z:"
+        },
+        {
+          "line": 459,
+          "text": "                for name,row in declared.items():"
+        },
+        {
+          "line": 460,
+          "text": "                    expected=row['sha256'] if isinstance(row,dict) else row"
+        },
+        {
+          "line": 461,
+          "text": "                    if hashlib.sha256(z.read(name)).hexdigest()!=expected:raise ValueError('PT_NATIVE_ARCHIVE_DIGEST')"
+        },
+        {
+          "line": 462,
+          "text": "            native_status='NATIVE_SEAL_COMPLETED'"
+        },
+        {
+          "line": 463,
+          "text": "        except (OSError,ValueError,KeyError,zipfile.BadZipFile):native_status='NATIVE_SEAL_UNRESOLVED'"
+        },
+        {
+          "line": 464,
+          "text": "    elif all(actual.values()) and (root/'inputs/SEAL_ERROR.json').exists():native_status='NATIVE_SEAL_FAILED'"
+        },
+        {
+          "line": 465,
+          "text": "    result={'schema':'PT-POSTEXIT/1','batch_id':identity['batch_id'],'source_revision':identity['revision'],"
+        },
+        {
+          "line": 466,
+          "text": "        'administrative_actor':BC.identity(),'administrative_uid':os.geteuid(),'administrative_deadline':admin_deadline,"
+        },
+        {
+          "line": 467,
+          "text": "        'observation_boot_id':BC.boot(),'observation':BC.stamp(),'runtime_objects':actual,'native_seal_status':native_status,"
+        },
+        {
+          "line": 468,
+          "text": "        'role_processes':role_processes,'payload_pids':payload,'parent_cgroup_exists':group_exists,'audit_errors':audit_errors,"
+        },
+        {
+          "line": 469,
+          "text": "        'quiescence_samples':audit_history,'quiescence_wait_bound_seconds':5,'quiescence_sample_bound':128,"
+        },
+        {
+          "line": 470,
+          "text": "        'closed_marker':closed.exists(),'T0':None,'R':None,'files':[],'nonregular':[],"
+        },
+        {
+          "line": 471,
+          "text": "        'source_manifest_sha256':BC.digest(source.parent/'inputs/static_manifest.json'),'execution_lock_sha256':BC.digest(source.parent/'inputs/execution_lock.json')}"
+        },
+        {
+          "line": 472,
+          "text": "    result['authorization_receipt_sha256']=receipt_hash"
+        },
+        {
+          "line": 473,
+          "text": "    if state.exists():"
+        },
+        {
+          "line": 474,
+          "text": "        try:result['T0']=BC.trusted(state)['T0']"
+        },
+        {
+          "line": 475,
+          "text": "        except (OSError,ValueError,KeyError):result['T0']='UNRESOLVED'"
+        },
+        {
+          "line": 476,
+          "text": "    if counter.exists():"
+        },
+        {
+          "line": 477,
+          "text": "        try:"
+        },
+        {
+          "line": 478,
+          "text": "            raw=counter.read_bytes()"
+        },
+        {
+          "line": 479,
+          "text": "            result['R']=struct.unpack('<Q',raw[8:16])[0] if len(raw)==24 and raw[:8]==b'BRNGv001' else 'UNRESOLVED'"
+        },
+        {
+          "line": 480,
+          "text": "        except (OSError,ValueError):result['R']='UNRESOLVED'"
+        },
+        {
+          "line": 481,
+          "text": "    try:internal=BC.trusted(root/'inputs/root_private/boot/mr_close_state.json')['status']"
+        },
+        {
+          "line": 482,
+          "text": "    except (OSError,ValueError,KeyError):internal='UNKNOWN'"
+        },
+        {
+          "line": 483,
+          "text": "    verdict=administrative_policy({'roles_empty':not role_processes and not payload,'group_absent':not group_exists,"
+        },
+        {
+          "line": 484,
+          "text": "        'audit_error':bool(audit_errors),'any_runtime':any(actual.values()),'native_verified':native_status=='NATIVE_SEAL_COMPLETED',"
+        },
+        {
+          "line": 485,
+          "text": "        'native_error':native_status=='NATIVE_SEAL_FAILED','internal_status':internal})"
+        },
+        {
+          "line": 486,
+          "text": "    result.update(verdict)"
+        },
+        {
+          "line": 487,
+          "text": "    if native_status=='NATIVE_SEAL_COMPLETED':result['native_zip_sha256']=BC.digest(native_zip)"
+        },
+        {
+          "line": 488,
+          "text": "    control=Path(identity['linux_control'])"
+        },
+        {
+          "line": 489,
+          "text": "    # Independent administrative record; runtime originals and native seal records are read-only."
+        },
+        {
+          "line": 490,
+          "text": "    with (control/'STARTUP_NATIVE_AUDIT.json').open('x',encoding='utf-8') as receipt:"
+        },
+        {
+          "line": 491,
+          "text": "        json.dump(result,receipt,ensure_ascii=False,indent=2);receipt.flush();os.fsync(receipt.fileno())"
+        },
+        {
+          "line": 492,
+          "text": "    if verdict['administrative_export_status']!='EXPORT_ALLOWED':print(json.dumps(result,ensure_ascii=False));return"
+        },
+        {
+          "line": 493,
+          "text": "    cfg=BC.trusted(source.parent/'inputs/startup_contract.json');control=Path(identity['linux_control']);dest=control/'startup_snapshot'"
+        },
+        {
+          "line": 494,
+          "text": "    if dest.exists():raise RuntimeError('PT_POSTEXIT_EXPORT_ALREADY_EXISTS')"
+        },
+        {
+          "line": 495,
+          "text": "    dest.mkdir();count=0;total=0"
+        },
+        {
+          "line": 496,
+          "text": "    for p in sorted(root.rglob('*')):"
+        },
+        {
+          "line": 497,
+          "text": "        if BC.now()>=admin_deadline:raise RuntimeError('PF_ADMIN_TOTAL_DEADLINE')"
+        },
+        {
+          "line": 498,
+          "text": "        s=p.lstat();rel=p.relative_to(root).as_posix()"
+        },
+        {
+          "line": 499,
+          "text": "        if stat.S_ISDIR(s.st_mode):continue"
+        },
+        {
+          "line": 500,
+          "text": "        meta={'uid':s.st_uid,'gid':s.st_gid,'mode':stat.S_IMODE(s.st_mode),'device':s.st_dev,'inode':s.st_ino}"
+        },
+        {
+          "line": 501,
+          "text": "        if not stat.S_ISREG(s.st_mode):result['nonregular'].append({'relative':rel,'type':stat.S_IFMT(s.st_mode),**meta});continue"
+        },
+        {
+          "line": 502,
+          "text": "        count+=1;total+=s.st_size"
+        },
+        {
+          "line": 503,
+          "text": "        if count>cfg['admin_max_files'] or total>cfg['admin_max_bytes']:raise RuntimeError('PT_ADMIN_EVIDENCE_BOUND')"
+        },
+        {
+          "line": 504,
+          "text": "        q=dest/rel;q.parent.mkdir(parents=True,exist_ok=True);digest=hashlib.sha256()"
+        },
+        {
+          "line": 505,
+          "text": "        with p.open('rb') as src,q.open('xb') as out:"
+        },
+        {
+          "line": 506,
+          "text": "            while True:"
+        },
+        {
+          "line": 507,
+          "text": "                b=src.read(65536)"
+        },
+        {
+          "line": 508,
+          "text": "                if not b:break"
+        },
+        {
+          "line": 509,
+          "text": "                out.write(b);digest.update(b)"
+        },
+        {
+          "line": 510,
+          "text": "        result['files'].append({'relative':rel,'bytes':s.st_size,'sha256':digest.hexdigest(),**meta})"
+        },
+        {
+          "line": 511,
+          "text": "    result['administrative_export_status']='EXPORTED_QUIESCENT_STARTUP_EVIDENCE'"
+        },
+        {
+          "line": 512,
+          "text": "    result['startup_status']=('STARTUP_ABORTED_PRE_T0' if not any(actual.values()) else"
+        },
+        {
+          "line": 513,
+          "text": "        'INITIALIZATION_PARTIAL_UNRESOLVED' if not all(actual.values()) else"
+        },
+        {
+          "line": 514,
+          "text": "        'RUNTIME_CLOSED' if closed.exists() else 'RUNTIME_EXIT_UNRESOLVED')"
+        },
+        {
+          "line": 515,
+          "text": "    try:"
+        },
+        {
+          "line": 516,
+          "text": "        first=BC.trusted(root/'inputs/root_private/boot/mr_first_failure.json')"
+        },
+        {
+          "line": 517,
+          "text": "        result['first_failure']={k:first.get(k) for k in ('reason','error_type','expected_diagnostic','sample','window')}"
+        },
+        {
+          "line": 518,
+          "text": "    except (OSError,ValueError,KeyError):pass"
+        },
+        {
+          "line": 519,
+          "text": "    print(json.dumps(result,ensure_ascii=False))"
+        },
+        {
+          "line": 520,
+          "text": ""
+        },
+        {
+          "line": 521,
+          "text": "if __name__=='__main__':"
+        },
+        {
+          "line": 522,
+          "text": "    import argparse"
+        },
+        {
+          "line": 523,
+          "text": "    parser=argparse.ArgumentParser();parser.add_argument('--post-exit-export',action='store_true',required=True);parser.parse_args()"
+        },
+        {
+          "line": 524,
+          "text": "    post_exit_export()"
+        }
+      ]
+    }
+  ],
+  "c09_regression.py": [
+    {
+      "start": 1,
+      "end": 74,
+      "lines": [
+        {
+          "line": 1,
+          "text": "\"\"\"C09H synthetic event interleavings. Role executes only in an authorized C09H controller.\"\"\""
+        },
+        {
+          "line": 2,
+          "text": "import hashlib"
+        },
+        {
+          "line": 3,
+          "text": "import json"
+        },
+        {
+          "line": 4,
+          "text": "from pathlib import Path"
+        },
+        {
+          "line": 5,
+          "text": "import c09_handoff as H"
+        },
+        {
+          "line": 6,
+          "text": ""
+        },
+        {
+          "line": 7,
+          "text": "class Subject:"
+        },
+        {
+          "line": 8,
+          "text": "    def __init__(self,mutant=None):"
+        },
+        {
+          "line": 9,
+          "text": "        self.f=H.synthetic_initial();self.state='PENDING';self.count=0;self.old=None;self.mutant=mutant"
+        },
+        {
+          "line": 10,
+          "text": "    def step(self,e):"
+        },
+        {
+          "line": 11,
+          "text": "        f=self.f"
+        },
+        {
+          "line": 12,
+          "text": "        if e=='prepare':f['prepared']=True"
+        },
+        {
+          "line": 13,
+          "text": "        elif e=='read_old':self.old=dict(f)"
+        },
+        {
+          "line": 14,
+          "text": "        elif e=='commit':f['commit']=True;f['durable_ack']=True"
+        },
+        {
+          "line": 15,
+          "text": "        elif e=='exit23':f['exit_observed']=True"
+        },
+        {
+          "line": 16,
+          "text": "        elif e=='exit_other':f['exit_observed']=True"
+        },
+        {
+          "line": 17,
+          "text": "        elif e=='witness23':f['witness']=23"
+        },
+        {
+          "line": 18,
+          "text": "        elif e=='witness_other':f['witness']=17"
+        },
+        {
+          "line": 19,
+          "text": "        elif e=='close':f['closed']=True"
+        },
+        {
+          "line": 20,
+          "text": "        elif e=='expire':f['now']=13"
+        },
+        {
+          "line": 21,
+          "text": "        elif e in ('write_interrupted','fsync_failed'):f['commit']=False;f['durable_ack']=False"
+        },
+        {
+          "line": 22,
+          "text": "        elif e in ('bad_batch','bad_boot','bad_lock'):f['binding_ok']=False"
+        },
+        {
+          "line": 23,
+          "text": "        elif e=='unready':f['receiver_ready']=False"
+        },
+        {
+          "line": 24,
+          "text": "        elif e=='receiver_dead':f['receiver_alive']=False"
+        },
+        {
+          "line": 25,
+          "text": "        elif e=='stop_lost':f['stop_alive']=False"
+        },
+        {
+          "line": 26,
+          "text": "        elif e=='bad_budget':f['budget_ok']=False"
+        },
+        {
+          "line": 27,
+          "text": "        elif e=='bad_sender':f['sender_ok']=False"
+        },
+        {
+          "line": 28,
+          "text": "        elif e=='bad_version':f['version_ok']=False"
+        },
+        {
+          "line": 29,
+          "text": "        elif e=='bad_window':f['window_ok']=False"
+        },
+        {
+          "line": 30,
+          "text": "        elif e not in ('observe','verify','repeat'):raise ValueError('UNFROZEN_EVENT')"
+        },
+        {
+          "line": 31,
+          "text": "        if e not in ('observe','verify','repeat'):return self.snapshot(e)"
+        },
+        {
+          "line": 32,
+          "text": "        check=dict(f)"
+        },
+        {
+          "line": 33,
+          "text": "        if self.mutant=='use_old_snapshot' and self.old is not None:"
+        },
+        {
+          "line": 34,
+          "text": "            verdict='FAILED' if not self.old['commit'] else H.classify(self.old)"
+        },
+        {
+          "line": 35,
+          "text": "        else:"
+        },
+        {
+          "line": 36,
+          "text": "            if self.mutant=='ignore_version':check['version_ok']=True"
+        },
+        {
+          "line": 37,
+          "text": "            if self.mutant=='reopen_closed' and check['closed']:"
+        },
+        {
+          "line": 38,
+          "text": "                check.update(closed=False,prepared=True,commit=True,durable_ack=True,"
+        },
+        {
+          "line": 39,
+          "text": "                             exit_observed=True,witness=23,now=0)"
+        },
+        {
+          "line": 40,
+          "text": "            if self.mutant=='exit23_only' and check['witness']==23:verdict='VERIFIED'"
+        },
+        {
+          "line": 41,
+          "text": "            elif self.mutant=='unknown_success' and check['exit_observed']:verdict='VERIFIED'"
+        },
+        {
+          "line": 42,
+          "text": "            else:verdict=H.classify(check)"
+        },
+        {
+          "line": 43,
+          "text": "        if self.state=='CLOSED' and self.mutant!='reopen_closed':verdict='CLOSED'"
+        },
+        {
+          "line": 44,
+          "text": "        if self.state=='FAILED' and self.mutant is None:verdict='FAILED'"
+        },
+        {
+          "line": 45,
+          "text": "        if verdict=='VERIFIED' and (self.state!='VERIFIED' or self.mutant=='duplicate_classification'):"
+        },
+        {
+          "line": 46,
+          "text": "            self.count+=1"
+        },
+        {
+          "line": 47,
+          "text": "        self.state=verdict"
+        },
+        {
+          "line": 48,
+          "text": "        return self.snapshot(e)"
+        },
+        {
+          "line": 49,
+          "text": "    def snapshot(self,e):"
+        },
+        {
+          "line": 50,
+          "text": "        return {'event':e,'facts':dict(self.f),'subject_state':self.state,'classification_count':self.count}"
+        },
+        {
+          "line": 51,
+          "text": ""
+        },
+        {
+          "line": 52,
+          "text": "def run_suite(G,budget):"
+        },
+        {
+          "line": 53,
+          "text": "    if G._TICKET is None or G._TICKET['case']!='C09H' or G.state()['status']!='CALIBRATING':"
+        },
+        {
+          "line": 54,
+          "text": "        raise G.AdmissionBlocked('C09H_CALIBRATION_MODE_ONLY')"
+        },
+        {
+          "line": 55,
+          "text": "    cfg=G.c09_contract();binding=G.safety_binding();base=G.OUT/'c09_tests'"
+        },
+        {
+          "line": 56,
+          "text": "    base.mkdir(exist_ok=False)"
+        },
+        {
+          "line": 57,
+          "text": "    import c09_oracle"
+        },
+        {
+          "line": 58,
+          "text": "    G.c09h_charge(budget)"
+        },
+        {
+          "line": 59,
+          "text": "    for job in cfg['jobs']:"
+        },
+        {
+          "line": 60,
+          "text": "        p=G._inside(base/job['case_id'],G.OUT);p.mkdir(exist_ok=False)"
+        },
+        {
+          "line": 61,
+          "text": "        if len(job['events'])>cfg['max_events_per_job']:raise G.AdmissionBlocked('C09H_EVENT_CAP')"
+        },
+        {
+          "line": 62,
+          "text": "        subject=Subject(job['mutant'])"
+        },
+        {
+          "line": 63,
+          "text": "        for index,e in enumerate(job['events']):"
+        },
+        {
+          "line": 64,
+          "text": "            G.c09h_charge(budget)"
+        },
+        {
+          "line": 65,
+          "text": "            row=subject.step(e)"
+        },
+        {
+          "line": 66,
+          "text": "            row.update({'case_id':job['case_id'],'event_index':index,'binding':binding,"
+        },
+        {
+          "line": 67,
+          "text": "                        'input_sha256':hashlib.sha256(H.canonical(job).encode()).hexdigest(),"
+        },
+        {
+          "line": 68,
+          "text": "                        'actor':G.identity(),'stamp':G.stamp(),'global_reserved':G.count()})"
+        },
+        {
+          "line": 69,
+          "text": "            G.write(p/('%03d.json'%index),row)"
+        },
+        {
+          "line": 70,
+          "text": "        G.c09h_charge(budget)"
+        },
+        {
+          "line": 71,
+          "text": "        result=c09_oracle.check_job(p,job,binding)"
+        },
+        {
+          "line": 72,
+          "text": "        G.write(p/'oracle.json',result)"
+        },
+        {
+          "line": 73,
+          "text": "        if not result['accepted']:raise G.AdmissionBlocked('C09H_'+result['status']+':'+job['case_id'])"
+        },
+        {
+          "line": 74,
+          "text": "    return {'case':'C09H','status':'PASS','jobs':len(cfg['jobs']),'binding':binding,'sample':G.stamp()}"
+        }
+      ]
+    }
+  ],
+  "range_core.py": [
+    {
+      "start": 100,
+      "end": 225,
+      "lines": [
+        {
+          "line": 100,
+          "text": "            with self.G._counter_lock(self.path,self.cap,self.request['case']) as v:yield v"
+        },
+        {
+          "line": 101,
+          "text": "    def validate_fact(self,fact,used):"
+        },
+        {
+          "line": 102,
+          "text": "        G=self.G"
+        },
+        {
+          "line": 103,
+          "text": "        if fact.get('protocol')!=G.BUDGET_PROTOCOL:raise G.AdmissionBlocked('FACT_PROTOCOL_MISMATCH')"
+        },
+        {
+          "line": 104,
+          "text": "        if fact['request']!=self.request:raise G.AdmissionBlocked('TASK_ID_REQUEST_CONFLICT')"
+        },
+        {
+          "line": 105,
+          "text": "        lo,hi=fact['credit_range']"
+        },
+        {
+          "line": 106,
+          "text": "        if type(lo) is not int or type(hi) is not int or not(0<=lo<hi<=used) or hi-lo!=self.request['N']:"
+        },
+        {
+          "line": 107,
+          "text": "            raise G.AdmissionBlocked('EXACT_FACT_RANGE_MISMATCH')"
+        },
+        {
+          "line": 108,
+          "text": "        material={'request':self.request,'credit_range':[lo,hi],'owner':fact['owner']}"
+        },
+        {
+          "line": 109,
+          "text": "        if request_hash(material)!=fact['lease_id']:raise G.AdmissionBlocked('EXACT_FACT_IDENTITY_MISMATCH')"
+        },
+        {
+          "line": 110,
+          "text": "        if fact['delivery_state'] not in ('UNCLAIMED','CLAIMED'):"
+        },
+        {
+          "line": 111,
+          "text": "            raise G.AdmissionBlocked('EXACT_FACT_DELIVERY_STATE')"
+        },
+        {
+          "line": 112,
+          "text": "    def reserve(self):"
+        },
+        {
+          "line": 113,
+          "text": "        G=self.G"
+        },
+        {
+          "line": 114,
+          "text": "        G.timing_event('reserve.request')"
+        },
+        {
+          "line": 115,
+          "text": "        if self.mode:self.mode.before_call('reserve')"
+        },
+        {
+          "line": 116,
+          "text": "        self.valid()"
+        },
+        {
+          "line": 117,
+          "text": "        if self.mode:"
+        },
+        {
+          "line": 118,
+          "text": "            self.mode.refund_prepared(self)"
+        },
+        {
+          "line": 119,
+          "text": "            if self.mode.mutant=='early_grant' and self.mode.phase=='primary':"
+        },
+        {
+          "line": 120,
+          "text": "                self.event('GRANT',lease_id='INVALID_EARLY',N=self.request['N'])"
+        },
+        {
+          "line": 121,
+          "text": "                self.mode.semantic(1)"
+        },
+        {
+          "line": 122,
+          "text": "        self.event('RESERVE_REQUEST',request=self.request,request_sha256=request_hash(self.request))"
+        },
+        {
+          "line": 123,
+          "text": "        if self.mode and self.mode.job['kind']=='concurrent':"
+        },
+        {
+          "line": 124,
+          "text": "            self.mode.rendezvous('request')"
+        },
+        {
+          "line": 125,
+          "text": "        self.hit('before_reserve')"
+        },
+        {
+          "line": 126,
+          "text": "        try:"
+        },
+        {
+          "line": 127,
+          "text": "            with self.lock() as (fd,used,p):"
+        },
+        {
+          "line": 128,
+          "text": "                self.valid()"
+        },
+        {
+          "line": 129,
+          "text": "                if self.mode is None:"
+        },
+        {
+          "line": 130,
+          "text": "                    checked,t=G._task_contract(self.request['task_id'],self.request['N'])"
+        },
+        {
+          "line": 131,
+          "text": "                    if checked!=self.request or G._TICKET is None or t['main_identity']!=G.identity():"
+        },
+        {
+          "line": 132,
+          "text": "                        raise G.AdmissionBlocked('EXACT_RESERVATION_OWNER_REQUIRED')"
+        },
+        {
+          "line": 133,
+          "text": "                fp=fact_path(p,self.request['task_id'])"
+        },
+        {
+          "line": 134,
+          "text": "                if fp.exists() and not(self.mode and self.mode.mutant=='duplicate_task'):"
+        },
+        {
+          "line": 135,
+          "text": "                    fact=G.read(fp);self.validate_fact(fact,used)"
+        },
+        {
+          "line": 136,
+          "text": "                    self.event('IDEMPOTENT_FACT',lease_id=fact['lease_id'])"
+        },
+        {
+          "line": 137,
+          "text": "                    return Reservation(self,fact,False,_MINT)"
+        },
+        {
+          "line": 138,
+          "text": "                n=self.request['N']"
+        },
+        {
+          "line": 139,
+          "text": "                soft=100000 if p==G.OUT/'visits.bin' and G._TICKET['case']!='FORMAL' else self.cap"
+        },
+        {
+          "line": 140,
+          "text": "                if used+n>min(self.cap,soft):raise G.LimitReached('VISIT_OR_CALIBRATION_LIMIT')"
+        },
+        {
+          "line": 141,
+          "text": "                rec={'protocol':G.BUDGET_PROTOCOL,'status':'PREPARED','before':used,'after':used+n,"
+        },
+        {
+          "line": 142,
+          "text": "                     'amount':n,'cap':self.cap,'request':self.request,**G.stamp()}"
+        },
+        {
+          "line": 143,
+          "text": "                intent=p.with_suffix(p.suffix+'.intent.json')"
+        },
+        {
+          "line": 144,
+          "text": "                self.atomic(intent,rec,'prepared')"
+        },
+        {
+          "line": 145,
+          "text": "                self.journal(rec,'journal_prepared')"
+        },
+        {
+          "line": 146,
+          "text": "                self.hit('counter.before_write')"
+        },
+        {
+          "line": 147,
+          "text": "                if G.timed('range.counter.write',os.pwrite,fd,struct.pack('<Q',used+n),8)!=8:"
+        },
+        {
+          "line": 148,
+          "text": "                    raise G.AdmissionBlocked('SHORT_COUNTER_WRITE')"
+        },
+        {
+          "line": 149,
+          "text": "                self.hit('counter.after_write');self.sync(fd,'counter')"
+        },
+        {
+          "line": 150,
+          "text": "                rec={**rec,'status':'COMMITTED',**G.stamp()}"
+        },
+        {
+          "line": 151,
+          "text": "                self.journal(rec,'journal_committed')"
+        },
+        {
+          "line": 152,
+          "text": "                fact={'protocol':G.BUDGET_PROTOCOL,'request':self.request,'credit_range':[used,used+n],"
+        },
+        {
+          "line": 153,
+          "text": "                      'owner':G.identity(),'delivery_state':'UNCLAIMED','executor':None,'reserved_at':G.stamp()}"
+        },
+        {
+          "line": 154,
+          "text": "                fact['lease_id']=request_hash({'request':self.request,'credit_range':fact['credit_range'],'owner':fact['owner']})"
+        },
+        {
+          "line": 155,
+          "text": "                self.atomic(fp,fact,'registry')"
+        },
+        {
+          "line": 156,
+          "text": "                self.atomic(intent,rec,'committed')"
+        },
+        {
+          "line": 157,
+          "text": "                G.timing_event('reserve.committed_barriers_done')"
+        },
+        {
+          "line": 158,
+          "text": "                self.event('COMMIT',lease_id=fact['lease_id'],before=used,after=used+n,request=self.request)"
+        },
+        {
+          "line": 159,
+          "text": "                self.valid()"
+        },
+        {
+          "line": 160,
+          "text": "                return Reservation(self,fact,True,_MINT)"
+        },
+        {
+          "line": 161,
+          "text": "        except G.LimitReached:raise"
+        },
+        {
+          "line": 162,
+          "text": "        except BaseException as exc:"
+        },
+        {
+          "line": 163,
+          "text": "            if self.mode is None:G.halt_budget(exc)"
+        },
+        {
+          "line": 164,
+          "text": "            raise"
+        },
+        {
+          "line": 165,
+          "text": "    def claim(self,lease_id):"
+        },
+        {
+          "line": 166,
+          "text": "        G=self.G"
+        },
+        {
+          "line": 167,
+          "text": "        if self.mode:self.mode.before_call('claim')"
+        },
+        {
+          "line": 168,
+          "text": "        self.valid()"
+        },
+        {
+          "line": 169,
+          "text": "        if self.mode is None:"
+        },
+        {
+          "line": 170,
+          "text": "            G.kernel_admission(self.ticket)"
+        },
+        {
+          "line": 171,
+          "text": "            if os.getppid()!=self.ticket['main_identity']['pid'] or G.identity(os.getppid())!=self.ticket['main_identity']:"
+        },
+        {
+          "line": 172,
+          "text": "                raise G.AdmissionBlocked('LOCAL_CREDIT_PARENT_MISMATCH')"
+        },
+        {
+          "line": 173,
+          "text": "        try:"
+        },
+        {
+          "line": 174,
+          "text": "            with self.lock() as (_,used,_):"
+        },
+        {
+          "line": 175,
+          "text": "                fact=G.read(fact_path(self.path,self.request['task_id']));self.validate_fact(fact,used)"
+        },
+        {
+          "line": 176,
+          "text": "                if fact['lease_id']!=lease_id:raise G.AdmissionBlocked('LOCAL_CREDIT_LEASE_MISMATCH')"
+        },
+        {
+          "line": 177,
+          "text": "                bypass=self.mode and self.mode.mutant in ('reissue','reset_claim')"
+        },
+        {
+          "line": 178,
+          "text": "                owner_ok=(fact['owner']==G.identity()) if self.mode else (fact['owner']==self.ticket['main_identity'])"
+        },
+        {
+          "line": 179,
+          "text": "                if not owner_ok and not bypass:raise G.AdmissionBlocked('LOCAL_CREDIT_OWNER_MISMATCH')"
+        },
+        {
+          "line": 180,
+          "text": "                if fact['delivery_state']!='UNCLAIMED' and not(self.mode and self.mode.mutant=='reset_claim'):"
+        },
+        {
+          "line": 181,
+          "text": "                    raise G.AdmissionBlocked('LOCAL_CREDIT_ALREADY_CLAIMED')"
+        },
+        {
+          "line": 182,
+          "text": "                fact={**fact,'delivery_state':'CLAIMED','executor':G.identity(),'claimed_at':G.stamp()}"
+        },
+        {
+          "line": 183,
+          "text": "                self.atomic(fact_path(self.path,self.request['task_id']),fact,'claimed')"
+        },
+        {
+          "line": 184,
+          "text": "                self.event('CLAIM',lease_id=lease_id,owner=fact['owner'],executor=fact['executor'])"
+        },
+        {
+          "line": 185,
+          "text": "                self.valid()"
+        },
+        {
+          "line": 186,
+          "text": "                credits=Credits(self,fact,_MINT)"
+        },
+        {
+          "line": 187,
+          "text": "                self.event('GRANT',lease_id=lease_id,N=self.request['N'])"
+        },
+        {
+          "line": 188,
+          "text": "                G.timing_event('local_credit.granted_to_executor')"
+        },
+        {
+          "line": 189,
+          "text": "                return credits"
+        },
+        {
+          "line": 190,
+          "text": "        except G.LimitReached:raise"
+        },
+        {
+          "line": 191,
+          "text": "        except BaseException as exc:"
+        },
+        {
+          "line": 192,
+          "text": "            if self.mode is None:G.halt_budget(exc)"
+        },
+        {
+          "line": 193,
+          "text": "            raise"
+        },
+        {
+          "line": 194,
+          "text": ""
+        },
+        {
+          "line": 195,
+          "text": "class Reservation:"
+        },
+        {
+          "line": 196,
+          "text": "    def __init__(self,store,fact,created,_mint=None):"
+        },
+        {
+          "line": 197,
+          "text": "        if _mint is not _MINT:raise store.G.AdmissionBlocked('RESERVATION_FACTORY_REQUIRED')"
+        },
+        {
+          "line": 198,
+          "text": "        self.store=store;self.fact=json.loads(canonical(fact));self.created=created"
+        },
+        {
+          "line": 199,
+          "text": "        self.issued=False;self.lock=threading.Lock()"
+        },
+        {
+          "line": 200,
+          "text": "    def dispatch_once(self):"
+        },
+        {
+          "line": 201,
+          "text": "        s=self.store;G=s.G"
+        },
+        {
+          "line": 202,
+          "text": "        if s.mode:s.mode.before_call('dispatch')"
+        },
+        {
+          "line": 203,
+          "text": "        with self.lock:"
+        },
+        {
+          "line": 204,
+          "text": "            bypass=s.mode and s.mode.mutant in ('reissue','reset_claim')"
+        },
+        {
+          "line": 205,
+          "text": "            if (not self.created or self.issued or self.fact['owner']!=G.identity()) and not bypass:"
+        },
+        {
+          "line": 206,
+          "text": "                raise G.AdmissionBlocked('RESERVATION_FACT_IS_NOT_FRESH_EXECUTION_CREDIT')"
+        },
+        {
+          "line": 207,
+          "text": "            s.valid();self.issued=True"
+        },
+        {
+          "line": 208,
+          "text": "            s.event('DISPATCH',lease_id=self.fact['lease_id'],owner=self.fact['owner'])"
+        },
+        {
+          "line": 209,
+          "text": "            G.timing_event('local_credit.dispatch_once')"
+        },
+        {
+          "line": 210,
+          "text": "            return json.loads(canonical(self.fact))"
+        },
+        {
+          "line": 211,
+          "text": ""
+        },
+        {
+          "line": 212,
+          "text": "class Credits:"
+        },
+        {
+          "line": 213,
+          "text": "    def __init__(self,store,fact,_mint=None):"
+        },
+        {
+          "line": 214,
+          "text": "        if _mint is not _MINT:raise store.G.AdmissionBlocked('CREDIT_FACTORY_REQUIRED')"
+        },
+        {
+          "line": 215,
+          "text": "        self.store=store;self.fact=fact;self.N=fact['request']['N'];self.used=0"
+        },
+        {
+          "line": 216,
+          "text": "        self.actor=store.G.identity();self.lock=threading.Lock();self.parent=None"
+        },
+        {
+          "line": 217,
+          "text": "        if fact['delivery_state']!='CLAIMED' or fact['executor']!=self.actor:"
+        },
+        {
+          "line": 218,
+          "text": "            raise store.G.AdmissionBlocked('CLAIMED_FACTORY_REQUIRED')"
+        },
+        {
+          "line": 219,
+          "text": "        if store.mode is None:"
+        },
+        {
+          "line": 220,
+          "text": "            owner=fact['owner'];G=store.G"
+        },
+        {
+          "line": 221,
+          "text": "            if os.getppid()!=owner['pid'] or G.identity(owner['pid'])!=owner:"
+        },
+        {
+          "line": 222,
+          "text": "                raise G.AdmissionBlocked('LOCAL_PARENT_IDENTITY_CHANGED')"
+        },
+        {
+          "line": 223,
+          "text": "            self.parent=os.pidfd_open(owner['pid'])"
+        },
+        {
+          "line": 224,
+          "text": "            if os.getppid()!=owner['pid'] or G.identity(owner['pid'])!=owner:"
+        },
+        {
+          "line": 225,
+          "text": "                os.close(self.parent);raise G.AdmissionBlocked('LOCAL_PARENT_PIDFD_RACE')"
+        }
+      ]
+    }
+  ]
+}

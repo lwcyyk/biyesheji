@@ -1,0 +1,572 @@
+# DCL-R6-C09-CloseReserve-Closure：关闭保留量、完整证据字节上界与容量合同最终审查
+
+## 一、任务背景与本轮授权
+
+继续推进硕士毕业设计《面向用户与 AI 智能体的全生命周期密码与凭据管理系统》的 DCL 安全验证研究。
+
+最新研究阶段：
+
+`DCL-R6-C09-PendingQuota-Closure`
+
+本轮必须继承以下结论：
+
+- C09 存在缺少记录配额的重复写入路径。
+- 同源码历史日志实际观察到17条PENDING。
+- 配额草案规定最多256次观察。
+- 主日志263条上界依赖待批配额合同。
+- 主日志345,148 bytes已取得条件性证明。
+- 关闭保留量尚未闭合。
+- 完整证据字节和工作量尚未闭合。
+- 完整证据容量合同仍未具备实施条件。
+- 256份行政原件及257个Native ZIP成员的旧守卫仍然有效。
+- MR跨实例证据承认合同仍为PROPOSED_NOT_EFFECTIVE。
+- 9,867份历史文件保持摘要一致。
+- 实现修改、动态测试和F1/F4运行次数均为0。
+- RESOURCE_GATE_PASS尚未取得。
+- IMPLEMENTATION_GATE=CLOSED。
+
+**本次明确授权：围绕关闭保留量、证据字节闭包和容量合同进行只读审计、形式化证明、反例构造及合同定稿。**
+
+本轮禁止编写或修改实现代码，禁止启动动态测试，禁止更新当前容量守卫，禁止激活任何待批合同。
+
+## 二、首先读取真实项目材料
+
+研究目录：
+
+`D:\毕业设计\research_main_innovation\decentralized_credential_lifecycle`
+
+优先读取：
+
+1. `DCL-R6-C09-PendingQuota-Closure/FINAL_DECISION.md`
+2. `DCL-R6-C09-PendingQuota-Closure/C09_RECORD_COUNT_BOUND_PROOF.md`
+3. `DCL-R6-C09-PendingQuota-Closure/C09_TOTAL_BYTE_BOUND_PROOF.md`
+4. `DCL-R6-C09-PendingQuota-Closure/C09_OVERFLOW_AND_CLOSE_RESERVE.md`
+5. `DCL-R6-C09-PendingQuota-Closure/C09_CONCURRENCY_AND_CRASH_ANALYSIS.md`
+6. `DCL-R6-C09-PendingQuota-Closure/C09_WORK_COMPLEXITY_BOUND.md`
+7. `DCL-R6-C09-PendingQuota-Closure/CAPACITY_CONTRACT_FINAL_PROPOSAL.md`
+8. `DCL-R6-C09-PendingQuota-Closure/CONTRACT_APPROVAL_CHECKLIST.md`
+9. `DCL-R6-C09-BoundClosure/FINAL_DECISION.md`
+10. `DCL-R6-EvidenceContract-Closure/FINAL_DECISION.md`
+11. `DCL-R6-FullChain-AdmissionFix/FINAL_DECISION.md`
+
+同时检查真实冻结源码：
+
+- C09 PENDING生产者。
+- C09失败与停止处理。
+- STOP_REQUEST/CLOSED持久化。
+- Root与外部TCB关闭路径。
+- ManagerRecovery异常处理。
+- native seal。
+- 行政finalizer。
+- 证据manifest和ZIP构建器。
+- 独立证据oracle。
+
+以上文件名以本地真实索引为准。
+
+先确认源码和输入摘要一致，随后开展审计。
+
+## 三、任务一：建立关闭事件的完整生产者清单
+
+这次最高优先级是找出：**主日志额度用尽后，系统究竟还需要写入哪些必需记录。**
+
+按照真实调用关系，枚举：
+
+1. PENDING超额拒绝记录。
+2. 首次失败记录。
+3. STOP_REQUEST。
+4. ABORTING或等价中间状态。
+5. CLOSED。
+6. Root停止确认。
+7. Launcher退出见证。
+8. Receiver退出或确认。
+9. waitpid结果。
+10. 预算最终状态。
+11. 管理器故障审查记录。
+12. 内部UNKNOWN状态。
+13. native seal相关记录。
+14. 行政finalizer收据。
+15. manifest和独立校验记录。
+
+具体项目必须以真实源码为准。
+
+对每种记录建立：
+
+| 属性 | 要求 |
+|---|---|
+| producer | 实际生产函数与进程 |
+| trigger | 触发条件 |
+| phase | 生命周期阶段 |
+| maximum_count | 最多出现次数 |
+| maximum_bytes | 单条最大编码字节 |
+| persistence | 持久化规则 |
+| quota_domain | 使用哪个配额 |
+| required_for_close | 是否为关闭必需记录 |
+| after_closed | CLOSED后是否允许写入 |
+| failure_behavior | 写入失败的处理 |
+
+必须防止同一记录被重复计数，同时确认所有真实生产者均被覆盖。
+
+## 四、任务二：证明关闭保留量上界
+
+分别定义：
+
+\[
+N_{\mathrm{close,max}}
+\]
+
+\[
+B_{\mathrm{close,max}}
+\]
+
+其中：
+
+- \(N_{\mathrm{close,max}}\)：关闭过程最多需要保存的受配额约束记录数。
+- \(B_{\mathrm{close,max}}\)：这些记录的最大编码字节数。
+
+针对每一种关闭路径，推导：
+
+\[
+B_{\mathrm{close}}
+\le
+\sum_i N_{i,\max}L_{i,\max}
++B_{\mathrm{fixed}}
+\]
+
+必须逐项核对：
+
+- 单次正常关闭。
+- 主日志配额耗尽后关闭。
+- C09交接失败后关闭。
+- Root异常退出。
+- ManagerRecovery失败。
+- 系统调用返回错误。
+- STOP_REQUEST重复发布。
+- CLOSED重复处理。
+- 清理超时。
+- native seal失败。
+- 行政finalizer失败。
+
+### 4.1 检查重复与并发
+
+重点判断：
+
+- 多个进程能否同时记录同一停止事件。
+- STOP_REQUEST是否可能重复追加。
+- CLOSED是否具有一次性终态约束。
+- 清理异常是否递归触发新的清理日志。
+- 记录写入失败是否触发无限错误日志。
+- 关闭后的迟到消息是否继续增加原生日志。
+
+如果发现无法约束的重复路径，必须构造具体反例。
+
+### 4.2 明确保留区语义
+
+区分：
+
+- 主PENDING日志额度。
+- 关闭记录保留额度。
+- 系统外部停止见证。
+- native seal证据。
+- 行政归档证据。
+
+不得默认所有对象都属于同一个日志配额。
+
+明确哪些记录需要预留磁盘空间，哪些通过独立受信来源保留。
+
+### 4.3 输出裁决
+
+使用：
+
+- CLOSE_RESERVE_PROVED
+- CLOSE_RESERVE_CONDITIONAL
+- CLOSE_RESERVE_COUNTEREXAMPLE
+- CLOSE_RESERVE_UNRESOLVED
+
+如未闭合，必须指出具体记录生产者、重复路径或无界字段。
+
+## 五、任务三：构造配额边界的最坏情况输入族
+
+至少构造以下抽象执行族。
+
+### 输入族 A：主额度恰好耗尽
+
+完成256次合法观察，主日志接近263条上限，随后触发正常关闭。
+
+检查关闭所需记录是否具有独立额度。
+
+### 输入族 B：第257次观察
+
+观察额度已耗尽，继续请求一次观察。
+
+验证：
+
+- 超额请求必须拒绝。
+- 超额拒绝是否增加新日志。
+- 是否可能多次重复产生超额拒绝日志。
+- 是否影响STOP/CLOSED写入。
+
+### 输入族 C：配额耗尽与管理器故障同时发生
+
+主日志处于上限，随后Root或ManagerRecovery发生异常。
+
+判断安全关闭所需记录是否仍能持久化。
+
+### 输入族 D：持久化异常
+
+在配额接近耗尽时发生短写或EIO。
+
+必须区分：
+
+- 逻辑配额充足。
+- 实际存储写入失败。
+- 进程回收完成。
+- 内部证据完整性无法确认。
+
+**有限配额只能为正常存储条件下的容量需求提供保证；出现持久化I/O故障时，应依照原故障模型保留UNKNOWN及外部停止证据。**
+
+不得承诺在任意存储故障下都能成功完成native seal。
+
+### 输入族 E：重复关闭
+
+CLOSED已经生效，多个迟到事件继续请求关闭。
+
+检查记录数量是否保持有限。
+
+对每个输入族给出：
+
+- 初始状态。
+- 事件序列。
+- 状态转换。
+- 记录数量。
+- 字节增量。
+- 预算变化。
+- 最终终态。
+- 成立所需前提。
+
+本轮只形成可复核轨迹及证明，不执行实际故障注入。
+
+## 六、任务四：核验主日志与关闭保留量的组合
+
+当前主日志合同草案：
+
+\[
+N_{\mathrm{main,max}}=263
+\]
+
+\[
+B_{\mathrm{main,max}}=345148\ \mathrm{bytes}
+\]
+
+这两项依赖待批准的256次观察配额。
+
+计算候选组合边界：
+
+\[
+B_{\mathrm{C09,total}}
+\le
+345148
++
+B_{\mathrm{close,max}}
++
+B_{\mathrm{other,max}}
+\]
+
+其中 \(B_{\mathrm{other,max}}\) 仅包含经过确认、尚未计入前两项的实际C09相关对象。
+
+必须说明：
+
+1. 主日志是否已经包含部分关闭记录。
+2. 关闭保留量是否存在重复计算。
+3. 哪些记录写入其他日志文件。
+4. 哪些记录由native seal读取但不重新生成。
+5. 哪些行政派生证明会新增字节。
+6. 当前配额合同是否保证原始交接安全性质。
+
+禁止将345,148 bytes直接认定为整个C09子系统的总容量。
+
+## 七、任务五：完整证据容量闭包
+
+继承已证明的条件性数量界：
+
+- 封存前原件最多4,450份。
+- Native ZIP最多4,451个成员。
+- 行政导出最多4,452份。
+
+核对这些数量是否仍适用于当前冻结执行范围。
+
+重新建立完整证据的字节组成：
+
+\[
+B_{\mathrm{evidence,max}}
+=
+B_{\mathrm{C09,max}}
++
+B_{\mathrm{other\ logs,max}}
++
+B_{\mathrm{test,max}}
++
+B_{\mathrm{metadata,max}}
+\]
+
+最终分类以真实证据依赖图为准。
+
+必须进一步计算：
+
+- 总未压缩字节数。
+- 单成员最大字节数。
+- 压缩输出最大字节数。
+- Manifest最大大小。
+- 校验器最大读取量。
+- 归档工作内存。
+- 最大文件描述符需求。
+- 最坏哈希工作量。
+
+如果其他日志存在无界字段或循环追加，逐项列出。
+
+不得为了闭合C09就忽略其他证据生产者。
+
+### 7.1 防止递归归档
+
+检查：
+
+- finalizer是否把自身输出再次纳入原件集合。
+- manifest是否被重复归档。
+- 独立oracle是否递归产生新归档要求。
+- 故障报告是否再次扩大必需集合。
+
+保留已有的封闭写入域及单次执行前提。
+
+### 7.2 区分三个结论
+
+- COUNT_BOUND_PROVED
+- BYTE_BOUND_PROVED
+- WORK_BOUND_PROVED
+
+三者独立裁决。
+
+完整墙钟300秒保证继续单独审查，禁止根据有限工作量直接推出严格时间保证。
+
+## 八、任务六：形成精确容量合同草案
+
+如果完整证据字节上界已经闭合，形成独立、版本化的容量合同。
+
+必须包含：
+
+1. 原件最大数量。
+2. Native ZIP最大成员数量。
+3. 行政导出最大数量。
+4. 总未压缩字节上限。
+5. 总归档字节上限。
+6. 单文件最大字节数。
+7. 主PENDING日志额度。
+8. 关闭保留量。
+9. Manifest与索引额度。
+10. 验证工作量和工作内存要求。
+11. 超额时的失败停止。
+12. 缺失或异常证据的UNKNOWN处理。
+13. 独立完整性校验。
+14. 旧版本守卫的兼容与隔离。
+15. 合同生效条件。
+
+所有配额必须由实际证明给出依据。
+
+**原256/257守卫继续有效。新合同在正式批准和独立版本实施之前不得用于动态准入。**
+
+如果字节上界仍缺少必要对象，保持：
+
+`CAPACITY_CONTRACT_NOT_READY`
+
+并输出完整的缺口表。
+
+## 九、任务七：MR跨实例合同独立处理
+
+保持：
+
+`MR_CROSS_INSTANCE_ADMISSION=PROPOSED_NOT_EFFECTIVE`
+
+本轮仅核查审批材料是否完整。
+
+不得实施跨实例承认。
+
+尤其不得将历史MR故障测试结果直接作为新主批次的RESOURCE_GATE_PASS依据。
+
+如果需要正式审批，单独提交：
+
+- 允许承认的证据类别。
+- 主批次必须重新验证的性质。
+- 源码与运行时等价条件。
+- 独立故障真实性。
+- 自动关闭和组空证据。
+- 预算、native seal及行政结果。
+- 失效与撤销条件。
+- 强制拒绝规则。
+
+容量合同和MR合同应分别批准、分别版本化。
+
+## 十、候选机制的实施前研究门
+
+对于任何新增候选机制，例如：
+
+- 新型日志额度管理。
+- 新型关闭保留区。
+- 新型归档结构。
+- 新型跨实例证明承认方法。
+
+在编写实现代码之前，必须先提供可证伪分离声明：
+
+1. 具体输入族。
+2. 明确的安全或资源成本指标。
+3. 当前最强通用方法G。
+4. 预测的严格差距。
+5. 至少一个具体实例，证明G必须支付更高代价。
+
+优先与成熟的有界追加日志、预留空间、幂等写入和标准归档方法比较。
+
+如果已有通用方法覆盖候选，标记：
+
+`COVERED_BY_G`
+
+允许将其保留为常规工程合同选项，但本轮仍不编写实现代码。
+
+继续保持：
+
+`STRICT_SEPARATION_INSTANCES=0`
+
+`IMPLEMENTATION_GATE=CLOSED`
+
+## 十一、验收门
+
+### CRB-1：关闭记录完整
+
+全部必要关闭记录生产者及触发路径已经枚举。
+
+### CRB-2：关闭保留量
+
+获得记录数和字节上界，或给出具体可复核反例。
+
+### CRB-3：配额耗尽安全
+
+主日志耗尽后，停止流程在声明的存储和TCB前提下仍有充分的必要资源。
+
+### CRB-4：完整证据字节
+
+全部必需证据的字节上界闭合。
+
+### CRB-5：归档工作量
+
+独立校验、native seal和行政finalizer的工作量与资源边界明确。
+
+### CRB-6：合同审批
+
+容量合同形成完整待批准文本，所有未决条件可逐项审查。
+
+### CRB-7：实现前研究门
+
+所有新候选均经过强G比较，未满足分离要求的机制保持禁止实现。
+
+状态采用：
+
+- PROVED
+- CONDITIONAL_PROVED
+- COUNTEREXAMPLE
+- PARTIAL
+- UNRESOLVED
+- BLOCKED
+
+本轮不得授予动态PASS。
+
+## 十二、交付文件
+
+在研究目录建立：
+
+`DCL-R6-C09-CloseReserve-Closure/`
+
+至少输出：
+
+- `CLOSE_RECORD_PRODUCER_AUDIT.md`
+- `CLOSE_RESERVE_BOUND_PROOF.md`
+- `QUOTA_EXHAUSTION_COUNTEREXAMPLES.md`
+- `C09_TOTAL_LOG_BOUND.md`
+- `PERSISTENCE_FAILURE_BOUNDARY.md`
+- `FULL_EVIDENCE_BYTE_CLOSURE.md`
+- `ARCHIVE_WORK_AND_MEMORY_BOUND.md`
+- `CAPACITY_CONTRACT_APPROVAL_DRAFT.md`
+- `MR_CROSS_INSTANCE_APPROVAL_STATUS.md`
+- `GENERAL_BASELINE_AND_SEPARATION.md`
+- `UNRESOLVED_BOUND_CHECKLIST.md`
+- `NEXT_STAGE_AUTHORIZATION_REQUEST.md`
+- `FINAL_DECISION.md`
+
+同步更新：
+
+- `CURRENT_VERDICT.md`
+- `NEXT_ACTION.md`
+- 研究证据索引。
+
+保留全部冻结代码、历史文件、执行锁和原始证据。
+
+每一项上界应引用真实源码、编码格式、输入限制与证明前提。
+
+## 十三、最终必须回答
+
+1. 关闭流程有哪些实际记录生产者？
+2. 主日志额度耗尽后还需多少条必需关闭记录？
+3. 关闭记录单条字节上界是多少？
+4. 关闭保留量总字节上界是多少？
+5. 是否存在重复关闭导致无界追加？
+6. 第257次观察如何被拒绝？
+7. 配额耗尽与故障同时发生时能否安全停止？
+8. 短写/EIO下哪些安全保证仍然成立？
+9. 345,148 bytes与关闭保留量是否存在重复计算？
+10. C09全部相关日志的最终条件字节上界是多少？
+11. 完整证据字节上界是否闭合？
+12. Native ZIP和行政归档的资源工作量是否闭合？
+13. 4,450/4,451/4,452数量上界是否继续有效？
+14. 完整容量合同是否达到正式审批条件？
+15. 哪些证明依赖待生效配额？
+16. 哪些结论仍依赖受信Root、文件系统和外部TCB？
+17. MR跨实例规则当前是否仍未生效？
+18. 下一轮最小实施授权应包含哪些确切文件和合同变更？
+19. 当前是否存在严格分离实例？
+20. 是否具备申请完整资源资格链的条件？
+
+继续保持：
+
+`RESOURCE_GATE_PASS=NOT_OBTAINED`
+
+`F1=UNRUN_RESOURCE_GATE`
+
+`F4=UNRUN_RESOURCE_GATE`
+
+`MR_CROSS_INSTANCE_ADMISSION=PROPOSED_NOT_EFFECTIVE`
+
+`IMPLEMENTATION_GATE=CLOSED`
+
+## 十四、立即执行
+
+本轮仅授权只读审计、证明、反例构造和合同材料编写。
+
+按以下顺序执行：
+
+1. 读取最新PENDING配额审查及原始源码。
+2. 列出全部关闭记录生产者。
+3. 重建配额耗尽后的停止与封存状态机。
+4. 构造正常关闭、超额请求、并发故障及持久化失败输入族。
+5. 推导关闭保留记录数上界。
+6. 推导关闭保留字节上界。
+7. 明确存储I/O失败条件下的UNKNOWN语义。
+8. 与345,148 bytes主日志界进行无重复合并。
+9. 检查其他证据生产者是否存在无界输出。
+10. 计算完整证据字节、内存和工作量边界。
+11. 审核证据生成是否存在递归依赖。
+12. 形成精确容量合同草案。
+13. 独立整理MR待批状态。
+14. 完成强G与候选分离审查。
+15. 列出正式批准后才可实施的最小变更。
+16. 更新最终裁决。
+
+如果关闭保留量仍无法证明，应给出最小反例和准确的缺失约束，停止扩大容量上限的猜测。
+
+**本轮成功标准：使C09主日志、关闭保留量和完整证据容量形成相互一致、可复核的条件性上界，并明确需要批准的最小合同变更。**
+
+现在开始 DCL-R6-C09-CloseReserve-Closure。

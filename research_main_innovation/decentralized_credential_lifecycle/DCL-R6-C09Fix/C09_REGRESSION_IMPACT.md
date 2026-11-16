@@ -1,0 +1,13 @@
+# 受影响范围与资源差异
+
+Material Passport：静态影响审查。
+
+C07/C08原payload退出/Watchdog探针字节保持；外部停止器继续对无有效当前C09承诺的退出关闭。关闭代码新增生命周期锁，关闭持久化错误仍执行实际group stop。需回归正常资源失败、意外launcher死、C07/C08及错误日志分支。
+
+S8原range核心/驱动/oracle保持，真实ROOT的CLOSED仍吸收；新增C09模型不修改真实batch_state作为故障注入。原34S及17门检查完整保留。C09H及handoff资格是额外前置，C09结果缺失时恢复拒绝，F1/F4继续只在完整资源链之后导入。
+
+预算机制原函数与三range模块不变。新增C09H独占全局写入阶段及root随后审查，用原单信用visit；5000子界检查在该无并发计费阶段执行。完成路径2245。原校准硬界57034加5000=62034≤100000，软窗口仍300。完成路径较旧增加2245；时间可行性未测，观察期限12秒属于原300内。
+
+payload父slice仍TasksMax4，C09H仅Controller/监控/Watchdog3tasks；原S6仍4。新增一个root协调器位于payload外，与既有root scheduler/stopper构成3个行政root进程。AS4条件只覆盖既定payload映射，不能把新增TCB开销藏入4GiB证明。下一动态许可应显式批准该增量，否则不启动。
+
+没有新账户/依赖/系统服务；不安装任何unit。本轮只准备batch05 argv与单位副本，运行根、T0、counter及授权receipt均未创建。

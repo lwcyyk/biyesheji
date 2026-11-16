@@ -1,0 +1,318 @@
+"""Independent raw oracle. No imports of guard, range_core or fixture driver."""
+import hashlib
+import json
+import os
+from pathlib import Path
+import stat
+import struct
+
+class EvidenceError(RuntimeError):pass
+def canonical(v):return json.dumps(v,sort_keys=True,separators=(',',':'))
+def sha_bytes(v):return hashlib.sha256(v).hexdigest()
+def bounded(path,limit):
+    fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
+    try:
+        s=os.fstat(fd)
+        if not stat.S_ISREG(s.st_mode) or s.st_size>limit:raise EvidenceError('FILE_TYPE_OR_SIZE')
+        data=os.read(fd,s.st_size+1)
+        if len(data)!=s.st_size:raise EvidenceError('SHORT_EVIDENCE_READ')
+        return data
+    finally:os.close(fd)
+def obj(path,limit=65536):return json.loads(bounded(path,limit))
+def lines(path,bytecap,linecap=4096):
+    data=bounded(path,bytecap)
+    if data and not data.endswith(b'\n'):raise EvidenceError('TRUNCATED_RAW_LOG')
+    out=[]
+    for raw in data.splitlines():
+        if len(raw)>linecap:raise EvidenceError('RAW_LINE_SIZE')
+        out.append(json.loads(raw))
+    return out
+def counter(path):
+    raw=bounded(path,24)
+    if len(raw)!=24 or raw[:8]!=b'BRNGv001':raise EvidenceError('COUNTER_FORMAT')
+    used,cap=struct.unpack('<QQ',raw[8:])
+    if used>cap:raise EvidenceError('COUNTER_OVERFLOW')
+    return used,cap
+def request_set(job,binding):
+    b={**binding,'protocol':'EXACT-RANGE/1','case':'RANGE','task_id':job['task_id'],
+       'N':job['N'],'payload_digest':sha_bytes((job['case_id']+'|base').encode())}
+    if job['kind']=='concurrent':
+        return [{**b,'task_id':job['task_id']+'.'+s} for s in ('L','R')]
+    if job['kind']=='conflict_retry':
+        return [b,{**b,'payload_digest':sha_bytes((job['case_id']+'|conflict').encode())}]
+    return [b]
+def inspect_job(base,job,binding,cfg):
+    base=Path(base);events=[];semantics=[];files={};total=0
+    allfiles=list(base.rglob('*'))
+    if len(allfiles)>256:raise EvidenceError('ARTIFACT_COUNT')
+    for p in allfiles:
+        if p.is_symlink():raise EvidenceError('SYMLINK_EVIDENCE')
+        if p.is_file():
+            total+=p.stat().st_size
+            if total>cfg['job_bytes_cap']:raise EvidenceError('JOB_BYTE_CAP')
+            if p.name!='checker_observation.json':
+                files[str(p.relative_to(base))]=sha_bytes(bounded(p,cfg['job_bytes_cap']))
+    actors={}
+    for actor in ('main','worker'):
+        p=base/('trace.'+actor+'.jsonl')
+        if not p.exists():continue
+        rows=lines(p,cfg['actor_event_cap']*cfg['event_bytes_cap'],cfg['event_bytes_cap'])
+        if len(rows)>cfg['actor_event_cap']:raise EvidenceError('ACTOR_EVENT_CAP')
+        last=-1;last_charge=-1
+        for e in rows:
+            if e['case_id']!=job['case_id'] or e['actor']!=actor or e['binding']!=binding:
+                raise EvidenceError('EVENT_BINDING')
+            if e['identity']['boot_id']!=binding['boot_id']:raise EvidenceError('ACTOR_BOOT_BINDING')
+            if e['boottime']<last or e['global_reserved_after_charge']<=last_charge:
+                raise EvidenceError('EVENT_TIME_OR_CHARGE_ORDER')
+            last=e['boottime'];last_charge=e['global_reserved_after_charge']
+            ident=e['identity']
+            if actor in actors and actors[actor]!=ident:raise EvidenceError('ACTOR_INCARNATION_CHANGED')
+            actors[actor]=ident
+        events.extend(rows)
+        q=base/('semantic.'+actor+'.jsonl')
+        data=lines(q,65536) if q.exists() else []
+        if len(data)>job['max_semantic_ops_per_actor']:raise EvidenceError('SEMANTIC_CAP')
+        for seq,s in enumerate(data,1):
+            if s['case_id']!=job['case_id'] or s['actor']!=actor or s['identity']!=actors.get(actor):
+                raise EvidenceError('SEMANTIC_IDENTITY')
+            if s.get('operation_seq')!=seq:raise EvidenceError('SEMANTIC_SEQUENCE')
+            expected=sha_bytes((job['case_id']+'|'+actor+'|'+str(s['ordinal'])).encode())
+            if s['payload']!=expected:raise EvidenceError('SEMANTIC_PAYLOAD')
+        if len(data)!=sum(e['event']=='SEMANTIC_OBSERVED' for e in rows):
+            raise EvidenceError('SEMANTIC_OBSERVATION_GAP')
+        semantics.extend(data)
+    if 'main' not in actors:raise EvidenceError('MAIN_TRACE_MISSING')
+    if not any(e['event']=='INITIAL' and e['used']==0 for e in events):raise EvidenceError('INITIAL_STATE_MISSING')
+    if not any(e['event']=='BEGIN' for e in events):raise EvidenceError('BEGIN_MISSING')
+    closed=obj(base/'CLOSED.json')
+    if closed['case_id']!=job['case_id'] or closed['binding']!=binding:raise EvidenceError('CLOSE_BINDING')
+    events.sort(key=lambda r:r['boottime'])
+    # Require the actual ordered persistence path, independently of PASS labels.
+    def atomic_points(stage):
+        return [stage+'.before_write',stage+'.after_write',
+                stage+'.file.before_fsync',stage+'.file.sync_return_unobserved',stage+'.file.after_fsync',
+                stage+'.after_rename',stage+'.directory.before_fsync',
+                stage+'.directory.sync_return_unobserved',stage+'.directory.after_fsync',stage+'.after_dirsync']
+    def journal_points(stage):
+        return [stage+'.before_write',stage+'.after_write',stage+'.before_fsync',
+                stage+'.sync_return_unobserved',stage+'.after_fsync']
+    required_commit=(atomic_points('prepared')+journal_points('journal_prepared')+
+                     ['counter.before_write','counter.after_write','counter.before_fsync',
+                      'counter.sync_return_unobserved','counter.after_fsync']+
+                     journal_points('journal_committed')+atomic_points('registry')+atomic_points('committed'))
+    def has_sequence(observed,expected):
+        at=0
+        for point in observed:
+            if at<len(expected) and point==expected[at]:at+=1
+        return at==len(expected)
+    barrier_violations=set()
+    for actor in actors:
+        segment=[];claim_segment=[];seen_claims=set()
+        for e in [x for x in events if x['actor']==actor]:
+            if e['event']=='RESERVE_REQUEST':segment=[]
+            if e['event']=='CHECKPOINT':
+                segment.append(e['point']);claim_segment.append(e['point'])
+            if e['event']=='COMMIT' and not has_sequence(segment,required_commit):
+                barrier_violations.add('UNACKNOWLEDGED_GRANT')
+            if e['event']=='CLAIM':
+                if not has_sequence(claim_segment,atomic_points('claimed')):
+                    barrier_violations.add('UNACKNOWLEDGED_CLAIM')
+                claim_segment=[];seen_claims.add(e['lease_id'])
+            if e['event']=='GRANT' and e['lease_id'] not in seen_claims:
+                barrier_violations.add('UNCLAIMED_GRANT')
+    used,cap=counter(base/'ledger.bin')
+    if cap!=job['cap']:raise EvidenceError('CAP_BINDING')
+    intent=obj(base/'ledger.bin.intent.json')
+    journal=lines(base/'ledger.bin.journal.jsonl',1048576,16384) if (base/'ledger.bin.journal.jsonl').exists() else []
+    allowed=request_set(job,binding);violations=set(barrier_violations)
+    requests=[e for e in events if e['event']=='RESERVE_REQUEST']
+    for e in requests:
+        if e['request'] not in allowed or e['request_sha256']!=sha_bytes(canonical(e['request']).encode()):
+            raise EvidenceError('REQUEST_DIGEST_OR_CONTENT')
+    commits=[j for j in journal if j['status']=='COMMITTED']
+    preps=[j for j in journal if j['status']=='PREPARED']
+    for rec in journal:
+        if rec['request'] not in allowed or rec['protocol']!='EXACT-RANGE/1':
+            raise EvidenceError('JOURNAL_BINDING')
+        if rec['amount']!=job['N'] or rec['after']-rec['before']!=job['N']:
+            violations.add('BAD_RANGE_SIZE')
+    ranges=[];tasks={}
+    for rec in commits:
+        lo,hi=rec['before'],rec['after'];task=rec['request']['task_id']
+        if any(max(lo,a)<min(hi,b) for a,b in ranges):violations.add('RANGE_OVERLAP')
+        ranges.append((lo,hi));tasks[task]=tasks.get(task,0)+1
+    if any(v>1 for v in tasks.values()):violations.add('DUPLICATE_TASK')
+    if sum(r['amount'] for r in commits)>used:violations.add('LOST_COUNTER_UPDATE')
+    grants=[e for e in events if e['event']=='GRANT']
+    claims=[e for e in events if e['event']=='CLAIM']
+    lease_claims={}
+    for c in claims:lease_claims[c['lease_id']]=lease_claims.get(c['lease_id'],0)+1
+    if any(v>1 for v in lease_claims.values()):violations.add('DUPLICATE_CLAIM')
+    committed_tasks={r['request']['task_id'] for r in commits}
+    for g in grants:
+        if g['task_id'] not in committed_tasks:violations.add('EARLY_GRANT')
+        if g['phase']=='recovery' and job['property'] in ('S2','S3'):violations.add('RECOVERY_GRANT')
+    faults=[e for e in events if e['event']=='FAULT']
+    if job['kind'] in ('crash','short_write','fsync_error'):
+        if len(faults)!=1 or faults[0]['point']!=job['fault_point'] or faults[0]['kind']!=job['kind']:
+            raise EvidenceError('EXPECTED_FAULT_NOT_TRIGGERED')
+        for name,row in faults[0].get('snapshots',{}).items():
+            p=base/row['path']
+            if not p.resolve().is_relative_to(base.resolve()) or sha_bytes(bounded(p,65536))!=row['sha256']:
+                raise EvidenceError('FAULT_SNAPSHOT_HASH')
+        if job['kind']=='short_write' and not any(e['event']=='WRITE_RESULT' and
+              e['stage']=='prepared' and 0<e['written']<e['requested'] for e in events):
+            raise EvidenceError('ACTUAL_SHORT_WRITE_MISSING')
+        if job['kind']=='short_write':
+            fragments=[e for e in events if e['event']=='PARTIAL_BYTES' and e['stage']=='prepared']
+            if len(fragments)!=1:raise EvidenceError('PARTIAL_ORIGINAL_MISSING')
+            fragment=fragments[0];p=base/fragment['file']
+            if not p.resolve().is_relative_to(base.resolve()):raise EvidenceError('PARTIAL_PATH_SCOPE')
+            data=bounded(p,16384)
+            if len(data)!=fragment['bytes'] or sha_bytes(data)!=fragment['sha256']:
+                raise EvidenceError('PARTIAL_ORIGINAL_HASH')
+        if job['kind']=='fsync_error' and not any(e['event']=='IO_RESULT' and e['errno']==5 and
+              e['stage']=='journal_prepared' and not e['syscall_invoked'] for e in events):
+            raise EvidenceError('ACTUAL_FSYNC_ADAPTER_ERROR_MISSING')
+    elif faults:raise EvidenceError('UNEXPECTED_FAULT')
+    if any(f['kind'] in ('short_write','fsync_error') for f in faults) and grants:
+        violations.add('ERROR_GRANT')
+    if job['kind']=='conflict_retry' and any(g['phase']=='retry_conflict' for g in grants):
+        violations.add('CONFLICT_ACCEPTED')
+    if job['kind'] in ('closed','expired','boot','lock'):
+        changed=[e for e in events if e['event']=='LIFECYCLE_CHANGED' and e['change']==job['kind']]
+        if len(changed)!=1:raise EvidenceError('LIFECYCLE_EXERCISE_MISSING')
+        actual=obj(base/'lifecycle.json')
+        if actual!=changed[0]['state']:raise EvidenceError('LIFECYCLE_RAW_MISMATCH')
+        k=job['kind']
+        if ((k=='closed' and actual['status']!='CLOSED') or
+            (k=='expired' and actual['deadline']>=changed[0]['boottime']) or
+            (k=='boot' and actual['boot_id']==binding['boot_id']) or
+            (k=='lock' and actual['execution_lock_sha256']==binding['execution_lock_sha256'])):
+            raise EvidenceError('INVALID_LIFECYCLE_NOT_EXERCISED')
+        if any(s['boottime']>=changed[0]['boottime'] for s in semantics):violations.add('INVALID_EXECUTION')
+    if any(e['event']=='REINITIALIZED' for e in events):violations.add('FREE_RESTART')
+    debits=[e for e in events if e['event']=='DEBIT']
+    if any(e['local_used']>job['N'] or e['N']!=job['N'] for e in debits):
+        violations.add('LOCAL_OVERSPEND')
+    if len(semantics)>job['N']*(2 if job['kind']=='concurrent' else 1):
+        violations.add('LOCAL_OVERSPEND')
+    if len(semantics)>sum(e['event']=='DEBIT' for e in events):violations.add('UNPREPAID_OPERATION')
+    if job['kind'] in ('crash','concurrent'):
+        proc=obj(base/'process.json')
+        code=71 if job['kind']=='crash' else 0
+        if proc['exit_code']!=code or proc['ready']['identity']!=actors.get('worker'):
+            raise EvidenceError('PROCESS_EXIT_OR_IDENTITY')
+        starts=[e for e in events if e['event']=='PROCESS_START']
+        exits=[e for e in events if e['event']=='PROCESS_EXIT']
+        if len(starts)!=1 or len(exits)!=1 or exits[0]['exit_code']!=code or exits[0]['timeout']:
+            raise EvidenceError('PROCESS_OBSERVATION_MISSING')
+    elif 'worker' in actors:raise EvidenceError('UNEXPECTED_WORKER')
+    denied=[e for e in events if e['event']=='DENIED']
+    if job['kind'] in ('same_retry','conflict_retry') and len(requests)!=2:
+        raise EvidenceError('RETRY_NOT_EXERCISED')
+    if job['kind']=='concurrent' and (len(actors)!=2 or len(requests)!=2):
+        raise EvidenceError('CONCURRENCY_NOT_EXERCISED')
+    if job['kind']=='restart' and not any(e['event']=='RESTART_REQUEST' for e in events):
+        raise EvidenceError('RESTART_NOT_EXERCISED')
+    if job['kind']=='exhausted':
+        attempts=len(debits)+sum('attempt' in e for e in denied)
+        if attempts!=job['N']+2:raise EvidenceError('N_PLUS_ONE_NOT_EXERCISED')
+    # Positive acceptance uses literal frozen obligations, independently of driver outcomes.
+    if job['variant']=='safe':
+        if job['property']=='S1' and (used!=0 or grants or semantics):violations.add('EARLY_GRANT')
+        if job['property']=='S2' and (grants or not denied):violations.add('RECOVERY_GRANT')
+        if job['property']=='S3' and (used!=job['N'] or grants or not denied):violations.add('RECOVERY_GRANT')
+        if job['property']=='S4' and (used!=job['N'] or len(semantics)!=1 or len(claims)!=1 or not denied):
+            violations.add('CLAIM_RECOVERY_MISMATCH')
+        if job['kind']=='same_retry' and (used!=job['N'] or len(grants)!=1 or not denied):
+            violations.add('DUPLICATE_TASK')
+        if job['kind']=='conflict_retry' and not any(e['reason']=='TASK_ID_REQUEST_CONFLICT' for e in denied):
+            violations.add('CONFLICT_ACCEPTED')
+        if job['kind']=='concurrent' and (used!=2*job['N'] or len(commits)!=2 or len(grants)!=2 or len(semantics)!=2*job['N']):
+            violations.add('RANGE_OVERLAP')
+        if job['property']=='S7' and (grants or not denied):violations.add('ERROR_GRANT')
+        expected_denial={'closed':'BATCH_CLOSED','expired':'ABSOLUTE_WALL_LIMIT','boot':'BOOT_ID_MISMATCH',
+                         'lock':'EXECUTION_LOCK_BINDING_MISMATCH','restart':'BATCH_ALREADY_INITIALIZED'}
+        if job['kind'] in expected_denial and not any(e['reason']==expected_denial[job['kind']] for e in denied):
+            violations.add('INVALID_EXECUTION')
+        if job['kind']=='exhausted' and (used!=job['N'] or len(semantics)!=job['N'] or len(denied)!=2):
+            violations.add('LOCAL_OVERSPEND')
+    liability=max([used]+[r['after'] for r in preps])
+    for p in base.glob('ledger.bin.intent.json.tmp.*'):
+        try:liability=max(liability,json.loads(bounded(p,16384)).get('after',0))
+        except (ValueError,UnicodeDecodeError):liability=max(liability,job['N'])
+    if faults and job['property'] in ('S2','S7'):liability=max(liability,job['N'])
+    return {'violations':sorted(violations),'used':used,'conservative_liability':liability,
+            'semantic_operations':len(semantics),'grants':len(grants),'claims':len(claims),
+            'raw_files':files,'fault_triggered':bool(faults),'raw_bytes':total}
+
+def check_job(base,job,binding,cfg):
+    try:
+        raw=inspect_job(base,job,binding,cfg)
+        if job['variant']=='safe':
+            accepted=not raw['violations'];status='PASS' if accepted else 'FAIL'
+        else:
+            accepted=job['expected_violation'] in raw['violations']
+            status='MUTATION_DETECTED' if accepted else 'MUTATION_NOT_DETECTED'
+        return {'case_id':job['case_id'],'property':job['property'],'status':status,'accepted':accepted,
+                'binding':binding,**raw}
+    except (EvidenceError,OSError,ValueError,KeyError,TypeError) as exc:
+        return {'case_id':job['case_id'],'property':job['property'],'status':'EVIDENCE_MISSING',
+                'accepted':False,'binding':binding,'error':repr(exc)}
+
+def check_suite(base,cfg,binding):
+    if Path(base).is_symlink():raise EvidenceError('SYMLINK_SUITE')
+    if len(cfg['jobs'])!=34 or cfg['max_jobs']!=34:raise EvidenceError('CONTRACT_JOB_COUNT')
+    expected={r['case_id'] for r in cfg['jobs']}
+    children={p.name for p in Path(base).iterdir() if p.is_dir()}
+    if any(p.is_symlink() for p in Path(base).iterdir()):raise EvidenceError('SYMLINK_JOB')
+    if children!=expected:raise EvidenceError('SUITE_JOB_SET')
+    results=[check_job(Path(base)/j['case_id'],j,binding,cfg) for j in cfg['jobs']]
+    if {r['property'] for r in results}!={'S'+str(i) for i in range(1,10)}:
+        raise EvidenceError('PROPERTY_SET')
+    return {'accepted':all(r['accepted'] for r in results),'results':results,'binding':binding}
+
+def check_global_ledger(path,cap,binding):
+    path=Path(path);used,stored=counter(path)
+    if stored!=cap:raise EvidenceError('GLOBAL_CAP')
+    intent=obj(path.with_suffix(path.suffix+'.intent.json'))
+    if intent.get('protocol')!='EXACT-RANGE/1' or intent['status']!='COMMITTED' or intent['after']!=used or intent['cap']!=cap:
+        raise EvidenceError('GLOBAL_AMBIGUOUS_INTENT')
+    if list(path.parent.glob(path.name+'.intent.json.tmp.*')):raise EvidenceError('GLOBAL_AMBIGUOUS_TEMP')
+    running=0;pending=None;records=0;tasks=set()
+    with path.with_suffix(path.suffix+'.journal.jsonl').open('rb') as stream:
+        while True:
+            raw=stream.readline(16385)
+            if not raw:break
+            records+=1
+            if records>200000 or len(raw)>16384 or not raw.endswith(b'\n'):raise EvidenceError('GLOBAL_JOURNAL_BOUND')
+            row=json.loads(raw)
+            if row['protocol']!='EXACT-RANGE/1' or row['cap']!=cap:raise EvidenceError('GLOBAL_RECORD_BINDING')
+            if row['boot_id']!=binding['boot_id']:raise EvidenceError('GLOBAL_BOOT_BINDING')
+            req=row.get('request')
+            if req is None:
+                if row['amount']!=1:raise EvidenceError('UNBOUND_GLOBAL_RANGE')
+            else:
+                known={'C02.memory.v1':32896,'C03.shared.v1':4096,'C04.fifth-task.v1':1}
+                if req.get('task_id') not in known or req['N']!=known[req['task_id']] or row['amount']!=req['N']:
+                    raise EvidenceError('GLOBAL_TASK_CONTRACT')
+                if any(req.get(k)!=binding[k] for k in ('batch_id','boot_id','T0')):
+                    raise EvidenceError('GLOBAL_REQUEST_IDENTITY')
+                if req.get('source_manifest')!=binding['static_manifest_sha256'] or req.get('contract_sha256')!=binding['child_contracts_sha256']:
+                    raise EvidenceError('GLOBAL_REQUEST_SOURCE')
+            if row['status']=='PREPARED':
+                if pending is not None or row['before']!=running or row['after']-running!=row['amount'] or row['amount']<=0:
+                    raise EvidenceError('GLOBAL_PREP_SEQUENCE')
+                pending=row
+            elif row['status']=='COMMITTED':
+                if pending is None or any(row.get(k)!=pending.get(k) for k in ('before','after','amount','cap','request')):
+                    raise EvidenceError('GLOBAL_COMMIT_SEQUENCE')
+                running=row['after'];pending=None
+                if req is not None:
+                    if req['task_id'] in tasks:raise EvidenceError('GLOBAL_DUPLICATE_TASK')
+                    tasks.add(req['task_id'])
+            else:raise EvidenceError('GLOBAL_STATUS')
+    if pending is not None or running!=used:raise EvidenceError('GLOBAL_COUNTER_JOURNAL_MISMATCH')
+    return {'used':used,'cap':cap,'records':records,'healthy':True}

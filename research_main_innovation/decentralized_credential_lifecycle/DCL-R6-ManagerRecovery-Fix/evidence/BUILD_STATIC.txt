@@ -1,0 +1,159 @@
+"""Host-only source/data construction. No target module import or test evaluation."""
+import ast
+import copy
+import hashlib
+import io
+import json
+from pathlib import Path
+import tokenize
+
+B=Path(r'D:\毕业设计\research_main_innovation\decentralized_credential_lifecycle');W=Path(r'D:\毕业设计\DCL-R6-isolated-verification\mr01');E=B/'DCL-R6-ManagerRecovery-Fix/evidence'
+def load(p):return json.loads(Path(p).read_bytes())
+def h(p):return hashlib.sha256(Path(p).read_bytes()).hexdigest()
+def put(p,x):Path(p).write_text(json.dumps(x,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+def rename(s):return s.replace('DCL-R6-B09-Supplement','DCL-R6-ManagerRecovery-Fix').replace('B09-AdmissionFix-static-1','ManagerRecovery-static-1').replace('batch09','batch10').replace('BATCH09','BATCH10').replace('cr09','mr01').replace('B09_','MR_')
+changes=[]
+for p in [*W.glob('src/*.py'),*W.glob('host/*.py')]:
+    raw=p.read_bytes().decode('utf-8');ls=raw.splitlines(keepends=True);offsets=[0]
+    for s in ls:offsets.append(offsets[-1]+len(s))
+    edits=[]
+    for token in tokenize.generate_tokens(io.StringIO(raw).readline):
+        if token.type!=tokenize.STRING:continue
+        try:value=ast.literal_eval(token.string)
+        except (ValueError,SyntaxError):continue
+        if isinstance(value,str) and rename(value)!=value:
+            a=offsets[token.start[0]-1]+token.start[1];z=offsets[token.end[0]-1]+token.end[1];edits.append((a,z,repr(rename(value))))
+            changes.append({'file':str(p.relative_to(W)),'line':token.start[0],'kind':'offline namespace literal'})
+    for a,z,s in reversed(edits):raw=raw[:a]+s+raw[z:]
+    if edits:p.write_bytes(raw.encode('utf-8'))
+def convert(x):
+    if isinstance(x,str):return rename(x)
+    if isinstance(x,list):return [convert(v) for v in x]
+    if isinstance(x,dict):return {rename(k):convert(v) for k,v in x.items()}
+    return x
+for p in W.glob('inputs/*.json'):
+    d=load(p);n=convert(d)
+    if n!=d:put(p,n)
+(W/'inputs/dclr6batch09.slice').rename(W/'inputs/dclr6batch10.slice')
+def edit(name,old,new,count=1):
+    p=W/name;s=p.read_text(encoding='utf-8')
+    if s.count(old)!=count:raise ValueError('EDIT_COUNT:'+name+':'+str(s.count(old))+':'+old[:90])
+    p.write_text(s.replace(old,new),encoding='utf-8');changes.append({'file':name,'old':old,'new':new,'count':count})
+
+# Core ACK, precharge, credit, C/S and18-case logic remain byte/AST protected.
+edit('src/guard.py',"def root_checkpoint(allow_uninitialized=False):\n    return root_ipc().checkpoint(sys.modules[__name__],allow_uninitialized)","def root_checkpoint(allow_uninitialized=False):\n    s=root_ipc().checkpoint(sys.modules[__name__],allow_uninitialized)\n    import manager_recovery as M\n    M.guard_liveness(sys.modules[__name__],s)\n    return s")
+edit('src/guard.py',"def seal():", "def seal(external_tail=False):")
+edit('src/guard.py',"    until=now()+20\n    while now()<until:\n        if unit_show(batch_unit('STOP')).get('ActiveState') in ('inactive','failed'): break\n        time.sleep(.05)\n    else: raise AdmissionBlocked('EXTERNAL_STOP_NOT_CLOSED; evidence remains unsealed')", "    if external_tail:\n        import manager_recovery as M\n        if not M.permit_external_seal(sys.modules[__name__]):raise AdmissionBlocked('MR_UNSAFE_EXTERNAL_SEAL')\n    else:\n        raw=trusted(ROOT/'inputs/batch_state.json')\n        until=min(raw['deadline'],now()+20)\n        while now()<until:\n            if unit_show(batch_unit('STOP')).get('ActiveState') in ('inactive','failed'): break\n            time.sleep(.05)\n        else: raise AdmissionBlocked('EXTERNAL_STOP_NOT_CLOSED; evidence remains unsealed')")
+edit('src/guard.py',"def _launcher_body(resume=False,calibrate_only=False):", "def _launcher_work(resume=False,calibrate_only=False):")
+old="    failed=_run(['/usr/bin/systemctl','list-units','--state=failed','--all','--no-pager','--no-legend'])\n    for line in failed.splitlines():\n        fields=line.replace('●','').split()\n        if fields and fields[0]!='mnt-e.mount': raise AdmissionBlocked('UNREVIEWED_MANAGER_FAILURE')"
+edit('src/guard.py',old,"    import manager_recovery as M\n    if not resume:M.health(sys.modules[__name__],False)")
+edit('src/guard.py',"    expected_scope='C00_DIAGNOSTIC_ONLY' if a['scope']=='C00_DIAGNOSTIC_ONLY' else ('CALIBRATE_S1S9_ONLY' if calibrate_only else 'CALIBRATE_S1S9_THEN_F1_F4')", "    expected_scope=('MR_RECOVERY_DIAGNOSTIC_ONLY' if a['scope']=='MR_RECOVERY_DIAGNOSTIC_ONLY' and calibrate_only else ('CALIBRATE_S1S9_ONLY' if calibrate_only else 'CALIBRATE_S1S9_THEN_F1_F4'))")
+edit('src/guard.py',"            remaining=CASES\n        else:", "            s['mr_stop_required']=True;_root_write(ROOT/'inputs/batch_state.json',s)\n            remaining=CASES\n        else:")
+edit('src/guard.py',"            s=H.resume_admission(sys.modules[__name__],_COORDINATOR_ID)", "            resumed=M.resume(sys.modules[__name__],_COORDINATOR_ID)\n            if not resumed['dispatch']:return 0\n            s=resumed['state']")
+edit('src/guard.py',"            if htest['status']!='PASS':stop_tree('C09H_REGRESSION_FAILED');return 65", "            if htest['status']!='PASS':return M.fail(sys.modules[__name__],'C09H_REGRESSION_FAILED',65)")
+edit('src/guard.py',"            if r['status']!='PASS': stop_tree('CALIBRATION_'+r['status']);return 65", "            if r['status']!='PASS':return M.fail(sys.modules[__name__],'CALIBRATION_'+r['status'],65)\n            if c in ('C06','C07'):M.review_case(sys.modules[__name__],c)\n            if c=='C10' and a['scope']=='MR_RECOVERY_DIAGNOSTIC_ONLY':return M.diagnostic_marker(sys.modules[__name__])")
+edit('src/guard.py',"                readiness_regression.run_suite(sys.modules[__name__])", "                readiness_regression.run_suite(sys.modules[__name__])\n                M.prepay(sys.modules[__name__])\n                import manager_recovery_regression\n                manager_recovery_regression.run_suite(sys.modules[__name__])")
+edit('src/guard.py',"        if r['status']!='PASS':stop_tree('RANGE_CALIBRATION_'+r['status']);return 65", "        if r['status']!='PASS':return M.fail(sys.modules[__name__],'RANGE_CALIBRATION_'+r['status'],65)")
+edit('src/guard.py',"    except BaseException:\n        if (ROOT/'inputs/batch_state.json').exists():\n            try: stop_tree('LAUNCHER_ERROR')\n            except BaseException: pass\n        raise", "    except BaseException as exc:\n        M.abort(sys.modules[__name__],'LAUNCHER_ERROR',exc)\n        raise")
+# A wrapper covers all pre-try code, including auth/version/manager/lock failures.
+needle="def launcher(resume=False,calibrate_only=False):"
+wrapper="def _launcher_body(resume=False,calibrate_only=False):\n    try:return _launcher_work(resume,calibrate_only)\n    except BaseException as exc:\n        import manager_recovery as M\n        M.abort(sys.modules[__name__],'LAUNCHER_PRELUDE_OR_BODY',exc)\n        raise\n\ndef _launcher_impl(resume=False,calibrate_only=False):"
+edit('src/guard.py',needle,wrapper)
+edit('src/guard.py',"        _full(go_w,b'G');os.close(go_w);go_w=None", "        import manager_recovery as M\n        M.scheduler(sys.modules[__name__],child_identity,coordinator,'resume' if resume else 'initial')\n        _full(go_w,b'G');os.close(go_w);go_w=None")
+edit('src/guard.py',"                s=trusted(p);limit=s['deadline']", "                s=trusted(p);limit=s['deadline']\n                if not any(flags.values()):\n                    import manager_recovery as M\n                    M.guard_liveness(sys.modules[__name__],s)\n                    if s['status'] in ('CALIBRATING','AWAIT_EXPECTED_RESUME'):limit=min(limit,s['T0']+300,s['stop_at'])")
+edit('src/guard.py',"        elif code==23:raise AdmissionBlocked('C09_EXIT23_WITHOUT_RECEIPT')\n        return code if code>=0 else 128-code", "        elif code==23:raise AdmissionBlocked('C09_EXIT23_WITHOUT_RECEIPT')\n        import manager_recovery as M\n        if code==23:\n            M.review_case(sys.modules[__name__],'C09')\n        elif code!=0 or not (ROOT/'inputs/CLOSED.json').exists():\n            M.abort(sys.modules[__name__],'COORDINATOR_CHILD_RETURN_'+str(code))\n            if code==78 and authorization()[0]['scope']=='MR_RECOVERY_DIAGNOSTIC_ONLY':M.diagnostic_report(sys.modules[__name__],code)\n            if code==0:code=125\n        return code if code>=0 else 128-code")
+edit('src/guard.py',"    except BaseException as exc:\n        if fd is not None and not select.select([fd],[],[],0)[0]:", "    except BaseException as exc:\n        import manager_recovery as M\n        M.abort(sys.modules[__name__],'COORDINATOR_EXCEPTION',exc)\n        if fd is not None and not select.select([fd],[],[],0)[0]:")
+edit('src/guard.py',"        if (ROOT/'inputs/batch_state.json').exists():\n            try:stop_tree('COORDINATOR_FAILURE:'+str(exc))\n            except BaseException:pass\n        raise", "        raise")
+edit('src/guard.py',"def main():", "def launcher(resume=False,calibrate_only=False):\n    try:return _launcher_impl(resume,calibrate_only)\n    except BaseException as exc:\n        import manager_recovery as M\n        M.abort(sys.modules[__name__],'LAUNCHER_ENTRY',exc)\n        raise\n\ndef main():")
+# Only root-owner finalizers invoke the serialized seal; child G.seal still fences itself.
+edit('src/guard.py',"            try: seal()", "            try:\n                import manager_recovery as M\n                M.seal(sys.modules[__name__])")
+edit('src/guard.py',"            try:seal()", "            try:\n                import manager_recovery as M\n                M.seal(sys.modules[__name__])")
+edit('src/guard.py',"        _root_write(ROOT/('inputs/ticket_'+case+'.json'),t)", "        if case in ('C06','C07','C09'):\n            import manager_recovery as M\n            M.capture(sys.modules[__name__],case,t)\n        _root_write(ROOT/('inputs/ticket_'+case+'.json'),t)")
+# Root external-stop keeps its own implementation wrapper covering construction errors.
+edit('src/guard.py',"def external_stop():", "def _external_stop_impl():")
+edit('src/guard.py',"    authorization();s=state();monitored=None;fd=None", "    resource.setrlimit(resource.RLIMIT_AS,(AS_CAP,AS_CAP))\n    authorization();s=state();monitored=None;fd=None")
+edit('src/guard.py',"            coordinator=fresh.get('coordinator_identity')\n            if coordinator and not H.alive(sys.modules[__name__],coordinator):\n                stop_tree('LAUNCHER_COORDINATOR_LOST');return 125", "            import manager_recovery as M\n            M.supervision(sys.modules[__name__],fresh)")
+edit('src/guard.py',"    except BaseException as exc:\n        try:stop_tree('C09_OR_SUPERVISOR_FAILURE:'+str(exc))\n        finally:raise", "    except BaseException as exc:\n        import manager_recovery as M\n        M.abort(sys.modules[__name__],'C09_OR_SUPERVISOR_FAILURE',exc)\n        raise")
+edit('src/guard.py',"def watchdog(case,parent,parent_start):", "def external_stop():\n    try:return _external_stop_impl()\n    except BaseException as exc:\n        import manager_recovery as M\n        M.abort(sys.modules[__name__],'EXTERNAL_STOP_ENTRY',exc)\n        raise\n    finally:\n        try:\n            import manager_recovery as M\n            if M.permit_external_seal(sys.modules[__name__]):M.seal(sys.modules[__name__],external_tail=True)\n        except BaseException as exc:print('MR_SEAL_UNKNOWN',repr(exc),file=sys.stderr,flush=True)\n\ndef watchdog(case,parent,parent_start):")
+edit('src/guard.py',"    import ledger_gate\n    ledger_gate.require_current(sys.modules[__name__],binding)", "    import ledger_gate\n    ledger_gate.require_current(sys.modules[__name__],binding)\n    import manager_recovery as M\n    M.formal_gate(sys.modules[__name__])")
+edit('src/guard.py',"a['scope'] not in ('CALIBRATE_S1S9_THEN_F1_F4','CALIBRATE_S1S9_ONLY')", "a['scope'] not in ('CALIBRATE_S1S9_THEN_F1_F4','CALIBRATE_S1S9_ONLY','MR_RECOVERY_DIAGNOSTIC_ONLY')")
+edit('src/guard.py',"    if a['scope']=='CALIBRATE_S1S9_ONLY'", "    if a.get('manager_contract_sha256')!=m['manager_contract_sha256']:raise AdmissionBlocked('MR_CONTRACT_AUTHORIZATION')\n    if a['scope']=='MR_RECOVERY_DIAGNOSTIC_ONLY' and (a.get('ManagerRecovery_diagnostic_explicitly_approved') is not True or a.get('Diagnostic_auto_close_injection_explicitly_approved') is not True or a.get('Full_conditional_chain_explicitly_approved') is not False):raise AdmissionBlocked('MR_DIAGNOSTIC_NOT_APPROVED')\n    if a['scope']=='CALIBRATE_S1S9_ONLY'")
+edit('src/boot_continuity.py',"    if any(s.replace('●','').split()[0]!='mnt-e.mount' for s in failed.splitlines() if s.replace('●','').split()):raise Rejected('BC_MANAGER_FAILED_UNIT')", "    import manager_recovery as M\n    reviewed=M.preflight(SOURCE,m,failed,deadline,epoch)\n    emit('MR_PREFLIGHT_REVIEW',review=reviewed)")
+edit('src/boot_continuity.py',"auth.get('scope') not in ('CALIBRATE_S1S9_THEN_F1_F4','CALIBRATE_S1S9_ONLY')", "auth.get('scope') not in ('CALIBRATE_S1S9_THEN_F1_F4','CALIBRATE_S1S9_ONLY','MR_RECOVERY_DIAGNOSTIC_ONLY')")
+edit('src/boot_continuity.py',"    if auth['scope']=='CALIBRATE_S1S9_ONLY'", "    if auth.get('manager_contract_sha256')!=m['manager_contract_sha256']:raise Rejected('MR_CONTRACT_AUTHORIZATION')\n    if auth['scope']=='MR_RECOVERY_DIAGNOSTIC_ONLY' and (auth.get('ManagerRecovery_diagnostic_explicitly_approved') is not True or auth.get('Diagnostic_auto_close_injection_explicitly_approved') is not True or auth.get('Full_conditional_chain_explicitly_approved') is not False):raise Rejected('MR_DIAGNOSTIC_NOT_APPROVED')\n    if auth['scope']=='CALIBRATE_S1S9_ONLY'")
+edit('src/boot_continuity.py',"a['scope'] not in ('CALIBRATE_S1S9_THEN_F1_F4','CALIBRATE_S1S9_ONLY')", "a['scope'] not in ('CALIBRATE_S1S9_THEN_F1_F4','CALIBRATE_S1S9_ONLY','MR_RECOVERY_DIAGNOSTIC_ONLY')")
+edit('src/boot_continuity.py',"            try:G.stop_tree('BOOT_CONTINUITY_ENTRY_FAILURE');G.seal()", "            try:\n                import manager_recovery as M\n                M.abort(G,'BOOT_CONTINUITY_ENTRY_FAILURE')\n                M.seal(G)")
+edit('src/boot_continuity.py',"'GATE_LEDGER_QUALIFICATION.json')", "'GATE_LEDGER_QUALIFICATION.json','MR_QUALIFICATION.json','MR_RECOVERY_REVIEW.json','MR_DIAGNOSTIC_RESULT.json')")
+edit('src/root_ipc.py',"'GATE_LEDGER_QUALIFICATION.json',", "'GATE_LEDGER_QUALIFICATION.json','MR_QUALIFICATION.json','MR_RECOVERY_REVIEW.json','MR_DIAGNOSTIC_RESULT.json',")
+
+# Fixed 48 safe scenarios and eight paired mutation/safe controls =64 jobs.
+basefacts=dict(closed=False,stop=False,binding=True,identity=True,fresh=True,expected_kind=True,budget=True,window=True,
+    exit_observed=True,active=False,review_complete=True,result_proof=True,ack=True,receiver=True,witness=True,supervision=True)
+def frame(action='resume',changes=None,critical=False,**extra):
+    f=dict(basefacts);f.update(changes or {})
+    return {'action':action,'facts':f,'critical':critical,'event_id':'primary-critical','other_roles_exited':True,'payload_empty':True,'cleanup_errors':[],**extra}
+scenarios=[
+ ('valid_review',[frame('review')]),('valid_resume',[frame()]),('repeated_review',[frame('review'),frame('review')]),
+ ('duplicate_event',[frame('review'),frame('review')]),('repeat_resume_fact',[frame(),frame('repeat_resume')]),
+ ('pending_then_complete',[frame('review',{'ack':False}),frame()]),('manager_active',[frame('review',{'exit_observed':False,'active':True})]),
+ ('closed_late_review',[frame('review',{'closed':True})]),('stop_before_review',[frame('review',{'stop':True})]),
+ ('missing_ack',[frame(changes={'ack':False})]),('receiver_missing',[frame(changes={'receiver':False})]),
+ ('bad_identity',[frame(changes={'identity':False})]),('unreviewed_exit',[frame(changes={'review_complete':False})]),
+ ('stale_snapshot',[frame(changes={'fresh':False})]),('supervisor_lost',[frame(changes={'supervision':False})]),
+ ('receipt_write_fail',[frame('close',critical=True,cleanup_errors=['WRITE_FAILED'])]),('corrupt_log',[frame('close',critical=True,cleanup_errors=['LOG_CORRUPT'])]),
+ ('wrong_boot',[frame(changes={'binding':False})]),('wrong_batch',[frame(changes={'binding':False})]),
+ ('closed_resume',[frame(changes={'closed':True})]),('event_conflict',[frame(changes={'identity':False})]),
+ ('return_error',[frame('close',critical=True)]),('exception',[frame('close',critical=True)]),('root_lost',[frame('close',critical=True)]),
+ ('controller_unexpected',[frame('close',critical=True)]),('watchdog_unexpected',[frame('close',critical=True)]),
+ ('close_repeat',[frame('close',critical=True),frame('close',critical=True)]),('cleanup_error',[frame('close',critical=True,cleanup_errors=['EIO'])]),
+ ('existing_stop',[frame('close',{'stop':True},True)]),('budget_unknown',[frame('close',{'budget':False},True)]),
+ ('short_log',[frame('close',critical=True,cleanup_errors=['SHORT_WRITE'])]),('child_unresponsive',[frame('close',critical=True,other_roles_exited=False)]),
+ ('external_stop',[frame('close',critical=True)]),('coordinator_lost_pending',[frame('close',{'supervision':False},True)]),
+ ('before_window',[frame('close',critical=True)]),('late_stop',[frame('close',{'window':False},True)]),
+ ('concurrent_close',[frame('close',critical=True),frame('close',critical=True)]),
+ ('flag_after_snapshot',[frame('review'),frame(changes={'stop':True})]),
+ ('version_between_reads',[frame(changes={'fresh':False})]),('ack_after_timeout',[frame(changes={'ack':False,'window':False})]),
+ ('wrong_exit23',[frame(changes={'expected_kind':False})]),('foreign_manager_failure',[frame(changes={'expected_kind':False})]),
+ ('forged_pass',[frame(changes={'result_proof':False})]),('current_unit_restart',[frame(changes={'identity':False,'fresh':False})]),
+ ('foreign_pid',[frame(changes={'identity':False})]),('missing_waitpid',[frame(changes={'witness':False})]),
+ ('contradictory_ack',[frame(changes={'ack':False,'binding':False})]),('expired_window',[frame(changes={'window':False})])]
+assert len(scenarios)==48
+jobs=[{'case_id':'P.'+n,'frames':f,'mutant':None,'allowed_violations':[],'expected_violation':None,'origin':'MR-SIMULATION/1'} for n,f in scenarios]
+mutants=[
+ ('skip_review',[frame(changes={'review_complete':False})],'UNREVIEWED_SUCCESS',['UNREVIEWED_SUCCESS','UNREVIEWED_RESUME']),
+ ('missing_ack',[frame(changes={'ack':False})],'UNREVIEWED_SUCCESS',['UNREVIEWED_SUCCESS','UNREVIEWED_RESUME']),
+ ('stale_snapshot',[frame('review'),frame(changes={'fresh':False})],'UNREVIEWED_SUCCESS',['UNREVIEWED_SUCCESS','UNREVIEWED_RESUME']),
+ ('ignore_stop',[frame(changes={'stop':True})],'UNREVIEWED_RESUME',['UNREVIEWED_SUCCESS','UNREVIEWED_RESUME']),
+ ('no_auto_close',[frame('close',critical=True)],'NO_AUTOMATIC_CLOSE',['NO_AUTOMATIC_CLOSE','REACTIVATION']),
+ ('reactivate_closed',[frame('close',critical=True),frame()],'REACTIVATION',['REACTIVATION','UNREVIEWED_SUCCESS','UNREVIEWED_RESUME']),
+ ('new_window_repeat',[frame('close',critical=True),frame('close',critical=True)],'BUDGET_OR_WINDOW_RESET',['BUDGET_OR_WINDOW_RESET']),
+ ('false_cleanup_success',[frame('close',critical=True,other_roles_exited=False)],'FALSE_EXIT_SUCCESS',['FALSE_EXIT_SUCCESS'])]
+for name,frames,expected,allowed in mutants:
+    jobs.append({'case_id':'M.'+name+'.safe','frames':copy.deepcopy(frames),'mutant':None,'allowed_violations':[],'expected_violation':None,'origin':'MR-SIMULATION/1'})
+    jobs.append({'case_id':'M.'+name+'.mutant','frames':frames,'mutant':name,'allowed_violations':allowed,'expected_violation':expected,'origin':'MR-SIMULATION/1'})
+assert len(jobs)==64
+root=Path(r'D:\毕业设计\DCL-R6-isolated-verification\batch09\final_snapshot')
+jrows=[json.loads(line) for line in (B/'DCL-R6-CalDiag/evidence/FINAL_RUN_BOOT_JOURNAL.stdout.raw').read_text().splitlines()]
+history={}
+for case,result,code,status in [('C06','signal',2,9),('C07','exit-code',1,23),('C09','signal',2,9)]:
+    unit='dclr6batch09-'+case.lower()+'.service';inv={r['INVOCATION_ID'] for r in jrows if r.get('UNIT')==unit}
+    assert len(inv)==1
+    rels=['inputs/CLOSED.json','inputs/result_'+case+'.json','inputs/ticket_'+case+'.json']
+    if case=='C09':rels+=['inputs/c09_handoff.json','inputs/c09_commit.json','inputs/c09_exit_witness.json']
+    history[unit]={'root':'/var/lib/dcl-r6/batch09','boot_id':'55ac71b2-e2c9-4e7b-9c94-e49d7082d8f4','InvocationID':next(iter(inv)),'Result':result,'ExecMainCode':code,'ExecMainStatus':status,'files':{rel:h(root/rel) for rel in rels}}
+cfg={'schema':'MANAGER-RECOVERY-CONTRACT/1','profile':'MANAGER-RECOVERY/1','version':'ManagerRecovery-static-1/r1','batch_id':'batch10',
+     'expected_cases':{'C06':{'Result':'signal','ExecMainCode':2,'ExecMainStatus':9},'C07':{'Result':'exit-code','ExecMainCode':1,'ExecMainStatus':23},'C09':{'Result':'signal','ExecMainCode':2,'ExecMainStatus':9}},
+     'historical_closed_units':history,'jobs':jobs,'driver_prepay':12,'regression_completed_visits':833,'regression_hard_visits':1024,
+     'native_review_credit':256,'phase_completed_visits':1089,'phase_hard_visits':1536,'full_calibration_hard':64082,
+     'native_scope':'Systemd unit instance review plus unmodified C09 ACK protocol; physical cleanup conditional on kernel/manager/IO response',
+     'dynamic_status':'UNRUN','stages':{'A':'MR_RECOVERY_DIAGNOSTIC_ONLY; C00..C10 plus64 then intentional close78','B':'new independent namespace after A; full qualification then F1/F4 if separately authorized'}}
+put(W/'inputs/manager_contract.json',cfg)
+ip=W/'inputs/execution_lock.json';x=load(ip);x['allowed_scopes']+=['MR_RECOVERY_DIAGNOSTIC_ONLY'];x['launch_commands_by_scope']['MR_RECOVERY_DIAGNOSTIC_ONLY']=x['calibrate_only_launch_command']
+x['authorization_receipt_required_fields']+=['manager_contract_sha256','ManagerRecovery_diagnostic_explicitly_approved','Diagnostic_auto_close_injection_explicitly_approved']
+x['manager_schedule']=['C00 and READY64','MR native prepay256 + regression64','C01..C08 + instance captures/reviewC6/C7','C09H/IPC56/BC40','real C09 ACK/waitpid','reviewC9 unit instance','fresh manager review + original resume admission','C10','A intentional critical78 and automatic close OR B C11/C12/S34/gate18/resource gate/models']
+x['manager_limits']={k:cfg[k] for k in ['driver_prepay','regression_completed_visits','regression_hard_visits','native_review_credit','phase_completed_visits','phase_hard_visits','full_calibration_hard']}
+x['current_authorization']='STATIC_ONLY; new batch10 dynamic receipt absent';x['status']='STATIC_CANDIDATE_UNRUN';x['source_version']='ManagerRecovery-static-1';x['static_revision']='ManagerRecovery-static-1/r1'
+put(ip,x)
+mp=W/'inputs/static_manifest.json';m=load(mp);m['version']='ManagerRecovery-static-1';m['static_revision']='ManagerRecovery-static-1/r1';m['inherited_semantics']='B09-AdmissionFix-static-1/r1 and C00Ready-static-1/r2';m['manager_delta']=x['manager_limits'];put(mp,m)
+put(E/'STATIC_TRANSFORMATION_LOG.json',{'offline_changes':changes,'runtime_string_replacements':0,'test_execution':0})
+print(json.dumps({'safe_scenarios':48,'paired_mutation_jobs':16,'total_MR_jobs':64,'mutants':8,'new_namespace':'batch10/mr01','target_runs':0}))

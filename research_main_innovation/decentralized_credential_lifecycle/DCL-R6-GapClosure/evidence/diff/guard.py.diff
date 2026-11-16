@@ -1,0 +1,454 @@
+warning: in the working copy of 'D:\毕业设计\DCL-R6-isolated-verification\lc03\src\guard.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'D:\毕业设计\DCL-R6-isolated-verification\gc01\src\guard.py', LF will be replaced by CRLF the next time Git touches it
+diff --git "a/D:\\毕业设计\\DCL-R6-isolated-verification\\lc03\\src\\guard.py" "b/D:\\毕业设计\\DCL-R6-isolated-verification\\gc01\\src\\guard.py"
+index f85831f..892ce5d 100644
+--- "a/D:\\毕业设计\\DCL-R6-isolated-verification\\lc03\\src\\guard.py"
++++ "b/D:\\毕业设计\\DCL-R6-isolated-verification\\gc01\\src\\guard.py"
+@@ -32,7 +32,7 @@ PYTHON_SHA = 'e50d468e8b0adfb05733f5b87b3cff34829c4a8c1aea50c865aa8bdfe4bb150f'
+ AS_CAP = 1 << 30
+ VISIT_CAP = 1000000
+ CASES = tuple('C%02d' % i for i in range(13))
+-ROOTS = (Path('/var/lib/dcl-r6/lc03'), Path('/var/lib/dcl-r6/batch03'))
++ROOTS = (Path('/var/lib/dcl-r6/gc01'), Path('/var/lib/dcl-r6/batch04'))
+ def _arg(name, default=None):
+     return sys.argv[sys.argv.index(name)+1] if name in sys.argv else default
+ ROOT = Path(_arg('--batch-root', str(ROOTS[0]))).resolve()
+@@ -50,6 +50,7 @@ _TIMING = {}
+ _TIMING_LOCK = threading.Lock()
+ _RESERVATION_MINT = object()
+ _LOCAL_CREDIT_MINT = object()
++_ROOT_SAFETY_AUDIT = False
+ 
+ def monotonic_ns(): return time.clock_gettime_ns(time.CLOCK_BOOTTIME)
+ def _timing(stage, start, end, utc_start, utc_end, error=None):
+@@ -181,7 +182,7 @@ def proc_memory():
+             'identity':identity(),'query_before':before,'query_after':stamp()}
+ def manifest():
+     m=trusted(SOURCE.parent/'inputs/static_manifest.json')
+-    if str(SOURCE)!='/var/lib/dcl-r6/lc03/src' or str(SOURCE)!=m['source_directory']:
++    if str(SOURCE)!='/var/lib/dcl-r6/gc01/src' or str(SOURCE)!=m['source_directory']:
+         raise AdmissionBlocked('UNTRUSTED_SOURCE_DIRECTORY')
+     if sys.platform != 'linux' or tuple(sys.version_info[:3]) != (3,12,3):
+         raise AdmissionBlocked('RUNTIME_VERSION_DRIFT')
+@@ -205,15 +206,16 @@ def verify_runtime_tree(m):
+ def authorization():
+     _check_root(); m=manifest()
+     a=trusted(ROOT/'inputs/execution_authorization.json')
+-    if ROOT.name != 'batch03' or a['batch_id'] != 'batch03' or a['scope'] != 'CALIBRATE_THEN_F1_F4':
+-        raise AdmissionBlocked('NO_DYNAMIC_BATCH03_AUTHORIZATION')
++    if ROOT.name != 'batch04' or a['batch_id'] != 'batch04' or a['scope'] not in ('CALIBRATE_S1S9_THEN_F1_F4','CALIBRATE_S1S9_ONLY'):
++        raise AdmissionBlocked('NO_DYNAMIC_BATCH04_AUTHORIZATION')
+     if a['profile'] != 'CPY312-UBU24/1' or a['limits'] != [1000000,1800,1740,AS_CAP,4]:
+         raise AdmissionBlocked('CONTRACT_MISMATCH')
+     if a['static_manifest_sha256'] != digest(SOURCE.parent/'inputs/static_manifest.json'):
+         raise AdmissionBlocked('STATIC_LOCK_MISMATCH')
+-    if a['execution_lock_sha256'] != digest(SOURCE.parent/'inputs/execution_lock.json'):
+-        raise AdmissionBlocked('EXECUTION_LOCK_MISMATCH')
+-    if a['authorization_text_sha256'] != digest(ROOT/'inputs/BATCH03_AUTHORIZATION_TEXT.txt'):
++    validate_execution_binding(a['execution_lock_sha256'],digest(SOURCE.parent/'inputs/execution_lock.json'))
++    if a.get('safety_contract_sha256')!=m['safety_contract_sha256'] or a.get('test_mode')!='RANGE_ONLY/1':
++        raise AdmissionBlocked('SAFETY_TEST_SCOPE_MISSING')
++    if a['authorization_text_sha256'] != digest(ROOT/'inputs/BATCH04_AUTHORIZATION_TEXT.txt'):
+         raise AdmissionBlocked('AUTHORIZATION_SOURCE_MISMATCH')
+     # This is explicit scope acceptance, never a substitute for OS limit checks.
+     if a.get('special_mapping_scope') != 'ORDINARY_AS_ACCOUNTED;KERNEL_SPECIALS_SEPARATELY_REVIEWED':
+@@ -259,10 +261,154 @@ def kernel_admission(ticket):
+ def ticket(case): return trusted(ROOT/('inputs/ticket_'+case+'.json'))
+ def guardian_check():
+     if _WATCH is None or _WATCH.poll() is not None: raise AdmissionBlocked('WATCHDOG_NOT_ALIVE')
++def validate_execution_binding(observed,expected):
++    if observed!=expected:raise AdmissionBlocked('EXECUTION_LOCK_BINDING_MISMATCH')
++def require_fresh_initialization(state_exists,counter_exists,closed_exists):
++    if state_exists or counter_exists or closed_exists:raise AdmissionBlocked('BATCH_ALREADY_INITIALIZED')
++def safety_binding():
++    s=state()
++    return {'batch_id':ROOT.name,'boot_id':s['boot_id'],'T0':s['T0'],
++            'static_manifest_sha256':digest(SOURCE.parent/'inputs/static_manifest.json'),
++            'execution_lock_sha256':digest(SOURCE.parent/'inputs/execution_lock.json'),
++            'fixture_contract_sha256':digest(SOURCE.parent/'inputs/safety_contract.json'),
++            'child_contracts_sha256':digest(SOURCE.parent/'inputs/child_contracts.json')}
++def safety_mode():
++    a,m=authorization();s=state();t=_TICKET
++    if t is None or t['case']!='RANGE' or s['status']!='CALIBRATING':
++        raise AdmissionBlocked('CALIBRATION_RANGE_MODE_ONLY')
++    if t['execution_lock_sha256']!=digest(SOURCE.parent/'inputs/execution_lock.json'):
++        raise AdmissionBlocked('SAFETY_EXECUTION_LOCK_DRIFT')
++    p=SOURCE.parent/'inputs/safety_contract.json'
++    if digest(p)!=m['safety_contract_sha256']:raise AdmissionBlocked('SAFETY_CONTRACT_DRIFT')
++    cfg=trusted(p)
++    if cfg['schema']!='GC-SAFETY-CONTRACT/1' or cfg['version']!='BF-static-2' or cfg['future_batch_id']!=ROOT.name:
++        raise AdmissionBlocked('SAFETY_CONTRACT_IDENTITY')
++    if cfg['global_safety_charge_cap']!=20000 or cfg['max_jobs']!=34 or len(cfg['jobs'])!=34:
++        raise AdmissionBlocked('SAFETY_RESOURCE_CONTRACT')
++    execution_deadline('RANGE')
++    return cfg
++def safety_charge():
++    t=_TICKET
++    if t is None or t['case']!='RANGE':raise AdmissionBlocked('SAFETY_CHARGE_CONTEXT')
++    execution_deadline('RANGE')
++    if os.geteuid()==0:
++        if not _ROOT_SAFETY_AUDIT:raise AdmissionBlocked('ROOT_SAFETY_AUDIT_CONTEXT')
++    elif identity()!=t['main_identity']:
++        if identity(os.getppid())!=t['main_identity']:raise AdmissionBlocked('SAFETY_CHARGE_PARENT')
++    else:guardian_check()
++    reserve_counter(OUT/'visits.bin',VISIT_CAP)
++def safety_worker_argv(case_id):
++    cfg=safety_mode()
++    if case_id not in {j['case_id'] for j in cfg['jobs']}:raise AdmissionBlocked('UNFROZEN_SAFETY_WORKER')
++    argv=[PYTHON,'-I','-S','-B',str(SOURCE/'range_fixtures.py'),'--batch-root',str(ROOT),'--case-id',case_id]
++    lock=trusted(SOURCE.parent/'inputs/execution_lock.json')
++    if argv!=lock['safety_worker_commands'][case_id]:raise AdmissionBlocked('SAFETY_WORKER_ARGV_DRIFT')
++    return argv
++def verify_sealed_safety(receipt,binding):
++    import range_evidence
++    if receipt.get('schema')!='GC-RANGE-QUALIFICATION/1' or receipt.get('binding')!=binding:
++        raise AdmissionBlocked('RANGE_RECEIPT_BINDING')
++    cfg=trusted(SOURCE.parent/'inputs/safety_contract.json')
++    rows=receipt['results']
++    expected={j['case_id']:j for j in cfg['jobs']}
++    if len(rows)!=34 or {r['case_id'] for r in rows}!=set(expected):
++        raise AdmissionBlocked('RANGE_RECEIPT_JOB_SET')
++    if receipt['checker_sha256']!=digest(SOURCE/'range_evidence.py'):
++        raise AdmissionBlocked('RANGE_CHECKER_DRIFT')
++    for row in rows:
++        job=expected[row['case_id']]
++        target='PASS' if job['variant']=='safe' else 'MUTATION_DETECTED'
++        if row.get('status')!=target or row.get('accepted') is not True or row.get('binding')!=binding:
++            raise AdmissionBlocked('RANGE_REQUIRED_RESULT_'+row['case_id'])
++        if not row.get('raw_files'):raise AdmissionBlocked('RANGE_RAW_EVIDENCE_MISSING')
++        base=OUT/'safety'/row['case_id']
++        _inside(base,OUT)
++        if (OUT/'safety').is_symlink() or base.is_symlink():
++            raise AdmissionBlocked('SYMLINK_RANGE_EVIDENCE')
++        for rel,expected_sha in row['raw_files'].items():
++            p=_inside(base/rel,base)
++            if p.is_symlink() or hashlib.sha256(range_evidence.bounded(p,4194304)).hexdigest()!=expected_sha:
++                raise AdmissionBlocked('RANGE_RAW_HASH_MISMATCH')
++def exercise_gate_negatives(report,binding,cfg):
++    if os.geteuid()!=0 or not _ROOT_SAFETY_AUDIT:raise AdmissionBlocked('ROOT_GATE_AUDIT_REQUIRED')
++    safety_charge()
++    verify_sealed_safety(report,binding)
++    results=[]
++    for spec in cfg['gate_negative_cases']:
++        safety_charge()
++        candidate=json.loads(json.dumps(report));recipe=spec['recipe']
++        row=candidate['results'][0]
++        if recipe=='status':row['status']=spec['value'];row['accepted']=True
++        elif recipe=='missing_job':candidate['results'].pop()
++        elif recipe=='missing_raw':row['raw_files']={}
++        elif recipe=='raw_hash':
++            key=next(iter(row['raw_files']));row['raw_files'][key]='0'*64
++        elif recipe=='binding':
++            key=spec['value']
++            candidate['binding'][key]=candidate['binding'][key]+1 if key=='T0' else 'invalid-frozen-gate-binding'
++        elif recipe=='checker_hash':candidate['checker_sha256']='0'*64
++        elif recipe=='forged_PASS':
++            row['status']='PASS';row['accepted']=True;row['raw_files']={}
++        else:raise AdmissionBlocked('UNFROZEN_GATE_NEGATIVE_RECIPE')
++        before=stamp();rejected=None
++        try:verify_sealed_safety(candidate,binding)
++        except (AdmissionBlocked,OSError,ValueError,KeyError,TypeError) as exc:rejected=str(exc)
++        if rejected is None or not rejected.startswith(spec['expected_prefix']):
++            raise AdmissionBlocked('GATE_MUTATION_NOT_DETECTED:'+spec['case_id'])
++        results.append({'case_id':spec['case_id'],'projection_sha256':hashlib.sha256(
++            json.dumps(candidate,sort_keys=True).encode()).hexdigest(),'rejected_by':rejected,
++            'before':before,'after':stamp(),'status':'MUTATION_DETECTED'})
++    return {'binding':binding,'positive_control':'PASS','results':results,'verifier':identity(),'sample':stamp()}
++def verify_gate_audit(receipt,binding):
++    cfg=trusted(SOURCE.parent/'inputs/safety_contract.json')
++    p=ROOT/'inputs/GATE_NEGATIVE_AUDIT.json'
++    if digest(p)!=receipt['gate_audit_sha256']:raise AdmissionBlocked('GATE_AUDIT_HASH_MISMATCH')
++    audit=trusted(p)
++    if audit['binding']!=binding or audit['positive_control']!='PASS':
++        raise AdmissionBlocked('GATE_AUDIT_BINDING')
++    expected={s['case_id']:s for s in cfg['gate_negative_cases']}
++    rows=audit['results']
++    if len(rows)!=len(expected) or {x['case_id'] for x in rows}!=set(expected):
++        raise AdmissionBlocked('GATE_AUDIT_SET')
++    for row in rows:
++        if row['status']!='MUTATION_DETECTED' or not row['rejected_by'].startswith(expected[row['case_id']]['expected_prefix']):
++            raise AdmissionBlocked('GATE_AUDIT_REQUIRED_REJECTION')
++def root_verify_safety():
++    global _TICKET,_ROOT_SAFETY_AUDIT
++    if os.geteuid()!=0:raise AdmissionBlocked('ROOT_SAFETY_VERIFIER_REQUIRED')
++    sys.path.insert(0,str(SOURCE))
++    import range_evidence
++    old=_TICKET
++    _TICKET=ticket('RANGE');_ROOT_SAFETY_AUDIT=True
++    try:
++        cfg=safety_mode();binding=safety_binding()
++        execution_deadline('RANGE')
++        for job in cfg['jobs']:safety_charge()
++        report=range_evidence.check_suite(OUT/'safety',cfg,binding)
++        if not report['accepted']:raise AdmissionBlocked('RANGE_RAW_VERIFICATION_FAILED')
++        health=range_evidence.check_global_ledger(OUT/'visits.bin',VISIT_CAP,binding)
++        if not(health['used']<100000 and health['used']<VISIT_CAP):
++            raise LimitReached('CALIBRATION_VISIT_ADMISSION')
++        execution_deadline('RANGE')
++        report.update({'schema':'GC-RANGE-QUALIFICATION/1','checker_sha256':digest(SOURCE/'range_evidence.py'),
++                       'global_health':health,'sample':stamp()})
++        verify_sealed_safety(report,binding)
++        gate_audit=exercise_gate_negatives(report,binding,cfg)
++        _root_write(ROOT/'inputs/GATE_NEGATIVE_AUDIT.json',gate_audit)
++        report['gate_audit_sha256']=digest(ROOT/'inputs/GATE_NEGATIVE_AUDIT.json')
++        # The audit consumed the same global calibration budget; recheck it now.
++        report['global_health']=range_evidence.check_global_ledger(OUT/'visits.bin',VISIT_CAP,binding)
++        execution_deadline('RANGE')
++        verify_gate_audit(report,binding)
++        _root_write(ROOT/'inputs/RANGE_QUALIFICATION.json',report)
++        return report
++    finally:_TICKET=old;_ROOT_SAFETY_AUDIT=False
+ def require_formal_admission():
+     if _TICKET is None or _TICKET['case'] != 'FORMAL' or _TICKET['main_identity'] != identity():
+         raise AdmissionBlocked('CONTROLLER_CONTEXT_REQUIRED')
+     kernel_admission(_TICKET); guardian_check()
++    a,_=authorization()
++    if a['scope']!='CALIBRATE_S1S9_THEN_F1_F4':raise AdmissionBlocked('FORMAL_SCOPE_NOT_AUTHORIZED')
+     q=trusted(ROOT/'inputs/RESOURCE_QUALIFICATION.json')
+     if q['boot_id']!=boot_id() or q['source_manifest']!=digest(SOURCE.parent/'inputs/static_manifest.json'):
+         raise AdmissionBlocked('QUALIFICATION_BINDING_MISMATCH')
+@@ -271,6 +417,17 @@ def require_formal_admission():
+         p=ROOT/('inputs/result_'+c+'.json'); r=trusted(p)
+         if digest(p)!=h or r['status']!='PASS' or r['case']!=c:
+             raise AdmissionBlocked('CALIBRATION_EVIDENCE_MISMATCH')
++    binding=safety_binding()
++    if q.get('binding')!=binding:raise AdmissionBlocked('RESOURCE_QUALIFICATION_BINDING')
++    rp=ROOT/'inputs/RANGE_QUALIFICATION.json'
++    if digest(rp)!=q['safety_receipt_sha256']:raise AdmissionBlocked('RANGE_RECEIPT_DRIFT')
++    receipt=trusted(rp)
++    verify_sealed_safety(receipt,binding)
++    verify_gate_audit(receipt,binding)
++    # Fresh raw global-ledger admission occurs before any F1/F4 business import.
++    reserve_counter(OUT/'visits.bin',VISIT_CAP)
++    import range_evidence
++    range_evidence.check_global_ledger(OUT/'visits.bin',VISIT_CAP,binding)
+ def request_stop(reason):
+     write(OUT/'STOP_REQUEST.json',{'reason':reason,**stamp()})
+ def init_counter(path,cap):
+@@ -310,6 +467,8 @@ def _counter_lock(path,cap,case=None):
+         raw=os.pread(fd,24,0)
+         if len(raw)!=24 or raw[:8]!=COUNTER_MAGIC:raise AdmissionBlocked('TORN_COUNTER_OR_OLD_PROTOCOL')
+         used,storedcap=struct.unpack('<QQ',raw[8:])
++        if list(p.parent.glob(p.name+'.intent.json.tmp.*')):
++            raise AdmissionBlocked('AMBIGUOUS_RESERVATION_TEMP')
+         old=read(p.with_suffix(p.suffix+'.intent.json'))
+         if storedcap!=cap or used>cap:raise AdmissionBlocked('COUNTER_CAP_MISMATCH')
+         if old.get('protocol')!=BUDGET_PROTOCOL or old.get('status')!='COMMITTED' or old['after']!=used or old['cap']!=cap:
+@@ -355,9 +514,15 @@ def _append_journal(p,record,stage):
+     finally:os.close(j)
+ def _reserve(path,cap,amount=1,request=None,fault=None):
+     budget_health();timing_event('reserve.request')
++    if request is not None:raise AdmissionBlocked('EXACT_RANGE_CORE_REQUIRED')
+     if type(amount) is not int or amount<=0:raise AdmissionBlocked('RESERVATION_AMOUNT')
+     p=_inside(path,OUT);global_ledger=p==OUT/'visits.bin'
+     if fault and global_ledger:raise AdmissionBlocked('FAULT_IN_GLOBAL_LEDGER_FORBIDDEN')
++    if fault:
++        allowed=('prepared','short_write','counter_fsynced','journal_fsynced')
++        if (_TICKET is None or _TICKET['case']!='C11' or fault not in allowed or
++            p!=OUT/('C11.'+fault+'.bin')):
++            raise AdmissionBlocked('CALIBRATION_C11_FAULT_MODE_ONLY')
+     if amount!=1 and request is None:raise AdmissionBlocked('RANGE_REQUIRES_FROZEN_TASK')
+     case=request['case'] if request else None
+     try:
+@@ -373,6 +538,8 @@ def _reserve(path,cap,amount=1,request=None,fault=None):
+                     timing_event('reserve.idempotent_fact_only')
+                     return {'after':used,'fact':fact,'created':False}
+             soft=100000 if global_ledger and (_TICKET is None or _TICKET['case']!='FORMAL') else cap
++            if global_ledger and _TICKET is not None and _TICKET['case']=='RANGE':
++                soft=min(soft,_TICKET['safety_visit_ceiling'])
+             if used+amount>min(cap,soft):raise LimitReached('VISIT_OR_CALIBRATION_LIMIT')
+             record={'protocol':BUDGET_PROTOCOL,'status':'PREPARED','before':used,'after':used+amount,
+                     'amount':amount,'cap':cap,'request':request,**stamp()}
+@@ -409,55 +576,10 @@ def _reserve(path,cap,amount=1,request=None,fault=None):
+ def reserve_counter(path,cap,fault=None):
+     return _reserve(path,cap,1,fault=fault)['after']
+ 
+-class ExactReservation:
+-    def __init__(self,fact,created,_mint=None):
+-        if _mint is not _RESERVATION_MINT:raise AdmissionBlocked('INTERNAL_RESERVATION_FACTORY_REQUIRED')
+-        self.fact=json.loads(json.dumps(fact));self.created=created;self._issued=False;self._lock=threading.Lock()
+-    def dispatch_once(self):
+-        with self._lock:
+-            if not self.created or self._issued or self.fact['owner']!=identity():
+-                raise AdmissionBlocked('RESERVATION_FACT_IS_NOT_FRESH_EXECUTION_CREDIT')
+-            execution_deadline(self.fact['request']['case']);self._issued=True
+-            timing_event('local_credit.dispatch_once')
+-            return json.loads(json.dumps(self.fact))
+-class LocalCredits:
+-    def __init__(self,fact,t,_mint=None):
+-        if _mint is not _LOCAL_CREDIT_MINT or fact.get('executor')!=identity() or fact.get('delivery_state')!='CLAIMED':
+-            raise AdmissionBlocked('INTERNAL_CLAIMED_CREDIT_FACTORY_REQUIRED')
+-        self.fact=fact;self.N=fact['request']['N'];self.used=0;self._ticket=t
+-        self._identity=identity();self._lock=threading.Lock()
+-        owner=fact['owner']
+-        if os.getppid()!=owner['pid'] or identity(owner['pid'])!=owner:raise AdmissionBlocked('LOCAL_PARENT_IDENTITY_CHANGED')
+-        self._parent=os.pidfd_open(owner['pid'])
+-        if os.getppid()!=owner['pid'] or identity(owner['pid'])!=owner:
+-            os.close(self._parent);raise AdmissionBlocked('LOCAL_PARENT_PIDFD_RACE')
+-    def visit(self):
+-        begin=monotonic_ns();utc=time.time_ns()
+-        with self._lock:
+-            if identity()!=self._identity:raise AdmissionBlocked('LOCAL_CREDIT_INCARNATION_MISMATCH')
+-            if select.select([self._parent],[],[],0)[0]:raise AdmissionBlocked('LOCAL_CREDIT_PARENT_EXIT')
+-            execution_deadline(self.fact['request']['case'])
+-            if self.used>=self.N:raise LimitReached('LOCAL_EXACT_CREDIT_EXHAUSTED')
+-            self.used+=1  # before the charged operation, including a failed attempt
+-        _timing('local_credit.debit',begin,monotonic_ns(),utc,time.time_ns())
+-    def close(self):os.close(self._parent)
+ def claim_exact(task_id,N,lease_id):
+-    request,t=_task_contract(task_id,N);kernel_admission(t)
+-    if os.getppid()!=t['main_identity']['pid'] or identity(os.getppid())!=t['main_identity']:
+-        raise AdmissionBlocked('LOCAL_CREDIT_PARENT_MISMATCH')
+-    try:
+-        with _counter_lock(OUT/'visits.bin',VISIT_CAP,request['case']) as (_,used,_):
+-            fact=read(_fact_path(task_id));_validate_fact(fact,request,used)
+-            if fact['lease_id']!=lease_id or fact['owner']!=t['main_identity']:
+-                raise AdmissionBlocked('LOCAL_CREDIT_LEASE_MISMATCH')
+-            if fact['delivery_state']!='UNCLAIMED':raise AdmissionBlocked('LOCAL_CREDIT_ALREADY_CLAIMED')
+-            fact={**fact,'delivery_state':'CLAIMED','executor':identity(),'claimed_at':stamp()}
+-            atomic(_fact_path(task_id),fact,timing_stage='budget.registry.claimed')
+-            execution_deadline(request['case'])
+-            credits=LocalCredits(fact,t,_LOCAL_CREDIT_MINT);timing_event('local_credit.granted_to_executor')
+-            return credits
+-    except LimitReached:raise
+-    except BaseException as exc:halt_budget(exc);raise
++    import range_core
++    request,_=_task_contract(task_id,N)
++    return range_core.Store(sys.modules[__name__],OUT/'visits.bin',VISIT_CAP,request).claim(lease_id)
+ class Budget:
+     def __init__(self,local=None):
+         if _TICKET is None: raise AdmissionBlocked('PAYLOAD_CONTEXT_REQUIRED')
+@@ -475,8 +597,8 @@ class Budget:
+         if self.local:raise AdmissionBlocked('LOCAL_MIRROR_EXACT_RESERVATION_NOT_APPROVED')
+         guardian_check();execution_deadline()
+         request,_=_task_contract(task_id,N)
+-        result=_reserve(OUT/'visits.bin',VISIT_CAP,N,request=request)
+-        return ExactReservation(result['fact'],result['created'],_RESERVATION_MINT)
++        import range_core
++        return range_core.Store(sys.modules[__name__],OUT/'visits.bin',VISIT_CAP,request).reserve()
+     def close(self): pass
+ 
+ def _run(argv,timeout=15):
+@@ -489,7 +611,7 @@ def unit_show(unit):
+     text=_run(['/usr/bin/systemctl','show',unit,*['--property='+f for f in fields]])
+     return dict(line.split('=',1) for line in text.splitlines() if '=' in line)
+ def service_argv(case):
+-    unit='dclr6batch03-'+case.lower()+'.service'
++    unit='dclr6batch04-'+case.lower()+'.service'
+     props={'User':'dcl-r6','Group':'dcl-r6','Type':'exec','Slice':PARENT,
+            'LimitAS':str(AS_CAP)+':'+str(AS_CAP),'TasksMax':'4','TasksAccounting':'yes',
+            'MemoryAccounting':'yes','MemoryMax':str(4*AS_CAP),'MemorySwapMax':'0',
+@@ -615,6 +737,11 @@ def controller(case):
+             sys.argv=[str(SOURCE/'run_batch.py'),'--batch-root',str(ROOT),'--session','1']
+             runpy.run_path(str(SOURCE/'run_batch.py'),run_name='__main__')
+             return 0
++        if case=='RANGE':
++            import range_fixtures
++            result=range_fixtures.run_suite()
++            write(OUT/'RANGE.probe.json',result)
++            return 0 if result['status']=='PASS' else 65
+         import guard_probe
+         result=guard_probe.run_case(case,Budget())
+         write(OUT/(case+'.probe.json'),result)
+@@ -633,7 +760,7 @@ def launch_one(case):
+     lock=trusted(SOURCE.parent/'inputs/execution_lock.json')
+     if argv!=lock['payload_commands'][case]: raise AdmissionBlocked('PAYLOAD_ARGV_DRIFT')
+     _run(argv)
+-    unit='dclr6batch03-'+case.lower()+'.service'; until=now()+14
++    unit='dclr6batch04-'+case.lower()+'.service'; until=now()+14
+     info={}
+     while now()<until:
+         info=unit_show(unit); pid=int(info.get('MainPID','0'))
+@@ -645,6 +772,8 @@ def launch_one(case):
+     t={'case':case,'unit':unit,'main_identity':identity(pid),'boot_id':boot_id(),
+        'source_manifest':digest(SOURCE.parent/'inputs/static_manifest.json'),'case_deadline':limit,
+        'unit_before_ticket':info,'argv':argv}
++    t['execution_lock_sha256']=digest(SOURCE.parent/'inputs/execution_lock.json')
++    if case=='RANGE':t['safety_visit_ceiling']=min(100000,count()+20000)
+     _root_write(ROOT/('inputs/ticket_'+case+'.json'),t)
+     if case=='C09':
+         while not (OUT/'C09.ready.json').exists() and now()<limit: time.sleep(.05)
+@@ -686,7 +815,7 @@ def seal():
+     # Wait for the independent writer to finish before freezing evidence.
+     until=now()+20
+     while now()<until:
+-        if unit_show('dclr6batch03-stop.service').get('ActiveState') in ('inactive','failed'): break
++        if unit_show('dclr6batch04-stop.service').get('ActiveState') in ('inactive','failed'): break
+         time.sleep(.05)
+     else: raise AdmissionBlocked('EXTERNAL_STOP_NOT_CLOSED; evidence remains unsealed')
+     rows={}
+@@ -698,9 +827,11 @@ def seal():
+         for rel in rows: z.write(ROOT/rel,rel)
+         z.write(OUT/'EVIDENCE_MANIFEST.json','out/EVIDENCE_MANIFEST.json')
+     return digest(OUT/'EVIDENCE.zip')
+-def launcher(resume=False):
++def launcher(resume=False,calibrate_only=False):
+     if os.geteuid()!=0: raise AdmissionBlocked('TRUSTED_ROOT_LAUNCHER_REQUIRED')
+-    _,m=authorization()
++    a,m=authorization()
++    expected_scope='CALIBRATE_S1S9_ONLY' if calibrate_only else 'CALIBRATE_S1S9_THEN_F1_F4'
++    if a['scope']!=expected_scope:raise AdmissionBlocked('LAUNCH_SCOPE_MODE_MISMATCH')
+     if _run(['/usr/bin/systemctl','show','--property=Version','--value']).strip()!=m['systemd']:
+         raise AdmissionBlocked('SYSTEMD_VERSION_DRIFT')
+     failed=_run(['/usr/bin/systemctl','list-units','--state=failed','--all','--no-pager','--no-legend'])
+@@ -711,13 +842,14 @@ def launcher(resume=False):
+     fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+     try:
+         if not resume:
+-            if (ROOT/'inputs/batch_state.json').exists() or (OUT/'visits.bin').exists():
+-                raise AdmissionBlocked('BATCH_ALREADY_INITIALIZED')
++            require_fresh_initialization((ROOT/'inputs/batch_state.json').exists(),
++                                         (OUT/'visits.bin').exists(),(ROOT/'inputs/CLOSED.json').exists())
+             if any(OUT.iterdir()): raise AdmissionBlocked('NEW_BATCH_OUTPUT_MUST_BE_EMPTY')
+             t0=now(); s={'status':'CALIBRATING','boot_id':boot_id(),'T0':t0,'stop_at':t0+1740,
+                 'deadline':t0+1800,'launcher_identity':identity(),'resume_count':0,'expected_launcher_exit':None}
++            s['execution_mode']=expected_scope
+             _root_write(ROOT/'inputs/batch_state.json',s);init_counter(OUT/'visits.bin',VISIT_CAP)
+-            stop_argv=['/usr/bin/systemd-run','--no-block','--unit=dclr6batch03-stop.service','--property=Type=exec',
++            stop_argv=['/usr/bin/systemd-run','--no-block','--unit=dclr6batch04-stop.service','--property=Type=exec',
+                   '--property=Restart=no','--property=User=root',PYTHON,'-I','-S','-B',str(SOURCE/'guard.py'),
+                   '--role','external-stop','--batch-root',str(ROOT)]
+             if stop_argv!=trusted(SOURCE.parent/'inputs/execution_lock.json')['external_stop_command']:
+@@ -731,6 +863,7 @@ def launcher(resume=False):
+             remaining=CASES
+         else:
+             s=state()
++            if s.get('execution_mode')!=expected_scope:raise AdmissionBlocked('RESUME_SCOPE_MODE_MISMATCH')
+             until=min(s['stop_at'],now()+14)
+             while s['status']=='CALIBRATING' and s.get('expected_launcher_exit')=='C09' and now()<until:
+                 time.sleep(.05);s=state()
+@@ -746,11 +879,18 @@ def launcher(resume=False):
+         for c in remaining:
+             r=launch_one(c)
+             if r['status']!='PASS': stop_tree('CALIBRATION_'+r['status']);return 65
++        r=launch_one('RANGE')
++        if r['status']!='PASS':stop_tree('RANGE_CALIBRATION_'+r['status']);return 65
++        range_report=root_verify_safety()
+         receipts={c:digest(ROOT/('inputs/result_'+c+'.json')) for c in CASES}
+         for c in CASES:
+             if trusted(ROOT/('inputs/result_'+c+'.json'))['status']!='PASS': raise AdmissionBlocked('INCOMPLETE_QUALIFICATION')
+         _root_write(ROOT/'inputs/RESOURCE_QUALIFICATION.json',{'cases':receipts,'boot_id':boot_id(),
+-            'source_manifest':digest(SOURCE.parent/'inputs/static_manifest.json'),'sample':stamp()})
++            'source_manifest':digest(SOURCE.parent/'inputs/static_manifest.json'),
++            'binding':range_report['binding'],'safety_receipt_sha256':digest(ROOT/'inputs/RANGE_QUALIFICATION.json'),
++            'sample':stamp()})
++        if calibrate_only:
++            stop_tree('CALIBRATION_S1S9_COMPLETE');seal();return 0
+         s=state();s['status']='FORMAL';_root_write(ROOT/'inputs/batch_state.json',s)
+         r=launch_one('FORMAL')
+         stop_tree('FORMAL_COMPLETE' if r['status']=='PASS' else 'FORMAL_FAILED')
+@@ -770,11 +910,12 @@ def main():
+     parser=argparse.ArgumentParser()
+     parser.add_argument('--role',choices=('controller','watchdog','external-stop','launcher'),required=True)
+     parser.add_argument('--batch-root',choices=tuple(map(str,ROOTS)),required=True)
+-    parser.add_argument('--case',choices=CASES+('FORMAL',))
++    parser.add_argument('--case',choices=CASES+('RANGE','FORMAL',))
+     parser.add_argument('--parent',type=int);parser.add_argument('--parent-start',type=int)
+     parser.add_argument('--resume',action='store_true')
++    parser.add_argument('--calibrate-only',action='store_true')
+     args=parser.parse_args()
+-    if args.role=='launcher': return launcher(args.resume)
++    if args.role=='launcher': return launcher(args.resume,args.calibrate_only)
+     if args.role=='external-stop': return external_stop()
+     if args.role=='watchdog': return watchdog(args.case,args.parent,args.parent_start)
+     return controller(args.case)

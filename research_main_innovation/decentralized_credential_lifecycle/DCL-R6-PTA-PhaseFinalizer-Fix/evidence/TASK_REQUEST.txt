@@ -1,0 +1,548 @@
+# DCL-R6-PTA-PhaseFinalizer-Fix：运行阶段漂移与自动行政收尾双缺陷修复
+
+## 一、任务与授权
+
+继续推进密码与凭据管理系统 DCL 研究。
+
+当前最新执行批次：
+
+`DCL-R6-PreT0-A`
+
+最终结果：阶段 A 未取得完整验收。
+
+实际观察：
+
+- 正常初始化到达 `RUNTIME_ARMED`。
+- T0 和预算账真实建立，R=0。
+- 随后触发 `PT_RUNTIME_PHASE_DRIFT`。
+- 系统自动停止。
+- 受控角色和 cgroup 均已清空。
+- 额外兜底清理次数为0。
+- native seal 实际完成。
+- 自动行政收尾因 Python 模块导入错误失败。
+- 证据已通过其他方式归档。
+- PT64执行0/64，变异检出0/9。
+- F1/F4仍未运行。
+- IMPLEMENTATION_GATE=CLOSED。
+
+**本次明确授权开展两个已观察故障的有限静态分析与修复：**
+
+A. `PT_RUNTIME_PHASE_DRIFT`。
+
+B. 自动行政收尾模块导入失败。
+
+允许分析现有源码和原始证据、完成必要的最小代码修改、补充静态测试及独立检查、冻结新版本并准备下一批次动态验收申请。
+
+本轮不授权 WSL 动态测试、Launcher 启动、systemd 单位启动、正式预算初始化、PT64 动态执行或 F1/F4。
+
+禁止现场修改既有历史批次、覆盖已冻结文件及扩大系统权限。
+
+## 二、恢复真实证据
+
+研究根目录：
+
+`D:\毕业设计\research_main_innovation\decentralized_credential_lifecycle`
+
+首先读取：
+
+- `DCL-R6-PreT0-A/PTA_FINAL_DECISION.md`
+- `DCL-R6-PreT0-A/PTA_COUNTEREXAMPLES.md`
+- `DCL-R6-PreT0-A/PTA_INITIALIZATION_RESULTS.md`
+- `DCL-R6-PreT0-A/PTA_CHECKPOINT_LIFECYCLE.md`
+- `DCL-R6-PreT0-A/PTA_AUTOMATIC_CLOSURE_RESULTS.md`
+- `DCL-R6-PreT0-A/PTA_SEALING_RESULTS.md`
+- `DCL-R6-PreT0-A/PTA_EXECUTION_TIMELINE.md`
+- `DCL-R6-PreT0-A/PTA_EVIDENCE.zip`
+- `DCL-R6-PreT0-Fix/FINAL_DECISION.md`
+- `DCL-R6-PreT0-Fix/SOURCE_AND_INPUT_LOCK.md`
+- `DCL-R6-PreT0-Fix/CHECKPOINT_LIFECYCLE_CONTRACT.md`
+- `DCL-R6-PreT0-Fix/PREWINDOW_RUNTIME_STATE_MODEL.md`
+- `DCL-R6-PreT0-Fix/NEXT_DYNAMIC_AUTHORIZATION.md`
+- `DCL-R6-ManagerRecovery-Fix/FINAL_DECISION.md`
+
+以实际文件和索引为准。
+
+检查原始 stdout、stderr、Python traceback、持久检查点、状态记录、进程退出和封存记录。
+
+优先从原始文件恢复精确错误信息。
+
+已有证据无法支持的字段标记 UNKNOWN。
+
+## 三、第一任务：定位 PT_RUNTIME_PHASE_DRIFT
+
+必须确定：
+
+1. 哪个函数产生错误。
+2. 调用该函数时处于什么阶段。
+3. 检查器期望的阶段是什么。
+4. 实际读取的阶段是什么。
+5. 状态分别存储在哪里。
+6. 哪个进程负责更新阶段。
+7. 哪个进程负责核验阶段。
+8. 状态更新与持久化的顺序。
+9. 是否存在旧快照、跨进程竞态或状态转换缺项。
+10. 触发漂移时 T0、预算账和运行态检查点是否仍一致。
+
+### 3.1 重建阶段转换
+
+以实际源码为准，建立：
+
+`PRE_WINDOW → INITIALIZATION_INTENT → RUNTIME_ARMED → WORK_ENABLED → RUNNING`
+
+如真实状态机与示意不同，必须完整采用原实现。
+
+为每条转换记录：
+
+- 前置条件。
+- 执行主体。
+- 持久化动作。
+- 版本号或序列号。
+- 读写位置。
+- 原始状态。
+- 目标状态。
+- 失败后行为。
+- 对应审查证据。
+
+### 3.2 区分三类情况
+
+**情况 A：合法转换尚未完成。**
+
+检查器可能过早要求下一阶段状态。
+
+**情况 B：阶段状态读取不一致。**
+
+不同组件可能观察到不同版本，或者跨多个时刻拼接状态。
+
+**情况 C：真实非法状态转换。**
+
+运行阶段确实违反冻结合同。
+
+逐项列出证据。
+
+禁止预先认定为竞态。
+
+如果无法通过原始证据确定具体原因，应保留：
+
+`PT_RUNTIME_PHASE_DRIFT_ROOT_CAUSE_UNRESOLVED`
+
+## 四、第二任务：安全修复阶段一致性
+
+以已经证明的真实问题为依据进行最小修复。
+
+### 4.1 必须保留的性质
+
+- T0只能合法建立一次。
+- 预算账只能合法建立一次。
+- `RUNTIME_ARMED` 不能直接替代全部运行资格。
+- WORK守卫必须保持。
+- 运行态检查点必须具有有效身份。
+- CLOSED后禁止恢复。
+- 真实非法阶段转换必须触发失败。
+- 检查器读取失败必须安全拒绝。
+
+### 4.2 可考虑的修复方向
+
+根据实际根因选择：
+
+- 明确 `RUNTIME_ARMED` 与 WORK 阶段之间的转换条件。
+- 增加具有明确上界的阶段同步。
+- 将多个阶段字段绑定同一状态版本。
+- 消除启动流程中的提前健康检查。
+- 在状态持久化成功后发布下一阶段资格。
+- 对检查期间的状态变化进行重新取样。
+- 使用同一批次身份和单调序列验证状态新鲜度。
+
+如果需要增加阶段等待：
+
+1. 必须明确允许等待的合法暂态。
+2. 保持固定且有限的期限。
+3. 等待计入实际运行预算。
+4. STOP_REQUEST/CLOSED具有优先级。
+5. 稳定非法状态立即失败。
+
+禁止使用固定 sleep 时间替代状态一致性证明。
+
+禁止简单删除 `PT_RUNTIME_PHASE_DRIFT` 检查或将其加入忽略列表。
+
+## 五、第三任务：定位自动行政收尾导入失败
+
+这是独立缺陷，必须独立分析。
+
+从真实 traceback 提取：
+
+- ImportError或ModuleNotFoundError的精确类型。
+- 模块全名。
+- 调用文件。
+- 触发位置。
+- 当前解释器。
+- 入口 argv。
+- 包结构。
+- 工作目录依赖。
+- 实际 sys.path 来源。
+- 运行身份。
+- 相关权限。
+- 打包或部署路径。
+
+重点检查：
+
+- 直接执行文件与 `python -m` 执行的差异。
+- 绝对导入和相对导入。
+- 包初始化文件。
+- 冻结源码目录布局。
+- systemd Environment及WorkingDirectory。
+- Root与Payload不同的运行环境。
+- 动态生成的PYTHONPATH。
+- 执行文件和被导入模块的部署清单。
+
+最终原因必须由源码与原始异常共同支持。
+
+## 六、第四任务：修复行政收尾路径
+
+要求自动行政收尾能够在以下情况下运行：
+
+1. T0尚未建立。
+2. T0已经建立。
+3. native seal已经完成。
+4. native seal失败。
+5. 内部关闭状态UNKNOWN。
+6. Root正常退出。
+7. Root异常退出。
+8. 原业务服务已经结束。
+9. 当前批次进入CLOSED。
+
+### 6.1 模块加载
+
+优先采用与冻结部署结构一致的稳定模块入口。
+
+避免依赖偶然的工作目录或交互式终端环境。
+
+如果需要修订包布局或入口参数，必须更新对应源码锁和执行申请。
+
+### 6.2 收尾权限
+
+明确：
+
+- 哪个可信主体执行行政收尾。
+- 该主体可以读取哪些文件。
+- 是否可以访问Root私有记录。
+- 哪些路径只读。
+- 哪些路径允许写入。
+- 是否能够访问其他历史批次。
+
+保持最小权限。
+
+### 6.3 行政证据封存
+
+至少保证：
+
+- 原始错误记录保留。
+- native seal结果原样保存。
+- 原始stdout/stderr保留。
+- T0/R实际状态记录准确。
+- 当前批次退出证据保留。
+- manifest完整。
+- SHA-256可独立核验。
+- 自动收尾失败能够形成独立故障记录。
+
+自动行政收尾完成与native seal完成分别裁决。
+
+本次历史native seal成功，必须保持原结果。
+
+## 七、第五任务：自动关闭安全性质
+
+定义并审查：
+
+**PF-1 PhaseMonotonicity**
+
+合法阶段转换遵守冻结状态机。
+
+**PF-2 RuntimeIdentityConsistency**
+
+阶段检查绑定同一批次、boot和有效进程身份。
+
+**PF-3 NoPrematureWork**
+
+运行资格建立前不能发放工作。
+
+**PF-4 IllegalDriftRejected**
+
+真实非法阶段漂移必须被拒绝。
+
+**PF-5 BoundedPhaseTransition**
+
+合法暂态具有明确的有限处理边界。
+
+**PF-6 AutomaticShutdown**
+
+关键失败能够触发自动停止。
+
+**PF-7 NoFalseCleanupSuccess**
+
+受控进程退出、内部关闭、native seal和行政封存分别裁决。
+
+**PF-8 AdministrativeFinalization**
+
+自动行政收尾使用已冻结且可正确加载的模块入口。
+
+**PF-9 EvidenceIntegrity**
+
+行政收尾不得修改原始执行证据和历史预算。
+
+**PF-10 NoReactivation**
+
+批次关闭后不得重新获得执行资格。
+
+每项性质对应实际源码、状态字段及测试断言。
+
+## 八、第六任务：新增静态回归与变异
+
+保留原 PreT0 64项夹具、9项变异及其冻结原件。
+
+新增针对本次两项故障的最小回归。
+
+### A. 阶段转换
+
+- 正常到达RUNTIME_ARMED。
+- 正常进入WORK。
+- 状态更新与检查交错。
+- 检查点持久化延迟。
+- 读到旧状态版本。
+- 读取到跨批次状态。
+- 阶段序列回退。
+- CLOSED后转换。
+- 真正非法阶段漂移。
+
+### B. 行政收尾
+
+- 正常导入。
+- 非默认工作目录导入。
+- 绝对与相对模块入口。
+- 运行身份变化。
+- T0缺失。
+- native seal已成功。
+- native seal失败。
+- UNKNOWN存在。
+- 依赖模块缺失。
+- 文件权限错误。
+- 收尾异常。
+- 重复收尾。
+
+### C. 自动关闭
+
+- 阶段检查失败后自动停止。
+- 自动停止后原生封存成功。
+- 行政收尾成功。
+- 行政收尾失败仍保留错误和已完成的native seal。
+- 角色组空但内部结果仍UNKNOWN。
+- 外部停止来源触发。
+
+### D. 变异
+
+至少考虑：
+
+- 放行非法阶段。
+- 跳过WORK守卫。
+- 使用旧状态快照。
+- 忽略状态版本不一致。
+- 关键异常不触发关闭。
+- 导入错误被吞掉。
+- 行政封存覆盖native seal记录。
+- CLOSED后允许启动。
+
+最终变异数量根据实际最小修复范围确定。
+
+全部使用独立oracle。
+
+只实现并开展允许的静态审查；动态运行留待下一次授权。
+
+## 九、修复范围与版本冻结
+
+建议版本：
+
+`PTA-PhaseFinalizer-static-1`
+
+允许修改：
+
+- 运行阶段核验。
+- 必要的阶段转换调度。
+- 自动行政收尾模块入口。
+- 必要的部署清单。
+- 新增专项测试和独立检查器。
+
+保持不变：
+
+- PreT0原生命周期安全要求。
+- sealed capability。
+- 一次性认领。
+- RootIPC权限。
+- C09持久ACK协议。
+- ManagerRecovery管理器审查。
+- C00八项资格。
+- 预算核心。
+- C00–C12业务测试语义。
+- S1–S9。
+- 18项负向门。
+- F1/F4五份业务源码。
+- 原资源限制。
+
+对全部代码变更保存完整diff、源码路径、修改理由和SHA-256。
+
+如果真实根因要求超出上述范围，形成具体补充授权申请。
+
+## 十、静态验收要求
+
+执行：
+
+1. Python语法检查。
+2. 实际导入关系审查。
+3. 运行阶段控制流检查。
+4. 生命周期状态转换检查。
+5. 初始化与WORK守卫检查。
+6. 自动关闭覆盖检查。
+7. 行政收尾入口检查。
+8. 包和部署结构一致性检查。
+9. 变异与独立oracle一致性检查。
+10. 预算与资源上界重新核算。
+11. 全部冻结源码及输入摘要核验。
+12. 历史批次与证据包核验。
+
+对于模块导入，可在不启动真实批次、不触发副作用的隔离主机环境开展静态或受控导入检查。
+
+主机侧导入成功仅作为主机环境证据，原生WSL导入仍须动态验证。
+
+## 十一、下一阶段执行申请
+
+修复完成后准备独立的有限动态验收申请。
+
+优先验证：
+
+1. 新批次预检。
+2. 预窗认证。
+3. 初始化intent。
+4. RUNTIME_ARMED。
+5. WORK守卫。
+6. 阶段状态一致性。
+7. 自动停止。
+8. native seal。
+9. 自动行政收尾。
+10. PT64及其9项变异。
+11. 本轮新增专项测试。
+12. 资源及进程清理。
+
+首次关键失败立即停止。
+
+此阶段不自动进入C09、ManagerRecovery全链、C10–C12、S1–S9或F1/F4。
+
+资源合同保持：
+
+- 总访问≤1,000,000。
+- 校准访问≤100,000。
+- 总墙钟≤1,800秒。
+- 校准软窗口300秒。
+- T0前沿用原120秒启动TCB期限。
+- T0后遵守运行态deadline。
+- 单进程RLIMIT_AS≤1GiB。
+- 父slice TasksMax=4。
+
+重新计算包含新增测试后的访问硬界。
+
+如果资源合同无法满足，停止并提交修订申请。
+
+## 十二、交付文件
+
+建立：
+
+`DCL-R6-PTA-PhaseFinalizer-Fix/`
+
+至少交付：
+
+- `PHASE_DRIFT_ROOT_CAUSE.md`
+- `PHASE_TRANSITION_TIMELINE.md`
+- `PHASE_CONSISTENCY_CONTRACT.md`
+- `ADMIN_FINALIZER_IMPORT_ROOT_CAUSE.md`
+- `ADMIN_FINALIZER_EXECUTION_CONTRACT.md`
+- `AUTOMATIC_SHUTDOWN_AUDIT.md`
+- `PHASE_FINALIZER_FIX_IMPLEMENTATION.md`
+- `REGRESSION_AND_MUTATION_PLAN.md`
+- `STATIC_VERIFICATION_RESULTS.md`
+- `SOURCE_AND_INPUT_LOCK.md`
+- `NEXT_DYNAMIC_AUTHORIZATION.md`
+- `FINAL_DECISION.md`
+
+更新：
+
+- `CURRENT_VERDICT.md`
+- `NEXT_ACTION.md`
+- 研究证据索引。
+
+所有历史批次和冻结原件保持不变。
+
+## 十三、验收门
+
+### PF-G1：阶段漂移根因
+
+必须定位实际期望阶段、观测阶段、读取主体和失败调用链。
+
+证据不足时保留UNRESOLVED。
+
+### PF-G2：阶段一致性
+
+合法状态转换可达，真实非法状态仍被拒绝，WORK守卫和预算资格保持。
+
+### PF-G3：行政收尾
+
+导入路径、部署结构、运行身份和封存前置条件完整。
+
+### PF-G4：自动关闭
+
+异常退出后能够触发停止；进程回收、内部状态、native seal和行政封存分别裁决。
+
+### PF-G5：执行准备
+
+新增回归、变异、执行锁、资源上界和下一阶段申请完整。
+
+结果采用：
+
+- PASS_STATIC
+- CONDITIONAL_PASS
+- PARTIAL
+- FAIL
+- UNRESOLVED
+
+本轮不授予动态PASS或RESOURCE_GATE_PASS。
+
+继续保持：
+
+`F1=UNRUN_RESOURCE_GATE`
+
+`F4=UNRUN_RESOURCE_GATE`
+
+`IMPLEMENTATION_GATE=CLOSED`
+
+`STRICT_SEPARATION_INSTANCES=0`
+
+## 十四、立即执行
+
+本次明确授权针对PT_RUNTIME_PHASE_DRIFT及行政收尾导入错误进行有限静态修复。
+
+按顺序：
+
+1. 读取PreT0-A原始失败证据。
+2. 重建RUNTIME_ARMED到失败关闭的状态时间线。
+3. 定位PT_RUNTIME_PHASE_DRIFT的精确触发条件。
+4. 判断合法暂态、旧快照和真实非法状态。
+5. 修复有证据支持的最小阶段转换缺陷。
+6. 定位行政收尾模块导入失败的真实原因。
+7. 修复模块入口和部署绑定。
+8. 保留native seal实际成功的历史结果。
+9. 检查自动停止与行政收尾的完整调用路径。
+10. 补充专项正反测试及变异。
+11. 检查与原PT64及ManagerRecovery测试的兼容性。
+12. 完成静态验证和资源上界重算。
+13. 冻结新版本和完整SHA-256。
+14. 准备独立动态验收申请。
+15. 更新研究裁决。
+
+**本轮的验收目标：正常初始化能够安全越过RUNTIME_ARMED并进入合法WORK阶段；若发生真实阶段异常，系统能够自动关闭，并通过正确的模块入口完成行政证据封存。**
+
+现在开始 DCL-R6-PTA-PhaseFinalizer-Fix。

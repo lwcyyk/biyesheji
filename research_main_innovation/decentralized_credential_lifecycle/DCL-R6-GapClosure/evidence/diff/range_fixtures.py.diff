@@ -1,0 +1,313 @@
+warning: in the working copy of 'D:\毕业设计\DCL-R6-isolated-verification\gc01\src\range_fixtures.py', LF will be replaced by CRLF the next time Git touches it
+diff --git "a/D:\\毕业设计\\research_main_innovation\\decentralized_credential_lifecycle\\DCL-R6-GapClosure\\evidence\\diff\\EMPTY_REFERENCE.txt" "b/D:\\毕业设计\\DCL-R6-isolated-verification\\gc01\\src\\range_fixtures.py"
+index e69de29..6a8954f 100644
+--- "a/D:\\毕业设计\\research_main_innovation\\decentralized_credential_lifecycle\\DCL-R6-GapClosure\\evidence\\diff\\EMPTY_REFERENCE.txt"
++++ "b/D:\\毕业设计\\DCL-R6-isolated-verification\\gc01\\src\\range_fixtures.py"
+@@ -0,0 +1,307 @@
++"""Frozen S1-S9 driver; execution requires a RANGE ticket and dynamic receipt."""
++import argparse
++import errno
++import hashlib
++import json
++import os
++from pathlib import Path
++import select
++import struct
++import subprocess
++import sys
++import time
++sys.path.insert(0,str(Path(__file__).resolve().parent))
++import guard as G
++import range_core as C
++
++def contract():
++    return G.safety_mode()
++def put(path,data):
++    G.atomic(path,data)
++def load_job(case_id):
++    rows=contract()['jobs']
++    matches=[r for r in rows if r['case_id']==case_id]
++    if len(matches)!=1:raise G.AdmissionBlocked('UNFROZEN_SAFETY_CASE')
++    return matches[0]
++def job_path(case_id):
++    base=G.OUT/'safety'
++    target=base/case_id
++    if base.is_symlink() or target.is_symlink():raise G.AdmissionBlocked('SYMLINK_SYNTHETIC_STORE')
++    return G._inside(target,G.OUT)
++def wait_file(path,seconds=8):
++    until=min(G.now()+seconds,G.ticket('RANGE')['case_deadline'])
++    while G.now()<until:
++        G.execution_deadline('RANGE')
++        if path.exists():return G.read(path)
++        time.sleep(.01)
++    raise G.LimitReached('SAFETY_HANDSHAKE_TIMEOUT')
++
++class Mode:
++    def __init__(self,job,actor):
++        self.contract=contract();self.job=job;self.actor=actor
++        if actor not in ('main','worker') or load_job(job['case_id'])!=job:
++            raise G.AdmissionBlocked('SAFETY_MODE_BINDING')
++        self.base=job_path(job['case_id']);self.phase='primary';self.mutant=job['mutant']
++        self.trace=self.base/('trace.'+actor+'.jsonl');self.events=0;self.ops=0
++        self.calls={'reserve':0,'claim':0,'dispatch':0,'visit':0}
++        self.partial_captures=0
++        self.binding=G.safety_binding()
++        self.identity=G.identity()
++    def charge(self):
++        G.safety_charge()
++    def before_call(self,kind):
++        self.charge();self.calls[kind]+=1
++        if self.calls[kind]>{'reserve':4,'claim':3,'dispatch':4,'visit':8}[kind]:
++            raise G.LimitReached('SAFETY_CALL_CAP')
++    def event(self,event,**fields):
++        self.charge()
++        self.events+=1
++        if self.events>self.contract['actor_event_cap']:raise G.LimitReached('SAFETY_EVENT_CAP')
++        row={'event':event,'case_id':self.job['case_id'],'actor':self.actor,
++             'identity':G.identity(),'phase':self.phase,'binding':self.binding,
++             'global_reserved_after_charge':G.count(),**G.stamp(),**fields}
++        raw=(C.canonical(row)+'\n').encode()
++        if len(raw)>self.contract['event_bytes_cap']:raise G.LimitReached('SAFETY_EVENT_SIZE')
++        fd=os.open(self.trace,os.O_WRONLY|os.O_CREAT|os.O_APPEND|os.O_NOFOLLOW,0o600)
++        try:
++            if os.write(fd,raw)!=len(raw):raise G.AdmissionBlocked('SAFETY_TRACE_SHORT_WRITE')
++            os.fsync(fd)
++        finally:os.close(fd)
++    def requests(self):
++        j=self.job
++        base={**self.binding,'protocol':G.BUDGET_PROTOCOL,'case':'RANGE',
++              'task_id':j['task_id'],'N':j['N'],'payload_digest':hashlib.sha256((j['case_id']+'|base').encode()).hexdigest()}
++        if j['kind']=='concurrent':
++            return [{**base,'task_id':j['task_id']+'.'+side} for side in ('L','R')]
++        if j['kind']=='conflict_retry':
++            return [base,{**base,'payload_digest':hashlib.sha256((j['case_id']+'|conflict').encode()).hexdigest()}]
++        return [base]
++    def validate_store(self,path,cap,request):
++        contract()
++        if path!=self.base/'ledger.bin' or cap!=self.job['cap'] or request not in self.requests():
++            raise G.AdmissionBlocked('UNFROZEN_SYNTHETIC_STORE')
++    def validity(self):
++        G.execution_deadline('RANGE')
++        if G.identity()!=self.identity:raise G.AdmissionBlocked('SAFETY_ACTOR_CHANGED')
++        if (self.base/'CLOSED.json').exists():raise G.AdmissionBlocked('SYNTHETIC_CASE_CLOSED')
++        v=G.read(self.base/'lifecycle.json')
++        bypass=self.mutant in ('bypass_validity','free_restart')
++        if (self.base/'io_halted.json').exists() and self.mutant not in ('ignore_fsync','ignore_short_write'):
++            raise G.AdmissionBlocked('SYNTHETIC_STORE_HALTED')
++        if not bypass:
++            G.validate_state_document(v)
++            G.validate_execution_binding(v['execution_lock_sha256'],self.binding['execution_lock_sha256'])
++            if v['batch_id']!=self.binding['batch_id'] or v['T0']!=self.binding['T0']:
++                raise G.AdmissionBlocked('SYNTHETIC_BATCH_BINDING')
++    def snapshot(self,store,point):
++        directory=self.base/'snapshots';directory.mkdir(exist_ok=True)
++        results={}
++        for name,p in (('counter',store.path),('intent',store.path.with_suffix(store.path.suffix+'.intent.json'))):
++            if p.exists():
++                target=directory/(self.actor+'.'+point+'.'+name)
++                raw=p.read_bytes()
++                fd=os.open(target,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
++                try:
++                    if os.write(fd,raw)!=len(raw):raise G.AdmissionBlocked('SNAPSHOT_SHORT_WRITE')
++                    os.fsync(fd)
++                finally:os.close(fd)
++                results[name]={'path':str(target.relative_to(self.base)),'sha256':G.digest(target)}
++        return results
++    def hit(self,point,store):
++        self.event('CHECKPOINT',point=point)
++        if self.phase=='primary' and self.job['kind']=='crash' and self.job['fault_point']==point:
++            self.event('FAULT',point=point,kind='crash',snapshots=self.snapshot(store,point))
++            os._exit(71)
++    def inject_io(self,point,kind):
++        if self.phase!='primary' or self.job['fault_point']!=point or self.job['kind']!=kind:return False
++        self.event('FAULT',point=point,kind=kind)
++        put(self.base/'io_halted.json',{'point':point,'kind':kind,'identity':G.identity(),**G.stamp()})
++        return True
++    def capture_partial(self,fd,stage,written):
++        self.charge();self.partial_captures+=1
++        if self.partial_captures>1:raise G.LimitReached('PARTIAL_CAPTURE_CAP')
++        source=Path('/proc/self/fd/%s'%fd).resolve()
++        if not source.is_relative_to(self.base.resolve()):raise G.AdmissionBlocked('PARTIAL_SOURCE_SCOPE')
++        raw=source.read_bytes()
++        if len(raw)!=written or len(raw)>16384:raise G.AdmissionBlocked('PARTIAL_BYTE_OBSERVATION')
++        p=self.base/('partial.'+self.actor+'.'+stage+'.bin')
++        target=os.open(p,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
++        try:
++            if os.write(target,raw)!=len(raw):raise G.AdmissionBlocked('PARTIAL_COPY_SHORT')
++            os.fsync(target)
++        finally:os.close(target)
++        self.event('PARTIAL_BYTES',stage=stage,file=p.name,bytes=len(raw),sha256=G.digest(p))
++    def refund_prepared(self,store):
++        if self.mutant!='refund_prepared' or self.phase!='recovery':return
++        intent=store.path.with_suffix(store.path.suffix+'.intent.json')
++        old=G.read(intent)
++        self.event('MUTANT_RECOVERY_RESET',before=old)
++        # Preserve fragments before the intentionally incorrect reset.
++        keep=self.base/'mutant_retained';keep.mkdir(exist_ok=True)
++        for p in intent.parent.glob(intent.name+'.tmp.*'):
++            os.rename(p,keep/p.name)
++        fd=os.open(store.path,os.O_RDWR|os.O_NOFOLLOW)
++        try:os.pwrite(fd,struct.pack('<Q',0),8);os.fsync(fd)
++        finally:os.close(fd)
++        put(intent,{'protocol':G.BUDGET_PROTOCOL,'status':'COMMITTED','after':0,'cap':self.job['cap']})
++    def semantic(self,ordinal):
++        self.charge()
++        self.ops+=1
++        if self.ops>self.job['max_semantic_ops_per_actor']:raise G.LimitReached('SYNTHETIC_OPERATION_CAP')
++        data={'case_id':self.job['case_id'],'actor':self.actor,'ordinal':ordinal,
++              'operation_seq':self.ops,
++              'payload':hashlib.sha256((self.job['case_id']+'|'+self.actor+'|'+str(ordinal)).encode()).hexdigest(),
++              'identity':G.identity(),'phase':self.phase,**G.stamp()}
++        fd=os.open(self.base/('semantic.'+self.actor+'.jsonl'),
++                   os.O_WRONLY|os.O_CREAT|os.O_APPEND|os.O_NOFOLLOW,0o600)
++        raw=(C.canonical(data)+'\n').encode()
++        try:
++            if os.write(fd,raw)!=len(raw):raise G.AdmissionBlocked('SEMANTIC_SHORT_WRITE')
++            os.fsync(fd)
++        finally:os.close(fd)
++        self.event('SEMANTIC_OBSERVED',ordinal=ordinal)
++    def rendezvous(self,label):
++        put(self.base/(label+'.'+self.actor+'.json'),{'identity':G.identity(),**G.stamp()})
++        wait_file(self.base/(label+'.'+('worker' if self.actor=='main' else 'main')+'.json'))
++    def store(self,index=0):
++        return C.Store(G,self.base/'ledger.bin',self.job['cap'],self.requests()[index],self)
++
++def consume(mode,reservation,count=1):
++    fact=reservation.dispatch_once()
++    credits=mode.store().claim(fact['lease_id']) if mode.job['kind']!='concurrent' else None
++    if credits is None:
++        idx=0 if mode.actor=='main' else 1
++        credits=mode.store(idx).claim(fact['lease_id'])
++    try:
++        for i in range(count):
++            credits.visit();mode.semantic(i+1)
++            if mode.job['kind']=='crash' and mode.job['fault_point']=='partial.after_semantic':
++                mode.store().hit('partial.after_semantic')
++    finally:credits.close()
++
++def attempt(mode,index=0,count=1):
++    try:
++        reservation=mode.store(index).reserve()
++        consume(mode,reservation,count)
++        return True
++    except (G.AdmissionBlocked,G.LimitReached,OSError) as exc:
++        mode.event('DENIED',reason=str(exc),exception_type=type(exc).__name__)
++        return False
++
++def execute_primary(mode):
++    j=mode.job;k=j['kind'];mode.event('BEGIN',scenario=j['scenario'],variant=j['variant'])
++    if k=='concurrent':
++        mode.rendezvous('start')
++        attempt(mode,0 if mode.actor=='main' else 1,j['N'])
++    elif k in ('same_retry','conflict_retry'):
++        attempt(mode)
++        mode.phase='retry_conflict' if k=='conflict_retry' else 'retry_same'
++        attempt(mode,1 if k=='conflict_retry' else 0)
++    elif k in ('closed','expired','boot','lock'):
++        reservation=mode.store().reserve();fact=reservation.dispatch_once()
++        credits=mode.store().claim(fact['lease_id'])
++        v=G.read(mode.base/'lifecycle.json')
++        if k=='closed':v['status']='CLOSED'
++        if k=='expired':v['deadline']=G.now()-1
++        if k=='boot':v['boot_id']='invalid-frozen-fixture-boot'
++        if k=='lock':v['execution_lock_sha256']='invalid-frozen-fixture-lock'
++        put(mode.base/'lifecycle.json',v);mode.event('LIFECYCLE_CHANGED',change=k,state=v)
++        try:
++            credits.visit();mode.semantic(1)
++        except (G.AdmissionBlocked,G.LimitReached) as exc:mode.event('DENIED',reason=str(exc))
++        finally:credits.close()
++    elif k=='restart':
++        original=G.read(mode.base/'lifecycle.json')
++        mode.event('RESTART_REQUEST',original_T0=original['T0'])
++        try:
++            if mode.mutant!='free_restart':
++                G.require_fresh_initialization((mode.base/'lifecycle.json').exists(),(mode.base/'ledger.bin').exists(),False)
++            changed={**original,'T0':G.now()};put(mode.base/'lifecycle.json',changed)
++            mode.event('REINITIALIZED',old_T0=original['T0'],new_T0=changed['T0'])
++        except G.AdmissionBlocked as exc:mode.event('DENIED',reason=str(exc))
++    elif k=='exhausted':
++        r=mode.store().reserve();f=r.dispatch_once();c=mode.store().claim(f['lease_id'])
++        try:
++            for i in range(j['N']+2):
++                try:c.visit();mode.semantic(i+1)
++                except G.LimitReached as exc:mode.event('DENIED',attempt=i+1,reason=str(exc))
++        finally:c.close()
++    else:
++        attempt(mode)
++        if k in ('short_write','fsync_error'):
++            mode.phase='recovery';attempt(mode)
++
++def spawn(mode):
++    argv=G.safety_worker_argv(mode.job['case_id'])
++    process=subprocess.Popen(argv,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,text=True)
++    if not select.select([process.stdout],[],[],5)[0]:
++        process.kill();process.communicate();raise G.AdmissionBlocked('SAFETY_WORKER_START_TIMEOUT')
++    line=process.stdout.readline();ready=json.loads(line)
++    if ready.get('identity')!=G.identity(process.pid):
++        process.kill();process.communicate();raise G.AdmissionBlocked('SAFETY_WORKER_IDENTITY')
++    mode.event('PROCESS_START',pid=process.pid,identity_observed=ready['identity'],argv=argv)
++    put(mode.base/'worker_go.json',{'identity':ready['identity'],**G.stamp()})
++    return process,ready
++def join(mode,process,ready):
++    try:out,err=process.communicate(timeout=mode.contract['worker_wall_cap'])
++    except subprocess.TimeoutExpired:
++        process.kill();out,err=process.communicate()
++        mode.event('PROCESS_EXIT',pid=process.pid,exit_code=process.returncode,timeout=True)
++        raise G.LimitReached('SAFETY_WORKER_WALL_CAP')
++    if len(out.encode())+len(err.encode())>65536:raise G.AdmissionBlocked('WORKER_OUTPUT_SIZE')
++    mode.event('PROCESS_EXIT',pid=process.pid,exit_code=process.returncode,timeout=False)
++    put(mode.base/'process.json',{'argv':G.safety_worker_argv(mode.job['case_id']),'pid':process.pid,
++        'ready':ready,'exit_code':process.returncode,'stdout':out,'stderr':err,**G.stamp()})
++    expected=71 if mode.job['kind']=='crash' else 0
++    if process.returncode!=expected:raise G.AdmissionBlocked('UNEXPECTED_SAFETY_WORKER_EXIT')
++
++def run_suite():
++    cfg=contract()
++    G.safety_charge()
++    base=G.OUT/'safety'
++    base.mkdir(exist_ok=False)
++    for job in cfg['jobs']:
++        G.safety_charge()
++        p=job_path(job['case_id']);p.mkdir(exist_ok=False)
++        G.init_counter(p/'ledger.bin',job['cap'])
++        v={**G.state(),'batch_id':G.ROOT.name,'execution_lock_sha256':G.digest(G.SOURCE.parent/'inputs/execution_lock.json')}
++        put(p/'lifecycle.json',v)
++        m=Mode(job,'main');m.event('INITIAL',N=job['N'],cap=job['cap'],used=0)
++        if job['kind'] in ('crash','concurrent'):
++            process,ready=spawn(m)
++            if job['kind']=='concurrent':execute_primary(m)
++            join(m,process,ready)
++            if job['kind']=='crash':
++                m.phase='recovery'
++                if job['property']=='S1':m.event('RECOVERY_CHECK',used=G.count(p/'ledger.bin'))
++                else:attempt(m,count=job['N'] if job['property']=='S4' else 1)
++        else:execute_primary(m)
++        m.event('JOB_CLOSED',counter=G.count(p/'ledger.bin'))
++        put(p/'CLOSED.json',{'binding':m.binding,'case_id':job['case_id'],**G.stamp()})
++        # The checker consumes raw storage, never a driver supplied PASS.
++        G.safety_charge()
++        import range_evidence
++        outcome=range_evidence.check_job(p,job,m.binding,cfg)
++        put(p/'checker_observation.json',outcome)
++        if not outcome['accepted']:
++            raise G.AdmissionBlocked(outcome['status']+':'+job['case_id'])
++    return {'case':'RANGE','status':'PASS','jobs':len(cfg['jobs']),'sample':G.stamp(),
++            'scope':'Driver observation only; root rechecks every raw ledger before qualification'}
++
++def worker(case_id):
++    G._TICKET=G.ticket('RANGE')
++    G.kernel_admission(G._TICKET)
++    if G.identity(os.getppid())!=G._TICKET['main_identity']:
++        raise G.AdmissionBlocked('SAFETY_WORKER_PARENT')
++    m=Mode(load_job(case_id),'worker')
++    print(json.dumps({'identity':G.identity()}),flush=True)
++    wait_file(m.base/'worker_go.json')
++    execute_primary(m)
++    return 0
++
++if __name__=='__main__':
++    ap=argparse.ArgumentParser();ap.add_argument('--batch-root',required=True);ap.add_argument('--case-id',required=True)
++    a=ap.parse_args()
++    try:rc=worker(a.case_id)
++    except BaseException as exc:print(repr(exc),file=sys.stderr);rc=72
++    sys.exit(rc)

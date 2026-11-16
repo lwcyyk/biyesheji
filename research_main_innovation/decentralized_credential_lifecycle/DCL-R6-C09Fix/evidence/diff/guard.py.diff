@@ -1,0 +1,384 @@
+warning: in the working copy of 'D:\毕业设计\DCL-R6-isolated-verification\gc01\src\guard.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'D:\毕业设计\DCL-R6-isolated-verification\c09f01\src\guard.py', LF will be replaced by CRLF the next time Git touches it
+diff --git "a/D:\\毕业设计\\DCL-R6-isolated-verification\\gc01\\src\\guard.py" "b/D:\\毕业设计\\DCL-R6-isolated-verification\\c09f01\\src\\guard.py"
+index 892ce5d..dd7bf30 100644
+--- "a/D:\\毕业设计\\DCL-R6-isolated-verification\\gc01\\src\\guard.py"
++++ "b/D:\\毕业设计\\DCL-R6-isolated-verification\\c09f01\\src\\guard.py"
+@@ -32,7 +32,7 @@ PYTHON_SHA = 'e50d468e8b0adfb05733f5b87b3cff34829c4a8c1aea50c865aa8bdfe4bb150f'
+ AS_CAP = 1 << 30
+ VISIT_CAP = 1000000
+ CASES = tuple('C%02d' % i for i in range(13))
+-ROOTS = (Path('/var/lib/dcl-r6/gc01'), Path('/var/lib/dcl-r6/batch04'))
++ROOTS = (Path('/var/lib/dcl-r6/c09f01'), Path('/var/lib/dcl-r6/batch05'))
+ def _arg(name, default=None):
+     return sys.argv[sys.argv.index(name)+1] if name in sys.argv else default
+ ROOT = Path(_arg('--batch-root', str(ROOTS[0]))).resolve()
+@@ -51,6 +51,7 @@ _TIMING_LOCK = threading.Lock()
+ _RESERVATION_MINT = object()
+ _LOCAL_CREDIT_MINT = object()
+ _ROOT_SAFETY_AUDIT = False
++_COORDINATOR_ID = None
+ 
+ def monotonic_ns(): return time.clock_gettime_ns(time.CLOCK_BOOTTIME)
+ def _timing(stage, start, end, utc_start, utc_end, error=None):
+@@ -182,7 +183,7 @@ def proc_memory():
+             'identity':identity(),'query_before':before,'query_after':stamp()}
+ def manifest():
+     m=trusted(SOURCE.parent/'inputs/static_manifest.json')
+-    if str(SOURCE)!='/var/lib/dcl-r6/gc01/src' or str(SOURCE)!=m['source_directory']:
++    if str(SOURCE)!='/var/lib/dcl-r6/c09f01/src' or str(SOURCE)!=m['source_directory']:
+         raise AdmissionBlocked('UNTRUSTED_SOURCE_DIRECTORY')
+     if sys.platform != 'linux' or tuple(sys.version_info[:3]) != (3,12,3):
+         raise AdmissionBlocked('RUNTIME_VERSION_DRIFT')
+@@ -206,8 +207,8 @@ def verify_runtime_tree(m):
+ def authorization():
+     _check_root(); m=manifest()
+     a=trusted(ROOT/'inputs/execution_authorization.json')
+-    if ROOT.name != 'batch04' or a['batch_id'] != 'batch04' or a['scope'] not in ('CALIBRATE_S1S9_THEN_F1_F4','CALIBRATE_S1S9_ONLY'):
+-        raise AdmissionBlocked('NO_DYNAMIC_BATCH04_AUTHORIZATION')
++    if ROOT.name != 'batch05' or a['batch_id'] != 'batch05' or a['scope'] not in ('CALIBRATE_S1S9_THEN_F1_F4','CALIBRATE_S1S9_ONLY'):
++        raise AdmissionBlocked('NO_DYNAMIC_BATCH05_AUTHORIZATION')
+     if a['profile'] != 'CPY312-UBU24/1' or a['limits'] != [1000000,1800,1740,AS_CAP,4]:
+         raise AdmissionBlocked('CONTRACT_MISMATCH')
+     if a['static_manifest_sha256'] != digest(SOURCE.parent/'inputs/static_manifest.json'):
+@@ -215,7 +216,9 @@ def authorization():
+     validate_execution_binding(a['execution_lock_sha256'],digest(SOURCE.parent/'inputs/execution_lock.json'))
+     if a.get('safety_contract_sha256')!=m['safety_contract_sha256'] or a.get('test_mode')!='RANGE_ONLY/1':
+         raise AdmissionBlocked('SAFETY_TEST_SCOPE_MISSING')
+-    if a['authorization_text_sha256'] != digest(ROOT/'inputs/BATCH04_AUTHORIZATION_TEXT.txt'):
++    if a.get('c09_contract_sha256')!=m['c09_contract_sha256'] or a.get('handoff_profile')!='C09-DURABLE-RPC/1':
++        raise AdmissionBlocked('C09_HANDOFF_SCOPE_MISSING')
++    if a['authorization_text_sha256'] != digest(ROOT/'inputs/BATCH05_AUTHORIZATION_TEXT.txt'):
+         raise AdmissionBlocked('AUTHORIZATION_SOURCE_MISMATCH')
+     # This is explicit scope acceptance, never a substitute for OS limit checks.
+     if a.get('special_mapping_scope') != 'ORDINARY_AS_ACCOUNTED;KERNEL_SPECIALS_SEPARATELY_REVIEWED':
+@@ -272,6 +275,38 @@ def safety_binding():
+             'execution_lock_sha256':digest(SOURCE.parent/'inputs/execution_lock.json'),
+             'fixture_contract_sha256':digest(SOURCE.parent/'inputs/safety_contract.json'),
+             'child_contracts_sha256':digest(SOURCE.parent/'inputs/child_contracts.json')}
++def c09_contract():
++    a,m=authorization();p=SOURCE.parent/'inputs/c09_contract.json'
++    if digest(p)!=m['c09_contract_sha256']:raise AdmissionBlocked('C09_CONTRACT_HASH')
++    cfg=trusted(p)
++    if cfg['schema']!='C09-HANDOFF-CONTRACT/1' or cfg['version']!='C09Fix-static-1' or cfg['future_batch_id']!=ROOT.name:
++        raise AdmissionBlocked('C09_CONTRACT_BINDING')
++    return cfg
++def c09h_charge(budget=None):
++    t=_TICKET
++    if t is None or t['case']!='C09H':raise AdmissionBlocked('C09H_CONTEXT_REQUIRED')
++    execution_deadline('C09H')
++    if count()>=t['c09h_visit_ceiling']:raise LimitReached('C09H_VISIT_LIMIT')
++    if budget is None:
++        if os.geteuid()!=0:raise AdmissionBlocked('ROOT_C09H_AUDIT_REQUIRED')
++        reserve_counter(OUT/'visits.bin',VISIT_CAP)
++    else:budget.visit()
++def root_verify_c09h():
++    global _TICKET
++    if os.geteuid()!=0:raise AdmissionBlocked('ROOT_C09H_VERIFIER_REQUIRED')
++    sys.path.insert(0,str(SOURCE))
++    import c09_oracle
++    old=_TICKET;_TICKET=ticket('C09H')
++    try:
++        cfg=c09_contract()
++        for job in cfg['jobs']:c09h_charge()
++        report=c09_oracle.check_suite(OUT/'c09_tests',cfg,safety_binding())
++        if not report['accepted']:raise AdmissionBlocked('C09H_RAW_ORACLE_FAILED')
++        report['checker_sha256']=digest(SOURCE/'c09_oracle.py')
++        report['contract_sha256']=digest(SOURCE.parent/'inputs/c09_contract.json')
++        _root_write(ROOT/'inputs/C09H_QUALIFICATION.json',report)
++        return report
++    finally:_TICKET=old
+ def safety_mode():
+     a,m=authorization();s=state();t=_TICKET
+     if t is None or t['case']!='RANGE' or s['status']!='CALIBRATING':
+@@ -424,6 +459,8 @@ def require_formal_admission():
+     receipt=trusted(rp)
+     verify_sealed_safety(receipt,binding)
+     verify_gate_audit(receipt,binding)
++    import c09_handoff
++    c09_handoff.verify_completed_handoff(sys.modules[__name__])
+     # Fresh raw global-ledger admission occurs before any F1/F4 business import.
+     reserve_counter(OUT/'visits.bin',VISIT_CAP)
+     import range_evidence
+@@ -611,7 +648,7 @@ def unit_show(unit):
+     text=_run(['/usr/bin/systemctl','show',unit,*['--property='+f for f in fields]])
+     return dict(line.split('=',1) for line in text.splitlines() if '=' in line)
+ def service_argv(case):
+-    unit='dclr6batch04-'+case.lower()+'.service'
++    unit='dclr6batch05-'+case.lower()+'.service'
+     props={'User':'dcl-r6','Group':'dcl-r6','Type':'exec','Slice':PARENT,
+            'LimitAS':str(AS_CAP)+':'+str(AS_CAP),'TasksMax':'4','TasksAccounting':'yes',
+            'MemoryAccounting':'yes','MemoryMax':str(4*AS_CAP),'MemorySwapMax':'0',
+@@ -635,54 +672,66 @@ def _empty():
+ def stop_tree(reason,close=True):
+     parent=Path('/sys/fs/cgroup')/PARENT
+     before=cg_snapshot(parent) if parent.exists() else None
++    close_error=None
+     if close:
+         p=ROOT/'inputs/CLOSED.json'
+-        if p.exists(): p=ROOT/('inputs/stop_event_%s_%s.json'%(os.getpid(),time.time_ns()))
+-        _root_write(p,{'reason':reason,**stamp()})
++        try:
++            sys.path.insert(0,str(SOURCE))
++            import c09_handoff as H
++            with H.lifecycle_lock(sys.modules[__name__]):
++                if p.exists():p=ROOT/('inputs/stop_event_%s_%s.json'%(os.getpid(),time.time_ns()))
++                _root_write(p,{'reason':reason,**stamp()})
++        except BaseException as exc:close_error=repr(exc)
+     r=subprocess.run(['/usr/bin/systemctl','stop',PARENT],capture_output=True,timeout=15)
+     until=now()+5
+     while not _empty() and now()<until: time.sleep(.05)
+     if not _empty(): raise AdmissionBlocked('STOP_UNCONFIRMED')
+-    result={'empty':True,'stop_exit':r.returncode,'before_stop_charged_snapshot':before,
++    result={'empty':True,'stop_exit':r.returncode,'closure_persistence_error':close_error,'before_stop_charged_snapshot':before,
+             'peak_scope':'observed charge peak for this group generation; no exact RSS tree peak inferred',
+             'after_stop_group_exists':parent.exists(),'sample':stamp()}
+     _root_write(ROOT/('inputs/stop_result_%s_%s.json'%(os.getpid(),time.time_ns())),result)
+     return result
+ def external_stop():
+-    if os.geteuid()!=0: raise AdmissionBlocked('TRUSTED_LAUNCHER_ONLY')
+-    authorization(); s=state(); monitored=None; fd=None
+-    _root_write(ROOT/'inputs/STOP_ARMED.json',{'identity':identity(),'stop_at':s['stop_at'],'boot_id':boot_id()})
+-    while True:
+-        s=trusted(ROOT/'inputs/batch_state.json')
+-        if (ROOT/'inputs/CLOSED.json').exists():
+-            stop_tree('CLOSED_BATCH_CLEANUP',False); return 0
+-        if s['boot_id']!=boot_id() or now()>=s['stop_at'] or (OUT/'STOP_REQUEST.json').exists():
+-            stop_tree('ABSOLUTE_STOP_OR_REQUEST'); return 124
+-        target=s.get('launcher_identity')
+-        if target and target!=monitored:
+-            if fd is not None: os.close(fd)
+-            try: valid=identity(target['pid'])==target
+-            except OSError: valid=False
+-            if not valid: stop_tree('LAUNCHER_IDENTITY_CHANGED'); return 125
+-            try:
++    if os.geteuid()!=0:raise AdmissionBlocked('TRUSTED_LAUNCHER_ONLY')
++    authorization();s=state();monitored=None;fd=None
++    sys.path.insert(0,str(SOURCE))
++    import c09_handoff as H
++    receiver=H.Receiver(sys.modules[__name__])
++    _root_write(ROOT/'inputs/STOP_ARMED.json',{'identity':identity(),'stop_at':s['stop_at'],
++        'boot_id':boot_id(),'handoff_profile':H.PROFILE,'socket':str(H.paths(sys.modules[__name__])['socket'])})
++    try:
++        while True:
++            s=trusted(ROOT/'inputs/batch_state.json')
++            if (ROOT/'inputs/CLOSED.json').exists():
++                stop_tree('CLOSED_BATCH_CLEANUP',False);return 0
++            if s['boot_id']!=boot_id() or now()>=s['stop_at'] or (OUT/'STOP_REQUEST.json').exists():
++                stop_tree('ABSOLUTE_STOP_OR_REQUEST');return 124
++            receiver.poll()
++            # A coordinator is the direct kernel exit witness, independent of the sender.
++            fresh=trusted(ROOT/'inputs/batch_state.json')
++            coordinator=fresh.get('coordinator_identity')
++            if coordinator and not H.alive(sys.modules[__name__],coordinator):
++                stop_tree('LAUNCHER_COORDINATOR_LOST');return 125
++            target=fresh.get('launcher_identity')
++            if target and target!=monitored:
++                if fd is not None:os.close(fd);fd=None
++                if identity(target['pid'])!=target:raise AdmissionBlocked('LAUNCHER_IDENTITY_CHANGED')
+                 fd=os.pidfd_open(target['pid'])
+-                if identity(target['pid'])!=target: raise ProcessLookupError('PID_REUSED')
+-            except OSError:
+-                stop_tree('LAUNCHER_PIDFD_NOT_STABLE'); return 125
+-            monitored=target
+-        if fd is not None and select.select([fd],[],[],.1)[0]:
+-            if s.get('expected_launcher_exit')=='C09' and s.get('resume_count',0)==0:
+-                cleanup=stop_tree('EXPECTED_C09',False)
+-                marker=read(OUT/'C09.ready.json')
+-                if marker['case']!='C09' or marker['counter']!=count() or marker['identity']!=ticket('C09')['main_identity']:
+-                    stop_tree('C09_LEDGER_OR_MARKER_MISMATCH'); return 125
+-                _root_write(ROOT/'inputs/result_C09.json',{'case':'C09','status':'PASS',
+-                    'actual':{'launcher_exit_observed':True,'cleanup':cleanup,'marker':marker},'sample':stamp()})
+-                s['status']='AWAIT_EXPECTED_RESUME';s['launcher_identity']=None;s['expected_launcher_exit']=None
+-                _root_write(ROOT/'inputs/batch_state.json',s)
+-                os.close(fd);fd=None;monitored=None
+-            else: stop_tree('UNEXPECTED_LAUNCHER_EXIT'); return 125
+-        else: time.sleep(.05)
++                if identity(target['pid'])!=target:raise AdmissionBlocked('LAUNCHER_PIDFD_NOT_STABLE')
++                monitored=target
++            if fd is not None and select.select([fd],[],[],.05)[0]:
++                verdict=receiver.observe_exit()  # lock + current state read after readiness
++                if verdict=='VERIFIED':
++                    os.close(fd);fd=None;monitored=None
++                elif verdict=='CLOSED':
++                    stop_tree('C09_CLOSED_DURING_CLASSIFICATION',False);return 125
++            else:time.sleep(.02)
++    except BaseException as exc:
++        try:stop_tree('C09_OR_SUPERVISOR_FAILURE:'+str(exc))
++        finally:raise
++    finally:
++        if fd is not None:os.close(fd)
++        receiver.close()
+ def watchdog(case,parent,parent_start):
+     t=ticket(case); kernel_admission(t)
+     if identity(parent)['start_ticks']!=parent_start or t['main_identity']!=identity(parent):
+@@ -742,6 +791,11 @@ def controller(case):
+             result=range_fixtures.run_suite()
+             write(OUT/'RANGE.probe.json',result)
+             return 0 if result['status']=='PASS' else 65
++        if case=='C09H':
++            import c09_regression
++            result=c09_regression.run_suite(sys.modules[__name__],Budget())
++            write(OUT/'C09H.probe.json',result)
++            return 0 if result['status']=='PASS' else 65
+         import guard_probe
+         result=guard_probe.run_case(case,Budget())
+         write(OUT/(case+'.probe.json'),result)
+@@ -760,7 +814,7 @@ def launch_one(case):
+     lock=trusted(SOURCE.parent/'inputs/execution_lock.json')
+     if argv!=lock['payload_commands'][case]: raise AdmissionBlocked('PAYLOAD_ARGV_DRIFT')
+     _run(argv)
+-    unit='dclr6batch04-'+case.lower()+'.service'; until=now()+14
++    unit='dclr6batch05-'+case.lower()+'.service'; until=now()+14
+     info={}
+     while now()<until:
+         info=unit_show(unit); pid=int(info.get('MainPID','0'))
+@@ -774,11 +828,13 @@ def launch_one(case):
+        'unit_before_ticket':info,'argv':argv}
+     t['execution_lock_sha256']=digest(SOURCE.parent/'inputs/execution_lock.json')
+     if case=='RANGE':t['safety_visit_ceiling']=min(100000,count()+20000)
++    if case=='C09H':t['c09h_visit_ceiling']=min(100000,count()+5000)
+     _root_write(ROOT/('inputs/ticket_'+case+'.json'),t)
+     if case=='C09':
+         while not (OUT/'C09.ready.json').exists() and now()<limit: time.sleep(.05)
+         if not (OUT/'C09.ready.json').exists(): raise AdmissionBlocked('C09_NOT_READY')
+-        s=state();s['expected_launcher_exit']='C09';_root_write(ROOT/'inputs/batch_state.json',s)
++        import c09_handoff as H
++        H.sender_prepare(sys.modules[__name__],_COORDINATOR_ID)
+         os._exit(23)  # one predeclared crash; resume retains T0/deadline/ledger
+     while now()<limit+5:
+         info=unit_show(unit)
+@@ -815,7 +871,7 @@ def seal():
+     # Wait for the independent writer to finish before freezing evidence.
+     until=now()+20
+     while now()<until:
+-        if unit_show('dclr6batch04-stop.service').get('ActiveState') in ('inactive','failed'): break
++        if unit_show('dclr6batch05-stop.service').get('ActiveState') in ('inactive','failed'): break
+         time.sleep(.05)
+     else: raise AdmissionBlocked('EXTERNAL_STOP_NOT_CLOSED; evidence remains unsealed')
+     rows={}
+@@ -827,7 +883,7 @@ def seal():
+         for rel in rows: z.write(ROOT/rel,rel)
+         z.write(OUT/'EVIDENCE_MANIFEST.json','out/EVIDENCE_MANIFEST.json')
+     return digest(OUT/'EVIDENCE.zip')
+-def launcher(resume=False,calibrate_only=False):
++def _launcher_body(resume=False,calibrate_only=False):
+     if os.geteuid()!=0: raise AdmissionBlocked('TRUSTED_ROOT_LAUNCHER_REQUIRED')
+     a,m=authorization()
+     expected_scope='CALIBRATE_S1S9_ONLY' if calibrate_only else 'CALIBRATE_S1S9_THEN_F1_F4'
+@@ -847,9 +903,9 @@ def launcher(resume=False,calibrate_only=False):
+             if any(OUT.iterdir()): raise AdmissionBlocked('NEW_BATCH_OUTPUT_MUST_BE_EMPTY')
+             t0=now(); s={'status':'CALIBRATING','boot_id':boot_id(),'T0':t0,'stop_at':t0+1740,
+                 'deadline':t0+1800,'launcher_identity':identity(),'resume_count':0,'expected_launcher_exit':None}
+-            s['execution_mode']=expected_scope
++            s['execution_mode']=expected_scope;s['coordinator_identity']=_COORDINATOR_ID
+             _root_write(ROOT/'inputs/batch_state.json',s);init_counter(OUT/'visits.bin',VISIT_CAP)
+-            stop_argv=['/usr/bin/systemd-run','--no-block','--unit=dclr6batch04-stop.service','--property=Type=exec',
++            stop_argv=['/usr/bin/systemd-run','--no-block','--unit=dclr6batch05-stop.service','--property=Type=exec',
+                   '--property=Restart=no','--property=User=root',PYTHON,'-I','-S','-B',str(SOURCE/'guard.py'),
+                   '--role','external-stop','--batch-root',str(ROOT)]
+             if stop_argv!=trusted(SOURCE.parent/'inputs/execution_lock.json')['external_stop_command']:
+@@ -862,21 +918,19 @@ def launcher(resume=False,calibrate_only=False):
+                 raise AdmissionBlocked('EXTERNAL_STOP_NOT_ARMED')
+             remaining=CASES
+         else:
+-            s=state()
++            import c09_handoff as H
++            s=H.resume_admission(sys.modules[__name__],_COORDINATOR_ID)
+             if s.get('execution_mode')!=expected_scope:raise AdmissionBlocked('RESUME_SCOPE_MODE_MISMATCH')
+-            until=min(s['stop_at'],now()+14)
+-            while s['status']=='CALIBRATING' and s.get('expected_launcher_exit')=='C09' and now()<until:
+-                time.sleep(.05);s=state()
+-            if s['status']!='AWAIT_EXPECTED_RESUME' or s['resume_count']!=0:
+-                raise AdmissionBlocked('NO_EXPECTED_C09_RESUME')
+-            if trusted(ROOT/'inputs/result_C09.json')['status']!='PASS': raise AdmissionBlocked('C09_NOT_PASSED')
+-            s['status']='CALIBRATING';s['resume_count']=1;s['launcher_identity']=identity()
+-            _root_write(ROOT/'inputs/batch_state.json',s);remaining=CASES[10:]
++            remaining=CASES[10:]
+         _run(['/usr/bin/systemctl','start',PARENT])
+         verify_runtime_tree(manifest())
+         info=unit_show(PARENT)
+         if info.get('TasksMax')!='4': raise AdmissionBlocked('PARENT_LIMIT_NOT_CONFIGURED')
+         for c in remaining:
++            if c=='C09':
++                htest=launch_one('C09H')
++                if htest['status']!='PASS':stop_tree('C09H_REGRESSION_FAILED');return 65
++                root_verify_c09h()
+             r=launch_one(c)
+             if r['status']!='PASS': stop_tree('CALIBRATION_'+r['status']);return 65
+         r=launch_one('RANGE')
+@@ -906,11 +960,73 @@ def launcher(resume=False,calibrate_only=False):
+             except BaseException as exc:
+                 _root_write(ROOT/'inputs/SEAL_ERROR.json',{'error':repr(exc),'sample':stamp()})
+         os.close(lock)
++def launcher(resume=False,calibrate_only=False):
++    """Root parent is the actual waitpid witness; child retains the old scheduler."""
++    global _COORDINATOR_ID
++    if os.geteuid()!=0:raise AdmissionBlocked('TRUSTED_ROOT_COORDINATOR_REQUIRED')
++    authorization()
++    sys.path.insert(0,str(SOURCE))
++    import c09_handoff as H
++    coordinator=identity()
++    ready_r,ready_w=os.pipe2(os.O_CLOEXEC)
++    go_r,go_w=os.pipe2(os.O_CLOEXEC)
++    child=os.fork()
++    if child==0:
++        os.close(ready_r);os.close(go_w)
++        _COORDINATOR_ID=coordinator
++        raw=json.dumps(identity()).encode()
++        try:
++            _full(ready_w,raw);os.close(ready_w)
++            if os.read(go_r,1)!=b'G':os._exit(125)
++            os.close(go_r)
++            try:code=_launcher_body(resume,calibrate_only)
++            except LimitReached as exc:print('INCONCLUSIVE_LIMIT',str(exc),file=sys.stderr,flush=True);code=124
++            except BaseException:traceback.print_exc();code=125
++            sys.stdout.flush();sys.stderr.flush();os._exit(code)
++        except BaseException:os._exit(125)
++    os.close(ready_w);os.close(go_r)
++    fd=None
++    try:
++        if not select.select([ready_r],[],[],5)[0]:raise AdmissionBlocked('COORDINATOR_CHILD_HANDSHAKE')
++        child_identity=json.loads(os.read(ready_r,4096))
++        if child_identity!=identity(child):raise AdmissionBlocked('COORDINATOR_CHILD_IDENTITY')
++        fd=os.pidfd_open(child)
++        if child_identity!=identity(child):raise AdmissionBlocked('COORDINATOR_CHILD_PIDFD_RACE')
++        _full(go_w,b'G');os.close(go_w);go_w=None
++        startup_until=now()+15
++        while True:
++            ended,status=os.waitpid(child,os.WNOHANG)
++            if ended:break
++            p=ROOT/'inputs/batch_state.json'
++            if p.exists():
++                s=trusted(p);limit=s['deadline']
++                if s['boot_id']!=boot_id():raise AdmissionBlocked('COORDINATOR_BOOT_DRIFT')
++            else:limit=startup_until
++            if now()>=limit:raise LimitReached('COORDINATOR_ABSOLUTE_LIMIT')
++            time.sleep(.02)
++        code=os.waitstatus_to_exitcode(status)
++        if H.paths(sys.modules[__name__])['state'].exists() and not (ROOT/'inputs/CLOSED.json').exists():
++            verified=H.coordinator_witness(sys.modules[__name__],child_identity,status)
++            if code==23 and verified is None:raise AdmissionBlocked('C09_NO_VERIFIED_HANDOFF')
++        elif code==23:raise AdmissionBlocked('C09_EXIT23_WITHOUT_RECEIPT')
++        return code if code>=0 else 128-code
++    except BaseException as exc:
++        if fd is not None and not select.select([fd],[],[],0)[0]:
++            try:signal.pidfd_send_signal(fd,signal.SIGKILL)
++            except OSError:pass
++        if (ROOT/'inputs/batch_state.json').exists():
++            try:stop_tree('COORDINATOR_FAILURE:'+str(exc))
++            except BaseException:pass
++        raise
++    finally:
++        os.close(ready_r)
++        if go_w is not None:os.close(go_w)
++        if fd is not None:os.close(fd)
+ def main():
+     parser=argparse.ArgumentParser()
+     parser.add_argument('--role',choices=('controller','watchdog','external-stop','launcher'),required=True)
+     parser.add_argument('--batch-root',choices=tuple(map(str,ROOTS)),required=True)
+-    parser.add_argument('--case',choices=CASES+('RANGE','FORMAL',))
++    parser.add_argument('--case',choices=CASES+('C09H','RANGE','FORMAL',))
+     parser.add_argument('--parent',type=int);parser.add_argument('--parent-start',type=int)
+     parser.add_argument('--resume',action='store_true')
+     parser.add_argument('--calibrate-only',action='store_true')

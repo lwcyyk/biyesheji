@@ -1,0 +1,845 @@
+--- BootContinuity-static-1/r4/boot_continuity.py
++++ C00Ready-static-1/r1/boot_continuity.py
+@@ -13,7 +13,7 @@
+ import time
+ 
+ SOURCE=Path(__file__).resolve().parent
+-ROOT=Path('/var/lib/dcl-r6/batch07')
++ROOT=Path('/var/lib/dcl-r6/batch08')
+ PROFILE='BC-SINGLE-SESSION/1'
+ _SESSION=None
+ 
+@@ -62,7 +62,7 @@
+ class Store:
+     """Fixed Root-only boot namespace plus two fixed group-readable certificates."""
+     def __enter__(self):
+-        if str(SOURCE)!='/var/lib/dcl-r6/bc01/src' or os.geteuid()!=0:raise Rejected('BC_ROOT_SOURCE_REQUIRED')
++        if str(SOURCE)!='/var/lib/dcl-r6/cr01/src' or os.geteuid()!=0:raise Rejected('BC_ROOT_SOURCE_REQUIRED')
+         if str(SOURCE) not in sys.path:sys.path.insert(0,str(SOURCE))
+         import root_ipc
+         self.owner=root_ipc.directories(Context());self.ds=self.owner.__enter__()
+@@ -82,7 +82,7 @@
+         finally:os.close(fd)
+     def put(self,name,doc,exclusive=False,public=False):
+         if public:
+-            if name not in ('BOOT_START.json','BOOT_RESUME.json','BOOT_CONTINUITY_QUALIFICATION.json'):raise Rejected('BC_PUBLIC_TARGET')
++            if name not in ('BOOT_START.json','BOOT_RESUME.json','BOOT_CONTINUITY_QUALIFICATION.json','C00_READINESS.json','C10_READINESS.json','C00_READY_QUALIFICATION.json'):raise Rejected('BC_PUBLIC_TARGET')
+             destination=self.ds['inputs'];gid=989;mode=0o640
+         else:
+             if '/' in name or name.startswith('.') or not name.endswith('.json'):raise Rejected('BC_PRIVATE_TARGET')
+@@ -152,7 +152,7 @@
+ 
+ def artifact_check(deadline,epoch):
+     m=trusted(SOURCE.parent/'inputs/static_manifest.json');lock=trusted(SOURCE.parent/'inputs/execution_lock.json')
+-    if m['version']!='BootContinuity-static-1' or m['source_directory']!=str(SOURCE):raise Rejected('BC_SOURCE_VERSION')
++    if m['version']!='C00Ready-static-1' or m['source_directory']!=str(SOURCE):raise Rejected('BC_SOURCE_VERSION')
+     if sys.platform!='linux' or tuple(sys.version_info[:3])!=(3,12,3):raise Rejected('BC_PYTHON_VERSION')
+     if str(Path(sys.executable).resolve())!='/usr/bin/python3.12':raise Rejected('BC_PYTHON_PATH')
+     if not(sys.flags.isolated and sys.flags.no_site and sys.dont_write_bytecode):raise Rejected('BC_PYTHON_FLAGS')
+@@ -203,15 +203,15 @@
+     if os.geteuid()!=0 or os.uname().release!=m['kernel'] or os.uname().machine!=m['architecture'] or os.sysconf('SC_PAGE_SIZE')!=4096:raise Rejected('BC_NATIVE_RUNTIME')
+     if not any(s.split()[4]=='/sys/fs/cgroup' and ' - cgroup2 ' in s for s in Path('/proc/self/mountinfo').read_text().splitlines()):raise Rejected('BC_CGROUP_V2')
+     if not prepared:
+-        listed=command(['/usr/bin/systemctl','list-units','dclr6batch07*','--all','--no-pager','--no-legend'],deadline,epoch)
+-        if (ROOT.exists() or Path('/etc/systemd/system/dclr6batch07.slice').exists() or
+-            Path('/sys/fs/cgroup/dclr6batch07.slice').exists() or listed.strip()):raise Rejected('BC_BATCH_MUST_BE_NEW')
++        listed=command(['/usr/bin/systemctl','list-units','dclr6batch08*','--all','--no-pager','--no-legend'],deadline,epoch)
++        if (ROOT.exists() or Path('/etc/systemd/system/dclr6batch08.slice').exists() or
++            Path('/sys/fs/cgroup/dclr6batch08.slice').exists() or listed.strip()):raise Rejected('BC_BATCH_MUST_BE_NEW')
+     state=ROOT/'inputs/batch_state.json';counter=ROOT/'out/visits.bin'
+     if state.exists() or counter.exists() or (ROOT/'inputs/CLOSED.json').exists() or (ROOT/'out/STOP_REQUEST.json').exists():raise Rejected('BC_PRIOR_WINDOW_OR_CLOSURE')
+     unit={}
+     if prepared:
+-        if digest('/etc/systemd/system/dclr6batch07.slice')!=lock['unit_slice_sha256']:raise Rejected('BC_INSTALLED_UNIT_DRIFT')
+-        text=command(['/usr/bin/systemctl','show','dclr6batch07.slice','--property=LoadState','--property=ActiveState','--property=TasksMax','--property=MemoryMax','--property=ControlGroup'],deadline,epoch)
++        if digest('/etc/systemd/system/dclr6batch08.slice')!=lock['unit_slice_sha256']:raise Rejected('BC_INSTALLED_UNIT_DRIFT')
++        text=command(['/usr/bin/systemctl','show','dclr6batch08.slice','--property=LoadState','--property=ActiveState','--property=TasksMax','--property=MemoryMax','--property=ControlGroup'],deadline,epoch)
+         unit=dict(s.split('=',1) for s in text.splitlines() if '='in s)
+         if unit.get('ActiveState')!='inactive' or unit.get('TasksMax')!='4' or unit.get('MemoryMax')!='4294967296' or unit.get('ControlGroup'):raise Rejected('BC_PARENT_PRESTART_LIMITS')
+         with Store():pass
+@@ -227,22 +227,25 @@
+     resource.setrlimit(resource.RLIMIT_AS,(1<<30,1<<30))
+     emit('PREFLIGHT_BEGIN',deadline=deadline,source_mode='SOURCE_ONLY/1')
+     m,lock,audit=artifact_check(deadline,epoch)
+-    if str(SOURCE)!='/var/lib/dcl-r6/bc01/src':raise Rejected('BC_PACKAGE_PATH')
++    if str(SOURCE)!='/var/lib/dcl-r6/cr01/src':raise Rejected('BC_PACKAGE_PATH')
+     auth_source=Path(lock['authorization_sources']['receipt']);text_source=Path(lock['authorization_sources']['text'])
+     # Host operator supplies these exact approved bytes; no authority is inferred from a cache.
+     auth_raw=operator_bytes(auth_source);text_raw=operator_bytes(text_source);auth=json.loads(auth_raw)
+-    binding={'batch_id':'batch07','static_manifest_sha256':audit['manifest_sha256'],
++    binding={'batch_id':'batch08','static_manifest_sha256':audit['manifest_sha256'],
+              'execution_lock_sha256':audit['execution_lock_sha256'],'authorization_text_sha256':hashlib.sha256(text_raw).hexdigest(),
+              'boot_contract_sha256':digest(SOURCE.parent/'inputs/boot_contract.json')}
+     for k,v in binding.items():
+         if auth.get(k)!=v:raise Rejected('BC_AUTHORIZATION_BINDING:'+k)
+     if (auth.get('boot_continuity_profile')!=PROFILE or auth.get('SingleSession_exec_explicitly_approved') is not True or
+-        auth.get('SameProcess_C09_resume_explicitly_approved') is not True or auth.get('RootIPC_helpers_explicitly_approved') is not True or
++        (auth.get('scope')!='C00_DIAGNOSTIC_ONLY' and auth.get('SameProcess_C09_resume_explicitly_approved') is not True) or (auth.get('scope')!='C00_DIAGNOSTIC_ONLY' and auth.get('RootIPC_helpers_explicitly_approved') is not True) or
+         auth.get('limits')!=[1000000,1800,1740,1<<30,4] or auth.get('source_mode')!='SOURCE_ONLY/1' or
+-        auth.get('scope')!='CALIBRATE_S1S9_THEN_F1_F4'):raise Rejected('BC_EXECUTION_SCOPE_MISSING')
++        auth.get('scope') not in ('CALIBRATE_S1S9_THEN_F1_F4','C00_DIAGNOSTIC_ONLY')):raise Rejected('BC_EXECUTION_SCOPE_MISSING')
++    if auth['scope']=='C00_DIAGNOSTIC_ONLY' and auth.get('C00_diagnostic_explicitly_approved') is not True:raise Rejected('BC_C00_SCOPE')
++    if auth['scope']=='CALIBRATE_S1S9_THEN_F1_F4' and auth.get('Full_conditional_chain_explicitly_approved') is not True:raise Rejected('BC_FULL_SCOPE')
++    if auth.get('readiness_contract_sha256')!=m.get('readiness_contract_sha256'):raise Rejected('BC_READINESS_BINDING')
+     first=runtime_snapshot(m,lock,deadline,epoch)
+     for argv in lock['preparation_commands']:command(argv,deadline,epoch)
+-    for data,target in [(text_raw,'BATCH07_AUTHORIZATION_TEXT.txt'),(auth_raw,'execution_authorization.json')]:
++    for data,target in [(text_raw,'BATCH08_AUTHORIZATION_TEXT.txt'),(auth_raw,'execution_authorization.json')]:
+         fd=os.open(ROOT/'inputs'/target,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o640)
+         try:os.fchown(fd,0,989);os.fchmod(fd,0o640);_full(fd,data);os.fsync(fd)
+         finally:os.close(fd)
+@@ -327,15 +330,12 @@
+     with Store() as store:store.put('child_'+('resume' if resume else 'initial')+'.json',{'child':G.identity(),'parent':G.identity(os.getppid()),'sample':stamp()})
+ 
+ 
+-def service_confirmed(G,t):
++def service_confirmed(G,t,lease=None):
+     if t['case'] not in ('C00','C10'):return
+     if _SESSION is None:raise Rejected('BC_CHILD_SESSION_MISSING')
+-    info=G.unit_show(t['unit']);s=G.state();owner=_SESSION['ticket']['owner']
+-    status=G._status(t['main_identity']['pid'])
+-    if (set(map(int,status['Uid'].split()))!={999} or set(map(int,status['Gid'].split()))!={989} or
+-        set(map(int,status['Groups'].split()))!={989} or int(status['CapEff'],16)!=0 or int(status['NoNewPrivs'])!=1 or
+-        info.get('LimitAS')!=str(G.AS_CAP) or info.get('LimitASSoft')!=str(G.AS_CAP) or
+-        info.get('ControlGroup')!='/'+G.PARENT+'/'+t['unit']):raise Rejected('BC_SERVICE_IDENTITY_OR_LIMITS')
++    import service_readiness
++    certificate=service_readiness.require_lease(G,t,lease)
++    info=lease.info;s=G.state();owner=_SESSION['ticket']['owner']
+     service_policy({'process_alive':G.identity(owner['pid'])==owner,'same_boot':s['boot_id']==owner['boot_id'],
+                     'service_active':info.get('ActiveState')=='active','stable_main_pid':int(info.get('MainPID','0'))==t['main_identity']['pid'] and G.identity(t['main_identity']['pid'])==t['main_identity'],
+                     'closed':G.stopped(),'stop':False})
+@@ -391,6 +391,8 @@
+     try:
+         result=G.launcher(False,calibrate_only)
+         if result==23:
++            a,_=G.authorization()
++            if a['scope']!='CALIBRATE_S1S9_THEN_F1_F4' or a.get('SameProcess_C09_resume_explicitly_approved') is not True:raise Rejected('BC_RESUME_NOT_APPROVED')
+             verify_regression(G)
+             # Same Root process/session remains alive across the verified C09 handoff.
+             with Store() as store:
+--- BootContinuity-static-1/r4/boot_continuity_regression.py
++++ C00Ready-static-1/r1/boot_continuity_regression.py
+@@ -12,7 +12,7 @@
+         self.uid=0;self.gid=0;self.cgroup='/root-tcb';self.tasks_max=4;self.artifact_digest='frozen-source'
+         self.window=False;self.counter=False;self.used=0;self.cap=False;self.sealed=False;self.active=False
+         self.cache=None;self.cache_rule=True;self.chain={};self.last_good=None
+-        self.binding={'batch_id':'batch07','execution_lock_sha256':'frozen-lock','source':'frozen-source'}
++        self.binding={'batch_id':'batch08','execution_lock_sha256':'frozen-lock','source':'frozen-source'}
+     def owner(self):return {'pid':self.pid,'start_ticks':self.ticks,'boot_id':self.boot()}
+     def boot(self):return '00000000-0000-4000-8000-%012d'%self.epoch
+     def observe(self):
+@@ -41,7 +41,7 @@
+         elif e=='stop':self.stop=True
+         elif e in ('orchestrator_exit','launcher_exit'):self.alive=False;self.cap=False;self.active=False
+         elif e=='resources_change':self.resources=False;self.tasks_max=8
+-        elif e=='identity_change':self.privileges=False;self.uid=999;self.gid=989;self.cgroup='/dclr6batch07.slice/unexpected'
++        elif e=='identity_change':self.privileges=False;self.uid=999;self.gid=989;self.cgroup='/dclr6batch08.slice/unexpected'
+         elif e=='service_active':self.active=True
+         elif e=='initialize_window':
+             if not self.window:self.window=True;self.counter=True;self.used=1
+--- BootContinuity-static-1/r4/c09_handoff.py
++++ C00Ready-static-1/r1/c09_handoff.py
+@@ -93,7 +93,7 @@
+     ident=arm['identity']
+     if h is not None and ident!=h['receiver']:raise G.AdmissionBlocked('C09_RECEIVER_IDENTITY')
+     if not alive(G,ident):raise G.AdmissionBlocked('C09_RECEIVER_DEAD')
+-    info=G.unit_show('dclr6batch07-stop.service')
++    info=G.unit_show('dclr6batch08-stop.service')
+     if info.get('ActiveState')!='active' or int(info.get('MainPID','0'))!=ident['pid']:
+         raise G.AdmissionBlocked('C09_STOP_SOURCE_NOT_ACTIVE')
+     if info.get('ControlGroup','')=='/'+G.PARENT or info.get('ControlGroup','').startswith('/'+G.PARENT+'/'):
+--- BootContinuity-static-1/r4/guard.py
++++ C00Ready-static-1/r1/guard.py
+@@ -32,7 +32,7 @@
+ AS_CAP = 1 << 30
+ VISIT_CAP = 1000000
+ CASES = tuple('C%02d' % i for i in range(13))
+-ROOTS = (Path('/var/lib/dcl-r6/bc01'), Path('/var/lib/dcl-r6/batch07'))
++ROOTS = (Path('/var/lib/dcl-r6/cr01'), Path('/var/lib/dcl-r6/batch08'))
+ def _arg(name, default=None):
+     return sys.argv[sys.argv.index(name)+1] if name in sys.argv else default
+ ROOT = Path(_arg('--batch-root', str(ROOTS[0]))).resolve()
+@@ -195,7 +195,7 @@
+             'identity':identity(),'query_before':before,'query_after':stamp()}
+ def manifest():
+     m=trusted(SOURCE.parent/'inputs/static_manifest.json')
+-    if str(SOURCE)!='/var/lib/dcl-r6/bc01/src' or str(SOURCE)!=m['source_directory']:
++    if str(SOURCE)!='/var/lib/dcl-r6/cr01/src' or str(SOURCE)!=m['source_directory']:
+         raise AdmissionBlocked('UNTRUSTED_SOURCE_DIRECTORY')
+     if sys.platform != 'linux' or tuple(sys.version_info[:3]) != (3,12,3):
+         raise AdmissionBlocked('RUNTIME_VERSION_DRIFT')
+@@ -219,8 +219,8 @@
+ def authorization():
+     _check_root(); m=manifest()
+     a=trusted(ROOT/'inputs/execution_authorization.json')
+-    if ROOT.name != 'batch07' or a['batch_id'] != 'batch07' or a['scope'] not in ('CALIBRATE_S1S9_THEN_F1_F4','CALIBRATE_S1S9_ONLY'):
+-        raise AdmissionBlocked('NO_DYNAMIC_BATCH07_AUTHORIZATION')
++    if ROOT.name != 'batch08' or a['batch_id'] != 'batch08' or a['scope'] not in ('CALIBRATE_S1S9_THEN_F1_F4','C00_DIAGNOSTIC_ONLY'):
++        raise AdmissionBlocked('NO_DYNAMIC_BATCH08_AUTHORIZATION')
+     if a['profile'] != 'CPY312-UBU24/1' or a['limits'] != [1000000,1800,1740,AS_CAP,4]:
+         raise AdmissionBlocked('CONTRACT_MISMATCH')
+     if a['static_manifest_sha256'] != digest(SOURCE.parent/'inputs/static_manifest.json'):
+@@ -231,13 +231,19 @@
+     if a.get('c09_contract_sha256')!=m['c09_contract_sha256'] or a.get('handoff_profile')!='C09-DURABLE-RPC/1':
+         raise AdmissionBlocked('C09_HANDOFF_SCOPE_MISSING')
+     if (a.get('root_ipc_contract_sha256')!=m.get('root_ipc_contract_sha256') or
+-        a.get('root_ipc_profile')!='ROOT-IPC/1' or a.get('RootIPC_helpers_explicitly_approved') is not True):
++        a.get('root_ipc_profile')!='ROOT-IPC/1' or (a['scope']!='C00_DIAGNOSTIC_ONLY' and a.get('RootIPC_helpers_explicitly_approved') is not True)):
+         raise AdmissionBlocked('ROOT_IPC_SCOPE_MISSING')
+     if (a.get('boot_continuity_profile')!='BC-SINGLE-SESSION/1' or
+         a.get('boot_contract_sha256')!=m.get('boot_contract_sha256') or a.get('source_mode')!='SOURCE_ONLY/1' or
+-        a.get('SingleSession_exec_explicitly_approved') is not True or a.get('SameProcess_C09_resume_explicitly_approved') is not True):
++        a.get('SingleSession_exec_explicitly_approved') is not True or (a['scope']!='C00_DIAGNOSTIC_ONLY' and a.get('SameProcess_C09_resume_explicitly_approved') is not True)):
+         raise AdmissionBlocked('BOOT_CONTINUITY_SCOPE_MISSING')
+-    if a['authorization_text_sha256'] != digest(ROOT/'inputs/BATCH07_AUTHORIZATION_TEXT.txt'):
++    if (a.get('readiness_profile')!='C00-READY/1' or a.get('readiness_contract_sha256')!=m.get('readiness_contract_sha256')):
++        raise AdmissionBlocked('READINESS_SCOPE_MISSING')
++    if a['scope']=='C00_DIAGNOSTIC_ONLY' and a.get('C00_diagnostic_explicitly_approved') is not True:
++        raise AdmissionBlocked('C00_DIAGNOSTIC_NOT_APPROVED')
++    if a['scope']=='CALIBRATE_S1S9_THEN_F1_F4' and a.get('Full_conditional_chain_explicitly_approved') is not True:
++        raise AdmissionBlocked('FULL_CHAIN_NOT_APPROVED')
++    if a['authorization_text_sha256'] != digest(ROOT/'inputs/BATCH08_AUTHORIZATION_TEXT.txt'):
+         raise AdmissionBlocked('AUTHORIZATION_SOURCE_MISMATCH')
+     # This is explicit scope acceptance, never a substitute for OS limit checks.
+     if a.get('special_mapping_scope') != 'ORDINARY_AS_ACCOUNTED;KERNEL_SPECIALS_SEPARATELY_REVIEWED':
+@@ -667,7 +673,7 @@
+     text=_run(['/usr/bin/systemctl','show',unit,*['--property='+f for f in fields]])
+     return dict(line.split('=',1) for line in text.splitlines() if '=' in line)
+ def service_argv(case):
+-    unit='dclr6batch07-'+case.lower()+'.service'
++    unit='dclr6batch08-'+case.lower()+'.service'
+     props={'User':'dcl-r6','Group':'dcl-r6','Type':'exec','Slice':PARENT,
+            'LimitAS':str(AS_CAP)+':'+str(AS_CAP),'TasksMax':'4','TasksAccounting':'yes',
+            'MemoryAccounting':'yes','MemoryMax':str(4*AS_CAP),'MemorySwapMax':'0',
+@@ -801,6 +807,8 @@
+         startup['after_watchdog_group']=cg_snapshot()
+         write(OUT/(case+'.startup.json'),startup)
+         if case=='FORMAL':
++            import service_readiness
++            service_readiness.formal_gate(sys.modules[__name__])
+             boot_continuity().formal_gate(sys.modules[__name__])
+             require_formal_admission()
+             sys.argv=[str(SOURCE/'run_batch.py'),'--batch-root',str(ROOT),'--session','1']
+@@ -834,25 +842,40 @@
+     argv=service_argv(case)
+     lock=trusted(SOURCE.parent/'inputs/execution_lock.json')
+     if argv!=lock['payload_commands'][case]: raise AdmissionBlocked('PAYLOAD_ARGV_DRIFT')
++    activation_started=now()
+     _run(argv)
+-    unit='dclr6batch07-'+case.lower()+'.service'; until=now()+14
+-    info={}
+-    while now()<until:
+-        root_checkpoint()
+-        info=unit_show(unit); pid=int(info.get('MainPID','0'))
+-        if pid: break
+-        time.sleep(.02)
+-    else: raise AdmissionBlocked('NO_CONTROLLER_PID')
++    unit='dclr6batch08-'+case.lower()+'.service'; until=activation_started+14
++    info={};ready_lease=None
++    if case in ('C00','C10'):
++        import service_readiness
++        ready_lease=service_readiness.wait_native(sys.modules[__name__],case,unit,activation_started)
++        pid=ready_lease.identity['pid'];info=ready_lease.info
++    else:
++        until=now()+14
++        while now()<until:
++            root_checkpoint()
++            info=unit_show(unit); pid=int(info.get('MainPID','0'))
++            if pid: break
++            time.sleep(.02)
++        else: raise AdmissionBlocked('NO_CONTROLLER_PID')
+     s=state()
+     limit=s['stop_at'] if case=='FORMAL' else min(s['stop_at'],s['T0']+300,now()+(2 if case=='C06' else 300))
+-    t={'case':case,'unit':unit,'main_identity':identity(pid),'boot_id':boot_id(),
++    t={'case':case,'unit':unit,'main_identity':(ready_lease.identity if ready_lease else identity(pid)),'boot_id':boot_id(),
+        'source_manifest':digest(SOURCE.parent/'inputs/static_manifest.json'),'case_deadline':limit,
+        'unit_before_ticket':info,'argv':argv}
+     t['execution_lock_sha256']=digest(SOURCE.parent/'inputs/execution_lock.json')
+     if case=='RANGE':t['safety_visit_ceiling']=min(100000,count()+20000)
+     if case=='C09H':t['c09h_visit_ceiling']=min(100000,count()+5000)
+-    boot_continuity().service_confirmed(sys.modules[__name__],t)
+-    _root_write(ROOT/('inputs/ticket_'+case+'.json'),t)
++    try:
++        boot_continuity().service_confirmed(sys.modules[__name__],t,ready_lease)
++        if ready_lease:
++            root_checkpoint()
++            if now()>=ready_lease.until:raise LimitReached('READINESS_TICKET_LATE')
++            ready_lease.ticket_admit(sys.modules[__name__],t)
++            t['readiness_sha256']=digest(ROOT/('inputs/'+case+'_READINESS.json'))
++        _root_write(ROOT/('inputs/ticket_'+case+'.json'),t)
++    finally:
++        if ready_lease:ready_lease.close()
+     if case=='C09':
+         import c09_handoff as H
+         def c09_live():
+@@ -901,7 +924,7 @@
+     # Wait for the independent writer to finish before freezing evidence.
+     until=now()+20
+     while now()<until:
+-        if unit_show('dclr6batch07-stop.service').get('ActiveState') in ('inactive','failed'): break
++        if unit_show('dclr6batch08-stop.service').get('ActiveState') in ('inactive','failed'): break
+         time.sleep(.05)
+     else: raise AdmissionBlocked('EXTERNAL_STOP_NOT_CLOSED; evidence remains unsealed')
+     rows={}
+@@ -917,7 +940,7 @@
+     if os.geteuid()!=0: raise AdmissionBlocked('TRUSTED_ROOT_LAUNCHER_REQUIRED')
+     a,m=authorization()
+     boot_continuity().child_admission(sys.modules[__name__],resume)
+-    expected_scope='CALIBRATE_S1S9_ONLY' if calibrate_only else 'CALIBRATE_S1S9_THEN_F1_F4'
++    expected_scope='C00_DIAGNOSTIC_ONLY' if a['scope']=='C00_DIAGNOSTIC_ONLY' else ('CALIBRATE_S1S9_ONLY' if calibrate_only else 'CALIBRATE_S1S9_THEN_F1_F4')
+     if a['scope']!=expected_scope:raise AdmissionBlocked('LAUNCH_SCOPE_MODE_MISMATCH')
+     if _run(['/usr/bin/systemctl','show','--property=Version','--value']).strip()!=m['systemd']:
+         raise AdmissionBlocked('SYSTEMD_VERSION_DRIFT')
+@@ -936,7 +959,7 @@
+                 'deadline':t0+1800,'launcher_identity':identity(),'resume_count':0,'expected_launcher_exit':None}
+             s['execution_mode']=expected_scope;s['coordinator_identity']=_COORDINATOR_ID
+             _root_write(ROOT/'inputs/batch_state.json',s);init_counter(OUT/'visits.bin',VISIT_CAP)
+-            stop_argv=['/usr/bin/systemd-run','--no-block','--unit=dclr6batch07-stop.service','--property=Type=exec',
++            stop_argv=['/usr/bin/systemd-run','--no-block','--unit=dclr6batch08-stop.service','--property=Type=exec',
+                   '--property=Restart=no','--property=User=root',PYTHON,'-I','-S','-B',str(SOURCE/'guard.py'),
+                   '--role','external-stop','--batch-root',str(ROOT)]
+             if stop_argv!=trusted(SOURCE.parent/'inputs/execution_lock.json')['external_stop_command']:
+@@ -971,6 +994,11 @@
+                 boot_continuity_regression.run_suite(sys.modules[__name__])
+             r=launch_one(c)
+             if r['status']!='PASS': stop_tree('CALIBRATION_'+r['status']);return 65
++            if c=='C00':
++                import readiness_regression
++                readiness_regression.run_suite(sys.modules[__name__])
++                if a['scope']=='C00_DIAGNOSTIC_ONLY':
++                    stop_tree('C00_DIAGNOSTIC_COMPLETE');seal();return 0
+         r=launch_one('RANGE')
+         if r['status']!='PASS':stop_tree('RANGE_CALIBRATION_'+r['status']);return 65
+         range_report=root_verify_safety()
+--- /dev/null
++++ C00Ready-static-1/r1/readiness_oracle.py
+@@ -0,0 +1,68 @@
++"""Independent readiness trace oracle. Imports no native collector, policy or subject."""
++import hashlib
++import json
++import os
++from pathlib import Path
++import stat
++
++
++def violations(trace):
++    found=set();fatal_seen=False
++    bad={'uid_wrong':0,'gid_wrong':1,'groups_wrong':2,'caps_wrong':3,'nnp_wrong':4,'as_hard_wrong':5,'as_soft_wrong':6,'cg_wrong':7}
++    expected=[[999],[989],[989],0,1,'1073741824','1073741824','/dclr6batch08.slice/dclr6batch08-c00.service']
++    for x in trace:
++        name=x['event'];f=x['facts'];decision=x['response']['decision']
++        if f['frame_name']!=name or len(f['checks'])!=8:raise ValueError('READY_RAW_FRAME')
++        for i,c in enumerate(f['checks']):
++            if c['check_id']!='CR-%02d'%(i+1) or c['expected']!=expected[i]:raise ValueError('READY_RAW_EXPECTED')
++            if name in bad and i==bad[name] and (c['observed'] is None or all(v==expected[i] for v in c['observed'])):raise ValueError('READY_FAULT_NOT_EXERCISED')
++        stable_bad=name in bad or name in ('wrong_unit','wrong_type','tasks_wrong','proc_as_wrong','proc_cg_wrong')
++        read_bad=name in ('read_error','field_missing','target_exit')
++        pid_bad=name=='pid_reused';boot_bad=name=='boot_wrong';lock_bad=name=='missing_lock';version_bad=name=='cross_version'
++        terminal=stable_bad or read_bad or pid_bad or boot_bad or lock_bad or version_bad or name in ('stop','closed','timeout','service_failed')
++        if decision=='READY':
++            for i,c in enumerate(f['checks']):
++                if c['observed'] is None or not all(v==expected[i] for v in c['observed']):found.add(c['check_id'])
++            if read_bad or f['error'] is not None:found.add('CR-READ_ERROR')
++            if pid_bad or f['identity_before']!=f['identity_after']:found.add('CR-PID')
++            if boot_bad or f['boot_before']!=f['expected_boot'] or f['boot_after']!=f['expected_boot']:found.add('CR-BOOT')
++            if lock_bad or not f['binding_valid']:found.add('CR-LOCK')
++            if version_bad or not f['coherent']:found.add('CR-SNAPSHOT')
++            if not f['hard_aux_valid']:found.add('CR-AUX')
++            if f['stopped'] or f['expired'] or f['phases']!=['READY','READY']:found.add('CR-GRANT')
++            if fatal_seen:found.add('CR-REACTIVATION')
++        if terminal and decision=='STARTING':
++            found.add('CR-STALE' if x['response']['shadow']!=f else 'CR-WAIT-MISMATCH')
++            if stable_bad:found.add('CR-WAIT-MISMATCH')
++            if f['expired']:found.add('CR-TIMEOUT')
++        if name=='timeout' and decision not in ('FAILED',):found.add('CR-TIMEOUT')
++        fatal_seen=fatal_seen or terminal
++    return sorted(found)
++
++
++def check_job(base,job,index,binding):
++    try:
++        p=Path(base)/('ready_case_%03d.json'%index);fd=os.open(p,os.O_RDONLY|os.O_NOFOLLOW)
++        try:
++            s=os.fstat(fd)
++            if (s.st_uid,s.st_gid,stat.S_IMODE(s.st_mode),s.st_nlink)!=(0,0,0o600,1) or s.st_size>131072:raise ValueError('READY_RAW_METADATA')
++            raw=os.read(fd,s.st_size+1)
++            if len(raw)!=s.st_size:raise ValueError('READY_RAW_SHORT')
++        finally:os.close(fd)
++        row=json.loads(raw);inp=json.dumps(job,sort_keys=True,separators=(',',':')).encode()
++        if row['case_id']!=job['case_id'] or row['binding']!=binding or row['input_sha256']!=hashlib.sha256(inp).hexdigest():raise ValueError('READY_RAW_BINDING')
++        if row['origin']!='SIMULATION_ONLY/1' or row['global_after']-row['global_before']!=6:raise ValueError('READY_SCOPE_OR_CHARGE')
++        if [x['event'] for x in row['trace']]!=job['frames']:raise ValueError('READY_RAW_ORDER')
++        v=violations(row['trace']);last=row['trace'][-1]['response']['decision']
++        accepted=(not v and last==job['expected']) if job['variant']=='safe' else job['expected_violation'] in v and set(v).issubset(job['allowed_violations'])
++        return {'case_id':job['case_id'],'accepted':accepted,'status':('PASS' if job['variant']=='safe' else 'MUTATION_DETECTED') if accepted else 'FAIL',
++                'violations':v,'raw_sha256':hashlib.sha256(raw).hexdigest()}
++    except (OSError,ValueError,KeyError,TypeError) as exc:return {'case_id':job['case_id'],'accepted':False,'status':'EVIDENCE_MISSING','error':repr(exc)}
++
++
++def check_suite(base,cfg,binding):
++    expected={'ready_case_%03d.json'%i for i in range(len(cfg['jobs']))}
++    if {p.name for p in Path(base).glob('ready_case_*.json')}!=expected:raise ValueError('READY_RAW_JOB_SET')
++    rows=[check_job(base,j,i,binding) for i,j in enumerate(cfg['jobs'])]
++    return {'schema':'C00-READY-QUALIFICATION/1','origin':'SIMULATION_ONLY/1','binding':binding,
++            'accepted':all(r['accepted'] for r in rows),'results':rows}
+--- /dev/null
++++ C00Ready-static-1/r1/readiness_regression.py
+@@ -0,0 +1,105 @@
++"""Readiness policy simulations; production native collector accepts no fixture backend."""
++import copy
++import hashlib
++import service_readiness as R
++import boot_continuity as BC
++
++
++def frame(name,sequence):
++    target={'pid':101,'start_ticks':10,'boot_id':'SIM-BOOT-A'}
++    d={'schema':'READINESS-SIM/1','expected_boot':'SIM-BOOT-A','boot_before':'SIM-BOOT-A','boot_after':'SIM-BOOT-A',
++       'stopped':False,'error':None,'binding_valid':True,'hard_aux_valid':True,'coherent':True,'expired':False,
++       'phases':['READY','READY'],'process_identity':target,'identity_before':target,'identity_after':dict(target),
++       'status_version_before':'inv1/version1','status_version_after':'inv1/version1','T0':10,'deadline':1810,
++       'ready_until':24,'now':10+sequence,'checks':[],'frame_name':name}
++    values=[[999],[989],[989],0,1,'1073741824','1073741824','/dclr6batch08.slice/dclr6batch08-c00.service']
++    expected=copy.deepcopy(values)
++    bad={'uid_wrong':0,'gid_wrong':1,'groups_wrong':2,'caps_wrong':3,'nnp_wrong':4,'as_hard_wrong':5,'as_soft_wrong':6,'cg_wrong':7}
++    if name in bad:
++        i=bad[name];values[i]=[0] if i<3 else 1 if i==3 else 0 if i==4 else '536870912' if i<7 else '/wrong.service'
++    starting=name in ('starting','pid0','pid_assigned','cg_pending','transition','timeout')
++    if starting:
++        d['phases']=['STARTING','READY'] if name=='transition' else ['STARTING','STARTING']
++        d['coherent']=name!='transition'
++        if name=='pid0':d['process_identity']=None
++        if name=='cg_pending':values[7]=''
++    if name in ('wrong_unit','wrong_type','tasks_wrong','proc_as_wrong','proc_cg_wrong'):d['hard_aux_valid']=False
++    if name=='pid_reused':d['error']={'type':'ProcessLookupError'};d['identity_after']={'pid':102,'start_ticks':11,'boot_id':'SIM-BOOT-A'}
++    if name=='target_exit':d['error']={'type':'ProcessLookupError','errno':3}
++    if name=='read_error':d['error']={'type':'OSError','errno':5}
++    if name=='field_missing':d['error']={'type':'KeyError','field':'NoNewPrivs'}
++    if name=='cross_version':d['coherent']=False;d['status_version_after']='inv1/version2'
++    if name=='boot_wrong':d['boot_after']='SIM-BOOT-B'
++    if name in ('stop','closed'):d['stopped']=True
++    if name=='missing_lock':d['binding_valid']=False
++    if name=='service_failed':d['phases']=['FAILED','FAILED']
++    if name=='timeout':d['expired']=True;d['now']=24
++    for i,cid in enumerate(R.IDS):
++        observed=[copy.deepcopy(values[i]),copy.deepcopy(values[i])]
++        result='MATCH' if values[i]==expected[i] else 'MISMATCH';error=None
++        if starting and (i<5 or (i==7 and name=='cg_pending')):observed=None;result='NOT_READY'
++        if name=='read_error' or (name=='field_missing' and i==4):observed=None;result='READ_ERROR';error=d['error']
++        d['checks'].append({'check_id':cid,'expected':expected[i],'observed':observed,'result':result,
++          'read_success':observed is not None,'error':error,'evidence_source':'FROZEN_SIMULATED_STATE/1'})
++    return d
++
++
++class Subject:
++    def __init__(self,mutation):self.mutation=mutation;self.terminal=False;self.cached=None
++    def sample(self,facts):
++        if self.terminal:return {'decision':'FAILED','shadow':None}
++        shadow=copy.deepcopy(facts);m=self.mutation
++        if self.cached is None:self.cached=copy.deepcopy(facts)
++        if m and m.startswith('ignore_CR-'):
++            for c in shadow['checks']:
++                if c['check_id']==m[len('ignore_'):]:c['result']='MATCH'
++        elif m=='read_error_match':
++            shadow['error']=None
++            for c in shadow['checks']:c['result']='MATCH'
++        elif m=='reuse_snapshot':shadow=copy.deepcopy(self.cached)
++        elif m=='only_uid':shadow['checks']=shadow['checks'][:1]
++        elif m=='wrong_pid':shadow['error']=None;shadow['coherent']=True
++        elif m=='other_boot':shadow['boot_before']=shadow['expected_boot'];shadow['boot_after']=shadow['expected_boot']
++        elif m=='stable_as_starting' and any(c['result']=='MISMATCH' for c in shadow['checks']):
++            shadow['phases']=['STARTING','STARTING']
++            for c in shadow['checks']:c['result']='NOT_READY'
++        elif m=='timeout_extend':shadow['expired']=False
++        elif m=='missing_lock':shadow['binding_valid']=True
++        elif m=='cross_version':shadow['coherent']=True
++        decision=R.policy(shadow)
++        if decision=='FAILED':self.terminal=True
++        return {'decision':decision,'shadow':shadow}
++
++
++def run_suite(G):
++    import readiness_oracle as O
++    cfg,a=R.contract(G);old=G._TICKET;G._TICKET=G.ticket('C00');base=G.count();binding=G.safety_binding()
++    def charge():
++        G.execution_deadline('C00')
++        if G.count()-base>=cfg['regression_hard_visits']:raise G.LimitReached('READY_REGRESSION_VISIT_CAP')
++        G.reserve_counter(G.OUT/'visits.bin',G.VISIT_CAP)
++    try:
++        charge()
++        with BC.Store() as store:
++            for index,job in enumerate(cfg['jobs']):
++                G.root_checkpoint();before=G.count()
++                for _ in range(cfg['driver_prepay']):charge()
++                subject=Subject(job['mutant']);trace=[]
++                for i,event in enumerate(job['frames']):
++                    facts=frame(event,i);response=subject.sample(facts)
++                    trace.append({'event':event,'facts':facts,'response':response})
++                row={'schema':'READY-SIM-RAW/1','origin':'SIMULATION_ONLY/1','case_id':job['case_id'],
++                     'input_sha256':hashlib.sha256(BC.canon(job)).hexdigest(),'binding':binding,'actor':G.identity(),
++                     'stamp':G.stamp(),'global_before':before,'global_after':G.count(),'trace':trace}
++                store.put('ready_case_%03d.json'%index,row,exclusive=True)
++                immediate=O.check_job(G.ROOT/'inputs/root_private/boot',job,index,binding)
++                if not immediate['accepted']:raise G.AdmissionBlocked('READY_REGRESSION_FIRST_FAILURE:'+job['case_id'])
++            for job in cfg['jobs']:charge()
++            report=O.check_suite(G.ROOT/'inputs/root_private/boot',cfg,binding)
++            if not report['accepted']:raise G.AdmissionBlocked('READY_REGRESSION_ORACLE')
++            report.update(contract_sha256=G.digest(G.SOURCE.parent/'inputs/readiness_contract.json'),
++                          checker_sha256=G.digest(G.SOURCE/'readiness_oracle.py'),sample=G.stamp(),
++                          global_before=base,global_after=G.count(),scope=a['scope'])
++            store.put('C00_READY_QUALIFICATION.json',report,public=True)
++            return report
++    finally:G._TICKET=old
+--- BootContinuity-static-1/r4/root_ipc.py
++++ C00Ready-static-1/r1/root_ipc.py
+@@ -70,7 +70,7 @@
+ 
+ @contextmanager
+ def directories(G):
+-    if os.geteuid() != 0 or str(G.ROOT) != '/var/lib/dcl-r6/batch07':
++    if os.geteuid() != 0 or str(G.ROOT) != '/var/lib/dcl-r6/batch08':
+         raise G.AdmissionBlocked('IPC_ROOT_CURRENT_BATCH_REQUIRED')
+     fds=[]
+     try:
+--- /dev/null
++++ C00Ready-static-1/r1/service_readiness.py
+@@ -0,0 +1,328 @@
++"""C00Ready/1: native field diagnostics, bounded exec-ready barrier and minted lease."""
++import hashlib
++import json
++import os
++from pathlib import Path
++import select
++import subprocess
++import time
++import boot_continuity as BC
++
++PROFILE='C00-READY/1'
++_NATIVE=object()
++_LEASE=object()
++IDS=('CR-01','CR-02','CR-03','CR-04','CR-05','CR-06','CR-07','CR-08')
++UNIT_FIELDS=('Id','Type','ActiveState','SubState','MainPID','ControlGroup','User','Group',
++ 'LimitAS','LimitASSoft','TasksMax','NoNewPrivileges','Restart','InvocationID',
++ 'StateChangeTimestampMonotonic','ActiveEnterTimestampMonotonic','Result','ExecMainStatus','Job')
++VERSION_FIELDS=('Id','Type','ActiveState','SubState','MainPID','ControlGroup','LimitAS','LimitASSoft',
++ 'TasksMax','NoNewPrivileges','Restart','InvocationID','StateChangeTimestampMonotonic','Job')
++
++
++class ReadFailure(RuntimeError):
++    def __init__(self,source,exc):
++        self.source=source;self.detail={'type':type(exc).__name__,'message':str(exc),'errno':getattr(exc,'errno',None)}
++        super().__init__(source+':'+str(exc))
++
++
++def expected(G,unit):
++    return {'CR-01':[999],'CR-02':[989],'CR-03':[989],'CR-04':0,'CR-05':1,
++            'CR-06':str(G.AS_CAP),'CR-07':str(G.AS_CAP),'CR-08':'/'+G.PARENT+'/'+unit}
++
++
++def policy(d):
++    """Shared pure classifier; a READY result alone cannot create a native lease."""
++    if d['error'] is not None:return 'FAILED'
++    if d['boot_before']!=d['expected_boot'] or d['boot_after']!=d['expected_boot'] or d['stopped']:return 'FAILED'
++    if not d['binding_valid'] or not d['hard_aux_valid'] or d['expired']:return 'FAILED'
++    phases=d['phases']
++    if phases[0]=='STARTING' and phases[1] in ('STARTING','READY'):
++        # Live credentials are not sampled before the Type=exec barrier.
++        return 'STARTING' if all(r['result'] in ('MATCH','NOT_READY') for r in d['checks']) else 'FAILED'
++    if phases!=['READY','READY'] or not d['coherent']:return 'FAILED'
++    return 'READY' if all(r['result']=='MATCH' for r in d['checks']) else 'FAILED'
++
++
++def contract(G):
++    a,m=G.authorization();p=G.SOURCE.parent/'inputs/readiness_contract.json'
++    if G.digest(p)!=m['readiness_contract_sha256'] or a.get('readiness_contract_sha256')!=G.digest(p):raise G.AdmissionBlocked('READY_CONTRACT_BINDING')
++    cfg=G.trusted(p)
++    if cfg['profile']!=PROFILE or cfg['future_batch_id']!=G.ROOT.name:raise G.AdmissionBlocked('READY_CONTRACT_VERSION')
++    return cfg,a
++
++
++def unit_read(G,unit,until):
++    G.root_checkpoint();begin=G.stamp()
++    try:
++        remain=until-G.now()
++        if remain<=0:raise TimeoutError('READINESS_DEADLINE')
++        argv=['/usr/bin/systemctl','show','--all','--no-pager',unit,*['--property='+f for f in UNIT_FIELDS]]
++        r=subprocess.run(argv,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,
++                         timeout=min(1.0,remain),check=False)
++        if len(r.stdout)+len(r.stderr)>32768:raise ValueError('UNIT_OUTPUT_LIMIT')
++        if r.returncode:raise OSError('UNIT_QUERY_EXIT_%s:%s'%(r.returncode,r.stderr.decode(errors='replace')))
++        values=dict(s.split('=',1) for s in r.stdout.decode().splitlines() if '='in s)
++        if any(k not in values for k in UNIT_FIELDS):raise KeyError('UNIT_PROPERTY_MISSING')
++        return {'values':values,'before':begin,'after':G.stamp(),'argv':argv,
++                'stdout_hex':r.stdout.hex(),'stderr_hex':r.stderr.hex(),'exit_code':r.returncode}
++    except BaseException as exc:
++        error=ReadFailure('systemd:'+unit,exc)
++        if 'r' in locals():error.detail['raw_result']={'stdout_hex':r.stdout[:32768].hex(),'stderr_hex':r.stderr[:32768].hex(),'exit_code':r.returncode}
++        raise error from exc
++
++
++def phase(values):
++    if values['Type']!='exec':return 'FAILED'
++    job=values['Job'].split()
++    if (values['ActiveState']=='inactive' and values['SubState']=='dead' and values['MainPID']=='0' and
++        job and job[0].isdigit() and int(job[0])>0):return 'STARTING'
++    if values['ActiveState']=='activating' and values['SubState'] in ('start','start-pre','start-post'):
++        return 'STARTING'
++    if values['ActiveState']=='active' and values['SubState']=='running' and int(values['MainPID'])>0:
++        return 'READY'
++    return 'FAILED'
++
++
++def read_file(G,p):
++    before=G.stamp()
++    try:
++        fd=os.open(p,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC)
++        try:
++            raw=os.read(fd,65537)
++            if len(raw)>65536:raise ValueError('READINESS_FILE_LIMIT')
++        finally:os.close(fd)
++        return {'path':str(p),'raw':raw.decode(),'before':before,'after':G.stamp()}
++    except BaseException as exc:raise ReadFailure(str(p),exc) from exc
++
++
++def process_read(G,pid):
++    partial={}
++    try:
++        status=read_file(G,Path('/proc')/str(pid)/'status');partial['status']=status
++        limits=read_file(G,Path('/proc')/str(pid)/'limits');partial['limits']=limits
++        cg=read_file(G,Path('/proc')/str(pid)/'cgroup');partial['cgroup']=cg
++        fields=dict(s.split(':',1) for s in status['raw'].splitlines() if ':'in s)
++        converted={'CR-01':sorted(set(map(int,fields['Uid'].split()))),'CR-02':sorted(set(map(int,fields['Gid'].split()))),
++                   'CR-03':sorted(set(map(int,fields['Groups'].split()))),'CR-04':int(fields['CapEff'].strip(),16),
++                   'CR-05':int(fields['NoNewPrivs'].strip())}
++        line=next(s for s in limits['raw'].splitlines() if s.startswith('Max address space'))
++        actual_as=line[len('Max address space'):].split()[:2]
++        as_pair=[int(x) if x.isdigit() else x for x in actual_as]
++        cgroup=next(s[3:] for s in cg['raw'].splitlines() if s.startswith('0::'))
++        return {'status':status,'limits':limits,'cgroup':cg,'converted':converted,'actual_AS':as_pair,'actual_cgroup':cgroup}
++    except BaseException as exc:
++        error=ReadFailure('/proc/%s read/conversion'%pid,exc);error.detail['partial_raw']=partial
++        raise error from exc
++
++
++def parent_read(G):
++    base=Path('/sys/fs/cgroup')/G.PARENT
++    pids=read_file(G,base/'pids.max');memory=read_file(G,base/'memory.max')
++    try:
++        st=base.stat()
++        return {'pids':pids,'memory':memory,'pids_max':int(pids['raw'].strip()),'memory_max':int(memory['raw'].strip()),
++                'device':st.st_dev,'inode':st.st_ino}
++    except BaseException as exc:raise ReadFailure(str(base),exc) from exc
++
++
++def check_row(cid,want,values,source,times,identity,state_phase,version):
++    good=all(v==want for v in values)
++    return {'check_id':cid,'expected':want,'observed':values,'evidence_source':source,'read_time':times,
++            'process_identity':identity,'state_phase':state_phase,'status_version':version,
++            'read_success':True,'result':'MATCH' if good else 'MISMATCH','error':None}
++
++
++class Observation:
++    def __init__(self,key,data,pidfd):
++        if key is not _NATIVE:raise TypeError('NATIVE_OBSERVATION_REQUIRED')
++        self.key=key;self.data=data;self.pidfd=pidfd
++    def close(self):
++        if self.pidfd is not None:os.close(self.pidfd);self.pidfd=None
++
++
++def collect_native(G,case,unit,until,anchor,sequence):
++    d={'schema':'C00-READY-DIAGNOSTIC/1','origin':'NATIVE_OS/1','batch_id':G.ROOT.name,'service_unit':unit,'case':case,
++       'sample_sequence':sequence,'check_time_begin':G.stamp(),'check_phase':'UNKNOWN','expected_boot':anchor,
++       'boot_before':G.boot_id(),'boot_after':None,'process_identity':None,'checks':[],
++       'error':None,'binding_valid':False,'hard_aux_valid':False,'coherent':False,'expired':False,
++       'stopped':G.stopped(),'phases':['FAILED','FAILED'],'raw':{},'aux_checks':[]}
++    pidfd=None;want=expected(G,unit)
++    def aux(cid,want_value,actual_value,source):
++        d['aux_checks'].append({'check_id':cid,'expected':want_value,'observed':actual_value,
++          'evidence_source':source,'read_time':G.stamp(),'result':'MATCH' if actual_value==want_value else 'MISMATCH'})
++        return actual_value==want_value
++    try:
++        G.root_checkpoint();cfg,a=contract(G)
++        d['binding_valid']=G.digest(G.SOURCE.parent/'inputs/execution_lock.json')==a['execution_lock_sha256']
++        d['execution_lock_sha256']=a['execution_lock_sha256']
++        u0=unit_read(G,unit,until);d['raw']['unit_before']=u0;v0=u0['values'];p0=phase(v0)
++        required=[aux('CR-A-UNIT',unit,v0['Id'],'systemd.Id'),aux('CR-A-TYPE','exec',v0['Type'],'systemd.Type'),
++          aux('CR-A-RESTART','no',v0['Restart'],'systemd.Restart'),aux('CR-A-USER','dcl-r6',v0['User'],'systemd.User'),
++          aux('CR-A-GROUP','dcl-r6',v0['Group'],'systemd.Group'),aux('CR-A-TASKS','4',v0['TasksMax'],'systemd.TasksMax'),
++          aux('CR-A-NNP','yes',v0['NoNewPrivileges'],'systemd.NoNewPrivileges')]
++        if not all(required):raise ValueError('UNIT_CONTRACT_MISMATCH')
++        if p0=='FAILED':
++            aux('CR-A-SERVICE-PHASE','Type=exec activating/start* or active/running',v0['ActiveState']+'/'+v0['SubState'],'systemd state')
++            raise ValueError('SERVICE_STATE_FAILED')
++        if p0=='READY' and not v0['InvocationID']:raise ValueError('INVOCATION_MISSING_WHEN_ACTIVE')
++        pid=int(v0['MainPID']);ident=G.identity(pid) if pid and p0 in ('STARTING','READY') else None;d['process_identity']=ident
++        if pid:
++            pidfd=os.pidfd_open(pid)
++            if G.identity(pid)!=ident or select.select([pidfd],[],[],0)[0]:raise ProcessLookupError('TARGET_EXIT_OR_PID_REUSE')
++        proc0=proc1=parent0=parent1=None
++        if p0=='READY':
++            proc0=process_read(G,pid);parent0=parent_read(G);d['raw'].update(proc_before=proc0,parent_before=parent0)
++        u1=unit_read(G,unit,until);d['raw']['unit_after']=u1;v1=u1['values'];p1=phase(v1)
++        if v1['Id']!=unit or v1['Type']!='exec' or v1['Restart']!='no':raise ValueError('UNIT_IDENTITY_CHANGED')
++        if v1['MainPID']!=v0['MainPID'] and not(p0=='STARTING' and v0['MainPID']=='0' and int(v1['MainPID'])>0):
++            aux('CR-A-PID-VERSION',v0['MainPID'],v1['MainPID'],'systemd.MainPID');raise ValueError('MAINPID_CHANGED_IN_SAMPLE')
++        for key,w in [('User','dcl-r6'),('Group','dcl-r6'),('TasksMax','4'),('NoNewPrivileges','yes')]:
++            aux('CR-A-AFTER-'+key,w,v1[key],'systemd.'+key)
++        if any(r['result']=='MISMATCH' for r in d['aux_checks']):raise ValueError('UNIT_CONFIG_CHANGED')
++        d['phases']=[p0,p1];d['check_phase']='PRE_EXEC' if p0=='STARTING' else 'EXEC_READY_SAMPLE'
++        versions=[[v[k] for k in VERSION_FIELDS] for v in [v0,v1]]
++        for cid,key in [('CR-06','LimitAS'),('CR-07','LimitASSoft'),('CR-08','ControlGroup')]:
++            values=[v0[key],v1[key]]
++            if cid=='CR-08' and p0=='STARTING' and any(x=='' for x in values) and all(x in ('',want[cid]) for x in values):
++                d['checks'].append({'check_id':cid,'expected':want[cid],'observed':values,'evidence_source':'systemd.ControlGroup',
++                  'read_time':[u0['after'],u1['after']],'process_identity':ident,'state_phase':d['check_phase'],
++                  'status_version':versions,'read_success':True,'result':'NOT_READY','error':'cgroup creation pending before exec-ready'})
++            else:d['checks'].append(check_row(cid,want[cid],values,'systemd.'+key,[u0['after'],u1['after']],ident,d['check_phase'],versions))
++        if p0=='STARTING':
++            for cid in IDS[:5]:d['checks'].append({'check_id':cid,'expected':want[cid],'observed':None,
++                'evidence_source':'/proc credentials deferred until Type=exec active/running','read_time':None,
++                'process_identity':ident,'state_phase':'PRE_EXEC','status_version':versions,'read_success':False,
++                'result':'NOT_READY','error':'target exec not confirmed; no credential mismatch is accepted'})
++            d['hard_aux_valid']=True
++        elif p0=='READY':
++            proc1=process_read(G,pid);parent1=parent_read(G);d['raw'].update(proc_after=proc1,parent_after=parent1)
++            for cid in IDS[:5]:d['checks'].append(check_row(cid,want[cid],[proc0['converted'][cid],proc1['converted'][cid]],
++                '/proc/%s/status'%pid,[proc0['status']['after'],proc1['status']['after']],ident,'EXEC_READY_SAMPLE',versions))
++            aux('CR-A-PROC-AS',[[G.AS_CAP,G.AS_CAP]]*2,[proc0['actual_AS'],proc1['actual_AS']],'/proc/limits')
++            aux('CR-A-PROC-CG',[want['CR-08']]*2,[proc0['actual_cgroup'],proc1['actual_cgroup']],'/proc/cgroup')
++            aux('CR-A-PARENT-PIDS',[4,4],[parent0['pids_max'],parent1['pids_max']],'cgroup.pids.max')
++            aux('CR-A-PARENT-MEMORY',[4*G.AS_CAP]*2,[parent0['memory_max'],parent1['memory_max']],'cgroup.memory.max')
++            aux('CR-A-PARENT-IDENTITY',[parent0['device'],parent0['inode']],[parent1['device'],parent1['inode']],'cgroup inode/device')
++            d['hard_aux_valid']=all(r['result']=='MATCH' for r in d['aux_checks'])
++        if pid and (G.identity(pid)!=ident or select.select([pidfd],[],[],0)[0]):raise ProcessLookupError('TARGET_EXIT_DURING_SAMPLE')
++        d['coherent']=versions[0]==versions[1] and (p0!='READY' or (proc0['converted']==proc1['converted']))
++        d['binding_valid']=d['binding_valid'] and G.digest(G.SOURCE.parent/'inputs/execution_lock.json')==a['execution_lock_sha256']
++    except BaseException as exc:
++        d['error']={'type':type(exc).__name__,'source':getattr(exc,'source','readiness control'),
++                    'detail':getattr(exc,'detail',{'message':str(exc),'errno':getattr(exc,'errno',None)})}
++    existing={r['check_id'] for r in d['checks']}
++    for cid in IDS:
++        if cid not in existing:d['checks'].append({'check_id':cid,'expected':want[cid],'observed':None,
++          'evidence_source':'not acquired; see raw_error','read_time':None,'process_identity':d['process_identity'],
++          'state_phase':d['check_phase'],'status_version':None,'read_success':False,'result':'READ_ERROR','error':d['error']})
++    d['checks'].sort(key=lambda r:r['check_id']);d['boot_after']=G.boot_id();d['stopped']=G.stopped();d['expired']=G.now()>=until
++    if d['boot_before']!=anchor or d['boot_after']!=anchor:aux('CR-A-BOOT',[anchor,anchor],[d['boot_before'],d['boot_after']],'boot_id')
++    if d['stopped']:aux('CR-A-STOP',False,True,'STOP_REQUEST/CLOSED')
++    if d['expired']:aux('CR-A-DEADLINE',False,True,'CLOCK_BOOTTIME/current window')
++    if 'FAILED' in d['phases']:aux('CR-A-PHASE','STARTING transition or READY/READY',d['phases'],'systemd ActiveState/SubState')
++    if d['phases']==['READY','READY'] and not d['coherent']:aux('CR-A-SNAPSHOT',True,False,'two-bookend status/identity version')
++    d['check_time_end']=G.stamp();d['overall_result']=policy(d)
++    d['all_failed_checks']=[r['check_id'] for r in d['checks']+d['aux_checks'] if r['result'] in ('MISMATCH','READ_ERROR')]
++    mismatches=[r['check_id'] for r in d['checks']+d['aux_checks'] if r['result']=='MISMATCH']
++    d['first_failed_check']=mismatches[0] if mismatches else d['all_failed_checks'][0] if d['all_failed_checks'] else None
++    if d['overall_result']=='FAILED' and not d['all_failed_checks']:d['first_failed_check']='CR-AUX_OR_PHASE'
++    d['raw_error']=d['error']
++    d['process_pid']=d['process_identity']['pid'] if d['process_identity'] else None
++    d['process_starttime']=d['process_identity']['start_ticks'] if d['process_identity'] else None
++    d['boot_id']=d['boot_before']
++    return Observation(_NATIVE,d,pidfd)
++
++
++def persist(G,row):
++    name='ready_%s_%04d.json'%(row['case'],row['sample_sequence'])
++    try:
++        if len(BC.canon(row))>131072:raise ValueError('READINESS_DIAGNOSTIC_ROW_LIMIT')
++        with BC.Store() as store:store.put(name,row,exclusive=True)
++    except BaseException as exc:
++        BC.emit('READINESS_DIAGNOSTIC_WRITE_FAILED',case=row['case'],error=repr(exc),qualification='CLOSED')
++        raise G.AdmissionBlocked('READINESS_DIAGNOSTIC_WRITE_FAILED') from exc
++
++
++class Lease:
++    def __init__(self,key,G,case,unit,until,anchor,observation):
++        if key is not _LEASE or observation.key is not _NATIVE or observation.data['overall_result']!='READY':raise TypeError('NATIVE_READY_LEASE_REQUIRED')
++        self.key=key;self.case=case;self.unit=unit;self.until=until;self.anchor=anchor;self.obs=observation
++        self.identity=observation.data['process_identity'];self.info=observation.data['raw']['unit_after']['values']
++        self.sequence=observation.data['sample_sequence'];self.closed=False
++    def confirm(self,G,t):
++        if self.closed or self.key is not _LEASE or t['case']!=self.case or t['unit']!=self.unit or t['main_identity']!=self.identity:raise G.AdmissionBlocked('READINESS_LEASE_BINDING')
++        G.root_checkpoint()
++        if G.now()>=self.until or G.boot_id()!=self.anchor or select.select([self.obs.pidfd],[],[],0)[0] or G.identity(self.identity['pid'])!=self.identity:raise G.AdmissionBlocked('READINESS_LEASE_EXPIRED_OR_EXIT')
++        check=collect_native(G,self.case,self.unit,self.until,self.anchor,self.sequence+1)
++        try:
++            persist(G,check.data)
++            if check.data['overall_result']!='READY' or check.data['process_identity']!=self.identity:raise G.AdmissionBlocked('READINESS_RECHECK_FAILED')
++            certificate={'schema':PROFILE,'origin':'NATIVE_OS/1','case':self.case,'unit':self.unit,'boot_id':self.anchor,
++              'process_identity':self.identity,'execution_lock_sha256':G.digest(G.SOURCE.parent/'inputs/execution_lock.json'),
++              'sample':check.data,'readiness_until':self.until,'resource_gate':'NOT_OBTAINED'}
++            with BC.Store() as store:store.put(self.case+'_READINESS.json',certificate,exclusive=True,public=True)
++            if G.now()>=self.until or G.stopped():raise G.AdmissionBlocked('READINESS_LATE_CERTIFICATE')
++            self.info=check.data['raw']['unit_after']['values'];return certificate
++        finally:check.close()
++    def close(self):
++        if not self.closed:self.obs.close();self.closed=True
++    def ticket_admit(self,G,t):
++        G.root_checkpoint()
++        if (self.closed or self.key is not _LEASE or t['main_identity']!=self.identity or G.boot_id()!=self.anchor or
++            G.now()>=self.until or select.select([self.obs.pidfd],[],[],0)[0] or G.identity(self.identity['pid'])!=self.identity):
++            raise G.AdmissionBlocked('READINESS_TICKET_IDENTITY_OR_DEADLINE')
++
++
++def wait_native(G,case,unit,started):
++    if case not in ('C00','C10') or os.geteuid()!=0:raise G.AdmissionBlocked('READINESS_ROOT_CASE_ONLY')
++    cfg,a=contract(G);s=G.state();anchor=s['boot_id']
++    until=min(started+cfg['readiness_seconds'],s['T0']+300,s['stop_at'],s['deadline'])
++    last_pid=None;last_invocation=None;last_identity=None
++    for sequence in range(cfg['sample_cap']):
++        obs=collect_native(G,case,unit,until,anchor,sequence);row=obs.data
++        try:
++            unit0=row['raw'].get('unit_before',{}).get('values',{})
++            pid=unit0.get('MainPID');inv=unit0.get('InvocationID')
++            if pid and pid!='0':
++                if last_pid is not None and last_pid!=pid:row['error']={'message':'MAINPID_CHANGED_ACROSS_SAMPLES'};row['overall_result']='FAILED'
++                last_pid=pid
++            current_identity=row['process_identity']
++            if current_identity is not None:
++                if last_identity is not None and last_identity!=current_identity:
++                    row['error']={'message':'PROCESS_IDENTITY_CHANGED_ACROSS_SAMPLES','before':last_identity,'after':current_identity}
++                    row['overall_result']='FAILED';row['first_failed_check']='CR-A-CROSS-SAMPLE-IDENTITY'
++                    row['all_failed_checks'].append('CR-A-CROSS-SAMPLE-IDENTITY')
++                last_identity=current_identity
++            if inv:
++                if last_invocation is not None and last_invocation!=inv:row['error']={'message':'INVOCATION_CHANGED_ACROSS_SAMPLES'};row['overall_result']='FAILED'
++                last_invocation=inv
++            persist(G,row)
++            if row['overall_result']=='READY':return Lease(_LEASE,G,case,unit,until,anchor,obs)
++            if row['overall_result']=='FAILED':raise G.AdmissionBlocked('BC_SERVICE_IDENTITY_OR_LIMITS:'+str(row['first_failed_check']))
++        except BaseException:obs.close();raise
++        obs.close()
++        if G.now()>=until:raise G.LimitReached('READINESS_TIMEOUT')
++        time.sleep(min(cfg['poll_seconds'],max(0,until-G.now())))
++    raise G.LimitReached('READINESS_SAMPLE_CAP')
++
++
++def require_lease(G,t,lease):
++    if type(lease) is not Lease or lease.key is not _LEASE:raise G.AdmissionBlocked('READINESS_NATIVE_LEASE_REQUIRED')
++    return lease.confirm(G,t)
++
++
++def formal_gate(G):
++    cfg,a=contract(G)
++    if a['scope']!='CALIBRATE_S1S9_THEN_F1_F4' or a.get('Full_conditional_chain_explicitly_approved') is not True:raise G.AdmissionBlocked('READY_FULL_CHAIN_NOT_APPROVED')
++    q=G.trusted(G.ROOT/'inputs/C00_READY_QUALIFICATION.json')
++    if q['binding']!=G.safety_binding() or q['contract_sha256']!=G.digest(G.SOURCE.parent/'inputs/readiness_contract.json') or q['checker_sha256']!=G.digest(G.SOURCE/'readiness_oracle.py') or not q['accepted']:raise G.AdmissionBlocked('READY_QUALIFICATION')
++    if len(q['results'])!=len(cfg['jobs']) or {r['case_id'] for r in q['results']}!={j['case_id'] for j in cfg['jobs']}:raise G.AdmissionBlocked('READY_QUALIFICATION_SET')
++    expected_jobs={j['case_id']:j for j in cfg['jobs']}
++    for r in q['results']:
++        j=expected_jobs[r['case_id']];target='PASS' if j['variant']=='safe' else 'MUTATION_DETECTED'
++        if not r['accepted'] or r['status']!=target or not set(r['violations']).issubset(j['allowed_violations']):raise G.AdmissionBlocked('READY_QUALIFICATION_RESULT')
++    for case in ('C00','C10'):
++        c=G.trusted(G.ROOT/('inputs/'+case+'_READINESS.json'))
++        if (c['origin']!='NATIVE_OS/1' or c['boot_id']!=G.boot_id() or c['execution_lock_sha256']!=G.digest(G.SOURCE.parent/'inputs/execution_lock.json') or
++            len(c['sample']['checks'])!=8 or {r['check_id'] for r in c['sample']['checks']}!=set(IDS) or
++            any(r['result']!='MATCH' for r in c['sample']['checks'])):raise G.AdmissionBlocked('READY_NATIVE_CERTIFICATE')
+--- old/host/windows_entry.py
++++ new/host/windows_entry.py
+@@ -12,7 +12,7 @@
+     p=argparse.ArgumentParser();p.add_argument('--activate',action='store_true',required=True);p.parse_args()
+     package=Path(__file__).resolve().parents[1]
+     lock=json.loads((package/'inputs/execution_lock.json').read_text(encoding='utf-8'))
+-    receipt_path=Path(r'D:\毕业设计\research_main_innovation\decentralized_credential_lifecycle\DCL-R6-batch07\evidence\execution_authorization.json')
++    receipt_path=Path(r'D:\毕业设计\research_main_innovation\decentralized_credential_lifecycle\DCL-R6-batch08\evidence\execution_authorization.json')
+     auth=json.loads(receipt_path.read_text(encoding='utf-8'))
+     h=lambda q:hashlib.sha256(q.read_bytes()).hexdigest()
+     if auth['execution_lock_sha256']!=h(package/'inputs/execution_lock.json') or auth['static_manifest_sha256']!=h(package/'inputs/static_manifest.json'):raise SystemExit('AUTHORIZATION_HASH_MISMATCH')

@@ -1,0 +1,318 @@
+--- /dev/null
++++ maintenance/archive_check.py
+@@ -0,0 +1,91 @@
++"""Conventional bounded ZIP/manifest checks. Review component; no runtime hook.
++
++Capacity is supplied by an explicitly selected contract. This module never
++raises a contract limit or extracts an archive to the filesystem.
++"""
++import hashlib
++import json
++from pathlib import PurePosixPath
++import stat
++import struct
++import unicodedata
++import zipfile
++
++class Rejected(ValueError):pass
++
++def path_key(name):
++    if (not isinstance(name,str) or not name or len(name.encode('utf-8'))>1024 or
++        '\\' in name or ':' in name or '\x00' in name or name.startswith('/') or
++        any(x in ('','.','..') for x in name.split('/')) or
++        unicodedata.normalize('NFC',name)!=name):raise Rejected('PATH')
++    if PurePosixPath(name).is_absolute():raise Rejected('PATH')
++    return name
++
++def bounded_directory(path,max_members):
++    """Reject oversized classic ZIP metadata before ZipFile allocates its index."""
++    if type(max_members) is not int or not 1<=max_members<=65534:raise Rejected('CONTRACT_COUNT')
++    with open(path,'rb') as f:
++        f.seek(0,2);size=f.tell()
++        if not 22<=size<=33554432:raise Rejected('COMPRESSED_BYTES')
++        f.seek(size-22);raw=f.read(22)
++        if raw[:4]!=b'PK\x05\x06':raise Rejected('PARTIAL_OR_COMMENTED_ZIP')
++        _,disk,start,n_disk,n,size_cd,offset,comment=struct.unpack('<4s4H2LH',raw)
++        if disk or start or n_disk!=n or comment or n>max_members:raise Rejected('MEMBER_COUNT')
++        if n==65535 or size_cd==0xffffffff or offset==0xffffffff:raise Rejected('ZIP64')
++        if size_cd>n*(46+1024+256+256) or offset+size_cd!=size-22:raise Rejected('CENTRAL_DIRECTORY_BOUND')
++        return n
++
++def verify(path,manifest_raw,max_members,manifest_name='out/EVIDENCE_MANIFEST.json',expected_binding=None):
++    count=bounded_directory(path,max_members)
++    if len(manifest_raw)>4194304:raise Rejected('MANIFEST_BYTES')
++    def pairs(items):
++        result={}
++        for k,v in items:
++            if k in result:raise Rejected('DUPLICATE_MANIFEST_KEY')
++            result[k]=v
++        return result
++    m=json.loads(manifest_raw,object_pairs_hook=pairs)
++    if expected_binding is not None and m.get('binding')!=expected_binding:raise Rejected('BINDING')
++    declared=m['files']
++    if isinstance(declared,list):
++        names=[r['archive_path'] for r in declared]
++        if len(names)!=len(set(names)):raise Rejected('DUPLICATE_MANIFEST_PATH')
++        declared={r['archive_path']:{'bytes':r['bytes'],'sha256':r['sha256']} for r in declared}
++    if not isinstance(declared,dict):raise Rejected('MANIFEST_SHAPE')
++    path_key(manifest_name)
++    for name,row in declared.items():
++        path_key(name)
++        if (not isinstance(row,dict) or type(row.get('bytes')) is not int or
++            not 0<=row['bytes']<=33554432 or not isinstance(row.get('sha256'),str) or
++            len(row['sha256'])!=64 or any(c not in '0123456789abcdef' for c in row['sha256'])):raise Rejected('MANIFEST_ROW')
++    if manifest_name in declared:raise Rejected('MANIFEST_SELF_CYCLE')
++    names=set(declared)|{manifest_name}
++    if len(names)>max_members:raise Rejected('MEMBER_COUNT')
++    total=len(manifest_raw)+sum(r['bytes'] for r in declared.values())
++    if total>33554432:raise Rejected('UNCOMPRESSED_BYTES')
++    with zipfile.ZipFile(path) as z:
++        infos=z.infolist()
++        if len(infos)!=count or len({i.filename for i in infos})!=len(infos):raise Rejected('DUPLICATE_MEMBER')
++        if {i.filename for i in infos}!=names:raise Rejected('MEMBER_SET')
++        actual_total=0
++        for i in infos:
++            path_key(i.filename)
++            mode=i.external_attr>>16
++            if (stat.S_IFMT(mode) not in (0,stat.S_IFREG) or i.is_dir() or
++                i.flag_bits&1 or i.compress_type not in (zipfile.ZIP_STORED,zipfile.ZIP_DEFLATED) or
++                len(i.extra)>256 or len(i.comment)>256):raise Rejected('MEMBER_TYPE_OR_COMPRESSION')
++            row=declared.get(i.filename)
++            expected_size=len(manifest_raw) if row is None else row['bytes']
++            if row is not None and 'mode' in row and stat.S_IMODE(mode)!=row['mode']:raise Rejected('MEMBER_PERMISSION')
++            if i.file_size!=expected_size:raise Rejected('MEMBER_SIZE')
++            digest=hashlib.sha256();size=0
++            with z.open(i) as item:
++                while True:
++                    chunk=item.read(65536)
++                    if not chunk:break
++                    size+=len(chunk);actual_total+=len(chunk)
++                    if size>expected_size or actual_total>33554432:raise Rejected('STREAM_BYTES')
++                    digest.update(chunk)
++            expected_hash=hashlib.sha256(manifest_raw).hexdigest() if row is None else row['sha256']
++            if size!=expected_size or digest.hexdigest()!=expected_hash:raise Rejected('CONTENT_HASH')
++    return {'members':count,'bytes':actual_total,'verified_files':len(declared),'status':'ACCEPT_ARCHIVE_ONLY'}
+--- /dev/null
++++ maintenance/archive_oracle.py
+@@ -0,0 +1,49 @@
++"""Independent ordinary ZIP oracle; no imports from archive_check."""
++import hashlib,json,stat,struct,unicodedata,zipfile
++
++def inspect(path,raw,cap,manifest_name='out/EVIDENCE_MANIFEST.json',binding=None):
++    """Return a separate ACCEPT/REJECT, with bounded parser/index and stream IO."""
++    try:
++        with open(path,'rb') as f:
++            f.seek(0,2);end=f.tell()
++            if end<22 or end>2**25:raise ValueError('compressed length')
++            f.seek(end-22);q=f.read(22)
++        e=struct.unpack('<4s4H2IH',q)
++        if e[0]!=b'PK\x05\x06' or any(e[k] for k in [1,2,7]) or e[3]!=e[4] or e[4]>cap or e[4]>=65535 or e[5]+e[6]+22!=end or e[5]>e[4]*1582:raise ValueError('directory')
++        if len(raw)>2**22:raise ValueError('manifest bytes')
++        def unique(items):
++            d=dict(items)
++            if len(d)!=len(items):raise ValueError('duplicate JSON')
++            return d
++        m=json.loads(raw,object_pairs_hook=unique)
++        if binding is not None and m.get('binding')!=binding:raise ValueError('binding')
++        records=m['files']
++        if isinstance(records,list):
++            expected={r['archive_path']:{'bytes':r['bytes'],'sha256':r['sha256']} for r in records}
++            if len(expected)!=len(records):raise ValueError('duplicate manifest path')
++        else:expected=dict(records)
++        if manifest_name in expected:raise ValueError('self cycle')
++        expected[manifest_name]={'bytes':len(raw),'sha256':hashlib.sha256(raw).hexdigest()}
++        def legal(s):
++            return isinstance(s,str) and 0<len(s.encode())<=1024 and not s.startswith('/') and not any(c in s for c in ['\\',':','\x00']) and all(x not in ('','.','..') for x in s.split('/')) and unicodedata.normalize('NFC',s)==s
++        if not all(legal(s) for s in expected) or len(expected)>cap:raise ValueError('names')
++        size_sum=0
++        with zipfile.ZipFile(path) as z:
++            if len(z.infolist())!=e[4] or len(z.namelist())!=len(set(z.namelist())) or set(z.namelist())!=set(expected):raise ValueError('set')
++            for item in z.infolist():
++                r=expected[item.filename];mode=item.external_attr>>16
++                if not legal(item.filename) or item.is_dir() or stat.S_IFMT(mode) not in [0,stat.S_IFREG] or item.flag_bits&1 or item.compress_type not in [0,8] or len(item.extra)>256 or len(item.comment)>256:raise ValueError('type')
++                if type(r['bytes']) is not int or not 0<=r['bytes']<=2**25 or item.file_size!=r['bytes']:raise ValueError('size')
++                if 'mode' in r and stat.S_IMODE(mode)!=r['mode']:raise ValueError('mode')
++                got=hashlib.sha256();item_size=0
++                with z.open(item) as stream:
++                    for _ in range((2**25)//32768+2):
++                        block=stream.read(32768)
++                        if not block:break
++                        got.update(block);size_sum+=len(block);item_size+=len(block)
++                        if size_sum>2**25 or item_size>r['bytes']:raise ValueError('stream bound')
++                    else:raise ValueError('iterations')
++                if item_size!=r['bytes'] or got.hexdigest()!=r['sha256']:raise ValueError('hash')
++        return {'decision':'ACCEPT','members':len(expected),'bytes':size_sum}
++    except (OSError,ValueError,KeyError,TypeError,zipfile.BadZipFile,RuntimeError,NotImplementedError) as ex:
++        return {'decision':'REJECT','reason':type(ex).__name__+':'+str(ex)}
+--- /dev/null
++++ maintenance/mr_native_entry.py
+@@ -0,0 +1,88 @@
++"""Review-only native A test entry. No standalone role or import-time actions.
++
++Integration and dynamic receipt remain unissued. The same A batch is CLOSED.
++Normal MR classifier, RootIPC policy and C09 protocol remain unmodified.
++"""
++import hashlib,json,os,resource,sys,time
++from pathlib import Path
++
++def command(G):
++    old=G.service_argv('C10');cut=old.index(G.PYTHON)
++    unit=G.NAMESPACE['service_prefix']+'mr-native-fault.service'
++    argv=[('--unit='+unit if x.startswith('--unit=') else x) for x in old[:cut]]
++    return argv+[G.PYTHON,'-I','-S','-B',str(G.SOURCE/'mr_native_entry.py'),'--worker','--batch-root',str(G.ROOT)]
++
++def run(G,contract):
++    import manager_recovery as M
++    import boot_continuity as BC
++    a,_=G.authorization()
++    if (a['scope']!='MR_RECOVERY_DIAGNOSTIC_ONLY' or a.get('MR_native_fault_explicitly_approved') is not True or
++        a.get('mr_native_contract_sha256')!=hashlib.sha256(json.dumps(contract,sort_keys=True,separators=(',',':')).encode()).hexdigest() or
++        contract.get('runtime_enabled') is not True or contract.get('source_revision')!=G.NAMESPACE['revision']):
++        raise G.AdmissionBlocked('MR_NATIVE_EXECUTION_UNAPPROVED')
++    if contract['fault_exit']!=79 or contract['scheduler_exit']!=78 or contract['prepaid_visits']!=512:raise G.AdmissionBlocked('MR_NATIVE_CONTRACT')
++    if Path(__file__).resolve().parent!=G.SOURCE or G.stopped():raise G.AdmissionBlocked('MR_NATIVE_CONTEXT')
++    G.root_checkpoint();cfg=M.contract(G);unit=G.NAMESPACE['service_prefix']+'mr-native-fault.service'
++    if unit in cfg['historical_closed_units']:raise G.AdmissionBlocked('MR_NATIVE_FAULT_UNIT_PREAPPROVED')
++    expected=command(G)
++    if expected!=contract['unit_argv']:raise G.AdmissionBlocked('MR_NATIVE_ARGV')
++    if G.trusted(G.ROOT/'inputs/result_C10.json')['status']!='PASS':raise G.AdmissionBlocked('MR_NATIVE_C10')
++    old_ticket=G._TICKET;G._TICKET=G.ticket('C10')
++    try:
++        for _ in range(512):G.execution_deadline('C10');G.reserve_counter(G.OUT/'visits.bin',G.VISIT_CAP)
++        before=G.count();until=min(G.now()+5,G.state()['T0']+300,G.state()['stop_at'])
++        failed_before=M.failed_set(G,until)
++        if unit in failed_before:raise G.AdmissionBlocked('MR_NATIVE_UNIT_EXISTS')
++        # Query errors or missed live identity cause a frozen abort, never a retry.
++        G._run(expected,timeout=max(.001,min(2,until-G.now())))
++        start=None;finish=None
++        for _ in range(64):
++            G.root_checkpoint()
++            if G.now()>=until:break
++            v=M.show(G,unit,until)['values']
++            if v['ActiveState']=='active' and int(v['MainPID'])>0:
++                if start is None:start={'native':v,'identity':G.identity(int(v['MainPID'])),'sample':G.stamp()}
++            if v['ActiveState']=='failed':finish={'native':v,'sample':G.stamp()};break
++            time.sleep(.025)
++        if start is None or finish is None:raise G.AdmissionBlocked('MR_NATIVE_EVENT_MISSING')
++        f=finish['native'];s=start['native']
++        if (f['Id']!=unit or f['InvocationID']!=s['InvocationID'] or f['Result']!='exit-code' or
++            f['ExecMainStatus']!='79' or f['ExecMainCode']!='1' or int(f['ExecMainPID'])!=start['identity']['pid'] or
++            int(f['ExecMainExitTimestampMonotonic'])<=0):raise G.AdmissionBlocked('MR_NATIVE_EVENT_IDENTITY')
++        failed_after=M.failed_set(G,until)
++        if set(failed_after)!=set(failed_before)|{unit}:raise G.AdmissionBlocked('MR_NATIVE_FAILED_SET_RACE')
++        try:M.historical(G,unit,cfg,until)
++        except G.AdmissionBlocked as ex:
++            if str(ex)!='MR_UNREVIEWED_MANAGER_FAILURE:'+unit:raise
++            rejection=str(ex)
++        else:raise G.AdmissionBlocked('MR_NATIVE_UNREVIEWED_ACCEPTED')
++        journal=M.query(G,['/usr/bin/journalctl','--boot','--no-pager','--all','--output=json',
++            '--output-fields=MESSAGE,_BOOT_ID,_SYSTEMD_UNIT,_SYSTEMD_INVOCATION_ID,__MONOTONIC_TIMESTAMP','--unit='+unit],until)
++        if G.count()!=before:raise G.AdmissionBlocked('MR_NATIVE_POST_PREPAY_BUDGET_CHANGED')
++        with BC.Store() as store:
++            store.put('mr_native_case.json',{'origin':'NATIVE_RECORDED_EVENT','binding':G.safety_binding(),'unit':unit,'start':start,'finish':finish,
++                'failed_before':failed_before,'failed_after':failed_after,'journal':journal,'rejection':rejection,
++                'prepaid':512,'counter_after_prepaid':before,'window':{k:G.state()[k] for k in ['T0','deadline','stop_at']},'sample':G.stamp()},exclusive=True)
++            store.put('mr_diag_injection.json',{'binding':G.safety_binding(),'case':'C10',
++                'C10_sha256':G.digest(G.ROOT/'inputs/result_C10.json'),'expected_exit':78,'sample':G.stamp()},exclusive=True)
++        return M.fail(G,'MR_EXPECTED_DIAGNOSTIC_FAILURE',78,True)
++    finally:G._TICKET=old_ticket
++
++def worker():
++    # Future worker: exact dedicated service sandbox; no account/credential use.
++    import batch_identity as N
++    cfg=N.load(Path(__file__).resolve().parent.parent)
++    if (sys.platform!='linux' or os.geteuid()!=999 or os.getegid()!=989 or
++        resource.getrlimit(resource.RLIMIT_AS)!=(1073741824,1073741824) or
++        sys.argv!=[str(Path(__file__).resolve()),'--worker','--batch-root',cfg['runtime_root']]):raise RuntimeError('MR_NATIVE_WORKER_CONTEXT')
++    path=next(s[3:] for s in Path('/proc/self/cgroup').read_text().splitlines() if s.startswith('0::'))
++    unit=cfg['service_prefix']+'mr-native-fault.service'
++    if not path.endswith('/'+cfg['slice']+'/'+unit):raise RuntimeError('MR_NATIVE_WORKER_CGROUP')
++    print(json.dumps({'event':'MR_NATIVE_FAULT_READY','batch_id':cfg['batch_id'],
++        'boot_id':Path('/proc/sys/kernel/random/boot_id').read_text().strip(),'pid':os.getpid(),'exit':79}),flush=True)
++    time.sleep(1)
++    os._exit(79)
++
++if __name__=='__main__':
++    if '--worker' not in sys.argv:raise SystemExit('REVIEW_COMPONENT_NO_ACTIVE_ENTRY')
++    worker()
+--- /dev/null
++++ maintenance/mr_native_oracle.py
+@@ -0,0 +1,78 @@
++"""Independent bounded data oracle for future A evidence. Never signals roles."""
++import hashlib,json
++
++def verify(case,closure,budget_before,budget_after,exit_witness,admin,expected):
++    errors=[]
++    def require(ok,code):
++        if not ok:errors.append(code)
++    require(case.get('origin')=='NATIVE_RECORDED_EVENT','ORIGIN')
++    require(case.get('binding')==expected.get('binding'),'BINDING')
++    unit=case.get('unit');start=case.get('start',{});finish=case.get('finish',{})
++    n=start.get('native',{});f=finish.get('native',{});ident=start.get('identity',{})
++    require(isinstance(unit,str) and unit==expected['service_prefix']+'mr-native-fault.service','UNIT')
++    require(n.get('Id')==unit and f.get('Id')==unit and n.get('ActiveState')=='active' and f.get('ActiveState')=='failed','STATE')
++    require(bool(n.get('InvocationID')) and n.get('InvocationID')==f.get('InvocationID'),'INVOCATION')
++    require(f.get('Result')=='exit-code' and f.get('ExecMainCode')=='1' and f.get('ExecMainStatus')=='79','REAL_EXIT')
++    require(str(ident.get('pid'))==n.get('MainPID')==f.get('ExecMainPID') and ident.get('boot_id')==expected['boot_id'],'PID_BOOT')
++    require(case.get('rejection')=='MR_UNREVIEWED_MANAGER_FAILURE:'+str(unit),'UNREVIEWED')
++    require(set(case.get('failed_after',[]))==set(case.get('failed_before',[]))|{unit},'FAILED_SET')
++    try:
++        rows=[json.loads(s) for s in case['journal']['stdout'].splitlines()]
++        require(case['journal']['exit_code']==0 and len(rows)<=32,'JOURNAL_QUERY')
++        hits=[r for r in rows if r.get('_SYSTEMD_UNIT')==unit and r.get('_BOOT_ID')==expected['boot_id'].replace('-','') and r.get('_SYSTEMD_INVOCATION_ID')==n.get('InvocationID')]
++        require(any(json.loads(r['MESSAGE']).get('event')=='MR_NATIVE_FAULT_READY' for r in hits),'JOURNAL_EVENT')
++        require(int(f['ExecMainExitTimestampMonotonic'])>0 and start['sample']['boottime']<=finish['sample']['boottime'],'TIME')
++    except (KeyError,TypeError,ValueError):errors.append('JOURNAL_OR_TIME')
++    require(closure.get('stop_published') is True and closure.get('closed') is True,'AUTO_STOP')
++    require(closure.get('roles_exited') is True and closure.get('group_empty') is True,'CLEANUP')
++    require(closure.get('fallback') is False and closure.get('manual_stop') is False,'PRIMARY_PATH')
++    require(closure.get('new_work_after_fault')==0,'DISPATCH')
++    require(closure.get('window')==case.get('window'),'WINDOW')
++    require(budget_before==budget_after and set(budget_before)=={'counter','intent','journal'},'BUDGET')
++    require(all(isinstance(v,str) and len(v)==64 and all(c in '0123456789abcdef' for c in v) for v in budget_before.values()),'BUDGET_HASH')
++    require(exit_witness.get('exit_code')==78 and exit_witness.get('source')=='direct-parent waitpid','WAITPID')
++    require(admin.get('native')=='NATIVE_SEAL_COMPLETED','NATIVE_SEAL')
++    require(admin.get('administrative')=='ADMIN_EVIDENCE_SEALED','ADMIN_SEAL')
++    return {'accepted':not errors,'errors':sorted(set(errors)),
++        'status':'EXPECTED_NATIVE_FAILURE_CLOSED' if not errors else 'REJECT_NATIVE_ACCEPTANCE',
++        'binding':expected.get('binding'),'promotes_other_batch':False}
++
++def from_snapshot(root,admin,expected):
++    """Parse immutable future exported originals; OS metadata is audited separately.
++
++    `admin` must be a separately verified finalizer audit, with archive hashes
++    and quiescence observations. This function cannot manufacture that audit.
++    """
++    from pathlib import Path
++    import stat,struct
++    root=Path(root)
++    def load(rel):
++        p=root/rel;s=p.lstat()
++        if not stat.S_ISREG(s.st_mode) or p.is_symlink() or s.st_size>4194304:raise ValueError('RAW_METADATA')
++        return json.loads(p.read_bytes())
++    case=load('inputs/root_private/boot/mr_native_case.json')
++    first=load('inputs/root_private/boot/mr_first_failure.json')
++    close=load('inputs/root_private/boot/mr_close_state.json')
++    closed=load('inputs/CLOSED.json');stop=load('out/STOP_REQUEST.json')
++    reg=load('inputs/root_private/boot/mr_scheduler.json')
++    wait=load('inputs/root_private/waitpid_%s.json'%reg['child']['pid'])
++    if wait['raw_wait_status']!=78<<8 or wait['child']!=reg['child'] or wait['coordinator']!=reg['owner']:raise ValueError('RAW_WAITPID')
++    if first['reason']!='MR_EXPECTED_DIAGNOSTIC_FAILURE' or first['expected_diagnostic'] is not True:raise ValueError('RAW_FIRST_FAILURE')
++    if close['first_failure_sha256']!=hashlib.sha256((root/'inputs/root_private/boot/mr_first_failure.json').read_bytes()).hexdigest():raise ValueError('RAW_FIRST_DIGEST')
++    if closed['boot_id']!=expected['boot_id'] or stop['boot_id']!=expected['boot_id']:raise ValueError('RAW_BOOT')
++    if not(case['finish']['sample']['boottime']<=stop['boottime']<=closed['boottime'] and first['sample']['boottime']>=case['finish']['sample']['boottime']):raise ValueError('RAW_STOP_TIME')
++    before={};after={}
++    for role,name in [('counter','visits.bin'),('intent','visits.bin.intent.json'),('journal','visits.bin.journal.jsonl')]:
++        before[role]=first['budget'][name]['sha256'];p=root/'out'/name
++        if p.is_symlink() or not p.is_file() or p.stat().st_size>33554432:raise ValueError('RAW_BUDGET_BOUND')
++        digest=hashlib.sha256()
++        with p.open('rb') as stream:
++            for chunk in iter(lambda:stream.read(65536),b''):digest.update(chunk)
++        after[role]=digest.hexdigest()
++    counter=(root/'out/visits.bin').read_bytes()
++    if len(counter)!=24 or counter[:8]!=b'BRNGv001' or struct.unpack('<Q',counter[8:16])[0]!=case['counter_after_prepaid']:raise ValueError('RAW_COUNTER')
++    if admin.get('binding')!=expected['binding'] or admin.get('independently_verified_archives') is not True:raise ValueError('RAW_ADMIN_TRUST')
++    closure={'stop_published':True,'closed':True,'roles_exited':admin.get('roles_exited'),
++        'group_empty':admin.get('group_empty'),'fallback':admin.get('fallback'),'manual_stop':admin.get('manual_stop'),
++        'new_work_after_fault':admin.get('new_work_after_fault'),'window':first['window']}
++    return verify(case,closure,before,after,{'exit_code':wait['exit_code'],'source':'direct-parent waitpid'},admin,expected)

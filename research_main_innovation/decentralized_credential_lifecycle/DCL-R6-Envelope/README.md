@@ -1,0 +1,19 @@
+# DCL-R6-Envelope 静态交付
+
+2026-11-10。Material Passport：资源隔离选型与执行前合同；STATIC_ONLY。原 WS4 的 E2=UNRESOLVED；推荐 C 的 AS4-PAYLOAD/1 条件方案，待明确批准。本轮新增验证代码、校准、模型、平台启动/配置/安装均为 0。
+
+|交付|内容|
+|---|---|
+|[RESOURCE_BACKEND_COMPARISON](RESOURCE_BACKEND_COMPARISON.md)|三路线统一判定与选择|
+|[PRELAUNCH_ENVELOPE_MODEL](PRELAUNCH_ENVELOPE_MODEL.md)|P_W/P_L、外部 TCB、首入口状态机|
+|[STRICT_MEMORY_BOUND_PROOF](STRICT_MEMORY_BOUND_PROOF.md)|原 WS 缺口、cgroup 暂时超限、AS 条件定理|
+|[PROCESS_TREE_SECURITY_MODEL](PROCESS_TREE_SECURITY_MODEL.md)|任务/权限/代理封闭与失败时序|
+|[SELECTED_EXECUTION_ARCHITECTURE](SELECTED_EXECUTION_ARCHITECTURE.md)|父 slice 总任务界、service/角色与八程序复用|
+|[PLATFORM_EVIDENCE_AND_GAPS](PLATFORM_EVIDENCE_AND_GAPS.md)|本机只读结果与缺项|
+|[BATCH02_EXECUTION_PLAN](BATCH02_EXECUTION_PLAN.md)|分阶段清单、校准矩阵、F1→F4 顺序|
+|[BATCH02_AUTHORIZATION_REQUEST](BATCH02_AUTHORIZATION_REQUEST.md)|替代合同差异、P 阶段与未来 batch02 申请|
+|[FINAL_DECISION](FINAL_DECISION.md)|E1–E4 裁决与历史保持|
+
+[来源索引](SOURCE_INDEX.json)、[证据索引](EVIDENCE_INDEX.md)、[行政核对](evidence/DELIVERY_CHECK.json)、[输出锁](evidence/OUTPUT_MANIFEST.json)。E1 CONDITIONAL_PASS，E3 静态设计完成但附条件，E4 PARTIAL_UNAUTHORIZED；RESOURCE_GATE 尚未通过，F1/F4 仍未运行。
+
+batch01 原27次/118.7340827秒和全部源码/失败记录继续冻结；v3 未追加修订。D1 1.1、G覆盖、I1/I2/I3归档、严格分离0与主机制门 CLOSED 保持。根导航旧版快照在 revisions/DCL-R6-Repair，全部旧 manifest 继续独立适用。

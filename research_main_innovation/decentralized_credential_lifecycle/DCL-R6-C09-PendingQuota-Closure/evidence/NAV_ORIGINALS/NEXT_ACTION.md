@@ -1,0 +1,583 @@
+## DCL-R6-C09-BoundClosure 源码/合同审查增量（2026-11-15）
+
+**原生PENDING自环反例成立，日志政策待批，容量NOT_READY。** 同字节C09历史有17条PENDING/24条原生记录，source loop保留ready pidfd且R不变；当前缺记录/总量上界。固定schema与ABI条件下单行1322；具体拟256观察/全路径≤256 PENDING（成功≤255）/263总行/345148主日志预留，未生效。完整raw/ZIP/admin字节与工作量仍有具体缺口。MR最终有限原则文本可独立决定，状态PROPOSED_NOT_EFFECTIVE。
+
+4450表复核补入mr_events.lock并排除完整scope不可达pt_expected_abort，数值保守包络保持；新实施/测试需ΔE。64运行文件、8审查对象、旧256/257与全部历史保持；WSL/动态/故障/实现/F1F4修改0，T0/R=null。RESOURCE_GATE_PASS=NOT_OBTAINED；STRICT_SEPARATION_INSTANCES=0；IMPLEMENTATION_GATE=CLOSED。
+
+[最终裁决](DCL-R6-C09-BoundClosure/FINAL_DECISION.md) · [记录反例](DCL-R6-C09-BoundClosure/C09_PENDING_RECORD_BOUND.md) · [配额与字节](DCL-R6-C09-BoundClosure/C09_PENDING_BYTE_BOUND.md) · [MR待批文本](DCL-R6-C09-BoundClosure/MR_CROSS_INSTANCE_FINAL_APPROVAL_TEXT.md) · [索引](DCL-R6-C09-BoundClosure/EVIDENCE_INDEX.md)
+
+以下逐字节保留先前记录。
+
+---
+
+## DCL-R6-EvidenceContract-Closure 合同审查增量（2026-11-14）
+
+**数量包络有条件闭合，字节/工作量未决，MR规则待批准。** 源级保守K4450/native4451/admin原件4452/admin ZIP4467，固定测试/actor/临时件/异常责任逐项推导；DAG1142节点拓扑无环。C09 PENDING重复日志只有deadline、缺record/byte/work配额，完整32MiB/300秒/封存期限仍未闭合。强化的同实例异常先决合同存在MR生命周期冲突；同boot单B/精确源码对的有限场景承认草案建议批准，当前user_approved=false且不可使用。
+
+旧256/257及64份运行源、8份审查工件保持，封装/跨实例gate实现和动态测试0，T0/deadline/R=null。RESOURCE_GATE_PASS=NOT_OBTAINED；F1/F4=UNRUN_RESOURCE_GATE；STRICT_SEPARATION_INSTANCES=0；IMPLEMENTATION_GATE=CLOSED。下一步继续静态日志/aggregate工作量合同，并可审阅MR原则草案。
+
+[最终裁决](DCL-R6-EvidenceContract-Closure/FINAL_DECISION.md) · [数量证明](DCL-R6-EvidenceContract-Closure/EVIDENCE_COUNT_CLOSURE_PROOF.md) · [待批准文本](DCL-R6-EvidenceContract-Closure/MR_CROSS_INSTANCE_ADMISSION_APPROVAL.md) · [索引](DCL-R6-EvidenceContract-Closure/EVIDENCE_INDEX.md)
+
+以下逐字节保留先前记录。
+
+---
+
+## DCL-R6-FullChain-AdmissionFix 静态审查增量（2026-11-13）
+
+**PARTIAL_STATIC_REPAIR_REVIEW_ONLY。** 校准必需原件下界887，含模型1082/native1083；完整最大清单尚未闭合，256/257生产守卫保持。4个维护/原生验收组件与MR hook审查稿形成，64基础主机检查/15变异完成，原生动态UNRUN。MR同批异常关闭与继续F1/F4的冲突已登记，A→B实现级证据承认需明确合同决定。旧64文件冻结，WSL/服务/故障/模型/预算/动态重跑0，T0/R=null。
+
+静态版本FullChainAdmission-static-1/review-1，执行锁/新生产容量/动态身份均未签发。RESOURCE_GATE_PASS=NOT_OBTAINED；STRICT_SEPARATION_INSTANCES=0；IMPLEMENTATION_GATE=CLOSED。
+
+[最终裁决](DCL-R6-FullChain-AdmissionFix/FINAL_DECISION.md) · [数量矛盾](DCL-R6-FullChain-AdmissionFix/EVIDENCE_COUNT_CONTRADICTION.md) · [后续方案](DCL-R6-FullChain-AdmissionFix/NEXT_DYNAMIC_AUTHORIZATION.md) · [索引](DCL-R6-FullChain-AdmissionFix/EVIDENCE_INDEX.md)
+
+以下逐字节保留先前记录。
+
+---
+
+## DCL-R6-FullChain-B 静态准入增量（2026-11-13）
+
+**BLOCKED_STATIC_ADMISSION。** 完整冻结链C00后六组回归至少312份独立原件，超出自动行政cap256；native ZIP最低313成员，超出终态reader cap257。MR64为MR-SIMULATION/1，完整scope另缺原生异常关闭验收路径。64/64原文件锁和44程序静态检查通过；独立校准硬界68,498≤100,000。依本轮授权停在静态阶段，WSL/部署/active entry/源码修订/重跑均0，T0/deadline/R=null，300秒性能UNRUN。
+
+新运行身份/动态收据/执行锁均未签发；历史batch14保持CLOSED，旧账/失败/UNKNOWN原样保留。下一步可准备独立静态修复，具体范围为完整输出封存容量合同与原生异常验收清单。RESOURCE_GATE_PASS=NOT_OBTAINED；F1/F4=UNRUN_RESOURCE_GATE；STRICT_SEPARATION_INSTANCES=0；IMPLEMENTATION_GATE=CLOSED。
+
+[本轮裁决](DCL-R6-FullChain-B/FULLCHAIN_FINAL_DECISION.md) · [集成冲突](DCL-R6-FullChain-B/FULLCHAIN_VERSION_INTEGRATION.md) · [预算复算](DCL-R6-FullChain-B/FULLCHAIN_RESOURCE_ACCOUNTING.md) · [证据索引](DCL-R6-FullChain-B/EVIDENCE_INDEX.md)
+
+以下逐字节保留先前记录。
+
+---
+
+## DCL-R6-TR-A2 最新动态增量（2026-11-13）
+
+**正常最小A2条件性通过。** RuntimeAdapt-static-1/r1/batch14真实新运行时/WORK/C00、PT64/PF48/TR40/RA32共184项与33变异、CLOSED后VALID只读和IPC_CLOSED_DOMINATES、native233/234及自动行政249/250均取得实际证据。R3133、3133事务/6266行，关键读取摘要与原生包/独立导出一致。
+
+来源仍CONDITIONAL（受信Root/dpkg/keyring、缺新.deb独立payload），identity原子性/特权更新边界与internal UNKNOWN保留。当前组/角色空，源码修改/重跑/手工seal/后备0；batch14保持CLOSED。下一步可准备独立MR/C09有限方案，需新身份/摘要与明确许可，未自动开始。
+
+RESOURCE_GATE_PASS=NOT_OBTAINED；F1/F4=UNRUN_RESOURCE_GATE；STRICT_SEPARATION_INSTANCES=0；IMPLEMENTATION_GATE=CLOSED。
+
+[动态裁决](DCL-R6-TR-A2/TRA2_FINAL_DECISION.md) · [终态读取](DCL-R6-TR-A2/TRA2_TERMINAL_READ_RESULTS.md) · [native结果](DCL-R6-TR-A2/TRA2_NATIVE_SEAL_RESULTS.md) · [未决边界](DCL-R6-TR-A2/TRA2_COUNTEREXAMPLES.md) · [证据索引](DCL-R6-TR-A2/EVIDENCE_INDEX.md)
+
+以下逐字节保留先前记录。
+
+---
+
+## RuntimeAdapt 最终静态/只读增量（2026-11-13）
+
+**RuntimeAdapt-static-1/r1已形成条件性新运行时基线，业务动态0。** GNU libc上游仍2.39，Ubuntu修订8.9→8.12；三个ELF归属/目录、两个InRelease及完整索引签名哈希、66入口/114对象必要ABI核验齐备。新8.12包payload未在本地重提取，来源依赖受信Root/dpkg/keyring，未来许可需显式接受；不接受时保持RUNTIME_PROVENANCE_UNRESOLVED。
+
+64文件/44程序、20静态断言/3纯ELF探针，三项pin显式更新；原严格hash守卫、业务/预算/RootIPC/MR/Terminal判据保持，新包/路径/Build-ID/自身映射重查及RA32/8变异齐备。正常A2完成3133/硬4417，完整硬68498；path→exec原子性和完整300秒性能未决。当前7次WSL均只读取证，T0/R=null，安装/下载/服务/校准/模型0。
+
+RA-1/2/3=CONDITIONAL_PASS，RA-4=PASS_STATIC。旧TR-A PREFLIGHT_FAILED及旧账/回执/封存保持，旧attempt不恢复。RESOURCE_GATE_PASS=NOT_OBTAINED；F1/F4=UNRUN_RESOURCE_GATE；STRICT_SEPARATION_INSTANCES=0；IMPLEMENTATION_GATE=CLOSED。
+
+[最终裁决](DCL-R6-RuntimeAdapt-Fix/FINAL_DECISION.md) · [来源条件](DCL-R6-RuntimeAdapt-Fix/RUNTIME_PROVENANCE_ASSESSMENT.md) · [新源码锁](DCL-R6-RuntimeAdapt-Fix/SOURCE_AND_INPUT_LOCK.md) · [TR-A2申请](DCL-R6-RuntimeAdapt-Fix/NEXT_DYNAMIC_AUTHORIZATION.md) · [证据索引](DCL-R6-RuntimeAdapt-Fix/EVIDENCE_INDEX.md)
+
+以下逐字节保留先前记录。
+
+---
+
+## DCL-R6-TR-A 最新动态增量（2026-11-13）
+
+**PREFLIGHT_FAILED_RUNTIME_DRIFT。** TerminalRead-static-1/r1/batch13-r1唯一入口exit125；冻结ld-linux摘要不符，完整1241对象核对发现loader/libc/libm三项变化，当前glibc2.39-0ubuntu8.12。源码/输入保持，未更新锁、安装依赖或重跑。
+
+WORK/C00/PT/PF/TR均未执行；T0/deadline/R/claim/正式实例未创建，native NOT_APPLICABLE。自动行政14/15封存成功，角色/组空，额外后备0；内部UNKNOWN保留。先独立审查运行时适配及新资格/身份/锁，当前control与失败证据保留。
+
+RESOURCE_GATE_PASS=NOT_OBTAINED；F1/F4=UNRUN_RESOURCE_GATE；STRICT_SEPARATION_INSTANCES=0；IMPLEMENTATION_GATE=CLOSED。
+
+[20项回答](DCL-R6-TR-A/TRA_FINAL_DECISION.md) · [具体差异](DCL-R6-TR-A/TRA_COUNTEREXAMPLES.md) · [行政封存](DCL-R6-TR-A/TRA_ADMIN_FINALIZER_RESULTS.md) · [证据索引](DCL-R6-TR-A/EVIDENCE_INDEX.md) · [下一适配范围](DCL-R6-TR-A/NEXT_PLATFORM_ADMISSION_REQUEST.md)
+
+以下逐字节保留先前记录。
+
+---
+
+## DCL-R6-TerminalRead 最终静态增量（2026-11-13）
+
+**TerminalRead-static-1/r1已冻结，新增原生执行0。** 独立终态只读接口复用原window/journal/phase/关闭/退出证据，活动态守卫保持；native在原退出等待之后接入只读前提及CLOSED活动拒绝回执。原host finalizer/entry字节保持，内部缺关闭收据的UNKNOWN不升级。
+
+59文件/41程序、28静态断言、13字节程序/70成员AST核验；新增TR40/8mutant全部UNRUN。正常A硬3649、完整硬67730；本轮WSL/T0/预算/套件/模型运行0。TR-G1=PASS_STATIC、G2=CONDITIONAL_PASS、G3=PARTIAL、G4=PASS_STATIC。历史PFA native UNRESOLVED/internal UNKNOWN/admin成功保持。
+
+RESOURCE_GATE_PASS=NOT_OBTAINED；F1/F4=UNRUN_RESOURCE_GATE；STRICT_SEPARATION_INSTANCES=0；IMPLEMENTATION_GATE=CLOSED。下一步限于审阅独立新batch13-r1正常A，当前没有实际回执或运行实体。
+
+[最终裁决](DCL-R6-TerminalRead-Fix/FINAL_DECISION.md) · [只读合同](DCL-R6-TerminalRead-Fix/TERMINAL_EVIDENCE_CONTRACT.md) · [native依赖](DCL-R6-TerminalRead-Fix/NATIVE_SEAL_DEPENDENCY_ANALYSIS.md) · [下一申请](DCL-R6-TerminalRead-Fix/NEXT_DYNAMIC_AUTHORIZATION.md) · [证据索引](DCL-R6-TerminalRead-Fix/EVIDENCE_INDEX.md)
+
+以下逐字节保留先前记录。
+
+---
+
+## DCL-R6-PTA-PF-A 最新动态增量（2026-11-12）
+
+**batch12/r3真实进入RUNNING、C00通过；PT64=55 PASS＋9变异检出，PF48=40 PASS＋8变异检出。完整A验收INCONCLUSIVE。** R1907、1907事务/3814行；正常自动CLOSED、waitpid0与角色/组空；自动行政包171/172逐流核验通过。native seal在终态期限辅助路径经G.state被拒绝，状态UNRESOLVED、未生成原生包；内部UNKNOWN与观测缺口保持。
+
+入口1次、源码修改/测试重跑/人工清理/额外兜底归档0。先对终态只读期限与必要观测作最小静态补缺，再新身份/锁/授权验收；当前不恢复MR/C09或模型。RESOURCE_GATE_PASS=NOT_OBTAINED；F1/F4=UNRUN_RESOURCE_GATE；STRICT_SEPARATION_INSTANCES=0；IMPLEMENTATION_GATE=CLOSED。
+
+[21项回答](DCL-R6-PTA-PF-A/PFA_FINAL_DECISION.md) · [新缺口](DCL-R6-PTA-PF-A/PFA_COUNTEREXAMPLES.md) · [自动行政](DCL-R6-PTA-PF-A/PFA_ADMIN_FINALIZER_RESULTS.md) · [证据索引](DCL-R6-PTA-PF-A/EVIDENCE_INDEX.md) · [下一静态范围](DCL-R6-PTA-PF-A/NEXT_STATIC_REPAIR_REQUEST.md)
+
+以下逐字节保留先前记录。
+
+---
+
+## PTA-PhaseFinalizer 最终静态增量（2026-11-12）
+
+**PTA-PhaseFinalizer-static-1/r3已冻结，新增Native执行0。** 阶段发布与Root读取共享有界锁；行政收尾使用固定Root源bootstrap，装载前设置AS1GiB和单次30秒界，当前回执/登记角色身份与native/admin证据分轴。历史精确phase操作数继续UNKNOWN，PF-G1=PARTIAL；G2–4=CONDITIONAL_PASS，G5=PASS_STATIC。
+
+55文件/38程序、28静态断言、最终5项主机受控探针通过；PT64保持，PF48/8mutant实际UNRUN。新完整访问硬界66770，正常A硬2689；WSL/服务/预算/模型执行0。旧batch11 native成功与自动post失败原件保持；研究实施门CLOSED、严格分离0、F1/F4=UNRUN_RESOURCE_GATE。
+
+[最终裁决](DCL-R6-PTA-PhaseFinalizer-Fix/FINAL_DECISION.md) · [根因精化](DCL-R6-PTA-PhaseFinalizer-Fix/PHASE_DRIFT_ROOT_CAUSE.md) · [源码锁](DCL-R6-PTA-PhaseFinalizer-Fix/SOURCE_AND_INPUT_LOCK.md) · [下一有限申请](DCL-R6-PTA-PhaseFinalizer-Fix/NEXT_DYNAMIC_AUTHORIZATION.md) · [证据索引](DCL-R6-PTA-PhaseFinalizer-Fix/EVIDENCE_INDEX.md)
+
+以下逐字节保留先前记录。
+
+---
+
+## DCL-R6-PreT0-A 当前增量（2026-11-12）
+
+**阶段A未完整通过：batch11/r3正常初始化达到RUNTIME_ARMED，PT_RUNTIME_PHASE_DRIFT触发自动关闭；C00/PT64未执行。** T0/预算真实建立，R=0；角色与组空，额外兜底/人工清理0；native包44/45完整，host自动行政post因ModuleNotFoundError失败。内部早期UNKNOWN原件保留，最终关闭CLOSED_CLEANUP_CONFIRMED；本轮研究行政包单列。
+
+下一步限于phase/checkpoint一致性、隔离入口和有界收尾的最小静态审查；batch11保持关闭，后续新身份与动态许可单列。RESOURCE_GATE_PASS=NOT_OBTAINED；F1/F4=UNRUN_RESOURCE_GATE；STRICT_SEPARATION_INSTANCES=0；IMPLEMENTATION_GATE=CLOSED。
+
+[最终裁决](DCL-R6-PreT0-A/PTA_FINAL_DECISION.md) · [反例](DCL-R6-PreT0-A/PTA_COUNTEREXAMPLES.md) · [证据索引](DCL-R6-PreT0-A/EVIDENCE_INDEX.md) · [下一静态范围](DCL-R6-PreT0-A/NEXT_STATIC_REPAIR_REQUEST.md)
+
+---
+
+# PreT0修复后下一步（2026-11-12）
+
+静态版本PreT0Recovery-static-1/r3已冻结。优先审阅[有限A两种互斥模式](DCL-R6-PreT0-Fix/NEXT_DYNAMIC_AUTHORIZATION.md)：NORMAL_START验证预窗→真实state/counter/checkpoint→armed→C00/PT64→关闭；PREWINDOW_ABORT在T0前注入77，验证认证TCB期限、自动STOP/CLOSED、进程/应用分项及自动行政封存。当前批准模板均false，未创建Linux源/单位/T0/账。
+
+一个关闭实例不能承载另一模式，后续B完整C09/MR/C-S/门18及F1F4须必要A证据和新独立身份/最终摘要/明确授权。原MRA的UNKNOWN/原生seal失败及无预算事实保持，不能追溯升级；原CalDiag真实C09与38,729账保持。
+
+[静态结果](DCL-R6-PreT0-Fix/STATIC_VERIFICATION_RESULTS.md) · [seal边界](DCL-R6-PreT0-Fix/PRET0_SEALING_BOUNDARY.md)。全链300秒仍UNRESOLVED，协议实施门CLOSED。
+
+以下保留此前下一步。
+
+---
+
+# DCL-R6-MR-A 下一步（2026-11-12）
+
+先审阅[最小静态补缺](DCL-R6-MR-A/NEXT_STATIC_REPAIR_REQUEST.md)：初始PRE_WINDOW只读健康查询与ACTIVE运行态检查点分离；无T0时使用已认证启动TCB期限和Owner/child证据完成有限停止；预窗封存明确记录未初始化并保留原件。恢复/正式阶段仍严格要求state和预算，不能全局放开allow_uninitialized。
+
+本轮保持r5源码，未重跑。batch10-r5已有CLOSED，实际T0/R仍null；Root角色已退，producer UNKNOWN与原生seal失败保持。重新静态冻结并取得新明确独立A授权后，再验证合法启动、MR64、真实C09恢复及预声明自动关闭。当前不具备完整资源链/S34/门18/F1F4准入。
+
+[最终裁决](DCL-R6-MR-A/MRA_FINAL_DECISION.md) · [时间/资源](DCL-R6-MR-A/MRA_RUNTIME_AND_RESOURCE.md)。原资源硬限、历史事实及协议实施门保持。
+
+以下完整保留先前下一步。
+
+---
+
+# ManagerRecovery下一步（2026-11-12）
+
+本轮有限静态修复及独立r5冻结已完成。优先审阅[阶段A有限恢复/关闭诊断](DCL-R6-ManagerRecovery-Fix/NEXT_DYNAMIC_AUTHORIZATION.md)：新batch10-r5身份、最终46项摘要、64回归、真实C09→恢复→C10，再触发声明的返回78并验收自动STOP/CLOSED、退出、预算和seal。当前批准模板全false，实际控制目录/T0/账尚未创建。
+
+阶段A的原生行为、停止响应、系统调用属性和未知故障模型仍需实际证据；其成功仅覆盖当批范围。完整资源链/S34/门18及F1/F4应在充分A证据和新的独立版本/身份/执行授权后推进，当前CalDiag/batch09保持CLOSED。资源上限及协议实施门保持。
+
+[静态结果](DCL-R6-ManagerRecovery-Fix/STATIC_VERIFICATION_RESULTS.md) · [故障模型/关闭](DCL-R6-ManagerRecovery-Fix/AUTOMATIC_CLOSURE_GAP.md)。
+
+以下完整保留先前下一步记录。
+
+---
+
+# DCL-R6-CalDiag 下一步（2026-11-12）
+
+当前先准备恢复健康检查与失败关闭的最小静态修订，范围见[下一静态修复申请](DCL-R6-CalDiag/NEXT_STATIC_REPAIR_REQUEST.md)。重点为本批受保护PASS所对应的预期failed单位分类/清理策略，恢复前言及普通exit125的关闭收敛，等待恢复期间的Root监督责任与原校准截止。其他未审阅manager失败继续拒绝，原ACK/预算/AS/任务/墙钟合同保持。
+
+本轮源保持B09-AdmissionFix-static-1/r1，目标入口1次、测试重跑0，batch09-r1已由CLOSED吸收标记关闭。后续先新版本静态冻结，再申请新独立身份/执行锁的方案B校准；C10–C12/S34/门18及完整300秒实测责任仍需完成。F1/F4技术准入尚未成立，新的正式模型执行仍需明确授权及当批资源资格。
+
+[最终裁决](DCL-R6-CalDiag/CALDIAG_FINAL_DECISION.md) · [时间裁决](DCL-R6-CalDiag/CALDIAG_TIME_FEASIBILITY.md)。严格分离0及机制实施门CLOSED保持。
+
+以下完整保留此前下一步记录。
+
+---
+
+# DCL-R6-B09-Supplement 下一步（2026-11-12）
+
+静态补缺完成，最新版本B09-AdmissionFix-static-1/r1。当前推荐审阅[方案B：有限完整校准诊断](DCL-R6-B09-Supplement/NEXT_DYNAMIC_AUTHORIZATION.md)：匹配42项新摘要和batch09-r1身份，在原300秒/100,000校准界内单次运行全部冻结校准/门18，记录关键路径包络，首次失败/截止停止并封存，F1/F4保持关闭。当前动态执行尚未获本轮授权，批准模板均false，运行窗尚未建立。
+
+完整条件方案A另列，须有充分时间依据及新版本专项批准；全部当前资源资格真实通过后才自动F1→F4。B若先运行并关闭，后续A需新的独立身份/锁与相应许可。保持原硬限、原判断、原账单调及历史冻结，F2/F3仍按各自准入范围。
+
+[时间审查](DCL-R6-B09-Supplement/CALIBRATION_TIME_FEASIBILITY.md) · [最终裁决](DCL-R6-B09-Supplement/FINAL_DECISION.md) · [源码锁](DCL-R6-B09-Supplement/SOURCE_AND_INPUT_LOCK.md)。严格分离实例0，IMPLEMENTATION_GATE=CLOSED。
+
+以下完整保留先前下一步记录。
+
+---
+
+# DCL-R6-batch09 下一步（2026-11-12）
+
+本轮完成静态准备，依据用户授权中的启动前停止分支交付BLOCKED_STATIC_ADMISSION。当前完整条件动态授权已收到；匹配batch09的执行版本和必需覆盖尚待形成。
+
+下一项可审阅工作见[最小补充申请](DCL-R6-batch09/BATCH09_MINIMAL_SUPPLEMENT_REQUEST.md)：在独立cr09源包静态适配batch09命名空间/回执/argv并重锁；保留门17，补一项独立合成预算账异常拒绝及正控制；补齐300秒成功完成依据，或明确一次原界内条件尝试的准入责任。当前这些新增改动尚未实施，源码保持冻结，运行窗尚未建立。
+
+沿用旧batch08入口会指向历史路径；新版本先完成可审阅diff、语义与资源复核及精确冻结，再按对应授权进入单会话启动。F1→F4条件执行的原意保留，运行前仍需全部当前批次资源资格；F2/F3保留各自准入责任。
+
+[最终裁决](DCL-R6-batch09/BATCH09_FINAL_DECISION.md) · [资源重算](DCL-R6-batch09/BATCH09_RESOURCE_ACCOUNTING.md)。严格分离0及IMPLEMENTATION_GATE=CLOSED保持。
+
+以下为先前完整导航，旧阶段文字按相应时点理解。
+
+---
+
+# DCL-R6-batch08-Diag 最新最小诊断裁决（2026-11-12）
+
+PREFLIGHT_PASS / SAME_BOOT_CONFIRMED / C00_PASS：C00Ready-static-1/r2实际单会话启动，Root438/start4792跨exec；C00自查811/start4978同boot0cc7ff50…。真实1轮STARTING后2轮READY，首次凭据CR01–05 defer为NOT_READY，最终8项双侧全MATCH。wait返回区间0.149840881–0.155141782秒；精确pidfd/返回点未单独打点，D08-4总体FIELD_EVIDENCE_PARTIAL。
+
+64项获准合成检查全部接受：47 PASS＋17 MUTATION_DETECTED，独立reference无差异。R450/450持久事务/900行配对；T0后10.267560352秒按C00_DIAGNOSTIC_COMPLETE正常关闭，进程/父组为空，原生100条目seal保存。源码/权限修复、重跑/恢复0，batch09创建0。
+
+Full批准false，其余BC40/RootIPC56/C09H34/C01–C12/C09/S34/门17及F1/F4均未授权/未运行，RESOURCE_GATE_PASS仍NOT_OBTAINED。旧batch07具体失败字段保持UNRESOLVED；下一步可准备匹配新批次版本/锁的独立完整链，不恢复已CLOSED的batch08。D1-PBFT-SEAL/1.1原条件、强G覆盖、严格分离0、IMPLEMENTATION_GATE=CLOSED保持。
+
+[最终裁决](DCL-R6-batch08-Diag/BATCH08_DIAG_FINAL_DECISION.md) · [字段证据](DCL-R6-batch08-Diag/BATCH08_C00_FIELD_RESULTS.md) · [证据索引](DCL-R6-batch08-Diag/EVIDENCE_INDEX.md)
+
+以下完整保存本轮前历史导航，旧阶段许可/下一步/未创建文字按相应时点理解。
+
+---
+
+# DCL-R6-C00Ready-Fix 最新静态裁决（2026-11-11）
+
+C00Ready-static-1/r2在host冻结：原真实8项逐字段审计/诊断、exec-ready三态与14秒同窗口屏障、双次采样/pidfd/native lease、C00/C10票据前复查；具体batch07失败字段仍C00_FAILED_FIELD_UNRESOLVED。原sealed/一次认领/exec与RootIPC/C09逻辑保持，15旧程序字节和24预算/资格函数AST保持。
+
+CR-1/CR-4=PASS_STATIC，CR-2/CR-3=CONDITIONAL_PASS。64夹具/17mutant、24程序host语法/3.12文法和36项锁完成；native部署/查询/服务/测试/batch08创建0。最小C00_DIAGNOSTIC_ONLY完成后关闭，完整C/S/H/门/F1F4另需明确批准；新增449/512访问，完整cal硬上界62546≤100000，原300/1800及总1e6不扩。
+
+batch07同PID/boot启动前缀、R0及原失败原件保持；旧预算/历史/误副本/blocked by policy保持。D1-PBFT-SEAL/1.1原条件、强G覆盖、严格分离0、IMPLEMENTATION_GATE=CLOSED保持。
+
+[最终裁决](DCL-R6-C00Ready-Fix/FINAL_DECISION.md) · [batch08申请](DCL-R6-C00Ready-Fix/BATCH08_EXECUTION_REQUEST.md) · [证据索引](DCL-R6-C00Ready-Fix/EVIDENCE_INDEX.md)
+
+以下为本轮前完整保存的历史导航，各旧阶段许可/下一步/未创建文字按相应时点理解。
+
+---
+
+# DCL-R6-batch07 最新实际裁决（2026-11-11）
+
+RESOURCE_GATE_FAILED：BootContinuity-static-1/r4已实际单会话预检、sealed fd/一次认领、same-PID exec到Guard；活动boot060a08fc…、父PID828/start7252贯穿前缀。C00票据前服务复核抛BC_SERVICE_IDENTITY_OR_LIMITS，BOOT_START未发布；具体8路失配字段无快照，源码MainPID>0缺exec-ready屏障与Starting-only journal支持启动临态竞态假设。
+
+T0=73.768774900，R0/1000000；T0+0.309347559闭合、+0.327163166组空，普通父waitpid raw32000/exit125。原生22条目seal、23 native文件、32冻结文件、34事件/15内部命令及7条run journal封存；source/权限修复、case重试、resume与batch08创建均0。BC40、RootIPC56、C09H34、真实C09、C01–C12、S34/门17及F1/F4都未完成准入；PASS_BOUNDED授予0。
+
+下一步仅列有界exec-ready/稳定身份屏障及完整失败采样的最小静态修复方向，保持原身份/AS/ACK/停止断言。D1-PBFT-SEAL/1.1原条件、强G覆盖、严格分离0、IMPLEMENTATION_GATE=CLOSED保持。
+
+[batch07最终裁决](DCL-R6-batch07/BATCH07_FINAL_DECISION.md) · [首次失败](DCL-R6-batch07/BATCH07_COUNTEREXAMPLES.md) · [证据索引](DCL-R6-batch07/EVIDENCE_INDEX.md)
+
+以下为本轮启动前完整保留的历史导航，各旧阶段资格/许可/下一步按对应时点理解。
+
+---
+
+# DCL-R6-BootContinuity-Fix 最新静态裁决（2026-11-11）
+
+BootContinuity-static-1/r4已在host冻结：单次WSL受信入口、same-PID exec与封印fd/持久一次认领、Root/服务内fresh复查、同一Root进程C09一次恢复；原14份程序字节与24预算/资格函数AST保持。新增40模拟回归/10变异，21程序host语法及3.12文法通过，32项包无旧pyc。
+
+BC-1/BC-2/BC-4=PASS_STATIC；BC-3=CONDITIONAL_PASS。目标3.12原生编译、当前WSL/接口、真实启动及测试全部UNRUN；本轮新WSL调用/部署/服务/T0/账/batch07创建均为0。新许可须明确source-only、预检TCB120秒/AS1GiB、初始10秒ticket与同进程恢复；BC481与既有合计3231≤5000，运行1800/校准300及原硬额保持。
+
+batch06的三boot/109.295102秒/PREFLIGHT_FAILED与目标启动0保持；具体触发源BOOT_CHANGE_CAUSE_UNRESOLVED。D1-PBFT-SEAL/1.1原条件、强G覆盖、严格分离0、IMPLEMENTATION_GATE=CLOSED保持。
+
+[最终裁决](DCL-R6-BootContinuity-Fix/FINAL_DECISION.md) · [batch07申请](DCL-R6-BootContinuity-Fix/BATCH07_EXECUTION_REQUEST.md) · [证据索引](DCL-R6-BootContinuity-Fix/EVIDENCE_INDEX.md)
+
+以下完整保留本轮之前历史导航；旧阶段许可/下一步/未创建文字按各自记录时点理解。
+
+---
+
+# DCL-R6-batch06 最新裁决（2026-11-11）
+
+PREFLIGHT_FAILED / RESOURCE_GATE_FAILED_PREFLIGHT：RootIPC-static-1/r4基础hash/runtime/身份预检通过，六条冻结准备和授权安装完成；最终启动前boot由3f63d905…变为c92b8cbc…，same_boot检查失败，按首次失败规则停止。Launcher/模型启动0，T0/预算账未建立；56项RootIPC、34项C09H、C00–C12、S34、门17与F1/F4全部未运行。
+
+事后boot为b69460ad…，专用进程与父cgroup为空；out/private空，仅两份授权文件和44项实际Linux冻结源封存。具体WSL生命周期触发源待确认；后续先收敛同boot预检与入口交接的行政编排，当前重试/恢复/代码修复0、batch07创建0。
+
+batch05的RESOURCE_GATE_FAILED、R37293及原失败保持；D1-PBFT-SEAL/1.1原条件、强G覆盖、严格分离0和IMPLEMENTATION_GATE=CLOSED保持。
+
+[batch06最终裁决](DCL-R6-batch06/BATCH06_FINAL_DECISION.md) · [首次失败](DCL-R6-batch06/BATCH06_COUNTEREXAMPLES.md) · [证据索引](DCL-R6-batch06/EVIDENCE_INDEX.md)
+
+以下为本轮开始前完整保留的历史导航，各旧阶段许可/未创建/下一步文字按其记录时点理解。
+
+---
+
+# DCL-R6-RootIPC-Fix 最新静态裁决（2026-11-11）
+
+RootIPC-static-1/r4完成有限静态修复：Root共享intent发布前固定999:989/0600，Root私有与payload可读收据分离；ready/RPC/父waitpid加入停止fresh-read及有限回收。修改原2份源码、新增3份；原12程序及24预算/资格函数保持，56专项夹具/8变异与最终44项文件冻结。
+
+RI-1/RI-4=PASS_STATIC；RI-2/RI-3=CONDITIONAL_PASS。17份最终源码语法与44项host/Linuxhash通过；动态执行0，batch06未创建。下一动态申请绑定r4真实hash，并明确新增最多1个顺序降权探针TCB、完整C/C09H/IPC56/S/17门及资格后自动F1→F4。实际停止延迟和300秒可完成性仍待测量。
+
+batch05原RESOURCE_GATE_FAILED、R37,293、303事务、真实C09 NOT_EXERCISED与全部失败证据保持。D1-PBFT-SEAL/1.1、强G原条件、严格分离0、IMPLEMENTATION_GATE=CLOSED保持。
+
+[最终裁决](DCL-R6-RootIPC-Fix/FINAL_DECISION.md) · [batch06申请](DCL-R6-RootIPC-Fix/BATCH06_EXECUTION_REQUEST.md) · [证据索引](DCL-R6-RootIPC-Fix/EVIDENCE_INDEX.md)
+
+以下完整保留本轮开始前的历史导航；各旧阶段“下一步/许可/未创建”文字按对应时点理解。
+
+---
+
+# DCL-R6-batch05 最新结果（2026-11-11）
+
+实际RESOURCE_GATE_FAILED：C00–C08九项PASS；C09H34 accepted（28 PASS+6 MUTATION_DETECTED）；Root审查后intent变为root:root/0600，真实C09 uid999入口读取失败，持久ACK/交接退出见证尚未取得。预算37,293；payload在T0+20.927591657清空，Root约T0+300退出。C10–C12、S34、门17与F1/F4全部未运行；PASS_BOUNDED授予0。
+
+当前batch05保持CLOSED；下一研究动作仅为审查共享账跨身份owner/mode与C09闭合等待的静态修复范围，审计全部Root全局记账路径，并在独立版本冻结后处理匹配动态许可。实现修改、权限修复、重试、恢复与batch06创建均为0。D1-PBFT-SEAL/1.1原条件、强G覆盖、严格分离0和IMPLEMENTATION_GATE=CLOSED保持；候选机制继续先过可证伪分离声明及严格实例门。
+
+[batch05最终裁决](DCL-R6-batch05/BATCH05_FINAL_DECISION.md) · [首次失败](DCL-R6-batch05/BATCH05_COUNTEREXAMPLES.md) · [证据索引](DCL-R6-batch05/EVIDENCE_INDEX.md)
+
+以下为本批启动前保留的历史记录；其中旧阶段“下一步/未授权/未创建”文字按其阶段理解。
+
+---
+
+# 下一步：审阅C09Fix-static-1的batch05许可
+
+2026-11-11。当前获准静态修复已完成，真实代码/hash/argv及进程增量在[BATCH05_EXECUTION_REQUEST](DCL-R6-C09Fix/BATCH05_EXECUTION_REQUEST.md)。旧batch04保持CLOSED/37021账，不能恢复或复用资格。
+
+新许可需接受持久RPC、父协调器waitpid见证、34C09H回归及新增1个可信root行政进程；payload父4tasks不变。C09H完成路径2245/硬5000，完整cal硬62034，仍原300秒与100000访问。全部H性质、真实交接、C/S/17负向及F1/F4当前UNRUN。
+
+下一实际顺序为预检→C00–C08→C09H/root检查→真实C09收据/ACK/退出见证/VERIFIED→一次原窗恢复→C10–C12→原S34/门17/健康主账→资格→F1/F4。缺收据、监督失效、UNKNOWN或关键失败立即停，禁止只用exit23/PASS文件跳过。
+
+当前没有创建batch05、单位、预算或T0；不自动执行新版本。F2/F3、Casdoor/T1–T4、主系统和误副本处置保持范围之外。主机制门CLOSED、严格分离0。以下历史行动记录保留。
+
+---
+
+# 下一步：修复已观察到的C09监督器快照竞态
+
+2026-11-11。batch04已在首次关键失败关闭；完整证据见[BATCH04_COUNTEREXAMPLES](DCL-R6-batch04/BATCH04_COUNTEREXAMPLES.md)、[最终裁决](DCL-R6-batch04/BATCH04_FINAL_DECISION.md)。C02旧预付瓶颈已取得实际改善证据，当前阻断为停止器对预定launcher退出的误判。
+
+最小静态修复建议：pidfd readiness后重新读取可信状态，校验同boot/T0/launcher身份、预定退出承诺和一次恢复计数；必要时加入双方持久handoff。保持真正意外退出立即关闭、预算/时限及C09只恢复一次。需补有界竞态回归：读/等待间预定退出、无承诺退出、陈旧/跨boot承诺和关闭后恢复；先冻结新hash及命令后再取得匹配许可。
+
+本批原CLOSED/37021账/94native文件/冻结r4源完整保留，当前未修复或重跑。禁止恢复已关闭batch04、重置额度或自动创建batch05。S34和门17尚未验证，F1/F4仍UNRUN_RESOURCE_GATE；优先修复具体失败，F2/F3继续待进入。
+
+原D1条件、强G覆盖、严格分离0及主机制门CLOSED保持。以下为历史行动记录。
+
+---
+
+# 下一步：审阅BF-static-2/r4的独立动态执行申请
+
+2026-11-11。获准静态补缺已完成，入口为[NEXT_EXECUTION_AUTHORIZATION](DCL-R6-GapClosure/NEXT_EXECUTION_AUTHORIZATION.md)、[最终源码锁](DCL-R6-GapClosure/SOURCE_AND_INPUT_LOCK.md)、[未来全部argv](DCL-R6-GapClosure/evidence/FUTURE_COMMANDS.md)。
+
+旧batch03许可只绑定BF-static-1。r4的新公共核心、34个S正反job、17个门负向检查、强制资格链及新hash需要匹配的新执行许可；本轮静态授权不会迁移成动态资格。原batch03没有可恢复的C09运行窗口，当前冻结工件选择独立batch04申请，新运行目录/单位/receipt/账均未创建。
+
+完整scope为CALIBRATE_S1S9_THEN_F1_F4：同批完成C00–C12、RANGE、root原始重算/门检查及资格后自动F1→F4；无需届时重复询问同范围转换。另有明确校准专用scope及--calibrate-only开关，通过后关闭并封存，该关闭窗口不转为后续FORMAL。两种模式须与许可及执行锁一致。
+
+动态准入先重核真实环境、32关键文件（原31＋journalctl）、完整runtime树、22源缓存、全部输入、目录/单位/账户及36项属性；原3类资源上限保持。所有新增动作仍在cal300/100000、全批1000000/1800/1740与父tasks4内。任一关键未运行、失败、变异未检出、意外恢复或缺件即停止；禁止重置或自动新批次。
+
+当前RESOURCE_GATE_PASS=NOT_OBTAINED，S/C/F1/F4均未运行；严格分离0、主机制门CLOSED，旧32191消耗与47副本保持。以下为历史行动记录。
+
+---
+
+# 下一步：补齐本次必需的冻结测试与准入能力
+
+2026-11-11。本次batch03条件动态授权已接受，当前因RESOURCE_EVIDENCE_INCOMPLETE在启动前阻断；F1/F4保持UNRUN_RESOURCE_GATE。BF-static-1本身、运行时与1266项Linux摘要均匹配，问题定位为必须的精确范围故障/重复/并发/N+1测试及相应formal证据门缺失。
+
+[最小后续静态范围](DCL-R6-batch03/BATCH03_GAP_CLOSURE_SCOPE.md)已经具体列明：仅资源监督/测试新副本补足有界S1–S9夹具、全局计费覆盖、结果绑定和缺失/UNKNOWN拒绝门；五业务、资源上限与旧账保持。当前授权§9禁止修改BF-static-1，新增实现和新hash需先明确静态许可，完成新冻结版本后再绑定相应执行范围。
+
+本次无需重复确认C12后已批准的同范围自动F1→F4行为。当前版本没有可直接使用的校准后停止开关，禁止独立调case或依赖外部抢停绕过冻结调度。新执行前需使程序能核实全部必要条件，所有变更按真实源/输入/argv重新登记。
+
+当前只创建研究预检目录；运行batch03根、单位、账与窗口未初始化，访问发放0，自动重试/新批次0。原32191及47误副本保持。主机制门CLOSED、严格分离0。以下为历史行动记录。
+
+---
+
+# 下一步：审阅BF-static-1的独立batch03申请
+
+2026-11-11。已授权的BudgetFix静态修复、语法与调用检查、条件安全审查及真实hash冻结已完成。入口为[BATCH03_EXECUTION_REQUEST](DCL-R6-BudgetFix/BATCH03_EXECUTION_REQUEST.md)、[SOURCE_AND_INPUT_LOCK](DCL-R6-BudgetFix/SOURCE_AND_INPUT_LOCK.md)、[完整未来argv](DCL-R6-BudgetFix/evidence/FUTURE_COMMANDS.md)。
+
+后续执行需要新的明确资源窗口授权。当前程序在本批C00–C12全PASS后自动进入F1→F4，申请已把该行为与S1–S9范围故障证据缺口列明。若先要求完整范围故障验证或只授权校准，先冻结相应有界夹具/准入门的新版本；当前BF-static-1及历史工件保持。
+
+批准后须重核source/cache、完整runtime树、单位/账户/权限、唯一输入根，建立新batch03授权原文与receipt；再按锁定argv准备新目录/单位，启动固定校准。实际boot/T0/账只在获批后生成，同批C09预定恢复最多一次，禁止新免费窗口。软300/100000、总1000000/1800/1740、AS1GiB和父tasks4保持。
+
+当前RESOURCE_GATE_PASS=NOT_OBTAINED、F1/F4=UNRUN_RESOURCE_GATE、batch03=UNAUTHORIZED、IMPLEMENTATION_GATE=CLOSED、严格分离0。旧32191消耗与47误副本继续保留。以下为历史行动记录。
+
+---
+
+# batch02-Perf之后：先审批精确N范围的有限静态修复
+
+恢复：[Perf裁决](DCL-R6-batch02-Perf/FINAL_DECISION.md) → [修复比较](DCL-R6-batch02-Perf/PERF_REPAIR_OPTIONS.md) → [BUD安全证明](DCL-R6-batch02-Perf/PERF_BUDGET_SAFETY_PROOF.md) → [B03分阶段申请](DCL-R6-batch02-Perf/BATCH03_AUTHORIZATION_REQUEST.md)。
+
+1. 主选A0：已知最大N的资源child一次精确持久范围、一次委派；guard/probe资源层加amount/owner/范围、同锁global+phase cap、持久后截止复核；普通F1/F4 visit暂不改。用户需先批准新lc03静态修复范围，当前未写代码。
+2. 补真实prepare/sync-return/grant/child时标与有界遥测。现journal的COMMIT同戳不能测fsync；先验证BUD1–6/并发/故障/不回收/身份，再独立验收性能。源码计数收益不登记为已实现墙钟加速。
+3. 修复后锁实际源/pyc/runtime/输入/单位/完整argv，再申请独立batch03（总100万/1800/1740、AS1GiB/父tasks4、主选cal10万/300）。C02必须实际跑allocatorchild后才能通过；任何加窗另批，当前450/600仅备选。
+4. B02已关闭，不用32191或剩余算术额度重开；不自动建B03。误路径47文件保持只读，正确根唯一可信；未再次尝试删除/移动/改名/提权或其他接口。需要整理则独立受策略审批。
+5. RESOURCE_GATE尚未取得，兼容/模型未跑；原各阶段/业务五hash/失败/账/ZIP保持。原WS4 E2未决、协议1.1/D2/强G/零分离与主机制门CLOSED维持。
+
+新许可依据本轮Perf任务§1、§7、§9：修复代码、性能探针、实际校准及新环境均明确留待后续。当前只读分析已经完成，无需重复批准。以下为历史恢复记录。
+
+---
+# batch02关闭后：先审持久预付成本，再申请独立修订/诊断
+
+恢复：[本批裁决](DCL-R6-batch02/BATCH02_FINAL_DECISION.md) → [资源失败](DCL-R6-batch02/BATCH02_RESOURCE_CALIBRATION.md) → [账/停止](DCL-R6-batch02/BATCH02_RESOURCE_ACCOUNTING.md) → [失败登记](DCL-R6-batch02/BATCH02_COUNTEREXAMPLES.md)。本次已授权执行已按失败分支关闭，无需再申请已执行范围。
+
+1. C02尚未启动allocator child便耗尽300秒校准软窗口，保留原FAIL/信号9/Watchdog截止/32191预付。先静态审查预付粒度/持久屏障与计费安全不变量的成本匹配，提出具体资源层性能修订及有限诊断范围；当前未改代码/预算，不能凭此推断内存或协议失败。
+2. batch02已关闭，即使算术剩余967809与总窗口未耗尽也不可重开；没有C09计划恢复资格，不自动创建batch03。任何资源代码/输入/新诊断批次须新的版本/摘要及匹配授权。
+3. 五业务动态兼容、C03–C12及F1/F4均未运行。完整资源资格和运行时接口验收仍为模型前置；保留原域/不变量/费用/独立参考/变异和同批账要求，禁止缩域或跳门制造PASS。
+4. 证据正确封存在专用host batch02/native_snapshot及冻结LC副本，原ZIP31流已核。误路径重复副本保留，自动审批拒绝迁移/删除；其清理单独受当前系统策略限制，不操作Linux失败原件。
+5. 原账27/118.7340827与所有历史版本/失败/ZIP/L-C原件保持。原WS4 E2未决，协议1.1/D2条件结论/强G覆盖/严格分离0和主机制门CLOSED保持；不运行F2/F3、Casdoor、原生或外发。
+
+以下为历史恢复记录，以本批已关闭状态为准。
+
+---
+# DCL-R6-LC之后：审批新batch02动态范围
+
+恢复：[LC裁决](DCL-R6-LC/LC_FINAL_DECISION.md) → [静态证据](DCL-R6-LC/LC_STATIC_VERIFICATION.md) → [执行锁](DCL-R6-LC/LC_BATCH02_EXECUTION_LOCK.md) → [独立授权](DCL-R6-LC/LC_BATCH02_AUTHORIZATION_REQUEST.md)。LC已完整执行，同范围无需重复批准。
+
+1. 审批精确batch02范围：新Linux/host结果根、dclr6batch02.slice、独立root停止服务、13校准+1正式瞬态单位；复用固定LC源/runtime，统一100万/1800秒、1740提前停，校准软100000/300包含其中。
+2. 特殊映射/普通AS计账范围、外部TCB/共享日志/宿主、调度/挂起/终止假设须明确审查；新许可原文和Root收据按实际hash生成，当前没有伪许可或RESOURCE_GATE_PASS。未知映射/能力缺口止于诊断。
+3. 按执行锁外层Launcher命令推进C00–C12，关键FAIL/INCONCLUSIVE即停。C09只允许预声明exit23后的同boot/T0/deadline/counter一次--resume；其他退出/重启/过期拒绝，Parent代次/峰值范围分记。
+4. 只有资格原件/源/输入/当前OS事实全匹配才导入业务并原F1→F4；所有变异/参考/重放共享总账，覆盖缺口/soft cutoff保持INCONCLUSIVE或FINISHED_WITH_GAPS。源码/参数变更另锁版本与范围。
+5. 当前LC1–3 PASS_STATIC、LC4 CONDITIONAL_PASS；两单位inactive、out空、batch02未建/未授权；兼容/资源/模型仍未验证。原账/源码/失败/ZIP/历史hash、D1 1.1/D2/G覆盖、严格分离0及主机制门CLOSED保持。
+
+新许可依据来自本轮LC任务§4、§10、§13，明确将动态校准、业务导入及F1/F4留给下一阶段。以下为历史恢复记录。
+
+---
+# DCL-R6-LR之后：审批复用3.12及L-C静态配置/接入
+
+恢复：[LR裁决](DCL-R6-LR/LR_FINAL_DECISION.md) → [运行时候选](DCL-R6-LR/LR_RUNTIME_ROUTE_DECISION.md) → [三文件接入](DCL-R6-LR/LR_LINUX_ADAPTER_PLAN.md) → [L-C精确申请](DCL-R6-LR/LR_NEXT_AUTHORIZATION.md)。当前LR已完成，同范围检查无需重复申请。
+
+1. 下一决定为L2：批准CPY312-UBU24/1候选，以现有/usr/bin/python3.12的固定3.12.3/包/摘要进入L-C。原3.14合同保留，静态兼容尚无实测等价；当前不需要安装、升级、改默认Python。
+2. 单独审批L-C：仅新dcl-r6系统身份/组、lc01工作区、两个inactive单位及资源三文件接入；业务五文件原字节复制。允许明确的语法/单位文本校验和daemon-reload/readback，禁止启动payload/探针/校准/业务导入/F1/F4。所有目录/属性/命令/停止条件在申请中列明。
+3. L-C前复核runtime/包/源hash、manager失败范围、身份冲突和工具存在性。当前manager degraded仅观测mnt-e.mount失败，候选路径在根ext4，未修复/mount；已有资源值无限，专用身份/目录缺失。变更范围或关键能力不符即停止。
+4. L-C后冻结完整依赖/单位/八源/输入/启动与外部绝对停止命令，再申请batch02；A1–A5、统一账/deadline、AS1GiB与父tasks4及完整C00–C12须有真实证据，之后F1→F4。-I会忽略PYTHONHASHSEED，确定性用状态/轨迹实际验收。
+5. RESOURCE_GATE_PASS尚未取得，L-C/batch02仍UNAUTHORIZED，F1/F4仍UNRUN_RESOURCE_GATE；原WS4 E2未决，主机制门CLOSED/严格分离0。原27次/118.7340827秒/关闭deadline及全部版本/失败/ZIP/P/Envelope保持。
+
+新授权需求来自当前LR任务§3.3、§7–9，明确将版本兼容测试、配置和资源代码接入留给下一阶段。以下为历史恢复记录。
+
+---
+# DCL-R6-P之后：L阶段只读补缺与最小变更申请
+
+恢复：[P裁决](DCL-R6-P/P_FINAL_DECISION.md) → [AS4矩阵](DCL-R6-P/P_AS4_ASSUMPTION_MATRIX.md) → [L准确需求](DCL-R6-P/P_NEXT_STAGE_REQUIREMENTS.md)。P已授权并完整执行，同范围许可无需再申请。
+
+1. 先申请L-R中列明的有限只读命令：发现现有native Python3.14或本地包候选，核对专用身份、manager属性和目录/父层能力。当前两获准Python路径缺失；尚无版本/摘要/loader核验，不自行安装、回退或使用Windows Python。
+2. 根据实际补缺结果准备确切3.14.x/来源/摘要/路径和专用UID/目录/单位/权限变更清单。PID1 systemd已观察，无需当前追加启用；资源设置、建用户/目录/单位和Linux接入均需对应新授权。
+3. 保持资源三文件接入范围与五业务原hash；v3主动拒绝入口和所有历史源码不动。补齐首目标映像AS、继承/映射、父slice总tasks4、专用身份/代理封闭、统一账与绝对停止源，再冻结全命令/配置/输入摘要。
+4. batch02仍UNAUTHORIZED。正式合同/配置/动态校准及F1→F4许可须明确；P通过无法替代RESOURCE_GATE。当前P1 PASS_STATIC、P2 CONDITIONAL_PASS、P3 FAIL、P4/P5 PARTIAL，原WS4 E2=UNRESOLVED。
+5. 原27次/118.7340827秒/关闭deadline与全部失败、ZIP、版本保持。P命令耗时独立记账；未创建batch02或Linux活账。发行版只知命令期间运行，未主动停止且未额外查最终状态。D1 1.1、G覆盖、严格分离0及主机制门CLOSED保持。
+
+后续新许可依据来自本次P授权§1、§4、§5、§8、§11，明确只覆盖12条命令；本轮已完成该范围。以下保留历史恢复记录。
+
+---
+# DCL-R6-Envelope 下一步：先决定合同边界与平台 P 阶段
+
+恢复：[最终裁决](DCL-R6-Envelope/FINAL_DECISION.md) → [严格界](DCL-R6-Envelope/STRICT_MEMORY_BOUND_PROOF.md) → [具体架构](DCL-R6-Envelope/SELECTED_EXECUTION_ARCHITECTURE.md) → [授权申请](DCL-R6-Envelope/BATCH02_AUTHORIZATION_REQUEST.md)。
+
+1. 原 WS4 的 E2=UNRESOLVED；选定 C 的 AS4-PAYLOAD/1 仅为条件替代。先决定是否接受 Linux payload 指标、外部TCB/pre-exec边界和时间假设；保持原合同则停于当前障碍。
+2. 本次任务§8/§11要求新许可。先单独批准仅启动 Ubuntu-24.04、执行计划§2的12条只读平台 argv；当前三个 WSL2 发行版均 Stopped，无 Linux 内部命令执行。缺 systemd/native Python3.14/权限时先报缺项，安装/配置另列真实动作。
+3. 基于实际结果补齐 A1–A5、资源三文件平台接入及所有源/runtime/配置/输入/命令摘要；五业务文件保持字节一致。当前 v3 为部分静态候选，主动拒绝入口未改；停止追加无边界 guard 版本。
+4. 最终锁完整后申请独立 batch02 动态许可，授权状态保持UNAUTHORIZED。校准矩阵全部实际通过，再按冻结 F1→F4 执行；父slice总tasks4、同一总账/deadline、无自动补窗。当前 E4=PARTIAL_UNAUTHORIZED，未建新目录。
+5. batch01 已关闭/到期，27次/118.7340827秒和原失败/ZIP/版本全部保留。协议1.1、G覆盖/严格分离0及主机制门CLOSED保持。未执行F2/F3、原生、Casdoor、真实凭据和外发。
+
+以下保留历史恢复记录，当前状态以前置 Envelope 节为准。
+
+---
+# R6-Repair后续：先闭合前置包络，再新批次校准
+
+恢复：[FINAL_DECISION](DCL-R6-Repair/FINAL_DECISION.md) → [RESOURCE_FAILURE_ROOT_CAUSE](DCL-R6-Repair/RESOURCE_FAILURE_ROOT_CAUSE.md) → [RESOURCE_BOUND_PROOF](DCL-R6-Repair/RESOURCE_BOUND_PROOF.md) → [v3变更](DCL-R6-Repair/GUARD_V3_CHANGELOG.md)。
+
+1. batch01的deadline已过期并关闭，27次和118.7340827秒不变；不得重新启动它、清零或延长。原证据/ZIP及所有v1/v2锁已经复核。
+2. v3只是部分静态修订，正式main/calibrate入口因启动界/峰值时窗未闭合而显式拒绝。先选择并实现有可核资源语义的前置平台包络；不能改容差、用commit/采样或验证布尔代替证明。
+3. 新诊断批次草案见[NEXT_BATCH_AUTHORIZATION](DCL-R6-Repair/NEXT_BATCH_AUTHORIZATION.md)：独立root/授权账，建议≤100000访问/300秒/4GiB，仅资源诊断；技术前置未满足时不启动压力或模型。平台/依赖/配置新增动作另须精确范围，当前未授权。
+4. 需鉴别的单因素：Job setter最小页值/flags/实际布局；分配前后同Job current/Peak；限制前后/Resume/释放/退出时窗；Native失败码；完整父/WD/子孙/额度事务中断矩阵。原失败不追认通过。
+5. 只有完整RG-3及有效新授权成立，才恢复F1→F4。业务五文件与冻结输入保持；原协议1.1及G覆盖/零分离/主机制门关闭不变。当前F1/F4仍未运行，不推进F2/F3或原生。
+
+以下保留历史。
+
+---
+# DCL-R6阶段B后续：先修复资源资格
+
+恢复：[实际最终裁决](DCL-R6/R6_FINAL_DECISION.md) → [资源报告](DCL-R6/R6_RESOURCE_CALIBRATION_REPORT.md) → [机器清单](DCL-R6/evidence/stage_B/RUN_RESULTS.json)。专项许可已取得；F1/F4因RESOURCE_GATE_FAILED而未启动，不再以UNRUN_PERMISSION描述当前状态。
+
+1. 先解释Job提交峰值超过测试限额及HardWS峰值多一页的计账语义，形成与4GiB进程树峰值匹配的硬上界/判据；不能仅加容差、改用采样或commit来通过。
+2. 保留batch01/versions/v1/v2及首轮错误87、v2内存失败；起点、deadline和27次计数不清零。本批已按失败分支停止。后续若使用新批次/时间预算，须有相应明确范围；已批准同范围许可本身无需重复申请。
+3. 修复后完整校准未运行的独立WS、异常、超时、子树终止/中断与breakaway等项。全部RESOURCE_GATE_PASS才可F1→F4。当前没有任何协议PASS_BOUNDED或真实模型反例。
+4. 八个程序已创建但F1/F4部分未执行，仍需逐转换/域/语法/独立参考检查。正式模型失败时保留首个轨迹再分类协议/抽象/实现错误。R6阶段A规范及旧文原件见evidence/stage_A。
+5. F2/F3尚无由F1/F4提供的技术证据；原生T1–T4、Casdoor、账户和外发仍关闭，114请求后续计划上限保持。强G覆盖、严格分离0及机制实现门CLOSED不变。
+
+下方为阶段A/历史任务记录。
+
+---
+# DCL-R6下一步：F1/F4专项许可
+
+恢复：[R6最终裁决](DCL-R6/R6_FINAL_DECISION.md) → [工具/资源/许可合同](DCL-R6/R6_TOOLCHAIN_AND_PERMISSION.md) → [F1规格](DCL-R6/R6_F1_SPECIFICATION.md)与[F4双实现规格](DCL-R6/R6_F4_SPECIFICATION.md)。当前F1/F4均UNRUN_PERMISSION；不要从研究续轮推定执行许可。
+
+1. 当前允许的只读准备已完成。最小专项申请为：仅在D:/毕业设计/DCL-R6-isolated-verification/batch01创建八个验证/监督程序及输入，复用已有Python/标准库，无下载；资源校准合格后F1→F4执行baseline/变异/独立参考，保存全证据，单批100万访问/30分钟/4GiB进程树峰值。具体命令/文件在合同§4–5。
+2. 收到单独明确许可后，先绑定授权收据、实际代码/输入/工具哈希并验收硬资源门；工作集/提交口径或计数/墙钟无法认证则止于校准，模型不启动。当前没有执行收据。
+3. F1必须保留两个候选及acceptedHeads集合、独立Release ghost账、旧right迟到IO；F4独立参考不用DP的Post/终态/压缩，world来源标签与影响未来的Markov状态分开。所有实际统计当前null。
+4. 若运行后有反例，封存原输入/版本/轨迹再区分协议/假设/抽象/实现错误；所有修复/重跑共享本批限额，超限INCONCLUSIVE_LIMIT。完整有界通过只标PASS_BOUNDED，LEVEL-4一般证明和LEVEL-5外审另取。
+5. F2/F3、Casdoor构建/原生T1–T4、真实账户及外部联系仍需各自权限；原生114封顶计划/18081冻结保持。强G覆盖/严格分离0及机制实现门CLOSED继续。
+
+以下为历史记录。
+
+---
+# DCL-R5下次恢复与验证优先级
+
+入口：[R5最终裁决](DCL-R5/R5_FINAL_DECISION.md) → [可证伪矩阵](DCL-R5/R5_CLAIM_VERIFICATION_MATRIX.md) → [构建/DB增量](DCL-R5/R5_SOURCE_BINARY_DELTA.md) → [S2复核](DCL-R5/R5_S2_CONTINUITY_AUDIT.md)。实现门保持CLOSED，严格分离0。
+
+1. 优先路线A。使用[阶段一审查包](DCL-R5/R5_BLIND_REVIEW_PACKAGE.md)准备独立异议；先封存外部初稿，再给R4/R5答案材料。当前未外发，联系/上传需相应授权。
+2. 申请最小[F1/F4验证](DCL-R5/R5_FORMAL_VERIFICATION_GATE.md)时，先绑定模型/配置/工具/监督器哈希及可强制的累计10^6访问状态、30分钟、进程树4GiB界；再做F2/F3。只读/纸面材料完整，模型代码及工具执行尚未授权。
+3. 原生实验使用[精确准入合同](DCL-R5/R5_NATIVE_EXPERIMENT_GATE.md)：新独立run目录、拟议28451、合成新账户/密钥、T1→T4→T2→T3、计划92/总封顶114、cleanup40含T3=12。先绑定harness/hook、构建/版本、同连接PRAGMA/Stats、fixture和执行权限；原工程/18081/历史秘密不复用。
+4. 继续只读补证限真实发行前后diff/日志、实际连接/代理串行层及新发现的官方/作者全文入口。官方asset摘要环已闭合；版本stamp提供dirty候选来源，不能据它排除其他修改。SC-A2A/Dyno正文仍缺，无新入口时保持状态。
+5. 论文采用[R5路线与贡献边界](DCL-R5/R5_RESEARCH_AND_THESIS_DECISION.md)。B工程化保留为后续路线；C独立创新需新输入及G必要额外代价实例，当前未启动。
+
+下面为历史恢复记录。
+
+---
+# DCL-R4下次恢复与最小验证任务
+
+恢复顺序：[R4最终裁决](DCL-R4/R4_FINAL_DECISION.md) → [1.1规范增量](DCL-R4/R4_PROTOCOL_REFINEMENT_DELTA.md) → [证明复核](DCL-R4/R4_PROOF_REVIEW.md) → [部署](DCL-R4/R4_DEPLOYMENT_REFINEMENT.md) → [B连续性](DCL-R4/R4_TASK_B_CONTINUITY.md)。R3规范/反例和全部历史保留，实现门关闭。
+
+1. 外部纸面复核准备已完成，入口为[DCL-R4审查包说明](DCL-R4/R4_EXTERNAL_REVIEW_PACKAGE.md)。挑战唯一child/旧钥/恢复、Ready秘密流、费用观察与B全部中间前缀。外部发送/上传/联系仍需对应明确授权，当前未执行。
+2. 只读补证优先为官方发行asset摘要/构建日志、dirty差异、实效DB/入口串行化记录，以及真正新的SC-A2A/Dyno正文入口；现有失败范围见R4_SOURCE_INDEX。避免将空元数据或重复入口记为新增核验。
+3. 如后续明确授权并满足适用门槛，可执行[形式化分层最小计划](DCL-R4/R4_FORMAL_VERIFICATION_PLAN.md)或[四条隔离原生轨迹](DCL-R4/R4_NATIVE_EXPERIMENT_PLAN.md)。后者拟议封顶114次，执行前核定逐端点依赖清单；冻结工程/账户与18081保持原状。当前均是待执行计划。
+4. 写论文可采用[贡献边界与段落](DCL-R4/R4_THESIS_CONTRIBUTION_BOUNDARY.md)：系统模型、条件协议、有限费用配置与具体源码审计；独立原创性/跨域实际部署/机器证明另待证。
+
+继续新机制前，先给具体输入族、固定指标、同能力最强G及必要代价差。I1/I2/I3保持归档，现有严格分离实例0；更多相同组件或变量不产生实现资格。
+
+以下为历史恢复记录，已完成项按R4最终裁决更新。
+
+---
+# DCL-R3下次可直接恢复的任务
+
+最新恢复入口：CURRENT_VERDICT的R3节 → R3_NOVELTY_DECISION → D1/BFT_RECONFIGURATION_PROTOCOL与PROOF_OBLIGATIONS_R3 → JOINT/R3_COMPOSITION_CONTRACT。原33输入/R1/R2归档保持冻结，实施门关闭。
+
+## 下一阶段决策
+
+本轮已完成NC1/NC2静态可行裁决、真实入口截止、COST1重新证明、具体顺序BFT实例及I1/I2/I3两轮反证。三个独立架构候选按覆盖/受阻归档。继续同类命名或更多变量无法补足严格差距；保留成熟工程和原生语义审计价值。
+
+最高价值的下一步是**对已闭合纸面实例取得独立异议/证明复核，并定点检查部署映射**：重点检查Seal不可回退/唯一child、无交集genesis验证、旧钥生命周期假设、转交空窗EnvClosure、B单Gate暂停失败和费用观察边界。材料可从上述三稿直接复查；本轮未外发，外部联系需相应授权。
+
+若继续仅做本地纸面研究，可选择以下具体任务：
+
+1. 为一个有限具体配置手工完成从RHO、空窗闭包到D2阈值证书的全分支走查，保留失败/UNKNOWN。严格Support(B)含Gate资格；若缺持续路径，先给该实例失败见证，不引入免费备用域。
+2. 只有出现真正新的官方/作者入口，才补SC-A2A或Dyno正文；记录未读定义/定理，不重复宽泛搜索。已有失败和读取范围见R3_SOURCE_INDEX/evidence/r3/web。
+3. 若目标转向可部署工程，先明确新增实现资格及用户授权。当前没有通过严格分离的待实现机制；机器验证/原生调度实验也保持未授权，已有源码/验收不动。
+
+R3条件协议可作为硕士论文系统架构/保证边界章节；独立主创新需要另一项有新输入和强G必要限制的实质性问题。当前未识别出已有必要下界的下一条分离任务。
+
+---
+
+# DCL-R2下次任务（历史）
+
+恢复顺序：CURRENT_VERDICT最新R2节 → CASDOOR_NATIVE_CONTRACT_AUDIT → NATIVE_SEMANTICS_REFINEMENT → STRONG_G_COVERAGE_AUDIT。R1已存revisions/DCL-R1，原33输入继续只读锁定。当前实施门关闭。
+
+## 当前最高优先级：独立静态核对精确反例与部署前提
+
+核对NC1/NC2/NC7与COST1，确认所审源码之外是否有whole-handler锁、同一DB事务或实际入口限制能排除这些轨迹。固定源码副本在evidence/r2/native/source，commit与哈希在SOURCE_LOCK.json；NC轨迹及局部行号在NATIVE_SEMANTICS_REFINEMENT。只读审查即可推进，受权新原生实验另行决定。
+
+对NC1重点核对F3有效父副本→V3/V4→F5的可执行性和真实DB提交模型；对NC7核对password RT省略secret及两个入口的所有前置filter。若出现排除该顺序的新证据，修正当前源码允许历史；实际复现之前保留SOURCE_ADMISSIBLE而非EXPERIMENT_OBSERVED。
+
+## 后续可直接执行的三项纸面工作
+
+1. **Gate B来源补齐**：SC-A2A官方发表日2026-10-13、卷页与作者已核，正文/实现仍缺。已有直取/stamp/出版方PDF/Crossref staging失败记录在evidence/r2/web。只跟进真正的新官方/作者全文入口，不重复宽泛搜索，也不联系作者或发送私有项目。
+2. **Gate C具体化**：选择一个成熟BFT状态服务/成员变更的明确版本，仅核对其接口如何保存RHO与当前资格/数据可用性；原生动作仍分域。加入选择需要的证据/信任与费用同等交给G。实际部署与代码继续受实施门控制。
+3. **费用与保持证明**：按D2累计费用阈值模型、非空Post和真实handler相位，对一个CD25-BOUND的最小RHO迁移作完整手工走查；同时确认CD25-LEAK的S_bypass不能由Q预算截断。预期产物为更严密的条件证明或反例，不预设严格优势。
+
+## 路线裁决
+
+S1–S4已完成本轮最小分离/反证尝试；没有存活的严格实例。可行的条件迁移/配置继续作为成熟组件工程底座，原生并发/入口/审计语义作为待独立确认的系统发现。只有新实例展示候选可达性质及G的必要额外代价，才重新登记机制实施资格。
+
+以下为R1恢复任务的历史记录，已执行项以本节和最新裁决为准。
+
+---
+
+# R1下次任务记录（历史）
+
+恢复入口：CURRENT_VERDICT → SEPARATION_GATE → 本文件。先读取 evidence/INPUT_MANIFEST.json 与最新用户指示；历史状态变化时重新锁定相应输入。当前实现门关闭，纸面与公开来源工作可继续。
+
+## 优先任务 A：有限原生 profile 的纸面精化
+
+读取：D1/PROTOCOL_SPEC T03/09/12/13/19、JOINT/COMPOSITION_PROOF_OBLIGATIONS CP2–5，以及当前 native_provider.py:151/192、reconciliation.py、M6 NATIVE_ISOLATION_PROFILE。
+
+构造一张“实际原生接口→请求/材料身份→原子竞争→派生覆盖→迟到拒绝→异步效果”对应表。只读公开 Casdoor 4.25.0 源码与已有 M3/M4/M6 证据，检验 E1 已看到密码时能否继续登录、枚举范围如何覆盖新派生、原生端是否存在对稳定 k 的终态化。
+
+预期产物：一个可复查的实际不可行输入，或一个精确的条件 profile；对每条映射标 S/T/N/P/U。若接口缺失，给最小新增原生能力及对 G 同等开放后的结论。此任务无需实账号操作或新代码，能直接检验目前最关键的模型前提。
+
+## 任务 B：直接近邻的窄范围补读
+
+1. SC-A2A：evidence/public_sources/SC_A2A_CROSSREF.json 已核作者/DOI；补出版方正文的协议、安全模型与撤销/迁移段，418 障碍保持记录。
+2. DISC2026 Fair Binding：官方题录/摘要已核，全文解析读取受限；补 witness validity、reserve/use 与重配置覆盖，判断隐藏状态联审是否产生直接覆盖。
+3. ALP §5、AH §§8–10 与 D1 T08–19 逐字段对照；公开草案实际证据已经足以支持概念重叠，具体 Provider 条件仍逐条核。
+4. Seal 当前设计/最佳实践与 Lit v3 当前 TEE/onchain 权限：冻结不可变版本，补秘密/子材料输出与回滚模型。保留 legacy Datil 检索片段与 v3 正文差异。
+5. 国内 CNKI/万方及 ESORICS/ACSAC/FC/TDSC/TIFS/ICDCS 的系统数据库查重仍未完成。先建立可复查题录与原文读取范围，再作优先权判断。
+
+## 任务 C：新的分离资格
+
+只有 A/B 补读产生了一个具体、标准 G 无法在相同能力/观察下匹配的性质，才登记新输入族和固定成本。先手工证明候选可行与 G 必要费用；若 G 通过相同闭包/博弈/工作流即可完成，新增 COVERED_BY_G 记录并停止该变体。当前不存在已经具备必要下界的待实现机制。
+
+可保留的硕士论文定位为：凭据生命周期威胁建模、原生接口可实现边界、条件跨域协议、联合配置规格与工程精化。其学术创新强度仍依赖实际 profile 发现、完整证明和先例补核。

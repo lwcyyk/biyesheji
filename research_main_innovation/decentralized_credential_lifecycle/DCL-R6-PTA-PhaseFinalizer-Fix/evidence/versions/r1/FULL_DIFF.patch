@@ -1,0 +1,4515 @@
+--- before/host/startup_finalize.py
++++ after/host/startup_finalize.py
+@@ -1,7 +1,7 @@
+ """Automatic host post-exit startup evidence seal; never grants runtime authority."""
+ import hashlib
+ import json
+-from pathlib import Path
++from pathlib import Path,PurePosixPath
+ import subprocess
+ import time
+ import zipfile
+@@ -9,6 +9,15 @@
+ 
+ def digest(p):return hashlib.sha256(Path(p).read_bytes()).hexdigest()
+ def write(p,x):Path(p).write_text(json.dumps(x,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
++
++def preserved_native_audit(package,control):
++    p=control/'STARTUP_NATIVE_AUDIT.json'
++    if not p.exists():return None
++    audit=json.loads(p.read_bytes());identity=json.loads((package/'inputs/batch_identity.json').read_bytes())
++    if (audit.get('batch_id')!=identity['batch_id'] or audit.get('source_revision')!=identity['revision'] or
++        audit.get('source_manifest_sha256')!=digest(package/'inputs/static_manifest.json') or
++        audit.get('execution_lock_sha256')!=digest(package/'inputs/execution_lock.json')):raise RuntimeError('PF_ADMIN_AUDIT_BINDING')
++    return audit
+ 
+ def frontend_abort(package,error):
+     """Host-only failed attempt: never assumes anything about a prior native run."""
+@@ -45,7 +54,8 @@
+     final=control/'STARTUP_FINALIZATION.json'
+     if final.exists():
+         previous=json.loads(final.read_bytes())
+-        if previous.get('administrative_seal_status')=='ADMIN_EVIDENCE_SEALED' and digest(control/'STARTUP_ADMIN_EVIDENCE.zip')==previous['ZIP_sha256']:
++        if (previous.get('administrative_seal_status')=='ADMIN_EVIDENCE_SEALED' and digest(control/'STARTUP_ADMIN_EVIDENCE.zip')==previous['ZIP_sha256'] and
++            digest(control/'STARTUP_ADMIN_MANIFEST.json')==previous['manifest_sha256']):
+             return previous
+         if previous.get('administrative_seal_status')=='NOT_REQUIRED_RUNTIME_NATIVE_SEAL':return previous
+         raise RuntimeError('PT_FINALIZATION_EXISTING_UNRESOLVED')
+@@ -54,25 +64,42 @@
+     write(control/'STARTUP_POSTEXIT_PLAN.json',plan);tick=time.perf_counter()
+     with (control/'STARTUP_POSTEXIT.stdout.raw').open('xb') as out,(control/'STARTUP_POSTEXIT.stderr.raw').open('xb') as err:
+         proc=subprocess.Popen(plan['argv'],stdin=subprocess.DEVNULL,stdout=out,stderr=err)
+-        try:code=proc.wait(timeout=35)
++        try:code=proc.wait(timeout=32)
+         except subprocess.TimeoutExpired:
+-            proc.terminate();code=124
++            proc.terminate()
++            try:proc.wait(timeout=max(.001,35-(time.perf_counter()-tick)))
++            except subprocess.TimeoutExpired:pass
++            code=124
+     result={'schema':'PT-HOST-FINALIZATION/1','post_exit_code':code,'active_exit':active_exit,'elapsed_seconds':time.perf_counter()-tick,
+             'administrative_seal_status':'ADMIN_EVIDENCE_UNRESOLVED','native_seal_status':'NATIVE_SEAL_UNRESOLVED'}
+     if code!=0:
++        audit=preserved_native_audit(package,control)
++        if audit is not None:result.update(native_seal_status=audit['native_seal_status'],preserved_native_audit=audit)
++        error={'schema':'PF-POSTEXIT-FAILURE/1','post_exit_code':code,'active_exit':active_exit,'sample_utc':datetime.now(timezone.utc).isoformat(),
++            'stdout_sha256':digest(control/'STARTUP_POSTEXIT.stdout.raw'),'stderr_sha256':digest(control/'STARTUP_POSTEXIT.stderr.raw'),
++            'native_seal_status':result['native_seal_status'],'runtime_originals_modified':False,'administrative_seal_status':'ADMIN_EVIDENCE_UNRESOLVED'}
++        write(control/'STARTUP_POSTEXIT_FAILURE.json',error)
+         write(final,result);return result
+     native=json.loads((control/'STARTUP_POSTEXIT.stdout.raw').read_bytes());result['native_audit']=native
++    saved=preserved_native_audit(package,control)
++    if saved is None or any(saved[k]!=native[k] for k in ('batch_id','source_revision','source_manifest_sha256','execution_lock_sha256','native_seal_status')):
++        raise RuntimeError('PF_POSTEXIT_AUDIT_MISMATCH')
+     result['native_seal_status']=native['native_seal_status'];result['process_cleanup_status']=native['process_cleanup_status']
+-    if native['administrative_export_status']=='NOT_REQUIRED_RUNTIME_NATIVE_SEAL':
+-        result['administrative_seal_status']='NOT_REQUIRED_RUNTIME_NATIVE_SEAL';write(final,result);return result
+-    if native['administrative_export_status']!='EXPORTED_QUIESCENT_STARTUP_EVIDENCE':write(final,result);return result
++    if native['administrative_export_status']!='EXPORTED_QUIESCENT_STARTUP_EVIDENCE':
++        write(control/'STARTUP_POSTEXIT_FAILURE.json',{'post_exit_code':code,'reason':native['administrative_export_status'],
++            'native_seal_status':native['native_seal_status'],'administrative_seal_status':'ADMIN_EVIDENCE_UNRESOLVED'})
++        write(final,result);return result
+     rows=[];folder=control/'startup_snapshot'
++    cfg=json.loads((package/'inputs/startup_contract.json').read_bytes())
++    if len(native['files'])>cfg['admin_max_files'] or sum(row['bytes'] for row in native['files'])>cfg['admin_max_bytes']:raise RuntimeError('PF_HOST_ADMIN_BOUND')
+     for row in native['files']:
++        rel=PurePosixPath(row['relative'])
++        if rel.is_absolute() or '..' in rel.parts or '\\' in row['relative'] or ':' in row['relative']:raise RuntimeError('PF_ADMIN_EXPORT_PATH')
+         p=folder/row['relative']
+         if digest(p)!=row['sha256']:raise RuntimeError('PT_ADMIN_COPY_HASH')
+         rows.append({'host':str(p),'archive_path':'startup/'+row['relative'],'bytes':p.stat().st_size,'sha256':digest(p)})
+     for name in ['TASK_REQUEST.txt','execution_authorization.json','WINDOWS_ENTRY_PLAN.json','WINDOWS_ENTRY_EXIT.json',
+-                 'windows_entry.stdout.raw','windows_entry.stderr.raw','STARTUP_POSTEXIT_PLAN.json','STARTUP_POSTEXIT.stdout.raw','STARTUP_POSTEXIT.stderr.raw']:
++                 'windows_entry.stdout.raw','windows_entry.stderr.raw','STARTUP_POSTEXIT_PLAN.json','STARTUP_POSTEXIT.stdout.raw','STARTUP_POSTEXIT.stderr.raw','STARTUP_NATIVE_AUDIT.json']:
+         p=control/name
+         if p.is_file():rows.append({'host':str(p),'archive_path':'host/'+name,'bytes':p.stat().st_size,'sha256':digest(p)})
+     for name in ['static_manifest.json','execution_lock.json','batch_identity.json','startup_contract.json']:
+--- before/host/windows_entry.py
++++ after/host/windows_entry.py
+@@ -28,6 +28,8 @@
+         raise SystemExit('MR_HOST_AUTHORIZATION_BINDING')
+     if auth['execution_lock_sha256']!=h(package/'inputs/execution_lock.json') or auth['static_manifest_sha256']!=h(package/'inputs/static_manifest.json'):raise SystemExit('AUTHORIZATION_HASH_MISMATCH')
+     if auth.get('SingleSession_exec_explicitly_approved') is not True or lock['windows_entry_sha256']!=h(Path(__file__)):raise SystemExit('ENTRY_NOT_APPROVED')
++    if auth.get('phase_finalizer_contract_sha256')!=h(package/'inputs/phase_finalizer_contract.json'):raise SystemExit('PF_CONTRACT_BINDING')
++    if auth['scope']=='PT_STARTUP_DIAGNOSTIC_ONLY' and auth.get('PhaseFinalizer_diagnostic_explicitly_approved') is not True:raise SystemExit('PF_SCOPE_NOT_APPROVED')
+     for rel,expected in json.loads((package/'inputs/static_manifest.json').read_text())['source_hashes'].items():
+         if h(package/'src'/rel)!=expected:raise SystemExit('SOURCE_DRIFT')
+     out=receipt_path.parent/'windows_entry.stdout.raw';err=receipt_path.parent/'windows_entry.stderr.raw'
+@@ -47,7 +49,13 @@
+         from startup_finalize import finalize
+         finalize(package,receipt_path.parent,code)
+     except BaseException as exc:
+-        (receipt_path.parent/'STARTUP_FINALIZATION_ERROR.json').write_text(json.dumps({'administrative_seal_status':'ADMIN_EVIDENCE_UNRESOLVED','error':repr(exc),'original_exit_code':code}),encoding='utf-8')
++        detail={'administrative_seal_status':'ADMIN_EVIDENCE_UNRESOLVED','error':repr(exc),'original_exit_code':code,'native_seal_status':'NATIVE_SEAL_UNRESOLVED'}
++        try:
++            from startup_finalize import preserved_native_audit
++            audit=preserved_native_audit(package,receipt_path.parent)
++            if audit is not None:detail.update(native_seal_status=audit['native_seal_status'],preserved_native_audit=audit)
++        except BaseException as audit_error:detail['audit_error']=repr(audit_error)
++        (receipt_path.parent/'STARTUP_FINALIZATION_ERROR.json').write_text(json.dumps(detail,ensure_ascii=False),encoding='utf-8')
+         if code==0:code=125
+     raise SystemExit(code)
+ 
+--- before/inputs/batch_identity.json
++++ after/inputs/batch_identity.json
+@@ -1,16 +1,16 @@
+ {
+   "schema": "DCL-BATCH-IDENTITY/1",
+-  "revision": "PreT0Recovery-static-1/r3",
+-  "batch_id": "batch11",
+-  "source_root": "/var/lib/dcl-r6/pt01",
+-  "runtime_root": "/var/lib/dcl-r6/batch11",
+-  "slice": "dclr6batch11.slice",
+-  "service_prefix": "dclr6batch11-",
+-  "host_package": "D:/毕业设计/DCL-R6-isolated-verification/pt01",
+-  "host_control": "D:/毕业设计/research_main_innovation/decentralized_credential_lifecycle/DCL-R6-PreT0-Fix/authorization/batch11-r5",
+-  "linux_control": "/mnt/d/毕业设计/research_main_innovation/decentralized_credential_lifecycle/DCL-R6-PreT0-Fix/authorization/batch11-r5",
++  "revision": "PTA-PhaseFinalizer-static-1/r1",
++  "batch_id": "batch12",
++  "source_root": "/var/lib/dcl-r6/pf01",
++  "runtime_root": "/var/lib/dcl-r6/batch12",
++  "slice": "dclr6batch12.slice",
++  "service_prefix": "dclr6batch12-",
++  "host_package": "D:/毕业设计/DCL-R6-isolated-verification/pf01",
++  "host_control": "D:/毕业设计/research_main_innovation/decentralized_credential_lifecycle/DCL-R6-PTA-PhaseFinalizer-Fix/authorization/batch12-r1",
++  "linux_control": "/mnt/d/毕业设计/research_main_innovation/decentralized_credential_lifecycle/DCL-R6-PTA-PhaseFinalizer-Fix/authorization/batch12-r1",
+   "authorization_filename": "execution_authorization.json",
+-  "authorization_text_filename": "BATCH11_AUTHORIZATION_TEXT.txt",
++  "authorization_text_filename": "BATCH12_AUTHORIZATION_TEXT.txt",
+   "operator_text_filename": "TASK_REQUEST.txt",
+   "cases": [
+     "C00",
+--- before/inputs/boot_contract.json
++++ after/inputs/boot_contract.json
+@@ -4,7 +4,7 @@
+   "driver_prepay": 11,
+   "freeze_revision": "r4",
+   "full_calibration_hard_visits": 65618,
+-  "future_batch_id": "batch11",
++  "future_batch_id": "batch12",
+   "jobs": [
+     {
+       "allowed_violations": [],
+--- before/inputs/c09_contract.json
++++ after/inputs/c09_contract.json
+@@ -1,5 +1,5 @@
+ {
+-  "future_batch_id": "batch11",
++  "future_batch_id": "batch12",
+   "handoff_seconds": 12,
+   "jobs": [
+     {
+--- before/inputs/dclr6batch11.slice
++++ after/inputs/dclr6batch11.slice
+@@ -1,7 +0,0 @@
+-[Unit]
+-Description=DCL R6 static preparation parent
+-[Slice]
+-TasksAccounting=yes
+-TasksMax=4
+-MemoryAccounting=yes
+-MemoryMax=4294967296
+--- before/inputs/dclr6batch12.slice
++++ after/inputs/dclr6batch12.slice
+@@ -0,0 +1,7 @@
++[Unit]
++Description=DCL R6 static preparation parent
++[Slice]
++TasksAccounting=yes
++TasksMax=4
++MemoryAccounting=yes
++MemoryMax=4294967296
+--- before/inputs/execution_lock.json
++++ after/inputs/execution_lock.json
+@@ -51,17 +51,19 @@
+     "startup_contract_sha256",
+     "PreT0_diagnostic_explicitly_approved",
+     "PreWindow_abort_injection_explicitly_approved",
+-    "startup_probe_mode"
+-  ],
+-  "authorization_source_filename": "BATCH11_AUTHORIZATION_TEXT.txt",
++    "startup_probe_mode",
++    "phase_finalizer_contract_sha256",
++    "PhaseFinalizer_diagnostic_explicitly_approved"
++  ],
++  "authorization_source_filename": "BATCH12_AUTHORIZATION_TEXT.txt",
+   "authorization_sources": {
+-    "receipt": "/mnt/d/毕业设计/research_main_innovation/decentralized_credential_lifecycle/DCL-R6-PreT0-Fix/authorization/batch11-r5/execution_authorization.json",
+-    "text": "/mnt/d/毕业设计/research_main_innovation/decentralized_credential_lifecycle/DCL-R6-PreT0-Fix/authorization/batch11-r5/TASK_REQUEST.txt"
++    "receipt": "/mnt/d/毕业设计/research_main_innovation/decentralized_credential_lifecycle/DCL-R6-PTA-PhaseFinalizer-Fix/authorization/batch12-r1/execution_authorization.json",
++    "text": "/mnt/d/毕业设计/research_main_innovation/decentralized_credential_lifecycle/DCL-R6-PTA-PhaseFinalizer-Fix/authorization/batch12-r1/TASK_REQUEST.txt"
+   },
+   "boot_continuity_limits": {
+     "Root_entry_AS_bytes": 1073741824,
+     "activation_TTL_seconds": 10,
+-    "calibration_hard_bound": 65618,
++    "calibration_hard_bound": 66770,
+     "combined_completed_bound": 3231,
+     "combined_hard_cap": 5000,
+     "completed_visits": 481,
+@@ -98,9 +100,9 @@
+     "F4",
+     "parent final seal"
+   ],
+-  "boot_contract_sha256": "17e52384e0d5081051dcdc8a2f3fe012833e61224798bfa8c951e583f9eae366",
++  "boot_contract_sha256": "3221664a05e92e33acbaec17e9bafa87cc4c21327e0da8cac6301d935982a9b9",
+   "budget_protocol": "EXACT-RANGE/1",
+-  "c09_contract_sha256": "cefa78cf540ee2aa2344f211fa65b263bb18d263218ebbb8b43c1d331824d99b",
++  "c09_contract_sha256": "4ec32a015a397b1ccf75e66c98ef29f0378ee6ed8d7a9f5480aa8a45fec190c2",
+   "c09_schedule": [
+     "C00-C08",
+     "C09H_34_SYNTHETIC_JOBS",
+@@ -125,20 +127,19 @@
+     "-I",
+     "-S",
+     "-B",
+-    "/var/lib/dcl-r6/pt01/src/guard.py",
++    "/var/lib/dcl-r6/pf01/src/guard.py",
+     "--role",
+     "launcher",
+     "--batch-root",
+-    "/var/lib/dcl-r6/batch11",
++    "/var/lib/dcl-r6/batch12",
+     "--calibrate-only"
+   ],
+   "calibration_schedule": [
+     "C00",
+-    "MANAGER_RECOVERY64_AND_PREPAID_NATIVE_REVIEW",
+-    "MANAGER_RECOVERY64_AND_PREPAID_NATIVE_REVIEW",
+-    "MANAGER_RECOVERY64_AND_PREPAID_NATIVE_REVIEW",
+-    "MANAGER_RECOVERY64_AND_PREPAID_NATIVE_REVIEW",
+-    "MANAGER_RECOVERY64_AND_PREPAID_NATIVE_REVIEW",
++    "PT64",
++    "PF48",
++    "READY64",
++    "MR_PREPAY_AND_MR64",
+     "C01",
+     "C02",
+     "C03",
+@@ -147,6 +148,9 @@
+     "C06",
+     "C07",
+     "C08",
++    "C09H",
++    "ROOT_IPC56",
++    "BOOT_CONTINUITY40",
+     "C09_EXPECTED_EXIT_RESUME_ONCE",
+     "C10",
+     "C11",
+@@ -165,7 +169,7 @@
+   "current_authorization": "STATIC_ONLY; all new dynamic receipts absent",
+   "dynamic_exact_range_tests": "34 inherited S jobs plus18 gate cases; ledger aggregate18 specimens/4 mutants; all UNRUN",
+   "execution_roots": [
+-    "/var/lib/dcl-r6/batch11"
++    "/var/lib/dcl-r6/batch12"
+   ],
+   "expected_C09_resume_command": {
+     "call": "guard.launcher(resume=True,calibrate_only=False)",
+@@ -174,11 +178,11 @@
+     "same_parent_PID": true
+   },
+   "expected_resume": "Exactly one C09 expected launcher-exit resume, same boot/T0/deadline/counter; unexpected exit closes batch",
+-  "export_lock_revision": "PT-r3",
++  "export_lock_revision": "PF-r1",
+   "external_stop_command": [
+     "/usr/bin/systemd-run",
+     "--no-block",
+-    "--unit=dclr6batch11-stop.service",
++    "--unit=dclr6batch12-stop.service",
+     "--property=Type=exec",
+     "--property=Restart=no",
+     "--property=User=root",
+@@ -186,14 +190,14 @@
+     "-I",
+     "-S",
+     "-B",
+-    "/var/lib/dcl-r6/pt01/src/guard.py",
++    "/var/lib/dcl-r6/pf01/src/guard.py",
+     "--role",
+     "external-stop",
+     "--batch-root",
+-    "/var/lib/dcl-r6/batch11"
++    "/var/lib/dcl-r6/batch12"
+   ],
+   "formal_schedule": "Original F1 baselines/mutants/replays/key predicates then F4 fixtures/G64/independent-reference/mutants; one worker; source and input hashes frozen",
+-  "freeze_revision": 3,
++  "freeze_revision": 1,
+   "gid": 989,
+   "journal_export_binary_sha256": "0b08431236d5c8249b42994c00b401b3c093dee837e0465a53658057820d05b7",
+   "journal_export_command": [
+@@ -202,35 +206,35 @@
+     "--no-pager",
+     "--output=json",
+     "--all",
+-    "--unit=dclr6batch11-c00.service",
+-    "--unit=dclr6batch11-c01.service",
+-    "--unit=dclr6batch11-c02.service",
+-    "--unit=dclr6batch11-c03.service",
+-    "--unit=dclr6batch11-c04.service",
+-    "--unit=dclr6batch11-c05.service",
+-    "--unit=dclr6batch11-c06.service",
+-    "--unit=dclr6batch11-c07.service",
+-    "--unit=dclr6batch11-c08.service",
+-    "--unit=dclr6batch11-c09.service",
+-    "--unit=dclr6batch11-c10.service",
+-    "--unit=dclr6batch11-c11.service",
+-    "--unit=dclr6batch11-c12.service",
+-    "--unit=dclr6batch11-formal.service",
+-    "--unit=dclr6batch11-range.service",
+-    "--unit=dclr6batch11-stop.service",
+-    "--unit=dclr6batch11-c09h.service"
+-  ],
+-  "journal_export_scope": "Only current boot exact17 batch11 service units after stop; include C09H; save raw stdout/stderr",
++    "--unit=dclr6batch12-c00.service",
++    "--unit=dclr6batch12-c01.service",
++    "--unit=dclr6batch12-c02.service",
++    "--unit=dclr6batch12-c03.service",
++    "--unit=dclr6batch12-c04.service",
++    "--unit=dclr6batch12-c05.service",
++    "--unit=dclr6batch12-c06.service",
++    "--unit=dclr6batch12-c07.service",
++    "--unit=dclr6batch12-c08.service",
++    "--unit=dclr6batch12-c09.service",
++    "--unit=dclr6batch12-c10.service",
++    "--unit=dclr6batch12-c11.service",
++    "--unit=dclr6batch12-c12.service",
++    "--unit=dclr6batch12-formal.service",
++    "--unit=dclr6batch12-range.service",
++    "--unit=dclr6batch12-stop.service",
++    "--unit=dclr6batch12-c09h.service"
++  ],
++  "journal_export_scope": "Only current boot exact17 batch12 service units after stop; include C09H; save raw stdout/stderr",
+   "launch_command": [
+     "/usr/bin/python3.12",
+     "-I",
+     "-S",
+     "-B",
+-    "/var/lib/dcl-r6/pt01/src/guard.py",
++    "/var/lib/dcl-r6/pf01/src/guard.py",
+     "--role",
+     "launcher",
+     "--batch-root",
+-    "/var/lib/dcl-r6/batch11"
++    "/var/lib/dcl-r6/batch12"
+   ],
+   "limits": [
+     1000000,
+@@ -244,22 +248,22 @@
+     "-I",
+     "-S",
+     "-B",
+-    "/var/lib/dcl-r6/pt01/src/guard.py",
++    "/var/lib/dcl-r6/pf01/src/guard.py",
+     "--role",
+     "launcher",
+     "--batch-root",
+-    "/var/lib/dcl-r6/batch11",
++    "/var/lib/dcl-r6/batch12",
+     "--resume"
+   ],
+   "payload_commands": {
+     "C00": [
+       "/usr/bin/systemd-run",
+       "--no-block",
+-      "--unit=dclr6batch11-c00.service",
++      "--unit=dclr6batch12-c00.service",
+       "--property=User=dcl-r6",
+       "--property=Group=dcl-r6",
+       "--property=Type=exec",
+-      "--property=Slice=dclr6batch11.slice",
++      "--property=Slice=dclr6batch12.slice",
+       "--property=LimitAS=1073741824:1073741824",
+       "--property=TasksMax=4",
+       "--property=TasksAccounting=yes",
+@@ -288,30 +292,30 @@
+       "--property=PrivateNetwork=yes",
+       "--property=RestrictNamespaces=yes",
+       "--property=RestrictAddressFamilies=AF_UNIX",
+-      "--property=ReadWritePaths=/var/lib/dcl-r6/batch11/out",
+-      "--property=WorkingDirectory=/var/lib/dcl-r6/batch11",
++      "--property=ReadWritePaths=/var/lib/dcl-r6/batch12/out",
++      "--property=WorkingDirectory=/var/lib/dcl-r6/batch12",
+       "--property=UnsetEnvironment=LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT PYTHONPATH PYTHONHOME",
+       "--property=InaccessiblePaths=/mnt /init /dev/hugepages /usr/lib/wsl /run/systemd/private /run/dbus /run/user",
+       "/usr/bin/python3.12",
+       "-I",
+       "-S",
+       "-B",
+-      "/var/lib/dcl-r6/pt01/src/guard.py",
++      "/var/lib/dcl-r6/pf01/src/guard.py",
+       "--role",
+       "controller",
+       "--batch-root",
+-      "/var/lib/dcl-r6/batch11",
++      "/var/lib/dcl-r6/batch12",
+       "--case",
+       "C00"
+     ],
+     "C01": [
+       "/usr/bin/systemd-run",
+       "--no-block",
+-      "--unit=dclr6batch11-c01.service",
++      "--unit=dclr6batch12-c01.service",
+       "--property=User=dcl-r6",
+       "--property=Group=dcl-r6",
+       "--property=Type=exec",
+-      "--property=Slice=dclr6batch11.slice",
++      "--property=Slice=dclr6batch12.slice",
+       "--property=LimitAS=1073741824:1073741824",
+       "--property=TasksMax=4",
+       "--property=TasksAccounting=yes",
+@@ -340,30 +344,30 @@
+       "--property=PrivateNetwork=yes",
+       "--property=RestrictNamespaces=yes",
+       "--property=RestrictAddressFamilies=AF_UNIX",
+-      "--property=ReadWritePaths=/var/lib/dcl-r6/batch11/out",
+-      "--property=WorkingDirectory=/var/lib/dcl-r6/batch11",
++      "--property=ReadWritePaths=/var/lib/dcl-r6/batch12/out",
++      "--property=WorkingDirectory=/var/lib/dcl-r6/batch12",
+       "--property=UnsetEnvironment=LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT PYTHONPATH PYTHONHOME",
+       "--property=InaccessiblePaths=/mnt /init /dev/hugepages /usr/lib/wsl /run/systemd/private /run/dbus /run/user",
+       "/usr/bin/python3.12",
+       "-I",
+       "-S",
+       "-B",
+-      "/var/lib/dcl-r6/pt01/src/guard.py",
++      "/var/lib/dcl-r6/pf01/src/guard.py",
+       "--role",
+       "controller",
+       "--batch-root",
+-      "/var/lib/dcl-r6/batch11",
++      "/var/lib/dcl-r6/batch12",
+       "--case",
+       "C01"
+     ],
+     "C02": [
+       "/usr/bin/systemd-run",
+       "--no-block",
+-      "--unit=dclr6batch11-c02.service",
++      "--unit=dclr6batch12-c02.service",
+       "--property=User=dcl-r6",
+       "--property=Group=dcl-r6",
+       "--property=Type=exec",
+-      "--property=Slice=dclr6batch11.slice",
++      "--property=Slice=dclr6batch12.slice",
+       "--property=LimitAS=1073741824:1073741824",
+       "--property=TasksMax=4",
+       "--property=TasksAccounting=yes",
+@@ -392,30 +396,30 @@
+       "--property=PrivateNetwork=yes",
+       "--property=RestrictNamespaces=yes",
+       "--property=RestrictAddressFamilies=AF_UNIX",
+-      "--property=ReadWritePaths=/var/lib/dcl-r6/batch11/out",
+-      "--property=WorkingDirectory=/var/lib/dcl-r6/batch11",
++      "--property=ReadWritePaths=/var/lib/dcl-r6/batch12/out",
++      "--property=WorkingDirectory=/var/lib/dcl-r6/batch12",
+       "--property=UnsetEnvironment=LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT PYTHONPATH PYTHONHOME",
+       "--property=InaccessiblePaths=/mnt /init /dev/hugepages /usr/lib/wsl /run/systemd/private /run/dbus /run/user",
+       "/usr/bin/python3.12",
+       "-I",
+       "-S",
+       "-B",
+-      "/var/lib/dcl-r6/pt01/src/guard.py",
++      "/var/lib/dcl-r6/pf01/src/guard.py",
+       "--role",
+       "controller",
+       "--batch-root",
+-      "/var/lib/dcl-r6/batch11",
++      "/var/lib/dcl-r6/batch12",
+       "--case",
+       "C02"
+     ],
+     "C03": [
+       "/usr/bin/systemd-run",
+       "--no-block",
+-      "--unit=dclr6batch11-c03.service",
++      "--unit=dclr6batch12-c03.service",
+       "--property=User=dcl-r6",
+       "--property=Group=dcl-r6",
+       "--property=Type=exec",
+-      "--property=Slice=dclr6batch11.slice",
++      "--property=Slice=dclr6batch12.slice",
+       "--property=LimitAS=1073741824:1073741824",
+       "--property=TasksMax=4",
+       "--property=TasksAccounting=yes",
+@@ -444,30 +448,30 @@
+       "--property=PrivateNetwork=yes",
+       "--property=RestrictNamespaces=yes",
+       "--property=RestrictAddressFamilies=AF_UNIX",
+-      "--property=ReadWritePaths=/var/lib/dcl-r6/batch11/out",
+-      "--property=WorkingDirectory=/var/lib/dcl-r6/batch11",
++      "--property=ReadWritePaths=/var/lib/dcl-r6/batch12/out",
++      "--property=WorkingDirectory=/var/lib/dcl-r6/batch12",
+       "--property=UnsetEnvironment=LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT PYTHONPATH PYTHONHOME",
+       "--property=InaccessiblePaths=/mnt /init /dev/hugepages /usr/lib/wsl /run/systemd/private /run/dbus /run/user",
+       "/usr/bin/python3.12",
+       "-I",
+       "-S",
+       "-B",
+-      "/var/lib/dcl-r6/pt01/src/guard.py",
++      "/var/lib/dcl-r6/pf01/src/guard.py",
+       "--role",
+       "controller",
+       "--batch-root",
+-      "/var/lib/dcl-r6/batch11",
++      "/var/lib/dcl-r6/batch12",
+       "--case",
+       "C03"
+     ],
+     "C04": [
+       "/usr/bin/systemd-run",
+       "--no-block",
+-      "--unit=dclr6batch11-c04.service",
++      "--unit=dclr6batch12-c04.service",
+       "--property=User=dcl-r6",
+       "--property=Group=dcl-r6",
+       "--property=Type=exec",
+-      "--property=Slice=dclr6batch11.slice",
++      "--property=Slice=dclr6batch12.slice",
+       "--property=LimitAS=1073741824:1073741824",
+       "--property=TasksMax=4",
+       "--property=TasksAccounting=yes",
+@@ -496,30 +500,30 @@
+       "--property=PrivateNetwork=yes",
+       "--property=RestrictNamespaces=yes",
+       "--property=RestrictAddressFamilies=AF_UNIX",
+-      "--property=ReadWritePaths=/var/lib/dcl-r6/batch11/out",
+-      "--property=WorkingDirectory=/var/lib/dcl-r6/batch11",
++      "--property=ReadWritePaths=/var/lib/dcl-r6/batch12/out",
++      "--property=WorkingDirectory=/var/lib/dcl-r6/batch12",
+       "--property=UnsetEnvironment=LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT PYTHONPATH PYTHONHOME",
+       "--property=InaccessiblePaths=/mnt /init /dev/hugepages /usr/lib/wsl /run/systemd/private /run/dbus /run/user",
+       "/usr/bin/python3.12",
+       "-I",
+       "-S",
+       "-B",
+-      "/var/lib/dcl-r6/pt01/src/guard.py",
++      "/var/lib/dcl-r6/pf01/src/guard.py",
+       "--role",
+       "controller",
+       "--batch-root",
+-      "/var/lib/dcl-r6/batch11",
++      "/var/lib/dcl-r6/batch12",
+       "--case",
+       "C04"
+     ],
+     "C05": [
+       "/usr/bin/systemd-run",
+       "--no-block",
+-      "--unit=dclr6batch11-c05.service",
++      "--unit=dclr6batch12-c05.service",
+       "--property=User=dcl-r6",
+       "--property=Group=dcl-r6",
+       "--property=Type=exec",
+-      "--property=Slice=dclr6batch11.slice",
++      "--property=Slice=dclr6batch12.slice",
+       "--property=LimitAS=1073741824:1073741824",
+       "--property=TasksMax=4",
+       "--property=TasksAccounting=yes",
+@@ -548,30 +552,30 @@
+       "--property=PrivateNetwork=yes",
+       "--property=RestrictNamespaces=yes",
+       "--property=RestrictAddressFamilies=AF_UNIX",
+-      "--property=ReadWritePaths=/var/lib/dcl-r6/batch11/out",
+-      "--property=WorkingDirectory=/var/lib/dcl-r6/batch11",
++      "--property=ReadWritePaths=/var/lib/dcl-r6/batch12/out",
++      "--property=WorkingDirectory=/var/lib/dcl-r6/batch12",
+       "--property=UnsetEnvironment=LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT PYTHONPATH PYTHONHOME",
+       "--property=InaccessiblePaths=/mnt /init /dev/hugepages /usr/lib/wsl /run/systemd/private /run/dbus /run/user",
+       "/usr/bin/python3.12",
+       "-I",
+       "-S",
+       "-B",
+-      "/var/lib/dcl-r6/pt01/src/guard.py",
++      "/var/lib/dcl-r6/pf01/src/guard.py",
+       "--role",
+       "controller",
+       "--batch-root",
+-      "/var/lib/dcl-r6/batch11",
++      "/var/lib/dcl-r6/batch12",
+       "--case",
+       "C05"
+     ],
+     "C06": [
+       "/usr/bin/systemd-run",
+       "--no-block",
+-      "--unit=dclr6batch11-c06.service",
++      "--unit=dclr6batch12-c06.service",
+       "--property=User=dcl-r6",
+       "--property=Group=dcl-r6",
+       "--property=Type=exec",
+-      "--property=Slice=dclr6batch11.slice",
++      "--property=Slice=dclr6batch12.slice",
+       "--property=LimitAS=1073741824:1073741824",
+       "--property=TasksMax=4",
+       "--property=TasksAccounting=yes",
+@@ -600,30 +604,30 @@
+       "--property=PrivateNetwork=yes",
+       "--property=RestrictNamespaces=yes",
+       "--property=RestrictAddressFamilies=AF_UNIX",
+-      "--property=ReadWritePaths=/var/lib/dcl-r6/batch11/out",
+-      "--property=WorkingDirectory=/var/lib/dcl-r6/batch11",
++      "--property=ReadWritePaths=/var/lib/dcl-r6/batch12/out",
++      "--property=WorkingDirectory=/var/lib/dcl-r6/batch12",
+       "--property=UnsetEnvironment=LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT PYTHONPATH PYTHONHOME",
+       "--property=InaccessiblePaths=/mnt /init /dev/hugepages /usr/lib/wsl /run/systemd/private /run/dbus /run/user",
+       "/usr/bin/python3.12",
+       "-I",
+       "-S",
+       "-B",
+-      "/var/lib/dcl-r6/pt01/src/guard.py",
++      "/var/lib/dcl-r6/pf01/src/guard.py",
+       "--role",
+       "controller",
+       "--batch-root",
+-      "/var/lib/dcl-r6/batch11",
++      "/var/lib/dcl-r6/batch12",
+       "--case",
+       "C06"
+     ],
+     "C07": [
+       "/usr/bin/systemd-run",
+       "--no-block",
+-      "--unit=dclr6batch11-c07.service",
++      "--unit=dclr6batch12-c07.service",
+       "--property=User=dcl-r6",
+       "--property=Group=dcl-r6",
+       "--property=Type=exec",
+-      "--property=Slice=dclr6batch11.slice",
++      "--property=Slice=dclr6batch12.slice",
+       "--property=LimitAS=1073741824:1073741824",
+       "--property=TasksMax=4",
+       "--property=TasksAccounting=yes",
+@@ -652,30 +656,30 @@
+       "--property=PrivateNetwork=yes",
+       "--property=RestrictNamespaces=yes",
+       "--property=RestrictAddressFamilies=AF_UNIX",
+-      "--property=ReadWritePaths=/var/lib/dcl-r6/batch11/out",
+-      "--property=WorkingDirectory=/var/lib/dcl-r6/batch11",
++      "--property=ReadWritePaths=/var/lib/dcl-r6/batch12/out",
++      "--property=WorkingDirectory=/var/lib/dcl-r6/batch12",
+       "--property=UnsetEnvironment=LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT PYTHONPATH PYTHONHOME",
+       "--property=InaccessiblePaths=/mnt /init /dev/hugepages /usr/lib/wsl /run/systemd/private /run/dbus /run/user",
+       "/usr/bin/python3.12",
+       "-I",
+       "-S",
+       "-B",
+-      "/var/lib/dcl-r6/pt01/src/guard.py",
++      "/var/lib/dcl-r6/pf01/src/guard.py",
+       "--role",
+       "controller",
+       "--batch-root",
+-      "/var/lib/dcl-r6/batch11",
++      "/var/lib/dcl-r6/batch12",
+       "--case",
+       "C07"
+     ],
+     "C08": [
+       "/usr/bin/systemd-run",
+       "--no-block",
+-      "--unit=dclr6batch11-c08.service",
++      "--unit=dclr6batch12-c08.service",
+       "--property=User=dcl-r6",
+       "--property=Group=dcl-r6",
+       "--property=Type=exec",
+-      "--property=Slice=dclr6batch11.slice",
++      "--property=Slice=dclr6batch12.slice",
+       "--property=LimitAS=1073741824:1073741824",
+       "--property=TasksMax=4",
+       "--property=TasksAccounting=yes",
+@@ -704,30 +708,30 @@
+       "--property=PrivateNetwork=yes",
+       "--property=RestrictNamespaces=yes",
+       "--property=RestrictAddressFamilies=AF_UNIX",
+-      "--property=ReadWritePaths=/var/lib/dcl-r6/batch11/out",
+-      "--property=WorkingDirectory=/var/lib/dcl-r6/batch11",
++      "--property=ReadWritePaths=/var/lib/dcl-r6/batch12/out",
++      "--property=WorkingDirectory=/var/lib/dcl-r6/batch12",
+       "--property=UnsetEnvironment=LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT PYTHONPATH PYTHONHOME",
+       "--property=InaccessiblePaths=/mnt /init /dev/hugepages /usr/lib/wsl /run/systemd/private /run/dbus /run/user",
+       "/usr/bin/python3.12",
+       "-I",
+       "-S",
+       "-B",
+-      "/var/lib/dcl-r6/pt01/src/guard.py",
++      "/var/lib/dcl-r6/pf01/src/guard.py",
+       "--role",
+       "controller",
+       "--batch-root",
+-      "/var/lib/dcl-r6/batch11",
++      "/var/lib/dcl-r6/batch12",
+       "--case",
+       "C08"
+     ],
+     "C09": [
+       "/usr/bin/systemd-run",
+       "--no-block",
+-      "--unit=dclr6batch11-c09.service",
++      "--unit=dclr6batch12-c09.service",
+       "--property=User=dcl-r6",
+       "--property=Group=dcl-r6",
+       "--property=Type=exec",
+-      "--property=Slice=dclr6batch11.slice",
++      "--property=Slice=dclr6batch12.slice",
+       "--property=LimitAS=1073741824:1073741824",
+       "--property=TasksMax=4",
+       "--property=TasksAccounting=yes",
+@@ -756,30 +760,30 @@
+       "--property=PrivateNetwork=yes",
+       "--property=RestrictNamespaces=yes",
+       "--property=RestrictAddressFamilies=AF_UNIX",
+-      "--property=ReadWritePaths=/var/lib/dcl-r6/batch11/out",
+-      "--property=WorkingDirectory=/var/lib/dcl-r6/batch11",
++      "--property=ReadWritePaths=/var/lib/dcl-r6/batch12/out",
++      "--property=WorkingDirectory=/var/lib/dcl-r6/batch12",
+       "--property=UnsetEnvironment=LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT PYTHONPATH PYTHONHOME",
+       "--property=InaccessiblePaths=/mnt /init /dev/hugepages /usr/lib/wsl /run/systemd/private /run/dbus /run/user",
+       "/usr/bin/python3.12",
+       "-I",
+       "-S",
+       "-B",
+-      "/var/lib/dcl-r6/pt01/src/guard.py",
++      "/var/lib/dcl-r6/pf01/src/guard.py",
+       "--role",
+       "controller",
+       "--batch-root",
+-      "/var/lib/dcl-r6/batch11",
++      "/var/lib/dcl-r6/batch12",
+       "--case",
+       "C09"
+     ],
+     "C09H": [
+       "/usr/bin/systemd-run",
+       "--no-block",
+-      "--unit=dclr6batch11-c09h.service",
++      "--unit=dclr6batch12-c09h.service",
+       "--property=User=dcl-r6",
+       "--property=Group=dcl-r6",
+       "--property=Type=exec",
+-      "--property=Slice=dclr6batch11.slice",
++      "--property=Slice=dclr6batch12.slice",
+       "--property=LimitAS=1073741824:1073741824",
+       "--property=TasksMax=4",
+       "--property=TasksAccounting=yes",
+@@ -808,30 +812,30 @@
+       "--property=PrivateNetwork=yes",
+       "--property=RestrictNamespaces=yes",
+       "--property=RestrictAddressFamilies=AF_UNIX",
+-      "--property=ReadWritePaths=/var/lib/dcl-r6/batch11/out",
+-      "--property=WorkingDirectory=/var/lib/dcl-r6/batch11",
++      "--property=ReadWritePaths=/var/lib/dcl-r6/batch12/out",
++      "--property=WorkingDirectory=/var/lib/dcl-r6/batch12",
+       "--property=UnsetEnvironment=LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT PYTHONPATH PYTHONHOME",
+       "--property=InaccessiblePaths=/mnt /init /dev/hugepages /usr/lib/wsl /run/systemd/private /run/dbus /run/user",
+       "/usr/bin/python3.12",
+       "-I",
+       "-S",
+       "-B",
+-      "/var/lib/dcl-r6/pt01/src/guard.py",
++      "/var/lib/dcl-r6/pf01/src/guard.py",
+       "--role",
+       "controller",
+       "--batch-root",
+-      "/var/lib/dcl-r6/batch11",
++      "/var/lib/dcl-r6/batch12",
+       "--case",
+       "C09H"
+     ],
+     "C10": [
+       "/usr/bin/systemd-run",
+       "--no-block",
+-      "--unit=dclr6batch11-c10.service",
++      "--unit=dclr6batch12-c10.service",
+       "--property=User=dcl-r6",
+       "--property=Group=dcl-r6",
+       "--property=Type=exec",
+-      "--property=Slice=dclr6batch11.slice",
++      "--property=Slice=dclr6batch12.slice",
+       "--property=LimitAS=1073741824:1073741824",
+       "--property=TasksMax=4",
+       "--property=TasksAccounting=yes",
+@@ -860,30 +864,30 @@
+       "--property=PrivateNetwork=yes",
+       "--property=RestrictNamespaces=yes",
+       "--property=RestrictAddressFamilies=AF_UNIX",
+-      "--property=ReadWritePaths=/var/lib/dcl-r6/batch11/out",
+-      "--property=WorkingDirectory=/var/lib/dcl-r6/batch11",
++      "--property=ReadWritePaths=/var/lib/dcl-r6/batch12/out",
++      "--property=WorkingDirectory=/var/lib/dcl-r6/batch12",
+       "--property=UnsetEnvironment=LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT PYTHONPATH PYTHONHOME",
+       "--property=InaccessiblePaths=/mnt /init /dev/hugepages /usr/lib/wsl /run/systemd/private /run/dbus /run/user",
+       "/usr/bin/python3.12",
+       "-I",
+       "-S",
+       "-B",
+-      "/var/lib/dcl-r6/pt01/src/guard.py",
++      "/var/lib/dcl-r6/pf01/src/guard.py",
+       "--role",
+       "controller",
+       "--batch-root",
+-      "/var/lib/dcl-r6/batch11",
++      "/var/lib/dcl-r6/batch12",
+       "--case",
+       "C10"
+     ],
+     "C11": [
+       "/usr/bin/systemd-run",
+       "--no-block",
+-      "--unit=dclr6batch11-c11.service",
++      "--unit=dclr6batch12-c11.service",
+       "--property=User=dcl-r6",
+       "--property=Group=dcl-r6",
+       "--property=Type=exec",
+-      "--property=Slice=dclr6batch11.slice",
++      "--property=Slice=dclr6batch12.slice",
+       "--property=LimitAS=1073741824:1073741824",
+       "--property=TasksMax=4",
+       "--property=TasksAccounting=yes",
+@@ -912,30 +916,30 @@
+       "--property=PrivateNetwork=yes",
+       "--property=RestrictNamespaces=yes",
+       "--property=RestrictAddressFamilies=AF_UNIX",
+-      "--property=ReadWritePaths=/var/lib/dcl-r6/batch11/out",
+-      "--property=WorkingDirectory=/var/lib/dcl-r6/batch11",
++      "--property=ReadWritePaths=/var/lib/dcl-r6/batch12/out",
++      "--property=WorkingDirectory=/var/lib/dcl-r6/batch12",
+       "--property=UnsetEnvironment=LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT PYTHONPATH PYTHONHOME",
+       "--property=InaccessiblePaths=/mnt /init /dev/hugepages /usr/lib/wsl /run/systemd/private /run/dbus /run/user",
+       "/usr/bin/python3.12",
+       "-I",
+       "-S",
+       "-B",
+-      "/var/lib/dcl-r6/pt01/src/guard.py",
++      "/var/lib/dcl-r6/pf01/src/guard.py",
+       "--role",
+       "controller",
+       "--batch-root",
+-      "/var/lib/dcl-r6/batch11",
++      "/var/lib/dcl-r6/batch12",
+       "--case",
+       "C11"
+     ],
+     "C12": [
+       "/usr/bin/systemd-run",
+       "--no-block",
+-      "--unit=dclr6batch11-c12.service",
++      "--unit=dclr6batch12-c12.service",
+       "--property=User=dcl-r6",
+       "--property=Group=dcl-r6",
+       "--property=Type=exec",
+-      "--property=Slice=dclr6batch11.slice",
++      "--property=Slice=dclr6batch12.slice",
+       "--property=LimitAS=1073741824:1073741824",
+       "--property=TasksMax=4",
+       "--property=TasksAccounting=yes",
+@@ -964,30 +968,30 @@
+       "--property=PrivateNetwork=yes",
+       "--property=RestrictNamespaces=yes",
+       "--property=RestrictAddressFamilies=AF_UNIX",
+-      "--property=ReadWritePaths=/var/lib/dcl-r6/batch11/out",
+-      "--property=WorkingDirectory=/var/lib/dcl-r6/batch11",
++      "--property=ReadWritePaths=/var/lib/dcl-r6/batch12/out",
++      "--property=WorkingDirectory=/var/lib/dcl-r6/batch12",
+       "--property=UnsetEnvironment=LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT PYTHONPATH PYTHONHOME",
+       "--property=InaccessiblePaths=/mnt /init /dev/hugepages /usr/lib/wsl /run/systemd/private /run/dbus /run/user",
+       "/usr/bin/python3.12",
+       "-I",
+       "-S",
+       "-B",
+-      "/var/lib/dcl-r6/pt01/src/guard.py",
++      "/var/lib/dcl-r6/pf01/src/guard.py",
+       "--role",
+       "controller",
+       "--batch-root",
+-      "/var/lib/dcl-r6/batch11",
++      "/var/lib/dcl-r6/batch12",
+       "--case",
+       "C12"
+     ],
+     "FORMAL": [
+       "/usr/bin/systemd-run",
+       "--no-block",
+-      "--unit=dclr6batch11-formal.service",
++      "--unit=dclr6batch12-formal.service",
+       "--property=User=dcl-r6",
+       "--property=Group=dcl-r6",
+       "--property=Type=exec",
+-      "--property=Slice=dclr6batch11.slice",
++      "--property=Slice=dclr6batch12.slice",
+       "--property=LimitAS=1073741824:1073741824",
+       "--property=TasksMax=4",
+       "--property=TasksAccounting=yes",
+@@ -1016,30 +1020,30 @@
+       "--property=PrivateNetwork=yes",
+       "--property=RestrictNamespaces=yes",
+       "--property=RestrictAddressFamilies=AF_UNIX",
+-      "--property=ReadWritePaths=/var/lib/dcl-r6/batch11/out",
+-      "--property=WorkingDirectory=/var/lib/dcl-r6/batch11",
++      "--property=ReadWritePaths=/var/lib/dcl-r6/batch12/out",
++      "--property=WorkingDirectory=/var/lib/dcl-r6/batch12",
+       "--property=UnsetEnvironment=LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT PYTHONPATH PYTHONHOME",
+       "--property=InaccessiblePaths=/mnt /init /dev/hugepages /usr/lib/wsl /run/systemd/private /run/dbus /run/user",
+       "/usr/bin/python3.12",
+       "-I",
+       "-S",
+       "-B",
+-      "/var/lib/dcl-r6/pt01/src/guard.py",
++      "/var/lib/dcl-r6/pf01/src/guard.py",
+       "--role",
+       "controller",
+       "--batch-root",
+-      "/var/lib/dcl-r6/batch11",
++      "/var/lib/dcl-r6/batch12",
+       "--case",
+       "FORMAL"
+     ],
+     "RANGE": [
+       "/usr/bin/systemd-run",
+       "--no-block",
+-      "--unit=dclr6batch11-range.service",
++      "--unit=dclr6batch12-range.service",
+       "--property=User=dcl-r6",
+       "--property=Group=dcl-r6",
+       "--property=Type=exec",
+-      "--property=Slice=dclr6batch11.slice",
++      "--property=Slice=dclr6batch12.slice",
+       "--property=LimitAS=1073741824:1073741824",
+       "--property=TasksMax=4",
+       "--property=TasksAccounting=yes",
+@@ -1068,19 +1072,19 @@
+       "--property=PrivateNetwork=yes",
+       "--property=RestrictNamespaces=yes",
+       "--property=RestrictAddressFamilies=AF_UNIX",
+-      "--property=ReadWritePaths=/var/lib/dcl-r6/batch11/out",
+-      "--property=WorkingDirectory=/var/lib/dcl-r6/batch11",
++      "--property=ReadWritePaths=/var/lib/dcl-r6/batch12/out",
++      "--property=WorkingDirectory=/var/lib/dcl-r6/batch12",
+       "--property=UnsetEnvironment=LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT PYTHONPATH PYTHONHOME",
+       "--property=InaccessiblePaths=/mnt /init /dev/hugepages /usr/lib/wsl /run/systemd/private /run/dbus /run/user",
+       "/usr/bin/python3.12",
+       "-I",
+       "-S",
+       "-B",
+-      "/var/lib/dcl-r6/pt01/src/guard.py",
++      "/var/lib/dcl-r6/pf01/src/guard.py",
+       "--role",
+       "controller",
+       "--batch-root",
+-      "/var/lib/dcl-r6/batch11",
++      "/var/lib/dcl-r6/batch12",
+       "--case",
+       "RANGE"
+     ]
+@@ -1101,9 +1105,9 @@
+       "root",
+       "-g",
+       "dcl-r6",
+-      "/var/lib/dcl-r6/batch11",
+-      "/var/lib/dcl-r6/batch11/inputs",
+-      "/var/lib/dcl-r6/batch11/reports"
++      "/var/lib/dcl-r6/batch12",
++      "/var/lib/dcl-r6/batch12/inputs",
++      "/var/lib/dcl-r6/batch12/reports"
+     ],
+     [
+       "/usr/bin/install",
+@@ -1114,7 +1118,7 @@
+       "dcl-r6",
+       "-g",
+       "dcl-r6",
+-      "/var/lib/dcl-r6/batch11/out"
++      "/var/lib/dcl-r6/batch12/out"
+     ],
+     [
+       "/usr/bin/install",
+@@ -1125,7 +1129,7 @@
+       "root",
+       "-g",
+       "root",
+-      "/var/lib/dcl-r6/batch11/inputs/root_private"
++      "/var/lib/dcl-r6/batch12/inputs/root_private"
+     ],
+     [
+       "/usr/bin/install",
+@@ -1135,13 +1139,13 @@
+       "root",
+       "-g",
+       "root",
+-      "/var/lib/dcl-r6/pt01/inputs/dclr6batch11.slice",
+-      "/etc/systemd/system/dclr6batch11.slice"
++      "/var/lib/dcl-r6/pf01/inputs/dclr6batch12.slice",
++      "/etc/systemd/system/dclr6batch12.slice"
+     ],
+     [
+       "/usr/bin/systemd-analyze",
+       "verify",
+-      "/etc/systemd/system/dclr6batch11.slice"
++      "/etc/systemd/system/dclr6batch12.slice"
+     ],
+     [
+       "/usr/bin/systemctl",
+@@ -1149,7 +1153,7 @@
+     ]
+   ],
+   "python": "/usr/bin/python3.12",
+-  "readiness_contract_sha256": "76a37579825e1422177d35f4b3a97ba910907054ee18ea9b0dedce3c3a31d7c6",
++  "readiness_contract_sha256": "a063f3fa16832de8c9a76131a3cdd02463437e2e29e52730f5cf31bafb75edde",
+   "readiness_limits": {
+     "calibration_seconds": 300,
+     "cases": [
+@@ -1168,7 +1172,7 @@
+     ],
+     "mutants": 17,
+     "new_actual_processes": 0,
+-    "new_calibration_hard": 65618,
++    "new_calibration_hard": 66770,
+     "old_calibration_hard": 62034,
+     "poll_seconds": 0.05,
+     "profile": "C00-READY/1",
+@@ -1207,7 +1211,7 @@
+   "required_root_ipc_profile": "ROOT-IPC/1",
+   "required_special_mapping_scope": "ORDINARY_AS_ACCOUNTED;KERNEL_SPECIALS_SEPARATELY_REVIEWED",
+   "required_test_mode": "RANGE_ONLY/1",
+-  "root_ipc_contract_sha256": "c5a018d1f16cfcda2f3f92311fa8cf7e61ffcf1ed9b8b82bc1cfba6218577bad",
++  "root_ipc_contract_sha256": "dbd53d1ab5cf2062345fa98bd29359345e07868a306842d2bfc92480d3dc3591",
+   "root_ipc_helper_contract": {
+     "alarm_seconds": 2,
+     "cleanup_seconds": 3,
+@@ -1234,7 +1238,7 @@
+     "combined_C09H_hard_visits": 5000,
+     "completed_upper_bound": 505,
+     "contract": "ROOT-IPC/1",
+-    "full_calibration_hard_visits": 65618,
++    "full_calibration_hard_visits": 66770,
+     "hard_visits": 512,
+     "jobs": 56,
+     "latency_guarantee": "UNMEASURED_CONDITIONAL",
+@@ -1264,16 +1268,16 @@
+     "F4",
+     "CLOSE_AND_PARENT_SEAL"
+   ],
+-  "safety_contract_sha256": "25a31bc9f3f3dac7a1c42756dca1871fabafa1b3e3c3113eeaf536af734955da",
++  "safety_contract_sha256": "17efd8711b12dc0a891442c844001888befe7f2ee21536e3aa3f9f3129a73fa5",
+   "safety_worker_commands": {
+     "S1.before.mutant": [
+       "/usr/bin/python3.12",
+       "-I",
+       "-S",
+       "-B",
+-      "/var/lib/dcl-r6/pt01/src/range_fixtures.py",
+-      "--batch-root",
+-      "/var/lib/dcl-r6/batch11",
++      "/var/lib/dcl-r6/pf01/src/range_fixtures.py",
++      "--batch-root",
++      "/var/lib/dcl-r6/batch12",
+       "--case-id",
+       "S1.before.mutant"
+     ],
+@@ -1282,9 +1286,9 @@
+       "-I",
+       "-S",
+       "-B",
+-      "/var/lib/dcl-r6/pt01/src/range_fixtures.py",
+-      "--batch-root",
+-      "/var/lib/dcl-r6/batch11",
++      "/var/lib/dcl-r6/pf01/src/range_fixtures.py",
++      "--batch-root",
++      "/var/lib/dcl-r6/batch12",
+       "--case-id",
+       "S1.before.safe"
+     ],
+@@ -1293,9 +1297,9 @@
+       "-I",
+       "-S",
+       "-B",
+-      "/var/lib/dcl-r6/pt01/src/range_fixtures.py",
+-      "--batch-root",
+-      "/var/lib/dcl-r6/batch11",
++      "/var/lib/dcl-r6/pf01/src/range_fixtures.py",
++      "--batch-root",
++      "/var/lib/dcl-r6/batch12",
+       "--case-id",
+       "S2.confirmed.mutant"
+     ],
+@@ -1304,9 +1308,9 @@
+       "-I",
+       "-S",
+       "-B",
+-      "/var/lib/dcl-r6/pt01/src/range_fixtures.py",
+-      "--batch-root",
+-      "/var/lib/dcl-r6/batch11",
++      "/var/lib/dcl-r6/pf01/src/range_fixtures.py",
++      "--batch-root",
++      "/var/lib/dcl-r6/batch12",
+       "--case-id",
+       "S2.confirmed.safe"
+     ],
+@@ -1315,9 +1319,9 @@
+       "-I",
+       "-S",
+       "-B",
+-      "/var/lib/dcl-r6/pt01/src/range_fixtures.py",
+-      "--batch-root",
+-      "/var/lib/dcl-r6/batch11",
++      "/var/lib/dcl-r6/pf01/src/range_fixtures.py",
++      "--batch-root",
++      "/var/lib/dcl-r6/batch12",
+       "--case-id",
+       "S2.unknown.mutant"
+     ],
+@@ -1326,9 +1330,9 @@
+       "-I",
+       "-S",
+       "-B",
+-      "/var/lib/dcl-r6/pt01/src/range_fixtures.py",
+-      "--batch-root",
+-      "/var/lib/dcl-r6/batch11",
++      "/var/lib/dcl-r6/pf01/src/range_fixtures.py",
++      "--batch-root",
++      "/var/lib/dcl-r6/batch12",
+       "--case-id",
+       "S2.unknown.safe"
+     ],
+@@ -1337,9 +1341,9 @@
+       "-I",
+       "-S",
+       "-B",
+-      "/var/lib/dcl-r6/pt01/src/range_fixtures.py",
+-      "--batch-root",
+-      "/var/lib/dcl-r6/batch11",
++      "/var/lib/dcl-r6/pf01/src/range_fixtures.py",
++      "--batch-root",
++      "/var/lib/dcl-r6/batch12",
+       "--case-id",
+       "S2.unsynced.mutant"
+     ],
+@@ -1348,9 +1352,9 @@
+       "-I",
+       "-S",
+       "-B",
+-      "/var/lib/dcl-r6/pt01/src/range_fixtures.py",
+-      "--batch-root",
+-      "/var/lib/dcl-r6/batch11",
++      "/var/lib/dcl-r6/pf01/src/range_fixtures.py",
++      "--batch-root",
++      "/var/lib/dcl-r6/batch12",
+       "--case-id",
+       "S2.unsynced.safe"
+     ],
+@@ -1359,9 +1363,9 @@
+       "-I",
+       "-S",
+       "-B",
+-      "/var/lib/dcl-r6/pt01/src/range_fixtures.py",
+-      "--batch-root",
+-      "/var/lib/dcl-r6/batch11",
++      "/var/lib/dcl-r6/pf01/src/range_fixtures.py",
++      "--batch-root",
++      "/var/lib/dcl-r6/batch12",
+       "--case-id",
+       "S3.committed.mutant"
+     ],
+@@ -1370,9 +1374,9 @@
+       "-I",
+       "-S",
+       "-B",
+-      "/var/lib/dcl-r6/pt01/src/range_fixtures.py",
+-      "--batch-root",
+-      "/var/lib/dcl-r6/batch11",
++      "/var/lib/dcl-r6/pf01/src/range_fixtures.py",
++      "--batch-root",
++      "/var/lib/dcl-r6/batch12",
+       "--case-id",
+       "S3.committed.safe"
+     ],
+@@ -1381,9 +1385,9 @@
+       "-I",
+       "-S",
+       "-B",
+-      "/var/lib/dcl-r6/pt01/src/range_fixtures.py",
+-      "--batch-root",
+-      "/var/lib/dcl-r6/batch11",
++      "/var/lib/dcl-r6/pf01/src/range_fixtures.py",
++      "--batch-root",
++      "/var/lib/dcl-r6/batch12",
+       "--case-id",
+       "S4.claimed.mutant"
+     ],
+@@ -1392,9 +1396,9 @@
+       "-I",
+       "-S",
+       "-B",
+-      "/var/lib/dcl-r6/pt01/src/range_fixtures.py",
+-      "--batch-root",
+-      "/var/lib/dcl-r6/batch11",
++      "/var/lib/dcl-r6/pf01/src/range_fixtures.py",
++      "--batch-root",
++      "/var/lib/dcl-r6/batch12",
+       "--case-id",
+       "S4.claimed.safe"
+     ],
+@@ -1403,9 +1407,9 @@
+       "-I",
+       "-S",
+       "-B",
+-      "/var/lib/dcl-r6/pt01/src/range_fixtures.py",
+-      "--batch-root",
+-      "/var/lib/dcl-r6/batch11",
++      "/var/lib/dcl-r6/pf01/src/range_fixtures.py",
++      "--batch-root",
++      "/var/lib/dcl-r6/batch12",
+       "--case-id",
+       "S5.conflict.mutant"
+     ],
+@@ -1414,9 +1418,9 @@
+       "-I",
+       "-S",
+       "-B",
+-      "/var/lib/dcl-r6/pt01/src/range_fixtures.py",
+-      "--batch-root",
+-      "/var/lib/dcl-r6/batch11",
++      "/var/lib/dcl-r6/pf01/src/range_fixtures.py",
++      "--batch-root",
++      "/var/lib/dcl-r6/batch12",
+       "--case-id",
+       "S5.conflict.safe"
+     ],
+@@ -1425,9 +1429,9 @@
+       "-I",
+       "-S",
+       "-B",
+-      "/var/lib/dcl-r6/pt01/src/range_fixtures.py",
+-      "--batch-root",
+-      "/var/lib/dcl-r6/batch11",
++      "/var/lib/dcl-r6/pf01/src/range_fixtures.py",
++      "--batch-root",
++      "/var/lib/dcl-r6/batch12",
+       "--case-id",
+       "S5.same.mutant"
+     ],
+@@ -1436,9 +1440,9 @@
+       "-I",
+       "-S",
+       "-B",
+-      "/var/lib/dcl-r6/pt01/src/range_fixtures.py",
+-      "--batch-root",
+-      "/var/lib/dcl-r6/batch11",
++      "/var/lib/dcl-r6/pf01/src/range_fixtures.py",
++      "--batch-root",
++      "/var/lib/dcl-r6/batch12",
+       "--case-id",
+       "S5.same.safe"
+     ],
+@@ -1447,9 +1451,9 @@
+       "-I",
+       "-S",
+       "-B",
+-      "/var/lib/dcl-r6/pt01/src/range_fixtures.py",
+-      "--batch-root",
+-      "/var/lib/dcl-r6/batch11",
++      "/var/lib/dcl-r6/pf01/src/range_fixtures.py",
++      "--batch-root",
++      "/var/lib/dcl-r6/batch12",
+       "--case-id",
+       "S6.concurrent.mutant"
+     ],
+@@ -1458,9 +1462,9 @@
+       "-I",
+       "-S",
+       "-B",
+-      "/var/lib/dcl-r6/pt01/src/range_fixtures.py",
+-      "--batch-root",
+-      "/var/lib/dcl-r6/batch11",
++      "/var/lib/dcl-r6/pf01/src/range_fixtures.py",
++      "--batch-root",
++      "/var/lib/dcl-r6/batch12",
+       "--case-id",
+       "S6.concurrent.safe"
+     ],
+@@ -1469,9 +1473,9 @@
+       "-I",
+       "-S",
+       "-B",
+-      "/var/lib/dcl-r6/pt01/src/range_fixtures.py",
+-      "--batch-root",
+-      "/var/lib/dcl-r6/batch11",
++      "/var/lib/dcl-r6/pf01/src/range_fixtures.py",
++      "--batch-root",
++      "/var/lib/dcl-r6/batch12",
+       "--case-id",
+       "S7.fsync.mutant"
+     ],
+@@ -1480,9 +1484,9 @@
+       "-I",
+       "-S",
+       "-B",
+-      "/var/lib/dcl-r6/pt01/src/range_fixtures.py",
+-      "--batch-root",
+-      "/var/lib/dcl-r6/batch11",
++      "/var/lib/dcl-r6/pf01/src/range_fixtures.py",
++      "--batch-root",
++      "/var/lib/dcl-r6/batch12",
+       "--case-id",
+       "S7.fsync.safe"
+     ],
+@@ -1491,9 +1495,9 @@
+       "-I",
+       "-S",
+       "-B",
+-      "/var/lib/dcl-r6/pt01/src/range_fixtures.py",
+-      "--batch-root",
+-      "/var/lib/dcl-r6/batch11",
++      "/var/lib/dcl-r6/pf01/src/range_fixtures.py",
++      "--batch-root",
++      "/var/lib/dcl-r6/batch12",
+       "--case-id",
+       "S7.short.mutant"
+     ],
+@@ -1502,9 +1506,9 @@
+       "-I",
+       "-S",
+       "-B",
+-      "/var/lib/dcl-r6/pt01/src/range_fixtures.py",
+-      "--batch-root",
+-      "/var/lib/dcl-r6/batch11",
++      "/var/lib/dcl-r6/pf01/src/range_fixtures.py",
++      "--batch-root",
++      "/var/lib/dcl-r6/batch12",
+       "--case-id",
+       "S7.short.safe"
+     ],
+@@ -1513,9 +1517,9 @@
+       "-I",
+       "-S",
+       "-B",
+-      "/var/lib/dcl-r6/pt01/src/range_fixtures.py",
+-      "--batch-root",
+-      "/var/lib/dcl-r6/batch11",
++      "/var/lib/dcl-r6/pf01/src/range_fixtures.py",
++      "--batch-root",
++      "/var/lib/dcl-r6/batch12",
+       "--case-id",
+       "S8.boot.mutant"
+     ],
+@@ -1524,9 +1528,9 @@
+       "-I",
+       "-S",
+       "-B",
+-      "/var/lib/dcl-r6/pt01/src/range_fixtures.py",
+-      "--batch-root",
+-      "/var/lib/dcl-r6/batch11",
++      "/var/lib/dcl-r6/pf01/src/range_fixtures.py",
++      "--batch-root",
++      "/var/lib/dcl-r6/batch12",
+       "--case-id",
+       "S8.boot.safe"
+     ],
+@@ -1535,9 +1539,9 @@
+       "-I",
+       "-S",
+       "-B",
+-      "/var/lib/dcl-r6/pt01/src/range_fixtures.py",
+-      "--batch-root",
+-      "/var/lib/dcl-r6/batch11",
++      "/var/lib/dcl-r6/pf01/src/range_fixtures.py",
++      "--batch-root",
++      "/var/lib/dcl-r6/batch12",
+       "--case-id",
+       "S8.closed.mutant"
+     ],
+@@ -1546,9 +1550,9 @@
+       "-I",
+       "-S",
+       "-B",
+-      "/var/lib/dcl-r6/pt01/src/range_fixtures.py",
+-      "--batch-root",
+-      "/var/lib/dcl-r6/batch11",
++      "/var/lib/dcl-r6/pf01/src/range_fixtures.py",
++      "--batch-root",
++      "/var/lib/dcl-r6/batch12",
+       "--case-id",
+       "S8.closed.safe"
+     ],
+@@ -1557,9 +1561,9 @@
+       "-I",
+       "-S",
+       "-B",
+-      "/var/lib/dcl-r6/pt01/src/range_fixtures.py",
+-      "--batch-root",
+-      "/var/lib/dcl-r6/batch11",
++      "/var/lib/dcl-r6/pf01/src/range_fixtures.py",
++      "--batch-root",
++      "/var/lib/dcl-r6/batch12",
+       "--case-id",
+       "S8.expired.mutant"
+     ],
+@@ -1568,9 +1572,9 @@
+       "-I",
+       "-S",
+       "-B",
+-      "/var/lib/dcl-r6/pt01/src/range_fixtures.py",
+-      "--batch-root",
+-      "/var/lib/dcl-r6/batch11",
++      "/var/lib/dcl-r6/pf01/src/range_fixtures.py",
++      "--batch-root",
++      "/var/lib/dcl-r6/batch12",
+       "--case-id",
+       "S8.expired.safe"
+     ],
+@@ -1579,9 +1583,9 @@
+       "-I",
+       "-S",
+       "-B",
+-      "/var/lib/dcl-r6/pt01/src/range_fixtures.py",
+-      "--batch-root",
+-      "/var/lib/dcl-r6/batch11",
++      "/var/lib/dcl-r6/pf01/src/range_fixtures.py",
++      "--batch-root",
++      "/var/lib/dcl-r6/batch12",
+       "--case-id",
+       "S8.lock.mutant"
+     ],
+@@ -1590,9 +1594,9 @@
+       "-I",
+       "-S",
+       "-B",
+-      "/var/lib/dcl-r6/pt01/src/range_fixtures.py",
+-      "--batch-root",
+-      "/var/lib/dcl-r6/batch11",
++      "/var/lib/dcl-r6/pf01/src/range_fixtures.py",
++      "--batch-root",
++      "/var/lib/dcl-r6/batch12",
+       "--case-id",
+       "S8.lock.safe"
+     ],
+@@ -1601,9 +1605,9 @@
+       "-I",
+       "-S",
+       "-B",
+-      "/var/lib/dcl-r6/pt01/src/range_fixtures.py",
+-      "--batch-root",
+-      "/var/lib/dcl-r6/batch11",
++      "/var/lib/dcl-r6/pf01/src/range_fixtures.py",
++      "--batch-root",
++      "/var/lib/dcl-r6/batch12",
+       "--case-id",
+       "S8.restart.mutant"
+     ],
+@@ -1612,9 +1616,9 @@
+       "-I",
+       "-S",
+       "-B",
+-      "/var/lib/dcl-r6/pt01/src/range_fixtures.py",
+-      "--batch-root",
+-      "/var/lib/dcl-r6/batch11",
++      "/var/lib/dcl-r6/pf01/src/range_fixtures.py",
++      "--batch-root",
++      "/var/lib/dcl-r6/batch12",
+       "--case-id",
+       "S8.restart.safe"
+     ],
+@@ -1623,9 +1627,9 @@
+       "-I",
+       "-S",
+       "-B",
+-      "/var/lib/dcl-r6/pt01/src/range_fixtures.py",
+-      "--batch-root",
+-      "/var/lib/dcl-r6/batch11",
++      "/var/lib/dcl-r6/pf01/src/range_fixtures.py",
++      "--batch-root",
++      "/var/lib/dcl-r6/batch12",
+       "--case-id",
+       "S9.exhausted.mutant"
+     ],
+@@ -1634,23 +1638,23 @@
+       "-I",
+       "-S",
+       "-B",
+-      "/var/lib/dcl-r6/pt01/src/range_fixtures.py",
+-      "--batch-root",
+-      "/var/lib/dcl-r6/batch11",
++      "/var/lib/dcl-r6/pf01/src/range_fixtures.py",
++      "--batch-root",
++      "/var/lib/dcl-r6/batch12",
+       "--case-id",
+       "S9.exhausted.safe"
+     ]
+   },
+   "schema": "C00Ready-execution-lock/1",
+-  "scope": "batch11-r1 only. Historical batch09 failed units are read-only reviewed using exact closed proofs. No reset-failed/global mutation. PhaseA stops after actual recovery/C10 by declared fault. Separate future phaseB cannot reuse CLOSED.",
+-  "source_directory": "/var/lib/dcl-r6/pt01/src",
++  "scope": "batch12-r1 only. Historical batch09 failed units are read-only reviewed using exact closed proofs. No reset-failed/global mutation. PhaseA stops after actual recovery/C10 by declared fault. Separate future phaseB cannot reuse CLOSED.",
++  "source_directory": "/var/lib/dcl-r6/pf01/src",
+   "source_mode": "SOURCE_ONLY/1",
+-  "source_version": "PreT0Recovery-static-1",
+-  "static_manifest_sha256": "34c9c4642c4ff8c68183845b66f49f1670efa3349ec82e07d80e8bbabfd86ab7",
++  "source_version": "PTA-PhaseFinalizer-static-1",
++  "static_manifest_sha256": "b666a3b1a078460f619660d64be938ecef9f92aebc977d45b1b1d8faeb0d7634",
+   "status": "STATIC_CANDIDATE_UNRUN",
+   "uid": 999,
+   "unit_slice_sha256": "0cedff23b26c5b09d550c882659e57b0cdf85dded070302f7b129401fa557337",
+-  "windows_entry_sha256": "e802304f8a69ba5c2d343b9128c406524b58428bb6187095d08fa9fea88b17f5",
++  "windows_entry_sha256": "3855a15d09309ddd7148db643c18474280477ab18d4bfee929ed9bf2c0981f88",
+   "windows_single_call": [
+     "C:\\Windows\\System32\\wsl.exe",
+     "--distribution",
+@@ -1662,10 +1666,10 @@
+     "-I",
+     "-S",
+     "-B",
+-    "/var/lib/dcl-r6/pt01/src/boot_continuity.py",
++    "/var/lib/dcl-r6/pf01/src/boot_continuity.py",
+     "--activate",
+     "--batch-root",
+-    "/var/lib/dcl-r6/batch11"
++    "/var/lib/dcl-r6/batch12"
+   ],
+   "launch_commands_by_scope": {
+     "CALIBRATE_S1S9_THEN_F1_F4": [
+@@ -1673,22 +1677,22 @@
+       "-I",
+       "-S",
+       "-B",
+-      "/var/lib/dcl-r6/pt01/src/guard.py",
++      "/var/lib/dcl-r6/pf01/src/guard.py",
+       "--role",
+       "launcher",
+       "--batch-root",
+-      "/var/lib/dcl-r6/batch11"
++      "/var/lib/dcl-r6/batch12"
+     ],
+     "CALIBRATE_S1S9_ONLY": [
+       "/usr/bin/python3.12",
+       "-I",
+       "-S",
+       "-B",
+-      "/var/lib/dcl-r6/pt01/src/guard.py",
++      "/var/lib/dcl-r6/pf01/src/guard.py",
+       "--role",
+       "launcher",
+       "--batch-root",
+-      "/var/lib/dcl-r6/batch11",
++      "/var/lib/dcl-r6/batch12",
+       "--calibrate-only"
+     ],
+     "MR_RECOVERY_DIAGNOSTIC_ONLY": [
+@@ -1696,11 +1700,11 @@
+       "-I",
+       "-S",
+       "-B",
+-      "/var/lib/dcl-r6/pt01/src/guard.py",
++      "/var/lib/dcl-r6/pf01/src/guard.py",
+       "--role",
+       "launcher",
+       "--batch-root",
+-      "/var/lib/dcl-r6/batch11",
++      "/var/lib/dcl-r6/batch12",
+       "--calibrate-only"
+     ],
+     "PT_STARTUP_DIAGNOSTIC_ONLY": [
+@@ -1708,11 +1712,11 @@
+       "-I",
+       "-S",
+       "-B",
+-      "/var/lib/dcl-r6/pt01/src/guard.py",
++      "/var/lib/dcl-r6/pf01/src/guard.py",
+       "--role",
+       "launcher",
+       "--batch-root",
+-      "/var/lib/dcl-r6/batch11",
++      "/var/lib/dcl-r6/batch12",
+       "--calibrate-only"
+     ]
+   },
+@@ -1728,9 +1732,9 @@
+     "root_qualification_reaudits": 2
+   },
+   "ledger_gate_schedule": "Root RANGE audit: original17 plus GATE-LEDGER-ANOMALY aggregate18 specimens; independent raw check before qualification",
+-  "ledger_gate_contract_sha256": "2e6023eb8f2259cc4920241e3233838f8038fe562877f9538ac63d6c4f91ba4a",
+-  "batch_identity_sha256": "92e33fda8780ac2772bbab050b0ac7877202ddb4fd3b1b9036d0fbec82f29b76",
+-  "static_revision": "PreT0Recovery-static-1/r3",
++  "ledger_gate_contract_sha256": "ec92fa6b5863b15e6d3ec47a43f88a69138a2f97baf5421f9b45b3e41f8e2f4b",
++  "batch_identity_sha256": "21453012696f307ba8b0891180042a362466f03c05858612eb8a740ffa5c1c8e",
++  "static_revision": "PTA-PhaseFinalizer-static-1/r1",
+   "manager_schedule": [
+     "C00 and READY64",
+     "MR native prepay256 + regression64",
+@@ -1749,9 +1753,9 @@
+     "native_review_credit": 256,
+     "phase_completed_visits": 1089,
+     "phase_hard_visits": 1536,
+-    "full_calibration_hard": 65618
++    "full_calibration_hard": 66770
+   },
+-  "manager_contract_sha256": "c4b9fda52851432f5a3763d42fe206cebc553d820c7bc56ed6522013e33ac76e",
++  "manager_contract_sha256": "9f1054575346b8f687ac7e0d45fb2c7a029bada8c7d710cc98e8cf0bb0c76202",
+   "manager_native_commands": {
+     "failed_set": [
+       "/usr/bin/systemctl",
+@@ -1779,26 +1783,26 @@
+     "stop_fallback": [
+       "/usr/bin/systemctl",
+       "stop",
+-      "dclr6batch11.slice"
++      "dclr6batch12.slice"
+     ],
+     "kill_fallback": [
+       "/usr/bin/systemctl",
+       "kill",
+       "--kill-whom=all",
+       "--signal=KILL",
+-      "dclr6batch11.slice"
++      "dclr6batch12.slice"
+     ],
+     "kernel_stop_targets": "Only exact Root-protected current owner/scheduler identities via verified pidfds; external self excluded"
+   },
+   "phase_A_diagnostic": {
+-    "scope": "MR_RECOVERY_DIAGNOSTIC_ONLY",
+-    "through": "C10 PASS",
+-    "fault": "MR_EXPECTED_DIAGNOSTIC_FAILURE",
+-    "expected_child_exit": 78,
++    "scope": "PT_STARTUP_DIAGNOSTIC_ONLY",
++    "mode": "NORMAL_START",
++    "through": "C00/PT64/PF48 then close",
+     "models_allowed": false,
+-    "automatic_retry": false
++    "automatic_retry": false,
++    "new_time_window": false
+   },
+-  "phase_B": "After required phaseA evidence, derive fresh namespace/exact digest for MR64/C09/full C-S-gate18 and F1/F4 if separately approved",
++  "phase_B": "REQUEST_ONLY: requires additional successful independent A evidence, new identity/digests and explicit authorization; current planned batch closes after minimal NORMAL_START",
+   "startup_post_exit_command": [
+     "C:\\Windows\\System32\\wsl.exe",
+     "--distribution",
+@@ -1810,7 +1814,7 @@
+     "-I",
+     "-S",
+     "-B",
+-    "/var/lib/dcl-r6/pt01/src/startup_lifecycle.py",
++    "/var/lib/dcl-r6/pf01/src/admin_postexit.py",
+     "--post-exit-export"
+   ],
+   "startup_schedule": [
+@@ -1824,23 +1828,49 @@
+     "STOP armed and parent resource checks",
+     "arm/work gate",
+     "C00",
+-    "NORMAL_START PT64 then close OR full inherited chain with PT64 added"
++    "NORMAL_START: PT64 then PF48 then close; full inherited chain requires a future independently approved version/scope"
+   ],
+   "startup_limits": {
+     "regression_hard": 1536,
+     "regression_completed": 1089,
+-    "normal_minimal_visits_hard": 1537,
+-    "full_calibration_hard": 65618,
++    "normal_minimal_visits_hard": 2689,
++    "full_calibration_hard": 66770,
+     "preflight_TCB_seconds": 120,
+     "new_time_window": false,
+     "admin_files": 256,
+     "admin_bytes": 33554432
+   },
+-  "startup_contract_sha256": "d93722dcfc4cd8ac7fd7bba4a2bef02b198c7de9cb4da2cfd5748315eab88257",
+-  "startup_host_finalizer_sha256": "c934b18de7bf7c865a2ea5f3eed2b5f9577d3db29a511f89b7411185ce4e1ed0",
++  "startup_contract_sha256": "9de6641c1b8593a9234bce33d28a9126ad1a8208e253f6dcd35cc70502a3c8ee",
++  "startup_host_finalizer_sha256": "faf15edbc8a766b69864fbb7c05c084d77030002dbb07bde4c78cfd7f38cc8cb",
+   "phase_A_modes": {
+-    "NORMAL_START": "New runtime/C00/PT64 then close. No READY64/MR64/C09/full C/S/gates/models",
++    "NORMAL_START": "Fresh prewindow/runtime/C00/PT64/PF48 then close/native and automatic admin seal. No READY64/MR64/C09/full C/S/gates/models",
+     "PREWINDOW_ABORT": "New prewindow context/health, explicit77 before runtime intent/T0; automatic post-exit administrative snapshot/seal"
+   },
+-  "phase_A_identity_rule": "Choose one mode for fresh batch11-r1; CLOSED/claim consumed; second mode requires new independent identity/lock/approval"
++  "phase_A_identity_rule": "NORMAL_START only for planned batch12-r1. PREWINDOW_ABORT and later stages require a separately frozen identity/lock and new authorization; no second free window",
++  "phase_finalizer_contract_sha256": "fc6681c936e9a046bde51fb4cabee02b5599bc8ee854677fd7a9db02234f0c42",
++  "phase_finalizer_schedule": [
++    "C00 PASS",
++    "unchanged PT64",
++    "PF48 with8 mutants",
++    "close and native seal",
++    "automatic checked admin_postexit entry",
++    "quiescent audit/snapshot and separate host administrative ZIP"
++  ],
++  "phase_finalizer_limits": {
++    "jobs": 48,
++    "safe": 40,
++    "mutants": 8,
++    "completed_visits": 817,
++    "hard_visits": 1152,
++    "normal_minimal_completed": 1907,
++    "normal_minimal_hard": 2689,
++    "full_calibration_hard": 66770,
++    "phase_lock_seconds": 2,
++    "phase_lock_attempts": 512,
++    "admin_quiescence_seconds": 5,
++    "admin_quiescence_samples": 128,
++    "native_admin_alarm_seconds": 30,
++    "host_postexit_seconds": 35,
++    "dynamic_status": "UNRUN"
++  }
+ }
+--- before/inputs/ledger_gate_contract.json
++++ after/inputs/ledger_gate_contract.json
+@@ -1,7 +1,7 @@
+ {
+   "schema": "GATE-LEDGER-ANOMALY/1",
+-  "version": "PreT0Recovery-static-1",
+-  "batch_id": "batch11",
++  "version": "PTA-PhaseFinalizer-static-1",
++  "batch_id": "batch12",
+   "jobs": [
+     {
+       "case_id": "L.healthy",
+--- before/inputs/manager_contract.json
++++ after/inputs/manager_contract.json
+@@ -1,8 +1,8 @@
+ {
+   "schema": "MANAGER-RECOVERY-CONTRACT/1",
+   "profile": "MANAGER-RECOVERY/1",
+-  "version": "PreT0Recovery-static-1/r3",
+-  "batch_id": "batch11",
++  "version": "PTA-PhaseFinalizer-static-1/r1",
++  "batch_id": "batch12",
+   "expected_cases": {
+     "C06": {
+       "Result": "signal",
+--- before/inputs/phase_finalizer_contract.json
++++ after/inputs/phase_finalizer_contract.json
+@@ -0,0 +1,1466 @@
++{
++  "schema": "PF-CONTRACT/1",
++  "version": "PTA-PhaseFinalizer-static-1/r1",
++  "batch_id": "batch12",
++  "profile": "PF-SIMULATION/1",
++  "driver_prepay": 16,
++  "completed_visits": 817,
++  "hard_visits": 1152,
++  "max_frames": 4,
++  "dynamic_status": "UNRUN",
++  "jobs": [
++    {
++      "case_id": "PF_SAFE_ready_inspection",
++      "mutant": null,
++      "violation_class": "NONE",
++      "allowed_violations": [],
++      "frames": [
++        {
++          "domain": "phase",
++          "facts": {
++            "closed": false,
++            "stop": false,
++            "binding": true,
++            "identity": true,
++            "deadline": true,
++            "lock_acquired": true,
++            "phase": "RUNTIME_READY",
++            "sequence": 4,
++            "committed": true,
++            "checkpoint_integrity": true,
++            "initialization_match": true,
++            "root_reader": true,
++            "private_phase": "RUNTIME_READY",
++            "private_sequence": 4,
++            "record_hash_match": true,
++            "work": false
++          },
++          "critical": true
++        }
++      ]
++    },
++    {
++      "case_id": "PF_SAFE_armed_work",
++      "mutant": null,
++      "violation_class": "NONE",
++      "allowed_violations": [],
++      "frames": [
++        {
++          "domain": "phase",
++          "facts": {
++            "closed": false,
++            "stop": false,
++            "binding": true,
++            "identity": true,
++            "deadline": true,
++            "lock_acquired": true,
++            "phase": "RUNTIME_ARMED",
++            "sequence": 5,
++            "committed": true,
++            "checkpoint_integrity": true,
++            "initialization_match": true,
++            "root_reader": true,
++            "private_phase": "RUNTIME_ARMED",
++            "private_sequence": 5,
++            "record_hash_match": true,
++            "work": true
++          },
++          "critical": true
++        }
++      ]
++    },
++    {
++      "case_id": "PF_SAFE_running_work",
++      "mutant": null,
++      "violation_class": "NONE",
++      "allowed_violations": [],
++      "frames": [
++        {
++          "domain": "phase",
++          "facts": {
++            "closed": false,
++            "stop": false,
++            "binding": true,
++            "identity": true,
++            "deadline": true,
++            "lock_acquired": true,
++            "phase": "RUNNING",
++            "sequence": 6,
++            "committed": true,
++            "checkpoint_integrity": true,
++            "initialization_match": true,
++            "root_reader": true,
++            "private_phase": "RUNNING",
++            "private_sequence": 6,
++            "record_hash_match": true,
++            "work": true
++          },
++          "critical": true
++        }
++      ]
++    },
++    {
++      "case_id": "PF_SAFE_transition_lock_interleaving",
++      "mutant": null,
++      "violation_class": "NONE",
++      "allowed_violations": [],
++      "frames": [
++        {
++          "domain": "phase",
++          "facts": {
++            "closed": false,
++            "stop": false,
++            "binding": true,
++            "identity": true,
++            "deadline": true,
++            "lock_acquired": false,
++            "phase": "RUNTIME_ARMED",
++            "sequence": 5,
++            "committed": true,
++            "checkpoint_integrity": true,
++            "initialization_match": true,
++            "root_reader": true,
++            "private_phase": "RUNTIME_ARMED",
++            "private_sequence": 5,
++            "record_hash_match": true,
++            "work": false
++          },
++          "critical": true
++        },
++        {
++          "domain": "phase",
++          "facts": {
++            "closed": false,
++            "stop": false,
++            "binding": true,
++            "identity": true,
++            "deadline": true,
++            "lock_acquired": true,
++            "phase": "RUNTIME_ARMED",
++            "sequence": 5,
++            "committed": true,
++            "checkpoint_integrity": true,
++            "initialization_match": true,
++            "root_reader": true,
++            "private_phase": "RUNTIME_ARMED",
++            "private_sequence": 5,
++            "record_hash_match": true,
++            "work": false
++          },
++          "critical": true
++        }
++      ]
++    },
++    {
++      "case_id": "PF_SAFE_delayed_publication",
++      "mutant": null,
++      "violation_class": "NONE",
++      "allowed_violations": [],
++      "frames": [
++        {
++          "domain": "phase",
++          "facts": {
++            "closed": false,
++            "stop": false,
++            "binding": true,
++            "identity": true,
++            "deadline": true,
++            "lock_acquired": false,
++            "phase": "RUNTIME_ARMED",
++            "sequence": 5,
++            "committed": true,
++            "checkpoint_integrity": true,
++            "initialization_match": true,
++            "root_reader": true,
++            "private_phase": "RUNTIME_ARMED",
++            "private_sequence": 5,
++            "record_hash_match": true,
++            "work": false
++          },
++          "critical": true
++        },
++        {
++          "domain": "phase",
++          "facts": {
++            "closed": false,
++            "stop": false,
++            "binding": true,
++            "identity": true,
++            "deadline": true,
++            "lock_acquired": false,
++            "phase": "RUNTIME_ARMED",
++            "sequence": 5,
++            "committed": true,
++            "checkpoint_integrity": true,
++            "initialization_match": true,
++            "root_reader": true,
++            "private_phase": "RUNTIME_ARMED",
++            "private_sequence": 5,
++            "record_hash_match": true,
++            "work": false
++          },
++          "critical": true
++        },
++        {
++          "domain": "phase",
++          "facts": {
++            "closed": false,
++            "stop": false,
++            "binding": true,
++            "identity": true,
++            "deadline": true,
++            "lock_acquired": true,
++            "phase": "RUNTIME_ARMED",
++            "sequence": 5,
++            "committed": true,
++            "checkpoint_integrity": true,
++            "initialization_match": true,
++            "root_reader": true,
++            "private_phase": "RUNTIME_ARMED",
++            "private_sequence": 5,
++            "record_hash_match": true,
++            "work": false
++          },
++          "critical": true
++        }
++      ]
++    },
++    {
++      "case_id": "PF_SAFE_old_version",
++      "mutant": null,
++      "violation_class": "NONE",
++      "allowed_violations": [],
++      "frames": [
++        {
++          "domain": "phase",
++          "facts": {
++            "closed": false,
++            "stop": false,
++            "binding": true,
++            "identity": true,
++            "deadline": true,
++            "lock_acquired": true,
++            "phase": "RUNTIME_ARMED",
++            "sequence": 5,
++            "committed": true,
++            "checkpoint_integrity": true,
++            "initialization_match": true,
++            "root_reader": true,
++            "private_phase": "RUNNING",
++            "private_sequence": 6,
++            "record_hash_match": true,
++            "work": false
++          },
++          "critical": true
++        }
++      ]
++    },
++    {
++      "case_id": "PF_SAFE_cross_batch",
++      "mutant": null,
++      "violation_class": "NONE",
++      "allowed_violations": [],
++      "frames": [
++        {
++          "domain": "phase",
++          "facts": {
++            "closed": false,
++            "stop": false,
++            "binding": false,
++            "identity": true,
++            "deadline": true,
++            "lock_acquired": true,
++            "phase": "RUNTIME_ARMED",
++            "sequence": 5,
++            "committed": true,
++            "checkpoint_integrity": true,
++            "initialization_match": true,
++            "root_reader": true,
++            "private_phase": "RUNTIME_ARMED",
++            "private_sequence": 5,
++            "record_hash_match": true,
++            "work": false
++          },
++          "critical": true
++        }
++      ]
++    },
++    {
++      "case_id": "PF_SAFE_sequence_rollback",
++      "mutant": null,
++      "violation_class": "NONE",
++      "allowed_violations": [],
++      "frames": [
++        {
++          "domain": "phase",
++          "facts": {
++            "closed": false,
++            "stop": false,
++            "binding": true,
++            "identity": true,
++            "deadline": true,
++            "lock_acquired": true,
++            "phase": "RUNTIME_ARMED",
++            "sequence": 4,
++            "committed": true,
++            "checkpoint_integrity": true,
++            "initialization_match": true,
++            "root_reader": true,
++            "private_phase": "RUNTIME_ARMED",
++            "private_sequence": 5,
++            "record_hash_match": true,
++            "work": false
++          },
++          "critical": true
++        }
++      ]
++    },
++    {
++      "case_id": "PF_SAFE_closed_transition",
++      "mutant": null,
++      "violation_class": "NONE",
++      "allowed_violations": [],
++      "frames": [
++        {
++          "domain": "phase",
++          "facts": {
++            "closed": true,
++            "stop": false,
++            "binding": true,
++            "identity": true,
++            "deadline": true,
++            "lock_acquired": true,
++            "phase": "RUNTIME_ARMED",
++            "sequence": 5,
++            "committed": true,
++            "checkpoint_integrity": true,
++            "initialization_match": true,
++            "root_reader": true,
++            "private_phase": "RUNTIME_ARMED",
++            "private_sequence": 5,
++            "record_hash_match": true,
++            "work": true
++          },
++          "critical": true
++        }
++      ]
++    },
++    {
++      "case_id": "PF_SAFE_illegal_phase",
++      "mutant": null,
++      "violation_class": "NONE",
++      "allowed_violations": [],
++      "frames": [
++        {
++          "domain": "phase",
++          "facts": {
++            "closed": false,
++            "stop": false,
++            "binding": true,
++            "identity": true,
++            "deadline": true,
++            "lock_acquired": true,
++            "phase": "RUNTIME_INITIALIZING",
++            "sequence": 3,
++            "committed": true,
++            "checkpoint_integrity": true,
++            "initialization_match": true,
++            "root_reader": true,
++            "private_phase": "RUNTIME_ARMED",
++            "private_sequence": 5,
++            "record_hash_match": true,
++            "work": false
++          },
++          "critical": true
++        }
++      ]
++    },
++    {
++      "case_id": "PF_SAFE_missing_checkpoint",
++      "mutant": null,
++      "violation_class": "NONE",
++      "allowed_violations": [],
++      "frames": [
++        {
++          "domain": "phase",
++          "facts": {
++            "closed": false,
++            "stop": false,
++            "binding": true,
++            "identity": true,
++            "deadline": true,
++            "lock_acquired": true,
++            "phase": "RUNTIME_ARMED",
++            "sequence": 5,
++            "committed": true,
++            "checkpoint_integrity": false,
++            "initialization_match": true,
++            "root_reader": true,
++            "private_phase": "RUNTIME_ARMED",
++            "private_sequence": 5,
++            "record_hash_match": true,
++            "work": false
++          },
++          "critical": true
++        }
++      ]
++    },
++    {
++      "case_id": "PF_SAFE_owner_mismatch",
++      "mutant": null,
++      "violation_class": "NONE",
++      "allowed_violations": [],
++      "frames": [
++        {
++          "domain": "phase",
++          "facts": {
++            "closed": false,
++            "stop": false,
++            "binding": true,
++            "identity": false,
++            "deadline": true,
++            "lock_acquired": true,
++            "phase": "RUNTIME_ARMED",
++            "sequence": 5,
++            "committed": true,
++            "checkpoint_integrity": true,
++            "initialization_match": true,
++            "root_reader": true,
++            "private_phase": "RUNTIME_ARMED",
++            "private_sequence": 5,
++            "record_hash_match": true,
++            "work": false
++          },
++          "critical": true
++        }
++      ]
++    },
++    {
++      "case_id": "PF_SAFE_stop_during_wait",
++      "mutant": null,
++      "violation_class": "NONE",
++      "allowed_violations": [],
++      "frames": [
++        {
++          "domain": "phase",
++          "facts": {
++            "closed": false,
++            "stop": false,
++            "binding": true,
++            "identity": true,
++            "deadline": true,
++            "lock_acquired": false,
++            "phase": "RUNTIME_ARMED",
++            "sequence": 5,
++            "committed": true,
++            "checkpoint_integrity": true,
++            "initialization_match": true,
++            "root_reader": true,
++            "private_phase": "RUNTIME_ARMED",
++            "private_sequence": 5,
++            "record_hash_match": true,
++            "work": false
++          },
++          "critical": true
++        },
++        {
++          "domain": "phase",
++          "facts": {
++            "closed": false,
++            "stop": true,
++            "binding": true,
++            "identity": true,
++            "deadline": true,
++            "lock_acquired": false,
++            "phase": "RUNTIME_ARMED",
++            "sequence": 5,
++            "committed": true,
++            "checkpoint_integrity": true,
++            "initialization_match": true,
++            "root_reader": true,
++            "private_phase": "RUNTIME_ARMED",
++            "private_sequence": 5,
++            "record_hash_match": true,
++            "work": false
++          },
++          "critical": true
++        }
++      ]
++    },
++    {
++      "case_id": "PF_SAFE_transition_expired",
++      "mutant": null,
++      "violation_class": "NONE",
++      "allowed_violations": [],
++      "frames": [
++        {
++          "domain": "phase",
++          "facts": {
++            "closed": false,
++            "stop": false,
++            "binding": true,
++            "identity": true,
++            "deadline": false,
++            "lock_acquired": false,
++            "phase": "RUNTIME_ARMED",
++            "sequence": 5,
++            "committed": true,
++            "checkpoint_integrity": true,
++            "initialization_match": true,
++            "root_reader": true,
++            "private_phase": "RUNTIME_ARMED",
++            "private_sequence": 5,
++            "record_hash_match": true,
++            "work": false
++          },
++          "critical": true
++        }
++      ]
++    },
++    {
++      "case_id": "PF_SAFE_admin_normal_import_model",
++      "mutant": null,
++      "violation_class": "NONE",
++      "allowed_violations": [],
++      "frames": [
++        {
++          "domain": "admin",
++          "facts": {
++            "roles_empty": true,
++            "group_absent": true,
++            "audit_error": false,
++            "any_runtime": true,
++            "native_verified": false,
++            "native_error": false,
++            "internal_status": "CLOSED_CLEANUP_CONFIRMED",
++            "module_ready": true,
++            "permission_ok": true,
++            "evidence_integrity": true,
++            "exception": false,
++            "repeated": false,
++            "repeat_valid": false
++          },
++          "critical": false
++        }
++      ]
++    },
++    {
++      "case_id": "PF_SAFE_admin_nondefault_cwd_model",
++      "mutant": null,
++      "violation_class": "NONE",
++      "allowed_violations": [],
++      "frames": [
++        {
++          "domain": "admin",
++          "facts": {
++            "roles_empty": true,
++            "group_absent": true,
++            "audit_error": false,
++            "any_runtime": true,
++            "native_verified": false,
++            "native_error": false,
++            "internal_status": "UNKNOWN",
++            "module_ready": true,
++            "permission_ok": true,
++            "evidence_integrity": true,
++            "exception": false,
++            "repeated": false,
++            "repeat_valid": false
++          },
++          "critical": false
++        }
++      ]
++    },
++    {
++      "case_id": "PF_SAFE_admin_absolute_entry_model",
++      "mutant": null,
++      "violation_class": "NONE",
++      "allowed_violations": [],
++      "frames": [
++        {
++          "domain": "admin",
++          "facts": {
++            "roles_empty": true,
++            "group_absent": true,
++            "audit_error": false,
++            "any_runtime": true,
++            "native_verified": false,
++            "native_error": false,
++            "internal_status": "UNKNOWN",
++            "module_ready": true,
++            "permission_ok": true,
++            "evidence_integrity": true,
++            "exception": false,
++            "repeated": false,
++            "repeat_valid": false
++          },
++          "critical": false
++        }
++      ]
++    },
++    {
++      "case_id": "PF_SAFE_admin_root_identity_failure",
++      "mutant": null,
++      "violation_class": "NONE",
++      "allowed_violations": [],
++      "frames": [
++        {
++          "domain": "admin",
++          "facts": {
++            "roles_empty": true,
++            "group_absent": true,
++            "audit_error": false,
++            "any_runtime": true,
++            "native_verified": false,
++            "native_error": false,
++            "internal_status": "UNKNOWN",
++            "module_ready": true,
++            "permission_ok": false,
++            "evidence_integrity": true,
++            "exception": false,
++            "repeated": false,
++            "repeat_valid": false
++          },
++          "critical": false
++        }
++      ]
++    },
++    {
++      "case_id": "PF_SAFE_admin_no_T0",
++      "mutant": null,
++      "violation_class": "NONE",
++      "allowed_violations": [],
++      "frames": [
++        {
++          "domain": "admin",
++          "facts": {
++            "roles_empty": true,
++            "group_absent": true,
++            "audit_error": false,
++            "any_runtime": false,
++            "native_verified": false,
++            "native_error": false,
++            "internal_status": "UNKNOWN",
++            "module_ready": true,
++            "permission_ok": true,
++            "evidence_integrity": true,
++            "exception": false,
++            "repeated": false,
++            "repeat_valid": false
++          },
++          "critical": false
++        }
++      ]
++    },
++    {
++      "case_id": "PF_SAFE_admin_native_completed",
++      "mutant": null,
++      "violation_class": "NONE",
++      "allowed_violations": [],
++      "frames": [
++        {
++          "domain": "admin",
++          "facts": {
++            "roles_empty": true,
++            "group_absent": true,
++            "audit_error": false,
++            "any_runtime": true,
++            "native_verified": true,
++            "native_error": false,
++            "internal_status": "UNKNOWN",
++            "module_ready": true,
++            "permission_ok": true,
++            "evidence_integrity": true,
++            "exception": false,
++            "repeated": false,
++            "repeat_valid": false
++          },
++          "critical": false
++        }
++      ]
++    },
++    {
++      "case_id": "PF_SAFE_admin_native_failed",
++      "mutant": null,
++      "violation_class": "NONE",
++      "allowed_violations": [],
++      "frames": [
++        {
++          "domain": "admin",
++          "facts": {
++            "roles_empty": true,
++            "group_absent": true,
++            "audit_error": false,
++            "any_runtime": true,
++            "native_verified": false,
++            "native_error": true,
++            "internal_status": "UNKNOWN",
++            "module_ready": true,
++            "permission_ok": true,
++            "evidence_integrity": true,
++            "exception": false,
++            "repeated": false,
++            "repeat_valid": false
++          },
++          "critical": false
++        }
++      ]
++    },
++    {
++      "case_id": "PF_SAFE_admin_internal_UNKNOWN",
++      "mutant": null,
++      "violation_class": "NONE",
++      "allowed_violations": [],
++      "frames": [
++        {
++          "domain": "admin",
++          "facts": {
++            "roles_empty": true,
++            "group_absent": true,
++            "audit_error": false,
++            "any_runtime": true,
++            "native_verified": false,
++            "native_error": false,
++            "internal_status": "UNKNOWN",
++            "module_ready": true,
++            "permission_ok": true,
++            "evidence_integrity": true,
++            "exception": false,
++            "repeated": false,
++            "repeat_valid": false
++          },
++          "critical": false
++        }
++      ]
++    },
++    {
++      "case_id": "PF_SAFE_admin_dependency_missing",
++      "mutant": null,
++      "violation_class": "NONE",
++      "allowed_violations": [],
++      "frames": [
++        {
++          "domain": "admin",
++          "facts": {
++            "roles_empty": true,
++            "group_absent": true,
++            "audit_error": false,
++            "any_runtime": true,
++            "native_verified": false,
++            "native_error": false,
++            "internal_status": "UNKNOWN",
++            "module_ready": false,
++            "permission_ok": true,
++            "evidence_integrity": true,
++            "exception": false,
++            "repeated": false,
++            "repeat_valid": false
++          },
++          "critical": false
++        }
++      ]
++    },
++    {
++      "case_id": "PF_SAFE_admin_file_permission",
++      "mutant": null,
++      "violation_class": "NONE",
++      "allowed_violations": [],
++      "frames": [
++        {
++          "domain": "admin",
++          "facts": {
++            "roles_empty": true,
++            "group_absent": true,
++            "audit_error": false,
++            "any_runtime": true,
++            "native_verified": false,
++            "native_error": false,
++            "internal_status": "UNKNOWN",
++            "module_ready": true,
++            "permission_ok": false,
++            "evidence_integrity": true,
++            "exception": false,
++            "repeated": false,
++            "repeat_valid": false
++          },
++          "critical": false
++        }
++      ]
++    },
++    {
++      "case_id": "PF_SAFE_admin_exception",
++      "mutant": null,
++      "violation_class": "NONE",
++      "allowed_violations": [],
++      "frames": [
++        {
++          "domain": "admin",
++          "facts": {
++            "roles_empty": true,
++            "group_absent": true,
++            "audit_error": false,
++            "any_runtime": true,
++            "native_verified": true,
++            "native_error": false,
++            "internal_status": "UNKNOWN",
++            "module_ready": true,
++            "permission_ok": true,
++            "evidence_integrity": true,
++            "exception": true,
++            "repeated": false,
++            "repeat_valid": false
++          },
++          "critical": false
++        }
++      ]
++    },
++    {
++      "case_id": "PF_SAFE_admin_repeat_valid",
++      "mutant": null,
++      "violation_class": "NONE",
++      "allowed_violations": [],
++      "frames": [
++        {
++          "domain": "admin",
++          "facts": {
++            "roles_empty": true,
++            "group_absent": true,
++            "audit_error": false,
++            "any_runtime": true,
++            "native_verified": true,
++            "native_error": false,
++            "internal_status": "UNKNOWN",
++            "module_ready": true,
++            "permission_ok": true,
++            "evidence_integrity": true,
++            "exception": false,
++            "repeated": true,
++            "repeat_valid": true
++          },
++          "critical": false
++        }
++      ]
++    },
++    {
++      "case_id": "PF_SAFE_close_phase_failure",
++      "mutant": null,
++      "violation_class": "NONE",
++      "allowed_violations": [],
++      "frames": [
++        {
++          "domain": "closure",
++          "facts": {
++            "critical": true,
++            "roles_empty": true,
++            "group_absent": true,
++            "audit_error": false,
++            "internal_status": "UNKNOWN",
++            "native_status": "NATIVE_SEAL_UNRESOLVED",
++            "admin_status": "ADMIN_EVIDENCE_UNRESOLVED"
++          },
++          "critical": true
++        }
++      ]
++    },
++    {
++      "case_id": "PF_SAFE_close_native_success",
++      "mutant": null,
++      "violation_class": "NONE",
++      "allowed_violations": [],
++      "frames": [
++        {
++          "domain": "closure",
++          "facts": {
++            "critical": true,
++            "roles_empty": true,
++            "group_absent": true,
++            "audit_error": false,
++            "internal_status": "UNKNOWN",
++            "native_status": "NATIVE_SEAL_COMPLETED",
++            "admin_status": "ADMIN_EVIDENCE_UNRESOLVED"
++          },
++          "critical": true
++        }
++      ]
++    },
++    {
++      "case_id": "PF_SAFE_close_admin_success",
++      "mutant": null,
++      "violation_class": "NONE",
++      "allowed_violations": [],
++      "frames": [
++        {
++          "domain": "closure",
++          "facts": {
++            "critical": true,
++            "roles_empty": true,
++            "group_absent": true,
++            "audit_error": false,
++            "internal_status": "UNKNOWN",
++            "native_status": "NATIVE_SEAL_UNRESOLVED",
++            "admin_status": "ADMIN_EVIDENCE_SEALED"
++          },
++          "critical": true
++        }
++      ]
++    },
++    {
++      "case_id": "PF_SAFE_close_admin_failure_native_preserved",
++      "mutant": null,
++      "violation_class": "NONE",
++      "allowed_violations": [],
++      "frames": [
++        {
++          "domain": "closure",
++          "facts": {
++            "critical": true,
++            "roles_empty": true,
++            "group_absent": true,
++            "audit_error": false,
++            "internal_status": "UNKNOWN",
++            "native_status": "NATIVE_SEAL_COMPLETED",
++            "admin_status": "ADMIN_EVIDENCE_UNRESOLVED"
++          },
++          "critical": true
++        }
++      ]
++    },
++    {
++      "case_id": "PF_SAFE_close_empty_internal_UNKNOWN",
++      "mutant": null,
++      "violation_class": "NONE",
++      "allowed_violations": [],
++      "frames": [
++        {
++          "domain": "closure",
++          "facts": {
++            "critical": true,
++            "roles_empty": true,
++            "group_absent": true,
++            "audit_error": false,
++            "internal_status": "UNKNOWN",
++            "native_status": "NATIVE_SEAL_UNRESOLVED",
++            "admin_status": "ADMIN_EVIDENCE_UNRESOLVED"
++          },
++          "critical": true
++        }
++      ]
++    },
++    {
++      "case_id": "PF_SAFE_close_external_stop",
++      "mutant": null,
++      "violation_class": "NONE",
++      "allowed_violations": [],
++      "frames": [
++        {
++          "domain": "closure",
++          "facts": {
++            "critical": true,
++            "roles_empty": false,
++            "group_absent": false,
++            "audit_error": false,
++            "internal_status": "UNKNOWN",
++            "native_status": "NATIVE_SEAL_UNRESOLVED",
++            "admin_status": "ADMIN_EVIDENCE_UNRESOLVED"
++          },
++          "critical": true
++        }
++      ]
++    },
++    {
++      "case_id": "PF_PAIR_allow_illegal_phase_safe",
++      "mutant": null,
++      "violation_class": "ILLEGAL_PHASE_ACCEPTED",
++      "allowed_violations": [],
++      "frames": [
++        {
++          "domain": "phase",
++          "facts": {
++            "closed": false,
++            "stop": false,
++            "binding": true,
++            "identity": true,
++            "deadline": true,
++            "lock_acquired": true,
++            "phase": "RUNTIME_INITIALIZING",
++            "sequence": 3,
++            "committed": true,
++            "checkpoint_integrity": true,
++            "initialization_match": true,
++            "root_reader": true,
++            "private_phase": "RUNTIME_ARMED",
++            "private_sequence": 5,
++            "record_hash_match": true,
++            "work": false
++          },
++          "critical": true
++        }
++      ]
++    },
++    {
++      "case_id": "PF_PAIR_allow_illegal_phase_mutant",
++      "mutant": "allow_illegal_phase",
++      "violation_class": "ILLEGAL_PHASE_ACCEPTED",
++      "allowed_violations": [
++        "ILLEGAL_PHASE_ACCEPTED",
++        "NO_AUTO_STOP"
++      ],
++      "frames": [
++        {
++          "domain": "phase",
++          "facts": {
++            "closed": false,
++            "stop": false,
++            "binding": true,
++            "identity": true,
++            "deadline": true,
++            "lock_acquired": true,
++            "phase": "RUNTIME_INITIALIZING",
++            "sequence": 3,
++            "committed": true,
++            "checkpoint_integrity": true,
++            "initialization_match": true,
++            "root_reader": true,
++            "private_phase": "RUNTIME_ARMED",
++            "private_sequence": 5,
++            "record_hash_match": true,
++            "work": false
++          },
++          "critical": true
++        }
++      ]
++    },
++    {
++      "case_id": "PF_PAIR_skip_work_safe",
++      "mutant": null,
++      "violation_class": "PREMATURE_WORK",
++      "allowed_violations": [],
++      "frames": [
++        {
++          "domain": "phase",
++          "facts": {
++            "closed": false,
++            "stop": false,
++            "binding": true,
++            "identity": true,
++            "deadline": true,
++            "lock_acquired": true,
++            "phase": "RUNTIME_READY",
++            "sequence": 4,
++            "committed": true,
++            "checkpoint_integrity": true,
++            "initialization_match": true,
++            "root_reader": true,
++            "private_phase": "RUNTIME_READY",
++            "private_sequence": 4,
++            "record_hash_match": true,
++            "work": true
++          },
++          "critical": true
++        }
++      ]
++    },
++    {
++      "case_id": "PF_PAIR_skip_work_mutant",
++      "mutant": "skip_work",
++      "violation_class": "PREMATURE_WORK",
++      "allowed_violations": [
++        "PREMATURE_WORK",
++        "NO_AUTO_STOP"
++      ],
++      "frames": [
++        {
++          "domain": "phase",
++          "facts": {
++            "closed": false,
++            "stop": false,
++            "binding": true,
++            "identity": true,
++            "deadline": true,
++            "lock_acquired": true,
++            "phase": "RUNTIME_READY",
++            "sequence": 4,
++            "committed": true,
++            "checkpoint_integrity": true,
++            "initialization_match": true,
++            "root_reader": true,
++            "private_phase": "RUNTIME_READY",
++            "private_sequence": 4,
++            "record_hash_match": true,
++            "work": true
++          },
++          "critical": true
++        }
++      ]
++    },
++    {
++      "case_id": "PF_PAIR_stale_snapshot_safe",
++      "mutant": null,
++      "violation_class": "STALE_SNAPSHOT_ACCEPTED",
++      "allowed_violations": [],
++      "frames": [
++        {
++          "domain": "phase",
++          "facts": {
++            "closed": false,
++            "stop": false,
++            "binding": true,
++            "identity": true,
++            "deadline": true,
++            "lock_acquired": true,
++            "phase": "RUNTIME_ARMED",
++            "sequence": 5,
++            "committed": true,
++            "checkpoint_integrity": true,
++            "initialization_match": true,
++            "root_reader": true,
++            "private_phase": "RUNNING",
++            "private_sequence": 6,
++            "record_hash_match": true,
++            "work": false
++          },
++          "critical": true
++        }
++      ]
++    },
++    {
++      "case_id": "PF_PAIR_stale_snapshot_mutant",
++      "mutant": "stale_snapshot",
++      "violation_class": "STALE_SNAPSHOT_ACCEPTED",
++      "allowed_violations": [
++        "STALE_SNAPSHOT_ACCEPTED",
++        "NO_AUTO_STOP"
++      ],
++      "frames": [
++        {
++          "domain": "phase",
++          "facts": {
++            "closed": false,
++            "stop": false,
++            "binding": true,
++            "identity": true,
++            "deadline": true,
++            "lock_acquired": true,
++            "phase": "RUNTIME_ARMED",
++            "sequence": 5,
++            "committed": true,
++            "checkpoint_integrity": true,
++            "initialization_match": true,
++            "root_reader": true,
++            "private_phase": "RUNNING",
++            "private_sequence": 6,
++            "record_hash_match": true,
++            "work": false
++          },
++          "critical": true
++        }
++      ]
++    },
++    {
++      "case_id": "PF_PAIR_ignore_version_safe",
++      "mutant": null,
++      "violation_class": "VERSION_MISMATCH_ACCEPTED",
++      "allowed_violations": [],
++      "frames": [
++        {
++          "domain": "phase",
++          "facts": {
++            "closed": false,
++            "stop": false,
++            "binding": true,
++            "identity": true,
++            "deadline": true,
++            "lock_acquired": true,
++            "phase": "RUNTIME_ARMED",
++            "sequence": 5,
++            "committed": true,
++            "checkpoint_integrity": true,
++            "initialization_match": true,
++            "root_reader": true,
++            "private_phase": "RUNTIME_ARMED",
++            "private_sequence": 4,
++            "record_hash_match": true,
++            "work": false
++          },
++          "critical": true
++        }
++      ]
++    },
++    {
++      "case_id": "PF_PAIR_ignore_version_mutant",
++      "mutant": "ignore_version",
++      "violation_class": "VERSION_MISMATCH_ACCEPTED",
++      "allowed_violations": [
++        "VERSION_MISMATCH_ACCEPTED",
++        "NO_AUTO_STOP"
++      ],
++      "frames": [
++        {
++          "domain": "phase",
++          "facts": {
++            "closed": false,
++            "stop": false,
++            "binding": true,
++            "identity": true,
++            "deadline": true,
++            "lock_acquired": true,
++            "phase": "RUNTIME_ARMED",
++            "sequence": 5,
++            "committed": true,
++            "checkpoint_integrity": true,
++            "initialization_match": true,
++            "root_reader": true,
++            "private_phase": "RUNTIME_ARMED",
++            "private_sequence": 4,
++            "record_hash_match": true,
++            "work": false
++          },
++          "critical": true
++        }
++      ]
++    },
++    {
++      "case_id": "PF_PAIR_no_auto_stop_safe",
++      "mutant": null,
++      "violation_class": "NO_AUTO_STOP",
++      "allowed_violations": [],
++      "frames": [
++        {
++          "domain": "phase",
++          "facts": {
++            "closed": false,
++            "stop": false,
++            "binding": true,
++            "identity": true,
++            "deadline": true,
++            "lock_acquired": true,
++            "phase": "RUNTIME_INITIALIZING",
++            "sequence": 3,
++            "committed": true,
++            "checkpoint_integrity": true,
++            "initialization_match": true,
++            "root_reader": true,
++            "private_phase": "RUNTIME_ARMED",
++            "private_sequence": 5,
++            "record_hash_match": true,
++            "work": false
++          },
++          "critical": true
++        }
++      ]
++    },
++    {
++      "case_id": "PF_PAIR_no_auto_stop_mutant",
++      "mutant": "no_auto_stop",
++      "violation_class": "NO_AUTO_STOP",
++      "allowed_violations": [
++        "NO_AUTO_STOP"
++      ],
++      "frames": [
++        {
++          "domain": "phase",
++          "facts": {
++            "closed": false,
++            "stop": false,
++            "binding": true,
++            "identity": true,
++            "deadline": true,
++            "lock_acquired": true,
++            "phase": "RUNTIME_INITIALIZING",
++            "sequence": 3,
++            "committed": true,
++            "checkpoint_integrity": true,
++            "initialization_match": true,
++            "root_reader": true,
++            "private_phase": "RUNTIME_ARMED",
++            "private_sequence": 5,
++            "record_hash_match": true,
++            "work": false
++          },
++          "critical": true
++        }
++      ]
++    },
++    {
++      "case_id": "PF_PAIR_swallow_import_error_safe",
++      "mutant": null,
++      "violation_class": "IMPORT_ERROR_SWALLOWED",
++      "allowed_violations": [],
++      "frames": [
++        {
++          "domain": "admin",
++          "facts": {
++            "roles_empty": true,
++            "group_absent": true,
++            "audit_error": false,
++            "any_runtime": true,
++            "native_verified": false,
++            "native_error": false,
++            "internal_status": "UNKNOWN",
++            "module_ready": false,
++            "permission_ok": true,
++            "evidence_integrity": true,
++            "exception": false,
++            "repeated": false,
++            "repeat_valid": false
++          },
++          "critical": false
++        }
++      ]
++    },
++    {
++      "case_id": "PF_PAIR_swallow_import_error_mutant",
++      "mutant": "swallow_import_error",
++      "violation_class": "IMPORT_ERROR_SWALLOWED",
++      "allowed_violations": [
++        "IMPORT_ERROR_SWALLOWED"
++      ],
++      "frames": [
++        {
++          "domain": "admin",
++          "facts": {
++            "roles_empty": true,
++            "group_absent": true,
++            "audit_error": false,
++            "any_runtime": true,
++            "native_verified": false,
++            "native_error": false,
++            "internal_status": "UNKNOWN",
++            "module_ready": false,
++            "permission_ok": true,
++            "evidence_integrity": true,
++            "exception": false,
++            "repeated": false,
++            "repeat_valid": false
++          },
++          "critical": false
++        }
++      ]
++    },
++    {
++      "case_id": "PF_PAIR_overwrite_native_safe",
++      "mutant": null,
++      "violation_class": "NATIVE_RESULT_OVERWRITTEN",
++      "allowed_violations": [],
++      "frames": [
++        {
++          "domain": "admin",
++          "facts": {
++            "roles_empty": true,
++            "group_absent": true,
++            "audit_error": false,
++            "any_runtime": true,
++            "native_verified": true,
++            "native_error": false,
++            "internal_status": "UNKNOWN",
++            "module_ready": true,
++            "permission_ok": true,
++            "evidence_integrity": true,
++            "exception": false,
++            "repeated": false,
++            "repeat_valid": false
++          },
++          "critical": false
++        }
++      ]
++    },
++    {
++      "case_id": "PF_PAIR_overwrite_native_mutant",
++      "mutant": "overwrite_native",
++      "violation_class": "NATIVE_RESULT_OVERWRITTEN",
++      "allowed_violations": [
++        "NATIVE_RESULT_OVERWRITTEN"
++      ],
++      "frames": [
++        {
++          "domain": "admin",
++          "facts": {
++            "roles_empty": true,
++            "group_absent": true,
++            "audit_error": false,
++            "any_runtime": true,
++            "native_verified": true,
++            "native_error": false,
++            "internal_status": "UNKNOWN",
++            "module_ready": true,
++            "permission_ok": true,
++            "evidence_integrity": true,
++            "exception": false,
++            "repeated": false,
++            "repeat_valid": false
++          },
++          "critical": false
++        }
++      ]
++    },
++    {
++      "case_id": "PF_PAIR_reactivate_closed_safe",
++      "mutant": null,
++      "violation_class": "REACTIVATION",
++      "allowed_violations": [],
++      "frames": [
++        {
++          "domain": "phase",
++          "facts": {
++            "closed": true,
++            "stop": false,
++            "binding": true,
++            "identity": true,
++            "deadline": true,
++            "lock_acquired": true,
++            "phase": "RUNTIME_ARMED",
++            "sequence": 5,
++            "committed": true,
++            "checkpoint_integrity": true,
++            "initialization_match": true,
++            "root_reader": true,
++            "private_phase": "RUNTIME_ARMED",
++            "private_sequence": 5,
++            "record_hash_match": true,
++            "work": true
++          },
++          "critical": true
++        }
++      ]
++    },
++    {
++      "case_id": "PF_PAIR_reactivate_closed_mutant",
++      "mutant": "reactivate_closed",
++      "violation_class": "REACTIVATION",
++      "allowed_violations": [
++        "REACTIVATION"
++      ],
++      "frames": [
++        {
++          "domain": "phase",
++          "facts": {
++            "closed": true,
++            "stop": false,
++            "binding": true,
++            "identity": true,
++            "deadline": true,
++            "lock_acquired": true,
++            "phase": "RUNTIME_ARMED",
++            "sequence": 5,
++            "committed": true,
++            "checkpoint_integrity": true,
++            "initialization_match": true,
++            "root_reader": true,
++            "private_phase": "RUNTIME_ARMED",
++            "private_sequence": 5,
++            "record_hash_match": true,
++            "work": true
++          },
++          "critical": true
++        }
++      ]
++    }
++  ],
++  "scope": "Synthetic policy/observation fixtures; real OS phase mutex, import and automatic finalization require separate actual receipts",
++  "phase_mutex_seconds": 2,
++  "phase_mutex_attempts": 512,
++  "postexit_quiescence_seconds": 5,
++  "postexit_quiescence_samples": 128,
++  "postexit_native_alarm_seconds": 30,
++  "postexit_host_wait_seconds": 35
++}
+--- before/inputs/readiness_contract.json
++++ after/inputs/readiness_contract.json
+@@ -20,7 +20,7 @@
+   "driver_prepay": 6,
+   "freeze_revision": "r2",
+   "full_mode": "CALIBRATE_S1S9_THEN_F1_F4 requires Full_conditional_chain_explicitly_approved",
+-  "future_batch_id": "batch11",
++  "future_batch_id": "batch12",
+   "global_calibration_hard_bound": 65618,
+   "global_calibration_soft": 100000,
+   "jobs": [
+--- before/inputs/root_ipc_contract.json
++++ after/inputs/root_ipc_contract.json
+@@ -8,7 +8,7 @@
+   "expected_mutants": 8,
+   "expected_safe": 48,
+   "full_calibration_hard_visits": 65618,
+-  "future_batch_id": "batch11",
++  "future_batch_id": "batch12",
+   "hard_visits": 512,
+   "helper_authorization_required": true,
+   "jobs": [
+--- before/inputs/safety_contract.json
++++ after/inputs/safety_contract.json
+@@ -4,7 +4,7 @@
+   "calibration_visits": 100000,
+   "completed_global_visit_upper_bound": 19861,
+   "event_bytes_cap": 4096,
+-  "future_batch_id": "batch11",
++  "future_batch_id": "batch12",
+   "gate_negative_cases": [
+     {
+       "case_id": "gate.status.UNRUN",
+@@ -116,7 +116,7 @@
+       "N": 4,
+       "N_source": "GC-SYNTHETIC-BOUND/1: exactly four allowed synthetic semantic operations",
+       "allowed_violation_set": [],
+-      "batch_id": "batch11",
++      "batch_id": "batch12",
+       "cap": 8,
+       "case_id": "S1.before.safe",
+       "cleanup_rule": "Keep all synthetic raw evidence; no refund, no ledger reuse",
+@@ -175,7 +175,7 @@
+         "UNCLAIMED_GRANT",
+         "UNPREPAID_OPERATION"
+       ],
+-      "batch_id": "batch11",
++      "batch_id": "batch12",
+       "cap": 8,
+       "case_id": "S1.before.mutant",
+       "cleanup_rule": "Keep all synthetic raw evidence; no refund, no ledger reuse",
+@@ -230,7 +230,7 @@
+       "N": 4,
+       "N_source": "GC-SYNTHETIC-BOUND/1: exactly four allowed synthetic semantic operations",
+       "allowed_violation_set": [],
+-      "batch_id": "batch11",
++      "batch_id": "batch12",
+       "cap": 8,
+       "case_id": "S2.unsynced.safe",
+       "cleanup_rule": "Keep all synthetic raw evidence; no refund, no ledger reuse",
+@@ -287,7 +287,7 @@
+       "allowed_violation_set": [
+         "RECOVERY_GRANT"
+       ],
+-      "batch_id": "batch11",
++      "batch_id": "batch12",
+       "cap": 8,
+       "case_id": "S2.unsynced.mutant",
+       "cleanup_rule": "Keep all synthetic raw evidence; no refund, no ledger reuse",
+@@ -342,7 +342,7 @@
+       "N": 4,
+       "N_source": "GC-SYNTHETIC-BOUND/1: exactly four allowed synthetic semantic operations",
+       "allowed_violation_set": [],
+-      "batch_id": "batch11",
++      "batch_id": "batch12",
+       "cap": 8,
+       "case_id": "S2.confirmed.safe",
+       "cleanup_rule": "Keep all synthetic raw evidence; no refund, no ledger reuse",
+@@ -399,7 +399,7 @@
+       "allowed_violation_set": [
+         "RECOVERY_GRANT"
+       ],
+-      "batch_id": "batch11",
++      "batch_id": "batch12",
+       "cap": 8,
+       "case_id": "S2.confirmed.mutant",
+       "cleanup_rule": "Keep all synthetic raw evidence; no refund, no ledger reuse",
+@@ -454,7 +454,7 @@
+       "N": 4,
+       "N_source": "GC-SYNTHETIC-BOUND/1: exactly four allowed synthetic semantic operations",
+       "allowed_violation_set": [],
+-      "batch_id": "batch11",
++      "batch_id": "batch12",
+       "cap": 8,
+       "case_id": "S2.unknown.safe",
+       "cleanup_rule": "Keep all synthetic raw evidence; no refund, no ledger reuse",
+@@ -511,7 +511,7 @@
+       "allowed_violation_set": [
+         "RECOVERY_GRANT"
+       ],
+-      "batch_id": "batch11",
++      "batch_id": "batch12",
+       "cap": 8,
+       "case_id": "S2.unknown.mutant",
+       "cleanup_rule": "Keep all synthetic raw evidence; no refund, no ledger reuse",
+@@ -566,7 +566,7 @@
+       "N": 4,
+       "N_source": "GC-SYNTHETIC-BOUND/1: exactly four allowed synthetic semantic operations",
+       "allowed_violation_set": [],
+-      "batch_id": "batch11",
++      "batch_id": "batch12",
+       "cap": 8,
+       "case_id": "S3.committed.safe",
+       "cleanup_rule": "Keep all synthetic raw evidence; no refund, no ledger reuse",
+@@ -623,7 +623,7 @@
+       "allowed_violation_set": [
+         "RECOVERY_GRANT"
+       ],
+-      "batch_id": "batch11",
++      "batch_id": "batch12",
+       "cap": 8,
+       "case_id": "S3.committed.mutant",
+       "cleanup_rule": "Keep all synthetic raw evidence; no refund, no ledger reuse",
+@@ -678,7 +678,7 @@
+       "N": 4,
+       "N_source": "GC-SYNTHETIC-BOUND/1: exactly four allowed synthetic semantic operations",
+       "allowed_violation_set": [],
+-      "batch_id": "batch11",
++      "batch_id": "batch12",
+       "cap": 8,
+       "case_id": "S4.claimed.safe",
+       "cleanup_rule": "Keep all synthetic raw evidence; no refund, no ledger reuse",
+@@ -737,7 +737,7 @@
+         "LOCAL_OVERSPEND",
+         "CLAIM_RECOVERY_MISMATCH"
+       ],
+-      "batch_id": "batch11",
++      "batch_id": "batch12",
+       "cap": 8,
+       "case_id": "S4.claimed.mutant",
+       "cleanup_rule": "Keep all synthetic raw evidence; no refund, no ledger reuse",
+@@ -792,7 +792,7 @@
+       "N": 4,
+       "N_source": "GC-SYNTHETIC-BOUND/1: exactly four allowed synthetic semantic operations",
+       "allowed_violation_set": [],
+-      "batch_id": "batch11",
++      "batch_id": "batch12",
+       "cap": 8,
+       "case_id": "S5.same.safe",
+       "cleanup_rule": "Keep all synthetic raw evidence; no refund, no ledger reuse",
+@@ -850,7 +850,7 @@
+         "DUPLICATE_TASK",
+         "CONFLICT_ACCEPTED"
+       ],
+-      "batch_id": "batch11",
++      "batch_id": "batch12",
+       "cap": 8,
+       "case_id": "S5.same.mutant",
+       "cleanup_rule": "Keep all synthetic raw evidence; no refund, no ledger reuse",
+@@ -905,7 +905,7 @@
+       "N": 4,
+       "N_source": "GC-SYNTHETIC-BOUND/1: exactly four allowed synthetic semantic operations",
+       "allowed_violation_set": [],
+-      "batch_id": "batch11",
++      "batch_id": "batch12",
+       "cap": 8,
+       "case_id": "S5.conflict.safe",
+       "cleanup_rule": "Keep all synthetic raw evidence; no refund, no ledger reuse",
+@@ -963,7 +963,7 @@
+         "DUPLICATE_TASK",
+         "CONFLICT_ACCEPTED"
+       ],
+-      "batch_id": "batch11",
++      "batch_id": "batch12",
+       "cap": 8,
+       "case_id": "S5.conflict.mutant",
+       "cleanup_rule": "Keep all synthetic raw evidence; no refund, no ledger reuse",
+@@ -1018,7 +1018,7 @@
+       "N": 4,
+       "N_source": "GC-SYNTHETIC-BOUND/1: exactly four allowed synthetic semantic operations",
+       "allowed_violation_set": [],
+-      "batch_id": "batch11",
++      "batch_id": "batch12",
+       "cap": 8,
+       "case_id": "S6.concurrent.safe",
+       "cleanup_rule": "Keep all synthetic raw evidence; no refund, no ledger reuse",
+@@ -1076,7 +1076,7 @@
+         "RANGE_OVERLAP",
+         "LOST_COUNTER_UPDATE"
+       ],
+-      "batch_id": "batch11",
++      "batch_id": "batch12",
+       "cap": 8,
+       "case_id": "S6.concurrent.mutant",
+       "cleanup_rule": "Keep all synthetic raw evidence; no refund, no ledger reuse",
+@@ -1131,7 +1131,7 @@
+       "N": 4,
+       "N_source": "GC-SYNTHETIC-BOUND/1: exactly four allowed synthetic semantic operations",
+       "allowed_violation_set": [],
+-      "batch_id": "batch11",
++      "batch_id": "batch12",
+       "cap": 8,
+       "case_id": "S7.short.safe",
+       "cleanup_rule": "Keep all synthetic raw evidence; no refund, no ledger reuse",
+@@ -1189,7 +1189,7 @@
+         "ERROR_GRANT",
+         "UNACKNOWLEDGED_GRANT"
+       ],
+-      "batch_id": "batch11",
++      "batch_id": "batch12",
+       "cap": 8,
+       "case_id": "S7.short.mutant",
+       "cleanup_rule": "Keep all synthetic raw evidence; no refund, no ledger reuse",
+@@ -1244,7 +1244,7 @@
+       "N": 4,
+       "N_source": "GC-SYNTHETIC-BOUND/1: exactly four allowed synthetic semantic operations",
+       "allowed_violation_set": [],
+-      "batch_id": "batch11",
++      "batch_id": "batch12",
+       "cap": 8,
+       "case_id": "S7.fsync.safe",
+       "cleanup_rule": "Keep all synthetic raw evidence; no refund, no ledger reuse",
+@@ -1302,7 +1302,7 @@
+         "ERROR_GRANT",
+         "UNACKNOWLEDGED_GRANT"
+       ],
+-      "batch_id": "batch11",
++      "batch_id": "batch12",
+       "cap": 8,
+       "case_id": "S7.fsync.mutant",
+       "cleanup_rule": "Keep all synthetic raw evidence; no refund, no ledger reuse",
+@@ -1357,7 +1357,7 @@
+       "N": 4,
+       "N_source": "GC-SYNTHETIC-BOUND/1: exactly four allowed synthetic semantic operations",
+       "allowed_violation_set": [],
+-      "batch_id": "batch11",
++      "batch_id": "batch12",
+       "cap": 8,
+       "case_id": "S8.closed.safe",
+       "cleanup_rule": "Keep all synthetic raw evidence; no refund, no ledger reuse",
+@@ -1414,7 +1414,7 @@
+       "allowed_violation_set": [
+         "INVALID_EXECUTION"
+       ],
+-      "batch_id": "batch11",
++      "batch_id": "batch12",
+       "cap": 8,
+       "case_id": "S8.closed.mutant",
+       "cleanup_rule": "Keep all synthetic raw evidence; no refund, no ledger reuse",
+@@ -1469,7 +1469,7 @@
+       "N": 4,
+       "N_source": "GC-SYNTHETIC-BOUND/1: exactly four allowed synthetic semantic operations",
+       "allowed_violation_set": [],
+-      "batch_id": "batch11",
++      "batch_id": "batch12",
+       "cap": 8,
+       "case_id": "S8.expired.safe",
+       "cleanup_rule": "Keep all synthetic raw evidence; no refund, no ledger reuse",
+@@ -1526,7 +1526,7 @@
+       "allowed_violation_set": [
+         "INVALID_EXECUTION"
+       ],
+-      "batch_id": "batch11",
++      "batch_id": "batch12",
+       "cap": 8,
+       "case_id": "S8.expired.mutant",
+       "cleanup_rule": "Keep all synthetic raw evidence; no refund, no ledger reuse",
+@@ -1581,7 +1581,7 @@
+       "N": 4,
+       "N_source": "GC-SYNTHETIC-BOUND/1: exactly four allowed synthetic semantic operations",
+       "allowed_violation_set": [],
+-      "batch_id": "batch11",
++      "batch_id": "batch12",
+       "cap": 8,
+       "case_id": "S8.boot.safe",
+       "cleanup_rule": "Keep all synthetic raw evidence; no refund, no ledger reuse",
+@@ -1638,7 +1638,7 @@
+       "allowed_violation_set": [
+         "INVALID_EXECUTION"
+       ],
+-      "batch_id": "batch11",
++      "batch_id": "batch12",
+       "cap": 8,
+       "case_id": "S8.boot.mutant",
+       "cleanup_rule": "Keep all synthetic raw evidence; no refund, no ledger reuse",
+@@ -1693,7 +1693,7 @@
+       "N": 4,
+       "N_source": "GC-SYNTHETIC-BOUND/1: exactly four allowed synthetic semantic operations",
+       "allowed_violation_set": [],
+-      "batch_id": "batch11",
++      "batch_id": "batch12",
+       "cap": 8,
+       "case_id": "S8.lock.safe",
+       "cleanup_rule": "Keep all synthetic raw evidence; no refund, no ledger reuse",
+@@ -1750,7 +1750,7 @@
+       "allowed_violation_set": [
+         "INVALID_EXECUTION"
+       ],
+-      "batch_id": "batch11",
++      "batch_id": "batch12",
+       "cap": 8,
+       "case_id": "S8.lock.mutant",
+       "cleanup_rule": "Keep all synthetic raw evidence; no refund, no ledger reuse",
+@@ -1805,7 +1805,7 @@
+       "N": 4,
+       "N_source": "GC-SYNTHETIC-BOUND/1: exactly four allowed synthetic semantic operations",
+       "allowed_violation_set": [],
+-      "batch_id": "batch11",
++      "batch_id": "batch12",
+       "cap": 8,
+       "case_id": "S8.restart.safe",
+       "cleanup_rule": "Keep all synthetic raw evidence; no refund, no ledger reuse",
+@@ -1863,7 +1863,7 @@
+         "FREE_RESTART",
+         "INVALID_EXECUTION"
+       ],
+-      "batch_id": "batch11",
++      "batch_id": "batch12",
+       "cap": 8,
+       "case_id": "S8.restart.mutant",
+       "cleanup_rule": "Keep all synthetic raw evidence; no refund, no ledger reuse",
+@@ -1918,7 +1918,7 @@
+       "N": 4,
+       "N_source": "GC-SYNTHETIC-BOUND/1: exactly four allowed synthetic semantic operations",
+       "allowed_violation_set": [],
+-      "batch_id": "batch11",
++      "batch_id": "batch12",
+       "cap": 8,
+       "case_id": "S9.exhausted.safe",
+       "cleanup_rule": "Keep all synthetic raw evidence; no refund, no ledger reuse",
+@@ -1975,7 +1975,7 @@
+       "allowed_violation_set": [
+         "LOCAL_OVERSPEND"
+       ],
+-      "batch_id": "batch11",
++      "batch_id": "batch12",
+       "cap": 8,
+       "case_id": "S9.exhausted.mutant",
+       "cleanup_rule": "Keep all synthetic raw evidence; no refund, no ledger reuse",
+--- before/inputs/startup_contract.json
++++ after/inputs/startup_contract.json
+@@ -1,8 +1,8 @@
+ {
+   "schema": "PRET0-CONTRACT/1",
+   "profile": "PRET0-LIFECYCLE/1",
+-  "version": "PreT0Recovery-static-1/r3",
+-  "batch_id": "batch11",
++  "version": "PTA-PhaseFinalizer-static-1/r1",
++  "batch_id": "batch12",
+   "jobs": [
+     {
+       "case_id": "P.fresh_pre",
+--- before/inputs/static_manifest.json
++++ after/inputs/static_manifest.json
+@@ -9,7 +9,7 @@
+   "boot_continuity_delta": {
+     "Root_entry_AS_bytes": 1073741824,
+     "activation_TTL_seconds": 10,
+-    "calibration_hard_bound": 65618,
++    "calibration_hard_bound": 66770,
+     "combined_completed_bound": 3231,
+     "combined_hard_cap": 5000,
+     "completed_visits": 481,
+@@ -24,44 +24,45 @@
+     "source_cache_policy": "No target pyc; future actual3.12 compile(source) without module execution or cache emission",
+     "synthetic_jobs": 40
+   },
+-  "boot_contract_sha256": "17e52384e0d5081051dcdc8a2f3fe012833e61224798bfa8c951e583f9eae366",
++  "boot_contract_sha256": "3221664a05e92e33acbaec17e9bafa87cc4c21327e0da8cac6301d935982a9b9",
+   "bound_inputs": {
+-    "inputs/boot_contract.json": "17e52384e0d5081051dcdc8a2f3fe012833e61224798bfa8c951e583f9eae366",
++    "inputs/boot_contract.json": "3221664a05e92e33acbaec17e9bafa87cc4c21327e0da8cac6301d935982a9b9",
+     "inputs/business_plan_original.json": "2245be87d589e6f5b055b7f19b67f7f757914fae6064d4c1f8a21956c5a36801",
+-    "inputs/c09_contract.json": "cefa78cf540ee2aa2344f211fa65b263bb18d263218ebbb8b43c1d331824d99b",
++    "inputs/c09_contract.json": "4ec32a015a397b1ccf75e66c98ef29f0378ee6ed8d7a9f5480aa8a45fec190c2",
+     "inputs/child_contracts.json": "d78be83c648b76a391708eddbb601724f83277392ae8fbdd3daf95d0e522eb7f",
+-    "inputs/dclr6batch11.slice": "0cedff23b26c5b09d550c882659e57b0cdf85dded070302f7b129401fa557337",
+-    "inputs/readiness_contract.json": "76a37579825e1422177d35f4b3a97ba910907054ee18ea9b0dedce3c3a31d7c6",
+-    "inputs/root_ipc_contract.json": "c5a018d1f16cfcda2f3f92311fa8cf7e61ffcf1ed9b8b82bc1cfba6218577bad",
++    "inputs/dclr6batch12.slice": "0cedff23b26c5b09d550c882659e57b0cdf85dded070302f7b129401fa557337",
++    "inputs/readiness_contract.json": "a063f3fa16832de8c9a76131a3cdd02463437e2e29e52730f5cf31bafb75edde",
++    "inputs/root_ipc_contract.json": "dbd53d1ab5cf2062345fa98bd29359345e07868a306842d2bfc92480d3dc3591",
+     "inputs/runtime_critical.json": "d35b0c1fbd0ae5e19f31ded640b1d0c7cf55fcd91e79f5a6f908ec59d157d2ac",
+     "inputs/runtime_tree_lock.json": "0768bfe15ccb71c903cd350e444997a0371a179f3def35a7566f9ec1d8fadaf7",
+-    "inputs/safety_contract.json": "25a31bc9f3f3dac7a1c42756dca1871fabafa1b3e3c3113eeaf536af734955da",
+-    "inputs/batch_identity.json": "92e33fda8780ac2772bbab050b0ac7877202ddb4fd3b1b9036d0fbec82f29b76",
+-    "inputs/ledger_gate_contract.json": "2e6023eb8f2259cc4920241e3233838f8038fe562877f9538ac63d6c4f91ba4a",
+-    "inputs/manager_contract.json": "c4b9fda52851432f5a3763d42fe206cebc553d820c7bc56ed6522013e33ac76e",
+-    "inputs/startup_contract.json": "d93722dcfc4cd8ac7fd7bba4a2bef02b198c7de9cb4da2cfd5748315eab88257"
++    "inputs/safety_contract.json": "17efd8711b12dc0a891442c844001888befe7f2ee21536e3aa3f9f3129a73fa5",
++    "inputs/batch_identity.json": "21453012696f307ba8b0891180042a362466f03c05858612eb8a740ffa5c1c8e",
++    "inputs/ledger_gate_contract.json": "ec92fa6b5863b15e6d3ec47a43f88a69138a2f97baf5421f9b45b3e41f8e2f4b",
++    "inputs/manager_contract.json": "9f1054575346b8f687ac7e0d45fb2c7a029bada8c7d710cc98e8cf0bb0c76202",
++    "inputs/startup_contract.json": "9de6641c1b8593a9234bce33d28a9126ad1a8208e253f6dcd35cc70502a3c8ee",
++    "inputs/phase_finalizer_contract.json": "fc6681c936e9a046bde51fb4cabee02b5599bc8ee854677fd7a9db02234f0c42"
+   },
+   "budget_protocol": "EXACT-RANGE/1",
+   "business_plan_original_sha256": "2245be87d589e6f5b055b7f19b67f7f757914fae6064d4c1f8a21956c5a36801",
+-  "c09_contract_sha256": "cefa78cf540ee2aa2344f211fa65b263bb18d263218ebbb8b43c1d331824d99b",
++  "c09_contract_sha256": "4ec32a015a397b1ccf75e66c98ef29f0378ee6ed8d7a9f5480aa8a45fec190c2",
+   "c09_resource_delta": {
+     "C09H_charge_ceiling": 5000,
+     "C09H_completed_bound": 2245,
+-    "calibration_hard_visit_upper_bound": 65618,
++    "calibration_hard_visit_upper_bound": 66770,
+     "calibration_seconds": 300,
+     "handoff_observation_seconds": 12,
+     "payload_tasks": 4,
+     "trusted_root_admin_process_delta": 1
+   },
+   "child_contracts_sha256": "d78be83c648b76a391708eddbb601724f83277392ae8fbdd3daf95d0e522eb7f",
+-  "export_lock_revision": "PT-r3",
+-  "freeze_revision": 3,
++  "export_lock_revision": "PF-r1",
++  "freeze_revision": 1,
+   "gid": 989,
+-  "input_binding_scope": "batch11-r1; all inherited C/READY64/BC40/IPC56/H34/S34 plus gate18 with isolated ledger aggregate",
++  "input_binding_scope": "batch12-r1; PT64 unchanged jobs plus PF48; scope authority remains the exact future receipt",
+   "kernel": "6.18.33.2-microsoft-standard-WSL2",
+   "profile": "CPY312-UBU24/1",
+-  "profile_approval": "C00READY_HOST_STATIC_ONLY; native deployment/diagnosis/execution not authorized",
+-  "readiness_contract_sha256": "76a37579825e1422177d35f4b3a97ba910907054ee18ea9b0dedce3c3a31d7c6",
++  "profile_approval": "PF_HOST_STATIC_ONLY; native deployment/import/diagnosis/execution require independent authorization",
++  "readiness_contract_sha256": "a063f3fa16832de8c9a76131a3cdd02463437e2e29e52730f5cf31bafb75edde",
+   "readiness_delta": {
+     "calibration_seconds": 300,
+     "cases": [
+@@ -79,7 +80,7 @@
+     ],
+     "mutants": 17,
+     "new_actual_processes": 0,
+-    "new_calibration_hard": 65618,
++    "new_calibration_hard": 66770,
+     "old_calibration_hard": 62034,
+     "poll_seconds": 0.05,
+     "profile": "C00-READY/1",
+@@ -88,7 +89,7 @@
+     "soft_calibration_cap": 100000
+   },
+   "resource_enforcement": "UNRUN_NEW_VERSION",
+-  "root_ipc_contract_sha256": "c5a018d1f16cfcda2f3f92311fa8cf7e61ffcf1ed9b8b82bc1cfba6218577bad",
++  "root_ipc_contract_sha256": "dbd53d1ab5cf2062345fa98bd29359345e07868a306842d2bfc92480d3dc3591",
+   "root_ipc_delta": {
+     "TCB_scope": "Root suite runs between C09H completion and real C09; sequential helper outside payload slice",
+     "calibration_seconds": 300,
+@@ -98,7 +99,7 @@
+     "combined_C09H_hard_visits": 5000,
+     "completed_upper_bound": 505,
+     "contract": "ROOT-IPC/1",
+-    "full_calibration_hard_visits": 65618,
++    "full_calibration_hard_visits": 66770,
+     "hard_visits": 512,
+     "jobs": 56,
+     "latency_guarantee": "UNMEASURED_CONDITIONAL",
+@@ -148,14 +149,15 @@
+     "/usr/sbin/useradd": "cf687323ab26e097237f5e106bf2a461f699840489ffe97871ca8111a2a220bd"
+   },
+   "runtime_tree_lock_sha256": "0768bfe15ccb71c903cd350e444997a0371a179f3def35a7566f9ec1d8fadaf7",
+-  "safety_contract_sha256": "25a31bc9f3f3dac7a1c42756dca1871fabafa1b3e3c3113eeaf536af734955da",
++  "safety_contract_sha256": "17efd8711b12dc0a891442c844001888befe7f2ee21536e3aa3f9f3129a73fa5",
+   "schema": "C00Ready-static-manifest/1",
+-  "source_directory": "/var/lib/dcl-r6/pt01/src",
++  "source_directory": "/var/lib/dcl-r6/pf01/src",
+   "source_hashes": {
+-    "batch_identity.py": "85d60a879827b6c910f2c7606b012c3435155d59fcd077c016ff8a449b1a75e2",
+-    "boot_continuity.py": "ca053d9a0f10a84d803875baa01c6e706241b82ce107d0e463d822eafa989d2a",
++    "admin_postexit.py": "6c8695032292f61028420062693fbcb6a43cf063929096542cf4e58082566521",
++    "batch_identity.py": "ac418ddb8c9b22764bf625cd98410f664cfcac9620b5843acc1e6bf15d5ce158",
++    "boot_continuity.py": "331ce03bc7105fb55f19d12d45f41279c4386c98e1aaef9948d221bd59a82fa3",
+     "boot_continuity_oracle.py": "a8101ed143f096d943ba9aa96af233e25d7ea4c96524d142ec07e6012e4ad4f9",
+-    "boot_continuity_regression.py": "bd933269f5e4a78f508925887b1e6b4c1cdbfa85a0f057f2ecfe161168c828ab",
++    "boot_continuity_regression.py": "2e2f7eedd456fa462dda10b531fa9ea095f2f16325caa4da84c99f44abe9cd25",
+     "c09_handoff.py": "0441874d3eec62720b920a48077bc52f4f3db9c64e3c21f3aa3aa97cd43e109f",
+     "c09_oracle.py": "7770f85435089af3e2cb0bda28ba9e759ba6624b3f766ce1823514b788e126da",
+     "c09_regression.py": "aa28e9f8c8d53b6780bc727f7a678d3c3bf08332c25b582cfbf7aa57b6546a8f",
+@@ -164,25 +166,27 @@
+     "f1_model.py": "5669c8486d00f56085ef1a69ad7b40c3fc328bd41ae1a8424f1cd68018911d35",
+     "f4_dp.py": "a07194f1dbec98efc2932186777f5bdb084012e3d8b5784d9b3c27b6ecbb50c5",
+     "f4_reference.py": "9d1fcbc5752bfe7c6cd0308fb06a838174834dfe0b2f23a75c352418c3047e2b",
+-    "guard.py": "64c9fc86f809edddbd6aaf6610b23d11406d1b22e19470cc19361d83df2273f8",
++    "guard.py": "aaa86e727f81791f83fb2915d9b133298aa86be1674059026d34f872f1b43356",
+     "guard_probe.py": "32ed91e5135e09454d6634bf369193c7ccf4e8ae669e523b1dd781ed96109de3",
+-    "ledger_gate.py": "8c601c903f5d0bd17dfc810871cd63266977573ac231a2f20b7bc727cd456b64",
++    "ledger_gate.py": "73d6d5c9e630bb6b9abe99840966de4f46e8c7df65072f190a4470d9026ddc34",
+     "ledger_gate_oracle.py": "e5213f0fc2b81e0cd55c81185d2d000639665e0faede930a4cbad283b46b9f7e",
+     "ledger_gate_regression.py": "2fd3f90b57d124ce6cdbd864068d1530e73fac28b312ea599b9b39f20e68a5a0",
+-    "manager_recovery.py": "db0efb2c902a679eb960b64ad1903fc1d8f67d7c33ea94e39c57d84705971095",
++    "manager_recovery.py": "31f5a1bdbbbe6e0aa3f4d390764d95b6a095aa1c9d544241d1a4f6c361a2b4fe",
+     "manager_recovery_oracle.py": "31864ac2f6d30286d4d6c8d54a85c6588725ff9c0f01c6bb4da8dbaa83bba3dc",
+     "manager_recovery_regression.py": "6a5f174cd1a560e7563b2db12ceb56e1effab541edf254f4b82dd44c89ccbb34",
++    "phase_finalizer_oracle.py": "15bbdc41f3d37dc8e43a9ea300e5496756d7e6fbb927153e36b30fbe9430fbf7",
++    "phase_finalizer_regression.py": "293f98afb2ae6126df580466b739565399b43c045d338ec98d0c4beea46aab9f",
+     "range_core.py": "2070eea62da7bf778fa5d359e22f01ab4e466acdf2b466cd66c9b816f902f096",
+     "range_evidence.py": "3971ad9effdd01166f15c7241111fbf4a32b2caa1b79fb4cea79c6244c8578a0",
+     "range_fixtures.py": "1dea0f8b25a35cc0366316070d76b9e02c4ef62794a904b87498625cf00aab39",
+-    "readiness_oracle.py": "1679a2dbd55ade4036c6d4a2f5f96d47c0f24d3ad09c8772aa8c18b1b46e3d53",
+-    "readiness_regression.py": "ffd0965678d02d803b6682768a0a040f4ef40e9b387a67a582f2f813a762d504",
+-    "root_ipc.py": "1402478795829e81bad0867294ae22ba1b551b028a42c81eb6cfae6b621fa906",
++    "readiness_oracle.py": "e22ba180262fbb8f8ac1ace39e89234ed112d162d53dc553b52b488d63383ead",
++    "readiness_regression.py": "af528462c442ae8c31b1218f3ec2beb35361751933ec58fee665300a24a32c35",
++    "root_ipc.py": "c2a68ba37e51b7729e0a5553f5aedacb0c44bf1f338a7c1f79cd68b57eb335fb",
+     "root_ipc_oracle.py": "7dd8c985ba5174a62ff6ecf3de6b439b6a598040868d319f5bd1f4de1acffa89",
+     "root_ipc_regression.py": "09d25707e995aee53996a17230df8ef8ef0dc3fb14cc61653ff9012e177f8da1",
+     "run_batch.py": "c88fc3b07e6feddf5d2aa96adf3b3b63fc3f6f9897d585f42d6882a5279a63e7",
+     "service_readiness.py": "d1ff983842e01430caf7ddd4af3ac5a8abb4bf4d48a43ef0a753972804e6bf4e",
+-    "startup_lifecycle.py": "89799fd68ba50c4dbf2dd85633b8e848b6bbea63828631a5067c73c03f96d23e",
++    "startup_lifecycle.py": "d6492323ea4bae82e7a7cee51f7fc24a23358c4959252ec5fe74e6d8204a9150",
+     "startup_oracle.py": "6ba6f3843356f2f1d438c67bca795a57605d73b1ea1abaff8f672626df47afa6",
+     "startup_regression.py": "d47f8a1cd85ac391f316f573e1b69baf4352fc8fe182dfc16dcf425b1af870f7"
+   },
+@@ -190,7 +194,7 @@
+   "systemd": "255.4-1ubuntu8.18",
+   "test_resource_limits": {
+     "calibration_seconds": 300,
+-    "calibration_total_max_visits": 65618,
++    "calibration_total_max_visits": 66770,
+     "completed_visit_upper_bound": 19861,
+     "gate_negative_cases": 18,
+     "global_range_visits": 20000,
+@@ -203,7 +207,7 @@
+     "historical_service": "0cedff23b26c5b09d550c882659e57b0cdf85dded070302f7b129401fa557337",
+     "slice": "0cedff23b26c5b09d550c882659e57b0cdf85dded070302f7b129401fa557337"
+   },
+-  "version": "PreT0Recovery-static-1",
++  "version": "PTA-PhaseFinalizer-static-1",
+   "inherited_semantics": "ManagerRecovery-static-1/r5 including unchanged normal manager rules",
+   "ledger_gate_delta": {
+     "jobs": 18,
+@@ -215,9 +219,9 @@
+     "range_hard_limit": 20000,
+     "root_qualification_reaudits": 2
+   },
+-  "batch_identity_sha256": "92e33fda8780ac2772bbab050b0ac7877202ddb4fd3b1b9036d0fbec82f29b76",
+-  "ledger_gate_contract_sha256": "2e6023eb8f2259cc4920241e3233838f8038fe562877f9538ac63d6c4f91ba4a",
+-  "static_revision": "PreT0Recovery-static-1/r3",
++  "batch_identity_sha256": "21453012696f307ba8b0891180042a362466f03c05858612eb8a740ffa5c1c8e",
++  "ledger_gate_contract_sha256": "ec92fa6b5863b15e6d3ec47a43f88a69138a2f97baf5421f9b45b3e41f8e2f4b",
++  "static_revision": "PTA-PhaseFinalizer-static-1/r1",
+   "manager_delta": {
+     "driver_prepay": 12,
+     "regression_completed_visits": 833,
+@@ -225,18 +229,36 @@
+     "native_review_credit": 256,
+     "phase_completed_visits": 1089,
+     "phase_hard_visits": 1536,
+-    "full_calibration_hard": 65618
+-  },
+-  "manager_contract_sha256": "c4b9fda52851432f5a3763d42fe206cebc553d820c7bc56ed6522013e33ac76e",
++    "full_calibration_hard": 66770
++  },
++  "manager_contract_sha256": "9f1054575346b8f687ac7e0d45fb2c7a029bada8c7d710cc98e8cf0bb0c76202",
+   "startup_delta": {
+     "regression_hard": 1536,
+     "regression_completed": 1089,
+-    "normal_minimal_visits_hard": 1537,
+-    "full_calibration_hard": 65618,
++    "normal_minimal_visits_hard": 2689,
++    "full_calibration_hard": 66770,
+     "preflight_TCB_seconds": 120,
+     "new_time_window": false,
+     "admin_files": 256,
+     "admin_bytes": 33554432
+   },
+-  "startup_contract_sha256": "d93722dcfc4cd8ac7fd7bba4a2bef02b198c7de9cb4da2cfd5748315eab88257"
++  "startup_contract_sha256": "9de6641c1b8593a9234bce33d28a9126ad1a8208e253f6dcd35cc70502a3c8ee",
++  "phase_finalizer_delta": {
++    "jobs": 48,
++    "safe": 40,
++    "mutants": 8,
++    "completed_visits": 817,
++    "hard_visits": 1152,
++    "normal_minimal_completed": 1907,
++    "normal_minimal_hard": 2689,
++    "full_calibration_hard": 66770,
++    "phase_lock_seconds": 2,
++    "phase_lock_attempts": 512,
++    "admin_quiescence_seconds": 5,
++    "admin_quiescence_samples": 128,
++    "native_admin_alarm_seconds": 30,
++    "host_postexit_seconds": 35,
++    "dynamic_status": "UNRUN"
++  },
++  "phase_finalizer_contract_sha256": "fc6681c936e9a046bde51fb4cabee02b5599bc8ee854677fd7a9db02234f0c42"
+ }
+--- before/src/admin_postexit.py
++++ after/src/admin_postexit.py
+@@ -0,0 +1,50 @@
++"""PF administrative entry: stdlib-only bootstrap, fixed source, no runtime grants."""
++import argparse
++import hashlib
++import importlib
++import json
++import os
++from pathlib import Path
++import stat
++import sys
++
++def checked_source():
++    source=Path(__file__).resolve().parent
++    if sys.platform!='linux' or os.geteuid()!=0 or source!=Path('/var/lib/dcl-r6/pf01/src'):
++        raise RuntimeError('PF_ADMIN_FIXED_ROOT_SOURCE')
++    if not (sys.version_info[:3]==(3,12,3) and sys.flags.isolated and sys.flags.no_site and sys.dont_write_bytecode):
++        raise RuntimeError('PF_ADMIN_INTERPRETER')
++    for p in [source.parent,source,source.parent/'inputs']:
++        s=p.lstat()
++        if not stat.S_ISDIR(s.st_mode) or s.st_uid!=0 or s.st_mode&0o022 or any(k.startswith('system.posix_acl_') for k in os.listxattr(p,follow_symlinks=False)):
++            raise RuntimeError('PF_ADMIN_SOURCE_DIRECTORY')
++    def read(p):
++        fd=os.open(p,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC)
++        try:
++            s=os.fstat(fd)
++            if not stat.S_ISREG(s.st_mode) or s.st_uid!=0 or s.st_mode&0o022 or s.st_nlink!=1 or s.st_size>4194304:
++                raise RuntimeError('PF_ADMIN_SOURCE_FILE')
++            raw=os.read(fd,s.st_size+1)
++            if len(raw)!=s.st_size:raise RuntimeError('PF_ADMIN_SHORT_READ')
++            return raw
++        finally:os.close(fd)
++    manifest_raw=read(source.parent/'inputs/static_manifest.json');manifest=json.loads(manifest_raw)
++    lock=json.loads(read(source.parent/'inputs/execution_lock.json'))
++    if hashlib.sha256(manifest_raw).hexdigest()!=lock['static_manifest_sha256']:raise RuntimeError('PF_ADMIN_MANIFEST_BINDING')
++    for name,expected in manifest['source_hashes'].items():
++        if Path(name).name!=name or hashlib.sha256(read(source/name)).hexdigest()!=expected:raise RuntimeError('PF_ADMIN_SOURCE_DIGEST')
++    return source
++
++def load_target(source):
++    # No environment/PYTHONPATH/cwd lookup can precede the checked fixed source.
++    sys.path.insert(0,str(source))
++    target=importlib.import_module('startup_lifecycle')
++    if Path(target.__file__).resolve()!=source/'startup_lifecycle.py':raise RuntimeError('PF_ADMIN_MODULE_ORIGIN')
++    return target
++
++def main():
++    parser=argparse.ArgumentParser();parser.add_argument('--post-exit-export',action='store_true',required=True);parser.parse_args()
++    source=checked_source()
++    load_target(source).post_exit_export()
++
++if __name__=='__main__':main()
+--- before/src/batch_identity.py
++++ after/src/batch_identity.py
+@@ -3,15 +3,15 @@
+ from pathlib import Path
+ 
+ SPEC = {
+-    'schema':'DCL-BATCH-IDENTITY/1','revision':'PreT0Recovery-static-1/r3',
+-    'batch_id':'batch11','source_root':'/var/lib/dcl-r6/pt01',
+-    'runtime_root':'/var/lib/dcl-r6/batch11','slice':'dclr6batch11.slice',
+-    'service_prefix':'dclr6batch11-',
+-    'host_package':'D:/毕业设计/DCL-R6-isolated-verification/pt01',
+-    'host_control':'D:/毕业设计/research_main_innovation/decentralized_credential_lifecycle/DCL-R6-PreT0-Fix/authorization/batch11-r5',
+-    'linux_control':'/mnt/d/毕业设计/research_main_innovation/decentralized_credential_lifecycle/DCL-R6-PreT0-Fix/authorization/batch11-r5',
++    'schema':'DCL-BATCH-IDENTITY/1','revision':'PTA-PhaseFinalizer-static-1/r1',
++    'batch_id':'batch12','source_root':'/var/lib/dcl-r6/pf01',
++    'runtime_root':'/var/lib/dcl-r6/batch12','slice':'dclr6batch12.slice',
++    'service_prefix':'dclr6batch12-',
++    'host_package':'D:/毕业设计/DCL-R6-isolated-verification/pf01',
++    'host_control':'D:/毕业设计/research_main_innovation/decentralized_credential_lifecycle/DCL-R6-PTA-PhaseFinalizer-Fix/authorization/batch12-r1',
++    'linux_control':'/mnt/d/毕业设计/research_main_innovation/decentralized_credential_lifecycle/DCL-R6-PTA-PhaseFinalizer-Fix/authorization/batch12-r1',
+     'authorization_filename':'execution_authorization.json',
+-    'authorization_text_filename':'BATCH11_AUTHORIZATION_TEXT.txt',
++    'authorization_text_filename':'BATCH12_AUTHORIZATION_TEXT.txt',
+     'operator_text_filename':'TASK_REQUEST.txt',
+     'cases':['C%02d'%i for i in range(13)]+['C09H','RANGE','FORMAL','STOP'],
+ }
+--- before/src/boot_continuity.py
++++ after/src/boot_continuity.py
+@@ -65,7 +65,7 @@
+ class Store:
+     """Fixed Root-only boot namespace plus two fixed group-readable certificates."""
+     def __enter__(self):
+-        if str(SOURCE)!='/var/lib/dcl-r6/pt01/src' or os.geteuid()!=0:raise Rejected('BC_ROOT_SOURCE_REQUIRED')
++        if str(SOURCE)!='/var/lib/dcl-r6/pf01/src' or os.geteuid()!=0:raise Rejected('BC_ROOT_SOURCE_REQUIRED')
+         if str(SOURCE) not in sys.path:sys.path.insert(0,str(SOURCE))
+         import root_ipc
+         self.owner=root_ipc.directories(Context());self.ds=self.owner.__enter__()
+@@ -155,7 +155,7 @@
+ 
+ def artifact_check(deadline,epoch):
+     m=trusted(SOURCE.parent/'inputs/static_manifest.json');lock=trusted(SOURCE.parent/'inputs/execution_lock.json')
+-    if m['version']!='PreT0Recovery-static-1' or m['source_directory']!=str(SOURCE):raise Rejected('BC_SOURCE_VERSION')
++    if m['version']!='PTA-PhaseFinalizer-static-1' or m['source_directory']!=str(SOURCE):raise Rejected('BC_SOURCE_VERSION')
+     if sys.platform!='linux' or tuple(sys.version_info[:3])!=(3,12,3):raise Rejected('BC_PYTHON_VERSION')
+     if str(Path(sys.executable).resolve())!='/usr/bin/python3.12':raise Rejected('BC_PYTHON_PATH')
+     if not(sys.flags.isolated and sys.flags.no_site and sys.dont_write_bytecode):raise Rejected('BC_PYTHON_FLAGS')
+@@ -208,15 +208,15 @@
+     if os.geteuid()!=0 or os.uname().release!=m['kernel'] or os.uname().machine!=m['architecture'] or os.sysconf('SC_PAGE_SIZE')!=4096:raise Rejected('BC_NATIVE_RUNTIME')
+     if not any(s.split()[4]=='/sys/fs/cgroup' and ' - cgroup2 ' in s for s in Path('/proc/self/mountinfo').read_text().splitlines()):raise Rejected('BC_CGROUP_V2')
+     if not prepared:
+-        listed=command(['/usr/bin/systemctl','list-units','dclr6batch11*','--all','--no-pager','--no-legend'],deadline,epoch)
+-        if (ROOT.exists() or Path('/etc/systemd/system/dclr6batch11.slice').exists() or
+-            Path('/sys/fs/cgroup/dclr6batch11.slice').exists() or listed.strip()):raise Rejected('BC_BATCH_MUST_BE_NEW')
++        listed=command(['/usr/bin/systemctl','list-units','dclr6batch12*','--all','--no-pager','--no-legend'],deadline,epoch)
++        if (ROOT.exists() or Path('/etc/systemd/system/dclr6batch12.slice').exists() or
++            Path('/sys/fs/cgroup/dclr6batch12.slice').exists() or listed.strip()):raise Rejected('BC_BATCH_MUST_BE_NEW')
+     state=ROOT/'inputs/batch_state.json';counter=ROOT/'out/visits.bin'
+     if state.exists() or counter.exists() or (ROOT/'inputs/CLOSED.json').exists() or (ROOT/'out/STOP_REQUEST.json').exists():raise Rejected('BC_PRIOR_WINDOW_OR_CLOSURE')
+     unit={}
+     if prepared:
+-        if digest('/etc/systemd/system/dclr6batch11.slice')!=lock['unit_slice_sha256']:raise Rejected('BC_INSTALLED_UNIT_DRIFT')
+-        text=command(['/usr/bin/systemctl','show','dclr6batch11.slice','--property=LoadState','--property=ActiveState','--property=TasksMax','--property=MemoryMax','--property=ControlGroup'],deadline,epoch)
++        if digest('/etc/systemd/system/dclr6batch12.slice')!=lock['unit_slice_sha256']:raise Rejected('BC_INSTALLED_UNIT_DRIFT')
++        text=command(['/usr/bin/systemctl','show','dclr6batch12.slice','--property=LoadState','--property=ActiveState','--property=TasksMax','--property=MemoryMax','--property=ControlGroup'],deadline,epoch)
+         unit=dict(s.split('=',1) for s in text.splitlines() if '='in s)
+         if unit.get('ActiveState')!='inactive' or unit.get('TasksMax')!='4' or unit.get('MemoryMax')!='4294967296' or unit.get('ControlGroup'):raise Rejected('BC_PARENT_PRESTART_LIMITS')
+         with Store():pass
+@@ -232,7 +232,7 @@
+     resource.setrlimit(resource.RLIMIT_AS,(1<<30,1<<30))
+     emit('PREFLIGHT_BEGIN',deadline=deadline,source_mode='SOURCE_ONLY/1')
+     m,lock,audit=artifact_check(deadline,epoch)
+-    if str(SOURCE)!='/var/lib/dcl-r6/pt01/src':raise Rejected('BC_PACKAGE_PATH')
++    if str(SOURCE)!='/var/lib/dcl-r6/pf01/src':raise Rejected('BC_PACKAGE_PATH')
+     auth_source=Path(lock['authorization_sources']['receipt']);text_source=Path(lock['authorization_sources']['text'])
+     # Host operator supplies these exact approved bytes; no authority is inferred from a cache.
+     auth_raw=operator_bytes(auth_source);text_raw=operator_bytes(text_source);auth=json.loads(auth_raw)
+@@ -253,6 +253,8 @@
+     if auth.get('static_revision')!=NAMESPACE['revision'] or auth.get('batch_identity_sha256')!=digest(SOURCE.parent/'inputs/batch_identity.json') or auth.get('ledger_gate_contract_sha256')!=m['ledger_gate_contract_sha256']:
+         raise Rejected('MR_IDENTITY_RECEIPT')
+     if auth.get('startup_contract_sha256')!=m['startup_contract_sha256']:raise Rejected('PT_CONTRACT_AUTHORIZATION')
++    if auth.get('phase_finalizer_contract_sha256')!=m['phase_finalizer_contract_sha256']:raise Rejected('PF_CONTRACT_AUTHORIZATION')
++    if auth['scope']=='PT_STARTUP_DIAGNOSTIC_ONLY' and auth.get('PhaseFinalizer_diagnostic_explicitly_approved') is not True:raise Rejected('PF_DIAGNOSTIC_NOT_APPROVED')
+     if auth['scope']=='PT_STARTUP_DIAGNOSTIC_ONLY' and (auth.get('PreT0_diagnostic_explicitly_approved') is not True or auth.get('startup_probe_mode') not in ('NORMAL_START','PREWINDOW_ABORT') or auth.get('Full_conditional_chain_explicitly_approved') is not False):raise Rejected('PT_DIAGNOSTIC_SCOPE')
+     if auth['scope']=='PT_STARTUP_DIAGNOSTIC_ONLY' and auth['startup_probe_mode']=='PREWINDOW_ABORT' and auth.get('PreWindow_abort_injection_explicitly_approved') is not True:raise Rejected('PT_INJECTION_NOT_APPROVED')
+     if auth.get('manager_contract_sha256')!=m['manager_contract_sha256']:raise Rejected('MR_CONTRACT_AUTHORIZATION')
+@@ -263,7 +265,7 @@
+     if auth.get('readiness_contract_sha256')!=m.get('readiness_contract_sha256'):raise Rejected('BC_READINESS_BINDING')
+     first=runtime_snapshot(m,lock,deadline,epoch)
+     for argv in lock['preparation_commands']:command(argv,deadline,epoch)
+-    for data,target in [(text_raw,'BATCH11_AUTHORIZATION_TEXT.txt'),(auth_raw,'execution_authorization.json')]:
++    for data,target in [(text_raw,'BATCH12_AUTHORIZATION_TEXT.txt'),(auth_raw,'execution_authorization.json')]:
+         fd=os.open(ROOT/'inputs'/target,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o640)
+         try:os.fchown(fd,0,989);os.fchmod(fd,0o640);_full(fd,data);os.fsync(fd)
+         finally:os.close(fd)
+--- before/src/boot_continuity_regression.py
++++ after/src/boot_continuity_regression.py
+@@ -12,7 +12,7 @@
+         self.uid=0;self.gid=0;self.cgroup='/root-tcb';self.tasks_max=4;self.artifact_digest='frozen-source'
+         self.window=False;self.counter=False;self.used=0;self.cap=False;self.sealed=False;self.active=False
+         self.cache=None;self.cache_rule=True;self.chain={};self.last_good=None
+-        self.binding={'batch_id':'batch11','execution_lock_sha256':'frozen-lock','source':'frozen-source'}
++        self.binding={'batch_id':'batch12','execution_lock_sha256':'frozen-lock','source':'frozen-source'}
+     def owner(self):return {'pid':self.pid,'start_ticks':self.ticks,'boot_id':self.boot()}
+     def boot(self):return '00000000-0000-4000-8000-%012d'%self.epoch
+     def observe(self):
+@@ -41,7 +41,7 @@
+         elif e=='stop':self.stop=True
+         elif e in ('orchestrator_exit','launcher_exit'):self.alive=False;self.cap=False;self.active=False
+         elif e=='resources_change':self.resources=False;self.tasks_max=8
+-        elif e=='identity_change':self.privileges=False;self.uid=999;self.gid=989;self.cgroup='/dclr6batch11.slice/unexpected'
++        elif e=='identity_change':self.privileges=False;self.uid=999;self.gid=989;self.cgroup='/dclr6batch12.slice/unexpected'
+         elif e=='service_active':self.active=True
+         elif e=='initialize_window':
+             if not self.window:self.window=True;self.counter=True;self.used=1
+--- before/src/guard.py
++++ after/src/guard.py
+@@ -230,11 +230,13 @@
+ def authorization():
+     _check_root(); m=manifest()
+     a=trusted(ROOT/'inputs/execution_authorization.json')
+-    if ROOT.name != 'batch11' or a['batch_id'] != 'batch11' or a['scope'] not in ('CALIBRATE_S1S9_THEN_F1_F4','CALIBRATE_S1S9_ONLY','MR_RECOVERY_DIAGNOSTIC_ONLY','PT_STARTUP_DIAGNOSTIC_ONLY'):
+-        raise AdmissionBlocked('NO_DYNAMIC_BATCH11_AUTHORIZATION')
++    if ROOT.name != 'batch12' or a['batch_id'] != 'batch12' or a['scope'] not in ('CALIBRATE_S1S9_THEN_F1_F4','CALIBRATE_S1S9_ONLY','MR_RECOVERY_DIAGNOSTIC_ONLY','PT_STARTUP_DIAGNOSTIC_ONLY'):
++        raise AdmissionBlocked('NO_DYNAMIC_BATCH12_AUTHORIZATION')
+     if (a.get('static_revision')!=NAMESPACE['revision'] or a.get('batch_identity_sha256')!=digest(SOURCE.parent/'inputs/batch_identity.json') or a.get('ledger_gate_contract_sha256')!=m['ledger_gate_contract_sha256']):
+         raise AdmissionBlocked('MR_REVISION_OR_IDENTITY_BINDING')
+     if a.get('startup_contract_sha256')!=m['startup_contract_sha256']:raise AdmissionBlocked('PT_CONTRACT_AUTHORIZATION')
++    if a.get('phase_finalizer_contract_sha256')!=m['phase_finalizer_contract_sha256']:raise AdmissionBlocked('PF_CONTRACT_AUTHORIZATION')
++    if a['scope']=='PT_STARTUP_DIAGNOSTIC_ONLY' and a.get('PhaseFinalizer_diagnostic_explicitly_approved') is not True:raise AdmissionBlocked('PF_DIAGNOSTIC_NOT_APPROVED')
+     if a['scope']=='PT_STARTUP_DIAGNOSTIC_ONLY' and (a.get('PreT0_diagnostic_explicitly_approved') is not True or a.get('startup_probe_mode') not in ('NORMAL_START','PREWINDOW_ABORT') or a.get('Full_conditional_chain_explicitly_approved') is not False):raise AdmissionBlocked('PT_DIAGNOSTIC_SCOPE')
+     if a['scope']=='PT_STARTUP_DIAGNOSTIC_ONLY' and a['startup_probe_mode']=='PREWINDOW_ABORT' and a.get('PreWindow_abort_injection_explicitly_approved') is not True:raise AdmissionBlocked('PT_INJECTION_NOT_APPROVED')
+     if a.get('manager_contract_sha256')!=m['manager_contract_sha256']:raise AdmissionBlocked('MR_CONTRACT_AUTHORIZATION')
+@@ -263,7 +265,7 @@
+         raise AdmissionBlocked('C00_DIAGNOSTIC_NOT_APPROVED')
+     if a['scope']=='CALIBRATE_S1S9_THEN_F1_F4' and a.get('Full_conditional_chain_explicitly_approved') is not True:
+         raise AdmissionBlocked('FULL_CHAIN_NOT_APPROVED')
+-    if a['authorization_text_sha256'] != digest(ROOT/'inputs/BATCH11_AUTHORIZATION_TEXT.txt'):
++    if a['authorization_text_sha256'] != digest(ROOT/'inputs/BATCH12_AUTHORIZATION_TEXT.txt'):
+         raise AdmissionBlocked('AUTHORIZATION_SOURCE_MISMATCH')
+     # This is explicit scope acceptance, never a substitute for OS limit checks.
+     if a.get('special_mapping_scope') != 'ORDINARY_AS_ACCOUNTED;KERNEL_SPECIALS_SEPARATELY_REVIEWED':
+@@ -1076,6 +1078,8 @@
+             if c=='C00':
+                 import startup_regression
+                 startup_regression.run_suite(sys.modules[__name__])
++                import phase_finalizer_regression
++                phase_finalizer_regression.run_suite(sys.modules[__name__])
+                 if a['scope']=='PT_STARTUP_DIAGNOSTIC_ONLY':
+                     stop_tree('PT_MINIMAL_RUNTIME_DIAGNOSTIC_COMPLETE');return 0
+                 import readiness_regression
+--- before/src/ledger_gate.py
++++ after/src/ledger_gate.py
+@@ -56,7 +56,7 @@
+ def require_current(G,binding):
+     G.root_checkpoint();G.execution_deadline('FORMAL' if G._TICKET and G._TICKET['case']=='FORMAL' else 'RANGE')
+     base=G.OUT
+-    if base != G.ROOT/'out' or G.ROOT.name!='batch11':raise G.AdmissionBlocked('GATE_LEDGER_CURRENT_ROOT')
++    if base != G.ROOT/'out' or G.ROOT.name!='batch12':raise G.AdmissionBlocked('GATE_LEDGER_CURRENT_ROOT')
+     try:descriptor=capture(base,G.VISIT_CAP,binding)
+     except (LedgerRejected,R.EvidenceError,OSError,ValueError,KeyError,TypeError) as exc:
+         raise G.AdmissionBlocked('REJECT_LEDGER_ANOMALY:'+str(exc)) from exc
+--- before/src/manager_recovery.py
++++ after/src/manager_recovery.py
+@@ -23,7 +23,7 @@
+     if G.digest(p)!=m['manager_contract_sha256'] or a.get('manager_contract_sha256')!=m['manager_contract_sha256']:
+         raise G.AdmissionBlocked('MR_CONTRACT_BINDING')
+     c=G.trusted(p)
+-    if (c['schema']!='MANAGER-RECOVERY-CONTRACT/1' or c['profile']!=PROFILE or c['version']!='PreT0Recovery-static-1/r3' or
++    if (c['schema']!='MANAGER-RECOVERY-CONTRACT/1' or c['profile']!=PROFILE or c['version']!='PTA-PhaseFinalizer-static-1/r1' or
+         c['batch_id']!=G.ROOT.name or len(c['jobs'])!=64 or len({j['case_id'] for j in c['jobs']})!=64 or
+         c['native_review_credit']!=256 or c['driver_prepay']!=12 or c['phase_hard_visits']!=1536 or
+         any(len(j['frames'])>2 for j in c['jobs'])):raise G.AdmissionBlocked('MR_CONTRACT_IDENTITY')
+--- before/src/phase_finalizer_oracle.py
++++ after/src/phase_finalizer_oracle.py
+@@ -0,0 +1,84 @@
++"""Independent PF reference: only stdlib, no subject/guard/lifecycle/budget imports."""
++import hashlib
++import json
++import os
++from pathlib import Path
++import stat
++
++def canonical(v):return json.dumps(v,sort_keys=True,separators=(',',':')).encode()
++
++def reference(frame):
++    f=frame['facts'];domain=frame['domain']
++    if domain=='phase':
++        numbers={'RUNTIME_READY':4,'RUNTIME_ARMED':5,'RUNNING':6}
++        if f['closed'] or f['stop']:decision='DENY_TERMINAL'
++        elif not (f['binding'] and f['identity'] and f['deadline']):decision='DENY_IDENTITY'
++        elif not f['lock_acquired']:decision='WAIT_BOUNDED'
++        elif numbers.get(f['phase'])!=f['sequence'] or f['phase'] not in numbers:decision='DENY_PHASE'
++        elif not(f['committed'] and f['checkpoint_integrity'] and f['initialization_match']):decision='DENY_CHECKPOINT'
++        elif f['root_reader'] and (f['private_phase']!=f['phase'] or f['private_sequence']!=f['sequence'] or not f['record_hash_match']):decision='DENY_VERSION'
++        elif f['work'] and f['phase']=='RUNTIME_READY':decision='DENY_WORK'
++        else:decision='ACCEPT'
++        return {'decision':decision,'work_granted':decision=='ACCEPT' and f['work'],'automatic_stop':frame['critical'] and decision.startswith('DENY_')}
++    if domain=='admin':
++        cleanup='CLEANUP_CONFIRMED' if (f['roles_empty'],f['group_absent'],f['audit_error'])==(True,True,False) else 'CLEANUP_UNKNOWN'
++        if not f['any_runtime']:native='NATIVE_SEAL_NOT_APPLICABLE'
++        elif f['native_verified']:native='NATIVE_SEAL_COMPLETED'
++        elif f['native_error']:native='NATIVE_SEAL_FAILED'
++        else:native='NATIVE_SEAL_UNRESOLVED'
++        failed=not all(f.get(k,True) for k in ('module_ready','permission_ok','evidence_integrity')) or f.get('exception',False)
++        if f.get('repeated',False):admin='RETURN_EXISTING_ADMIN_SEAL' if f.get('repeat_valid',False) else 'ADMIN_EVIDENCE_UNRESOLVED'
++        elif failed:admin='ADMIN_EVIDENCE_UNRESOLVED'
++        elif cleanup=='CLEANUP_CONFIRMED':admin='EXPORT_ALLOWED'
++        else:admin='DEFERRED_ACTIVE_WRITERS'
++        return {'process_cleanup_status':cleanup,'native_seal_status':native,'administrative_export_status':admin,
++            'internal_cleanup_status':f['internal_status'],'error_recorded':failed or (f.get('repeated',False) and not f.get('repeat_valid',False))}
++    return {'automatic_stop':f['critical'],'cleanup':'CLEANUP_CONFIRMED' if f['roles_empty'] and f['group_absent'] and not f['audit_error'] else 'CLEANUP_UNKNOWN',
++        'internal':f['internal_status'],'native':f['native_status'],'admin':f['admin_status']}
++
++def check_job(root,job,index,binding):
++    try:
++        fd=os.open(Path(root)/('pf_case_%03d.json'%index),os.O_RDONLY|os.O_NOFOLLOW)
++        try:
++            meta=os.fstat(fd)
++            if not stat.S_ISREG(meta.st_mode) or meta.st_size>131072:raise ValueError('PF_RAW_BOUND')
++            raw=os.read(fd,meta.st_size+1)
++            if len(raw)!=meta.st_size:raise ValueError('PF_RAW_SHORT')
++        finally:os.close(fd)
++        d=json.loads(raw)
++        if d['origin']!='PF-SIMULATION/1' or d['binding']!=binding or d['case_id']!=job['case_id'] or d['input_sha256']!=hashlib.sha256(canonical(job)).hexdigest():raise ValueError('PF_RAW_BINDING')
++        if len(d['trace'])!=len(job['frames']):raise ValueError('PF_TRACE_COUNT')
++        violations=set()
++        for source,actual in zip(job['frames'],d['trace']):
++            if actual['actual_input']!=source or actual['origin']!='PF-SIMULATION/1':raise ValueError('PF_RAW_INPUT')
++            expected=reference(source);observed=actual['observed'];facts=source['facts']
++            if set(observed)!=set(expected):violations.add('UNEXPECTED_FIELDS')
++            if source['domain']=='phase':
++                if observed.get('decision')!=expected['decision'] or observed.get('work_granted')!=expected['work_granted']:
++                    if expected['decision']=='DENY_TERMINAL':violations.add('REACTIVATION')
++                    elif expected['decision']=='DENY_WORK':violations.add('PREMATURE_WORK')
++                    elif expected['decision']=='DENY_PHASE':violations.add('ILLEGAL_PHASE_ACCEPTED')
++                    elif expected['decision']=='DENY_VERSION':
++                        violations.add('STALE_SNAPSHOT_ACCEPTED' if facts['phase']!=facts['private_phase'] else 'VERSION_MISMATCH_ACCEPTED')
++                    else:violations.add('UNEXPECTED_DECISION')
++                if observed.get('automatic_stop')!=expected['automatic_stop']:
++                    # Re-activation suppresses the same required stop; keep its causal class.
++                    violations.add('REACTIVATION' if expected['decision']=='DENY_TERMINAL' else 'NO_AUTO_STOP' if expected['automatic_stop'] else 'UNEXPECTED_STOP')
++            elif source['domain']=='admin':
++                for key in expected:
++                    if observed.get(key)==expected[key]:continue
++                    if key=='native_seal_status':violations.add('NATIVE_RESULT_OVERWRITTEN')
++                    elif key in ('error_recorded','administrative_export_status') and not facts.get('module_ready',True):violations.add('IMPORT_ERROR_SWALLOWED')
++                    else:violations.add('ADMIN_AXIS_MISMATCH')
++            elif observed!=expected:violations.add('CLOSURE_AXIS_MISMATCH')
++        if job['mutant']:
++            accepted=job['violation_class'] in violations and violations<=set(job['allowed_violations'])
++            status='MUTATION_DETECTED' if accepted else ('UNEXPECTED_VIOLATION' if violations-set(job['allowed_violations']) else 'MUTATION_NOT_DETECTED')
++        else:accepted=not violations;status='PASS' if accepted else 'FAIL'
++        return {'case_id':job['case_id'],'accepted':accepted,'status':status,'violations':sorted(violations),'raw_sha256':hashlib.sha256(raw).hexdigest()}
++    except (OSError,ValueError,KeyError,TypeError) as exc:
++        return {'case_id':job['case_id'],'accepted':False,'status':'EVIDENCE_MISSING','error':repr(exc)}
++
++def check_suite(root,cfg,binding):
++    rows=[check_job(root,j,i,binding) for i,j in enumerate(cfg['jobs'])]
++    return {'accepted':all(r['accepted'] for r in rows),'binding':binding,'origin':'PF-SIMULATION/1','results':rows}
+--- before/src/phase_finalizer_regression.py
++++ after/src/phase_finalizer_regression.py
+@@ -0,0 +1,72 @@
++"""PF-SIMULATION/1, same billed window after PT64; no actual OS fault injection."""
++import copy
++import hashlib
++import os
++import boot_continuity as BC
++import startup_lifecycle as P
++import phase_finalizer_oracle as O
++
++def contract(G):
++    a,m=G.authorization();path=G.SOURCE.parent/'inputs/phase_finalizer_contract.json';cfg=G.trusted(path)
++    if (cfg['version']!='PTA-PhaseFinalizer-static-1/r1' or cfg['batch_id']!=G.ROOT.name or
++        G.digest(path)!=m['phase_finalizer_contract_sha256'] or a.get('phase_finalizer_contract_sha256')!=G.digest(path) or
++        len(cfg['jobs'])!=48 or len({j['case_id'] for j in cfg['jobs']})!=48 or
++        cfg['driver_prepay']!=16 or cfg['hard_visits']!=1152 or any(len(j['frames'])>4 for j in cfg['jobs'])):
++        raise G.AdmissionBlocked('PF_CONTRACT_BINDING')
++    return cfg
++
++def subject_step(frame,mutant):
++    actual=copy.deepcopy(frame);facts=copy.deepcopy(frame['facts']);domain=frame['domain']
++    if mutant=='reactivate_closed':facts['closed']=False;facts['stop']=False
++    if domain=='phase':
++        decision=P.phase_snapshot_policy(facts)
++        if mutant in ('allow_illegal_phase','skip_work','stale_snapshot','ignore_version'):decision='ACCEPT'
++        shutdown=decision.startswith('DENY_') and frame['critical']
++        if mutant=='no_auto_stop':shutdown=False
++        observed={'decision':decision,'work_granted':decision=='ACCEPT' and facts['work'],'automatic_stop':shutdown}
++    elif domain=='admin':
++        observed=P.administrative_policy(facts)
++        if mutant=='swallow_import_error':observed['error_recorded']=False;observed['administrative_export_status']='EXPORT_ALLOWED'
++        if mutant=='overwrite_native':observed['native_seal_status']='NATIVE_SEAL_FAILED'
++    else:
++        # This fixture describes a close-result observation, never calls real shutdown.
++        observed={'automatic_stop':facts['critical'],'cleanup':'CLEANUP_CONFIRMED' if facts['roles_empty'] and facts['group_absent'] and not facts['audit_error'] else 'CLEANUP_UNKNOWN',
++            'internal':facts['internal_status'],'native':facts['native_status'],'admin':facts['admin_status']}
++    return {'actual_input':actual,'observed':observed,'origin':'PF-SIMULATION/1'}
++
++def run_suite(G):
++    if os.geteuid()!=0:raise G.AdmissionBlocked('PF_ROOT_REQUIRED')
++    cfg=contract(G);old=G._TICKET;G._TICKET=G.ticket('C00');base=G.count();binding=G.safety_binding()
++    def charge():
++        if G.count()-base>=cfg['hard_visits']:raise G.LimitReached('PF_REGRESSION_CAP')
++        G.execution_deadline('C00');G.reserve_counter(G.OUT/'visits.bin',G.VISIT_CAP)
++    try:
++        charge()
++        with BC.Store() as store:
++            for i,job in enumerate(cfg['jobs']):
++                before=G.count()
++                for _ in range(cfg['driver_prepay']):charge()
++                trace=[subject_step(f,job['mutant']) for f in job['frames']]
++                store.put('pf_case_%03d.json'%i,{'schema':'PF-RAW/1','origin':'PF-SIMULATION/1','case_id':job['case_id'],
++                    'binding':binding,'input_sha256':hashlib.sha256(P.canonical(job)).hexdigest(),'trace':trace,
++                    'before':before,'after':G.count(),'sample':G.stamp()},exclusive=True)
++                result=O.check_job(G.ROOT/'inputs/root_private/boot',job,i,binding)
++                if not result['accepted']:raise G.AdmissionBlocked('PF_FIRST_TEST_FAILURE:'+job['case_id']+':'+result['status'])
++            for job in cfg['jobs']:charge()
++            result=O.check_suite(G.ROOT/'inputs/root_private/boot',cfg,binding)
++            if not result['accepted']:raise G.AdmissionBlocked('PF_SUITE_FAILED')
++            result.update(contract_sha256=G.digest(G.SOURCE.parent/'inputs/phase_finalizer_contract.json'),
++                checker_sha256=G.digest(G.SOURCE/'phase_finalizer_oracle.py'),before=base,after=G.count(),sample=G.stamp())
++            store.put('pf_qualification.json',result,exclusive=True)
++            return result
++    finally:G._TICKET=old
++
++def verify(G):
++    cfg=contract(G)
++    with BC.Store() as store:q=store.read('pf_qualification.json')
++    if (not q['accepted'] or q['binding']!=G.safety_binding() or q['contract_sha256']!=G.digest(G.SOURCE.parent/'inputs/phase_finalizer_contract.json') or
++        q['checker_sha256']!=G.digest(G.SOURCE/'phase_finalizer_oracle.py') or len(q['results'])!=len(cfg['jobs'])):raise G.AdmissionBlocked('PF_QUALIFICATION')
++    jobs={j['case_id']:j for j in cfg['jobs']}
++    if {r['case_id'] for r in q['results']}!=set(jobs):raise G.AdmissionBlocked('PF_JOB_SET')
++    for row in q['results']:
++        if not row['accepted'] or row['status']!=('MUTATION_DETECTED' if jobs[row['case_id']]['mutant'] else 'PASS'):raise G.AdmissionBlocked('PF_REQUIRED_RESULT')
+--- before/src/readiness_oracle.py
++++ after/src/readiness_oracle.py
+@@ -9,7 +9,7 @@
+ def violations(trace):
+     found=set();fatal_seen=False
+     bad={'uid_wrong':0,'gid_wrong':1,'groups_wrong':2,'caps_wrong':3,'nnp_wrong':4,'as_hard_wrong':5,'as_soft_wrong':6,'cg_wrong':7}
+-    expected=[[999],[989],[989],0,1,'1073741824','1073741824','/dclr6batch11.slice/dclr6batch11-c00.service']
++    expected=[[999],[989],[989],0,1,'1073741824','1073741824','/dclr6batch12.slice/dclr6batch12-c00.service']
+     for x in trace:
+         name=x['event'];f=x['facts'];decision=x['response']['decision']
+         if f['frame_name']!=name or len(f['checks'])!=8:raise ValueError('READY_RAW_FRAME')
+--- before/src/readiness_regression.py
++++ after/src/readiness_regression.py
+@@ -12,7 +12,7 @@
+        'phases':['READY','READY'],'process_identity':target,'identity_before':target,'identity_after':dict(target),
+        'status_version_before':'inv1/version1','status_version_after':'inv1/version1','T0':10,'deadline':1810,
+        'ready_until':24,'now':10+sequence,'checks':[],'frame_name':name}
+-    values=[[999],[989],[989],0,1,'1073741824','1073741824','/dclr6batch11.slice/dclr6batch11-c00.service']
++    values=[[999],[989],[989],0,1,'1073741824','1073741824','/dclr6batch12.slice/dclr6batch12-c00.service']
+     expected=copy.deepcopy(values)
+     bad={'uid_wrong':0,'gid_wrong':1,'groups_wrong':2,'caps_wrong':3,'nnp_wrong':4,'as_hard_wrong':5,'as_soft_wrong':6,'cg_wrong':7}
+     if name in bad:
+--- before/src/root_ipc.py
++++ after/src/root_ipc.py
+@@ -70,7 +70,7 @@
+ 
+ @contextmanager
+ def directories(G):
+-    if os.geteuid() != 0 or str(G.ROOT) != '/var/lib/dcl-r6/batch11':
++    if os.geteuid() != 0 or str(G.ROOT) != '/var/lib/dcl-r6/batch12':
+         raise G.AdmissionBlocked('IPC_ROOT_CURRENT_BATCH_REQUIRED')
+     fds=[]
+     try:
+--- before/src/startup_lifecycle.py
++++ after/src/startup_lifecycle.py
+@@ -1,6 +1,7 @@
+ """PT/1 explicit prewindow/runtime contracts. Administrative export has no grant API."""
+ from contextlib import contextmanager
+ import hashlib
++import fcntl
+ import json
+ import math
+ import os
+@@ -51,13 +52,48 @@
+ def _phase(G):
+     with BC.Store() as store:return store.read('pt_phase.json')
+ 
+-def _set_phase(G,phase):
+-    import manager_recovery as M
+-    with M.locked(G,'pt_phase.lock') as store:
++def _phase_deadline(G):
++    if (G.ROOT/'inputs/batch_state.json').exists():
++        s=G.state()
++        if s['boot_id']!=G.boot_id():raise G.AdmissionBlocked('PF_PHASE_BOOT')
++        return min(s['deadline'],s['stop_at'],s['T0']+300 if s['status']=='CALIBRATING' else s['deadline'])
++    with BC.Store() as store:c=store.read('pt_context.json')
++    if c['binding']!=binding(G):raise G.AdmissionBlocked('PF_PHASE_CONTEXT')
++    return c['preflight_deadline']
++
++def _cancel(G,until,terminal_inspection=False):
++    if not terminal_inspection and G.stopped():raise G.AdmissionBlocked('PF_TERMINAL_DOMINATES')
++    if G.now()>=until:raise G.LimitReached('PF_PHASE_DEADLINE')
++
++@contextmanager
++def _phase_guard(G,terminal_inspection=False):
++    """One existing Root-private mutex for full phase publication and Root reads."""
++    if os.geteuid()!=0:raise G.AdmissionBlocked('PF_PHASE_ROOT_REQUIRED')
++    until=min(G.now()+2,_phase_deadline(G));_cancel(G,until,terminal_inspection)
++    with BC.Store() as store:
++        fd=os.open('pt_phase.lock',os.O_RDWR|os.O_CREAT|os.O_NOFOLLOW|os.O_CLOEXEC,0o600,dir_fd=store.fd)
++        acquired=False
++        try:
++            s=os.fstat(fd)
++            if (s.st_uid,s.st_gid,stat.S_IMODE(s.st_mode),s.st_nlink)!=(0,0,0o600,1):raise G.AdmissionBlocked('PF_PHASE_LOCK_METADATA')
++            for _ in range(512):
++                _cancel(G,until,terminal_inspection)
++                try:fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB);acquired=True;break
++                except BlockingIOError:time.sleep(min(.005,max(0,until-G.now())))
++            if not acquired:raise G.AdmissionBlocked('PF_PHASE_LOCK_BOUND')
++            _cancel(G,until,terminal_inspection)
++            yield store,until
++            _cancel(G,until,terminal_inspection)
++        finally:
++            if acquired:fcntl.flock(fd,fcntl.LOCK_UN)
++            os.close(fd)
++
++def _set_phase_locked(G,phase,store):
+         try:old=store.read('pt_phase.json')
+         except FileNotFoundError:old=None
+         if old:
+             if old['binding']!=binding(G):raise G.AdmissionBlocked('PT_PHASE_BINDING')
++            if old['phase'] not in PHASES or old['sequence']!=PHASES.index(old['phase']):raise G.AdmissionBlocked('PF_PHASE_SEQUENCE')
+             if old['phase']==phase:return old
+             if old['phase'] not in PHASES or phase not in PHASES or PHASES.index(phase)!=PHASES.index(old['phase'])+1:
+                 raise G.AdmissionBlocked('PT_ILLEGAL_PHASE_TRANSITION')
+@@ -69,6 +105,20 @@
+         finally:os.close(fd)
+         store.put('pt_phase.json',d)
+         return d
++
++def _set_phase(G,phase):
++    with _phase_guard(G) as (store,until):return _set_phase_locked(G,phase,store)
++
++def phase_snapshot_policy(f):
++    """Pure decision surface for frozen synthetic PF fixtures; no IO or authority."""
++    if f['closed'] or f['stop']:return 'DENY_TERMINAL'
++    if not f['binding'] or not f['identity'] or not f['deadline']:return 'DENY_IDENTITY'
++    if not f['lock_acquired']:return 'WAIT_BOUNDED'
++    if f['phase'] not in PHASES[4:] or f['sequence']!=PHASES.index(f['phase']):return 'DENY_PHASE'
++    if not all(f[k] for k in ('committed','checkpoint_integrity','initialization_match')):return 'DENY_CHECKPOINT'
++    if f['root_reader'] and (f['phase']!=f['private_phase'] or f['sequence']!=f['private_sequence'] or not f['record_hash_match']):return 'DENY_VERSION'
++    if f['work'] and f['phase'] not in ('RUNTIME_ARMED','RUNNING'):return 'DENY_WORK'
++    return 'ACCEPT'
+ 
+ def _live_ticket(G):
+     if os.geteuid()!=0 or BC._SESSION is None or BC._SESSION['phase']!='initial':raise G.AdmissionBlocked('PT_INITIAL_SESSION_REQUIRED')
+@@ -166,38 +216,66 @@
+     if (s['boot_id']!=G.boot_id() or s['status']!='CALIBRATING' or abs(s['deadline']-s['T0']-1800)>1e-6 or abs(s['stop_at']-s['T0']-1740)>1e-6 or
+         len(raw)!=24 or struct.unpack('<Q',raw[8:16])[0]!=0 or intent.get('status')!='COMMITTED' or intent.get('after')!=0 or intent.get('cap')!=G.VISIT_CAP):
+         raise G.AdmissionBlocked('PT_RUNTIME_CREATION_INCOMPLETE')
+-    ident=_budget_identity(G);phase=_set_phase(G,'RUNTIME_READY')
+-    with BC.Store() as store:initial=store.read('pt_runtime_intent.json')
+-    G._root_write(G.ROOT/'inputs/PT_RUNTIME_CHECKPOINT.json',{'schema':'PT-RUNTIME-CHECKPOINT/1','binding':binding(G),
+-        'initialization_id':sha(initial),'window':{k:s[k] for k in ('T0','deadline','stop_at')},'counter':ident,
+-        'phase':phase['phase'],'sequence':phase['sequence'],'sample':G.stamp()})
+-
+-def runtime_checkpoint(G,s):
++    with _phase_guard(G) as (store,until):
++        initialization_guard(G);ident=_budget_identity(G);initial=store.read('pt_runtime_intent.json')
++        phase=_set_phase_locked(G,'RUNTIME_READY',store)
++        G._root_write(G.ROOT/'inputs/PT_RUNTIME_CHECKPOINT.json',{'schema':'PT-RUNTIME-CHECKPOINT/1','binding':binding(G),
++            'initialization_id':sha(initial),'window':{k:s[k] for k in ('T0','deadline','stop_at')},'counter':ident,
++            'phase':phase['phase'],'sequence':phase['sequence'],'phase_record_sha256':sha(phase),'committed':True,'sample':G.stamp()})
++
++def _runtime_checkpoint_locked(G,s,store=None,terminal_inspection=False):
+     q=G.trusted(G.ROOT/'inputs/PT_RUNTIME_CHECKPOINT.json')
+     if (q['schema']!='PT-RUNTIME-CHECKPOINT/1' or q['binding']!=binding(G) or q['window']!={k:s[k] for k in ('T0','deadline','stop_at')} or
+         q['phase'] not in ('RUNTIME_READY','RUNTIME_ARMED','RUNNING') or q['counter']!=_budget_identity(G)):
+         raise G.AdmissionBlocked('PT_RUNTIME_CHECKPOINT_CORRUPT')
+     p=G.OUT/'visits.bin.intent.json';meta=p.lstat()
+     if not stat.S_ISREG(meta.st_mode):raise G.AdmissionBlocked('PT_RUNTIME_INTENT_MISSING_OR_TYPE')
+-    if os.geteuid()==0:
+-        with BC.Store() as store:i=store.read('pt_runtime_intent.json')
+-        if sha(i)!=q['initialization_id'] or _phase(G)['phase']!=q['phase']:raise G.AdmissionBlocked('PT_RUNTIME_PHASE_DRIFT')
++    root=store is not None
++    i=store.read('pt_runtime_intent.json') if root else None
++    phase=store.read('pt_phase.json') if root else None
++    if root and (phase['binding']!=binding(G) or i['binding']!=binding(G)):raise G.AdmissionBlocked('PF_PRIVATE_BINDING')
++    facts={'closed':False if terminal_inspection else G.stopped(),'stop':False,'binding':True,'identity':True,
++        'deadline':G.now()<min(s['deadline'],s['stop_at']),'lock_acquired':True,
++        'phase':q['phase'],'sequence':q['sequence'],'committed':q.get('committed') is True,
++        'checkpoint_integrity':True,'initialization_match':not root or sha(i)==q['initialization_id'],
++        'root_reader':root,'private_phase':phase['phase'] if root else None,'private_sequence':phase['sequence'] if root else None,
++        'record_hash_match':not root or q.get('phase_record_sha256')==sha(phase),'work':False}
++    decision=phase_snapshot_policy(facts)
++    if decision!='ACCEPT':
++        detail={k:facts[k] for k in ('phase','sequence','private_phase','private_sequence','initialization_match','record_hash_match')}
++        raise G.AdmissionBlocked('PT_RUNTIME_PHASE_DRIFT:'+decision+':'+json.dumps(detail,sort_keys=True))
+     # No concurrent used/intent consistency test here: reserve_core owns its lock.
+     return q
+ 
++def runtime_checkpoint(G,s,terminal_inspection=False):
++    if os.geteuid()==0:
++        with _phase_guard(G,terminal_inspection) as (store,until):return _runtime_checkpoint_locked(G,s,store,terminal_inspection)
++    if terminal_inspection:raise G.AdmissionBlocked('PF_TERMINAL_INSPECTION_ROOT')
++    q=_runtime_checkpoint_locked(G,s)
++    if G.stopped():raise G.AdmissionBlocked('PF_TERMINAL_DOMINATES')
++    return q
++
++def _commit_phase(G,s,q,target,store):
++    if G.identity()!=s['launcher_identity']:raise G.AdmissionBlocked('PF_PHASE_WRITER_IDENTITY')
++    phase=_set_phase_locked(G,target,store)
++    q.update(phase=phase['phase'],sequence=phase['sequence'],phase_record_sha256=sha(phase),committed=True,sample=G.stamp())
++    G._root_write(G.ROOT/'inputs/PT_RUNTIME_CHECKPOINT.json',q)
++    return q
++
+ def arm(G):
+-    s=G.state();runtime_checkpoint(G,s);arm=G.trusted(G.ROOT/'inputs/STOP_ARMED.json')
+-    import c09_handoff as H
+-    if arm['boot_id']!=G.boot_id() or arm['stop_at']!=s['stop_at'] or not H.alive(G,arm['identity']):raise G.AdmissionBlocked('PT_STOP_SOURCE_NOT_ARMED')
+-    phase=_set_phase(G,'RUNTIME_ARMED');q=G.trusted(G.ROOT/'inputs/PT_RUNTIME_CHECKPOINT.json');q.update(phase=phase['phase'],sequence=phase['sequence'],sample=G.stamp())
+-    G._root_write(G.ROOT/'inputs/PT_RUNTIME_CHECKPOINT.json',q)
++    with _phase_guard(G) as (store,until):
++        s=G.state();q=_runtime_checkpoint_locked(G,s,store);arm=G.trusted(G.ROOT/'inputs/STOP_ARMED.json')
++        import c09_handoff as H
++        if q['phase']!='RUNTIME_READY':raise G.AdmissionBlocked('PF_ARM_SOURCE_PHASE')
++        if arm['boot_id']!=G.boot_id() or arm['stop_at']!=s['stop_at'] or not H.alive(G,arm['identity']):raise G.AdmissionBlocked('PT_STOP_SOURCE_NOT_ARMED')
++        _commit_phase(G,s,q,'RUNTIME_ARMED',store)
+ 
+ def require_work(G):
+-    if G.stopped():raise G.AdmissionBlocked('PT_WORK_AFTER_STOP')
+-    s=G.state();q=runtime_checkpoint(G,s)
+-    if q['phase'] not in ('RUNTIME_ARMED','RUNNING'):raise G.AdmissionBlocked('PT_NO_PREWINDOW_WORK')
+-    if q['phase']=='RUNTIME_ARMED':
+-        p=_set_phase(G,'RUNNING');q.update(phase=p['phase'],sequence=p['sequence'],sample=G.stamp());G._root_write(G.ROOT/'inputs/PT_RUNTIME_CHECKPOINT.json',q)
++    with _phase_guard(G) as (store,until):
++        s=G.state();q=_runtime_checkpoint_locked(G,s,store)
++        if G.identity()!=s['launcher_identity']:raise G.AdmissionBlocked('PF_WORK_WRITER_IDENTITY')
++        if q['phase'] not in ('RUNTIME_ARMED','RUNNING'):raise G.AdmissionBlocked('PT_NO_PREWINDOW_WORK')
++        if q['phase']=='RUNTIME_ARMED':_commit_phase(G,s,q,'RUNNING',store)
+ 
+ def formal_gate(G):
+     cfg=config(G);q=G.trusted(G.ROOT/'inputs/PT_QUALIFICATION.json')
+@@ -208,6 +286,8 @@
+     for row in q['results']:
+         target='MUTATION_DETECTED' if jobs[row['case_id']]['mutant'] else 'PASS'
+         if not row['accepted'] or row['status']!=target:raise G.AdmissionBlocked('PT_REQUIRED_RESULT')
++    import phase_finalizer_regression as F
++    F.verify(G)
+     runtime_checkpoint(G,G.state())
+ 
+ def expected_prewindow_abort(G):
+@@ -243,7 +323,7 @@
+     present=[p.exists() for p in _paths(G)]
+     if not runtime_intent_exists(G) and not any(present):return 'NATIVE_SEAL_NOT_APPLICABLE'
+     try:
+-        s=G.trusted(G.ROOT/'inputs/batch_state.json');runtime_checkpoint(G,s)
++        s=G.trusted(G.ROOT/'inputs/batch_state.json');runtime_checkpoint(G,s,terminal_inspection=True)
+         with BC.Store() as store:
+             try:close=store.read('mr_close_state.json')
+             except FileNotFoundError:close=None
+@@ -257,6 +337,33 @@
+         'process_cleanup':'Separately audited after caller exit','startup_result':'STARTUP_ABORTED_PRE_T0' if kind=='NATIVE_SEAL_NOT_APPLICABLE' else 'RUNTIME_SEAL_UNRESOLVED',
+         'sample':G.stamp()})
+     return None
++
++def administrative_policy(f):
++    """Independent cleanup/native/admin axes; no writes, grants or budget API."""
++    cleanup='CLEANUP_CONFIRMED' if f['roles_empty'] and f['group_absent'] and not f['audit_error'] else 'CLEANUP_UNKNOWN'
++    if not f['any_runtime']:native='NATIVE_SEAL_NOT_APPLICABLE'
++    elif f['native_verified']:native='NATIVE_SEAL_COMPLETED'
++    elif f['native_error']:native='NATIVE_SEAL_FAILED'
++    else:native='NATIVE_SEAL_UNRESOLVED'
++    admin='EXPORT_ALLOWED' if cleanup=='CLEANUP_CONFIRMED' else 'DEFERRED_ACTIVE_WRITERS'
++    failed=any(not f.get(k,True) for k in ('module_ready','permission_ok','evidence_integrity')) or f.get('exception',False)
++    if failed:admin='ADMIN_EVIDENCE_UNRESOLVED'
++    if f.get('repeated',False):admin='RETURN_EXISTING_ADMIN_SEAL' if f.get('repeat_valid',False) else 'ADMIN_EVIDENCE_UNRESOLVED'
++    return {'process_cleanup_status':cleanup,'native_seal_status':native,'administrative_export_status':admin,
++        'internal_cleanup_status':f['internal_status'],'error_recorded':failed or (f.get('repeated',False) and not f.get('repeat_valid',False))}
++
++def _postexit_roles(source,root,slice_name):
++    roles=[];payload=[];errors=[]
++    for p in Path('/proc').glob('[0-9]*'):
++        try:
++            args=(p/'cmdline').read_bytes().decode(errors='replace').split('\0')
++            status=dict(s.split(':',1) for s in (p/'status').read_text().splitlines() if ':' in s)
++            if '--batch-root' in args and str(root) in args and any(str(source/name) in args for name in ('guard.py','boot_continuity.py')):
++                roles.append({'pid':int(p.name),'start_ticks':BC.identity(int(p.name))['start_ticks'],'args':args})
++            if 999 in map(int,status['Uid'].split()):payload.append(int(p.name))
++        except FileNotFoundError:pass
++        except (OSError,ValueError,KeyError) as exc:errors.append({'pid':p.name,'error':type(exc).__name__})
++    return roles,payload,Path('/sys/fs/cgroup',slice_name).exists(),errors
+ 
+ def post_exit_export():
+     """Automatic audit/export only; never initializes, resumes or grants work."""
+@@ -272,15 +379,22 @@
+         if BC.digest(source/name)!=expected:raise RuntimeError('PT_POSTEXIT_SOURCE_DRIFT')
+     for rel,expected in manifest['bound_inputs'].items():
+         if BC.digest(source.parent/rel)!=expected:raise RuntimeError('PT_POSTEXIT_INPUT_DRIFT')
+-    role_processes=[];payload=[]
+-    for p in Path('/proc').glob('[0-9]*'):
+-        try:
+-            args=(p/'cmdline').read_bytes().decode(errors='replace').split('\0')
+-            status=dict(s.split(':',1) for s in (p/'status').read_text().splitlines() if ':' in s)
+-            if '--batch-root' in args and str(root) in args and str(source/'guard.py') in args:
+-                role_processes.append({'pid':int(p.name),'args':args})
+-            if 999 in map(int,status['Uid'].split()):payload.append(int(p.name))
+-        except (OSError,ValueError,KeyError):pass
++    began=BC.now();wait_until=began+5
++    # Existing execution expiry only reduces waiting; administrative IO keeps its own30s alarm.
++    state_path=root/'inputs/batch_state.json';activation=root/'inputs/root_private/boot/activation.json'
++    if state_path.exists():
++        try:wait_until=min(wait_until,BC.trusted(state_path)['deadline'])
++        except (OSError,ValueError,KeyError):wait_until=began
++    elif activation.exists():
++        try:wait_until=min(wait_until,BC.trusted(activation)['ticket']['preflight_deadline'])
++        except (OSError,ValueError,KeyError):wait_until=began
++    audit_history=[]
++    for _ in range(128):
++        role_processes,payload,group_exists,audit_errors=_postexit_roles(source,root,identity['slice'])
++        audit_history.append({'sample':BC.stamp(),'role_pids':[r['pid'] for r in role_processes],'payload_pids':payload,
++            'parent_cgroup_exists':group_exists,'errors':audit_errors})
++        if (not role_processes and not payload and not group_exists and not audit_errors) or BC.now()>=wait_until or audit_errors:break
++        time.sleep(min(.02,max(0,wait_until-BC.now())))
+     cp=root/'inputs/PT_RUNTIME_CHECKPOINT.json';state=root/'inputs/batch_state.json';counter=root/'out/visits.bin'
+     runtime_intent=root/'inputs/root_private/boot/pt_runtime_intent.json'
+     actual={'runtime_intent':runtime_intent.exists(),'state':state.exists(),'counter':counter.exists(),'checkpoint':cp.exists()}
+@@ -299,7 +413,8 @@
+     elif all(actual.values()) and (root/'inputs/SEAL_ERROR.json').exists():native_status='NATIVE_SEAL_FAILED'
+     result={'schema':'PT-POSTEXIT/1','batch_id':identity['batch_id'],'source_revision':identity['revision'],
+         'observation_boot_id':BC.boot(),'observation':BC.stamp(),'runtime_objects':actual,'native_seal_status':native_status,
+-        'role_processes':role_processes,'payload_pids':payload,'parent_cgroup_exists':Path('/sys/fs/cgroup',identity['slice']).exists(),
++        'role_processes':role_processes,'payload_pids':payload,'parent_cgroup_exists':group_exists,'audit_errors':audit_errors,
++        'quiescence_samples':audit_history,'quiescence_wait_bound_seconds':5,'quiescence_sample_bound':128,
+         'closed_marker':closed.exists(),'T0':None,'R':None,'files':[],'nonregular':[],
+         'source_manifest_sha256':BC.digest(source.parent/'inputs/static_manifest.json'),'execution_lock_sha256':BC.digest(source.parent/'inputs/execution_lock.json')}
+     if state.exists():
+@@ -310,13 +425,18 @@
+             raw=counter.read_bytes()
+             result['R']=struct.unpack('<Q',raw[8:16])[0] if len(raw)==24 and raw[:8]==b'BRNGv001' else 'UNRESOLVED'
+         except (OSError,ValueError):result['R']='UNRESOLVED'
+-    if role_processes or payload or result['parent_cgroup_exists']:
+-        result['process_cleanup_status']='CLEANUP_UNKNOWN';result['administrative_export_status']='DEFERRED_ACTIVE_WRITERS'
+-        print(json.dumps(result,ensure_ascii=False));return
+-    result['process_cleanup_status']='CLEANUP_CONFIRMED'
+-    if native_status=='NATIVE_SEAL_COMPLETED':
+-        result['native_zip_sha256']=BC.digest(native_zip);result['administrative_export_status']='NOT_REQUIRED_RUNTIME_NATIVE_SEAL'
+-        print(json.dumps(result,ensure_ascii=False));return
++    try:internal=BC.trusted(root/'inputs/root_private/boot/mr_close_state.json')['status']
++    except (OSError,ValueError,KeyError):internal='UNKNOWN'
++    verdict=administrative_policy({'roles_empty':not role_processes and not payload,'group_absent':not group_exists,
++        'audit_error':bool(audit_errors),'any_runtime':any(actual.values()),'native_verified':native_status=='NATIVE_SEAL_COMPLETED',
++        'native_error':native_status=='NATIVE_SEAL_FAILED','internal_status':internal})
++    result.update(verdict)
++    if native_status=='NATIVE_SEAL_COMPLETED':result['native_zip_sha256']=BC.digest(native_zip)
++    control=Path(identity['linux_control'])
++    # Independent administrative record; runtime originals and native seal records are read-only.
++    with (control/'STARTUP_NATIVE_AUDIT.json').open('x',encoding='utf-8') as receipt:
++        json.dump(result,receipt,ensure_ascii=False,indent=2);receipt.flush();os.fsync(receipt.fileno())
++    if verdict['administrative_export_status']!='EXPORT_ALLOWED':print(json.dumps(result,ensure_ascii=False));return
+     cfg=BC.trusted(source.parent/'inputs/startup_contract.json');control=Path(identity['linux_control']);dest=control/'startup_snapshot'
+     if dest.exists():raise RuntimeError('PT_POSTEXIT_EXPORT_ALREADY_EXISTS')
+     dest.mkdir();count=0;total=0
+@@ -335,13 +455,13 @@
+                 out.write(b);digest.update(b)
+         result['files'].append({'relative':rel,'bytes':s.st_size,'sha256':digest.hexdigest(),**meta})
+     result['administrative_export_status']='EXPORTED_QUIESCENT_STARTUP_EVIDENCE'
+-    result['startup_status']='STARTUP_ABORTED_PRE_T0' if not any(actual.values()) else 'RUNTIME_OR_INITIALIZATION_ABORTED_UNRESOLVED'
++    result['startup_status']=('STARTUP_ABORTED_PRE_T0' if not any(actual.values()) else
++        'INITIALIZATION_PARTIAL_UNRESOLVED' if not all(actual.values()) else
++        'RUNTIME_CLOSED' if closed.exists() else 'RUNTIME_EXIT_UNRESOLVED')
+     try:
+         first=BC.trusted(root/'inputs/root_private/boot/mr_first_failure.json')
+         result['first_failure']={k:first.get(k) for k in ('reason','error_type','expected_diagnostic','sample','window')}
+-        internal=BC.trusted(root/'inputs/root_private/boot/mr_close_state.json')
+-        result['internal_cleanup_status']=internal['status']
+-    except (OSError,ValueError,KeyError):result['internal_cleanup_status']='UNKNOWN'
++    except (OSError,ValueError,KeyError):pass
+     print(json.dumps(result,ensure_ascii=False))
+ 
+ if __name__=='__main__':

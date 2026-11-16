@@ -1,0 +1,45 @@
+# 源码、输入与执行锁
+
+Material Passport：BF-static-2/r4；FROZEN_STATIC；动态授权尚缺。
+
+## 唯一可信工作区
+
+host：D:\毕业设计\DCL-R6-isolated-verification\gc01
+Linux：/var/lib/dcl-r6/gc01
+代码目录：/var/lib/dcl-r6/gc01/src。
+起点：正确BF-static-1的D:\毕业设计\DCL-R6-isolated-verification\lc03\src。
+误路径副本只读登记，输入采用次数0。源码硬编码canonical SOURCE，其他同名目录拒绝。
+
+|实际工件|SHA-256|
+|---|---|
+|guard.py|38269f9a1996919f660d9309ac3b80fe2eec0cb115a7510a1bd0fe70ea35f992|
+|range_core.py|2070eea62da7bf778fa5d359e22f01ab4e466acdf2b466cd66c9b816f902f096|
+|range_fixtures.py|1dea0f8b25a35cc0366316070d76b9e02c4ef62794a904b87498625cf00aab39|
+|range_evidence.py|b905003a7b6555b35d75d139607a5d0bb4978015ad0bde2411e20eb2fb7e47d4|
+|static_manifest.json|4c488e52869d58b14b59721c0cdbd3a068a5fcda256891256c2c9f3e649bf103|
+|execution_lock.json|aa9c4a84451a1c5053eb9dd6850254fd7efc5c560889dd017540cc827f5c0e9b|
+|safety_contract.json|358cf611aabdc71499723056d51765edc47084b9b7a88102c72a28ab0b1e178a|
+|原business_plan_original.json|2245be87d589e6f5b055b7f19b67f7f757914fae6064d4c1f8a21956c5a36801|
+|原child_contracts.json|d78be83c648b76a391708eddbb601724f83277392ae8fbdd3daf95d0e522eb7f|
+|runtime_tree_lock.json（继承）|0768bfe15ccb71c903cd350e444997a0371a179f3def35a7566f9ec1d8fadaf7|
+|拟用dclr6batch04.slice（未安装）|e4bdea70e3e13ad7a3a431652ba8634bfa527e1aba0a0037a1bbb7e6698b89c2|
+
+30项实际工作文件的完整path/bytes/hash在STATIC_WORKSPACE_LOCK。22项source/cache、原31关键runtime加journalctl导出工具、1224完整树锁、原业务输入、子合同与新安全合同由manifest绑定；执行锁再绑定manifest、15组payload、34条worker模板、根启动/恢复/stop及5条准备命令。旧候选均独立归档，最终r4有效。
+
+## 保持的业务摘要
+
+|文件|SHA-256|
+|---|---|
+|f1_model.py|5669c8486d00f56085ef1a69ad7b40c3fc328bd41ae1a8424f1cd68018911d35|
+|f1_check.py|1ed89b7da8a03593d49cd91c409e161eb8a118584d8e066423feefbaf6e21645|
+|f4_dp.py|a07194f1dbec98efc2932186777f5bdb084012e3d8b5784d9b3c27b6ecbb50c5|
+|f4_reference.py|9d1fcbc5752bfe7c6cd0308fb06a838174834dfe0b2f23a75c352418c3047e2b|
+|compare.py|3848301c699b5a25a284e5747bb37d38d61ddb144cf49e0506e3ea82a5b7244f|
+|run_batch.py|c88fc3b07e6feddf5d2aa96adf3b3b63fc3f6f9897d585f42d6882a5279a63e7|
+|guard_probe.py|32ed91e5135e09454d6634bf369193c7ccf4e8ae669e523b1dd781ed96109de3|
+
+正式输入由这些冻结源中的固定参数/夹具生成；原business_plan是来源意图归档，runner没有从该JSON加载参数。S合同则由可信root输入JSON加载，实际请求绑定完整合同摘要及case_id。
+
+journalctl二进制摘要=0b08431236d5c8249b42994c00b401b3c093dee837e0465a53658057820d05b7；命令封存修订export_lock_revision=1。实际尚未读取本批运行日志。
+
+当前仅新静态目录、源码、输入及py_compile缓存存在。动态batch04根、单位安装、授权receipt、out、T0及预算账均未创建。后续任何实现改动须登记新修订、hash、差异与适当静态检查，再取得匹配执行许可。
