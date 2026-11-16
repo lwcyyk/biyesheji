@@ -1,0 +1,167 @@
+"""Port of the fixed-input k=2 protocol to authenticated GF(2^128).
+
+No true-support input, public deterministic challenges, fake preprocessing,
+or diagnostic mask disclosure is used. Clear Prony decoding operates ONLY
+on the four opened masked moments. Output is provisional until process exit 0.
+"""
+from Compiler.types import sgf2n, cgf2n, regint, Array, MemValue
+from Compiler.library import print_ln, check_point, if_, if_e, else_, for_range
+
+n = int(program.args[1]) if len(program.args) > 1 else 8
+batches = int(program.args[2]) if len(program.args) > 2 else 4
+mode = program.args[3] if len(program.args) > 3 else 'moments'
+assert 3 <= n <= 256 and 1 <= batches <= 64
+assert mode in ('moments', 'coordinate')
+attempt_limit = 2
+norm_c = cgf2n(0x2000000000000000000000000000000)
+fifth = cgf2n(0x7959d70ce1ee694253b85b6402b1e849)
+labels = [cgf2n(3) ** i for i in range(n)]
+
+
+def norm(a, b):
+    return a * a + a * b + norm_c * (b * b)
+
+
+def public_nonzero(count):
+    # Live malicious-secure inverse preprocessing supplies uniform nonzero a.
+    result = [sgf2n.get_random_inverse()[0].reveal() for _ in range(count)]
+    check_point()  # Authenticate public challenges BEFORE using them.
+    return result
+
+
+def secret_uniform():
+    # Fresh independent triple, discard b and c. Includes zero as required.
+    a, unused_b, unused_c = sgf2n.get_random_triple()
+    return a
+
+
+def blind_open(value):
+    rho, unused = sgf2n.get_random_inverse()
+    opened = (rho * value).reveal()
+    check_point()  # No branch on an unauthenticated opening.
+    return opened
+
+
+def polynomial(coefficients, point):
+    value = sgf2n(0)
+    for coefficient in reversed(coefficients):
+        value = value * point + coefficient
+    return value
+
+
+def det3(matrix):
+    a, b, c = matrix[0]
+    d, e, f = matrix[1]
+    g, h, i = matrix[2]
+    return a * (e * i + f * h) + b * (d * i + f * g) + c * (d * h + e * g)
+
+
+def moments(values):
+    r0, r1 = secret_uniform(), secret_uniform()
+    s = [sum(values[i] * labels[i] ** j for i in range(n)) for j in range(5)]
+    points = [fifth ** j for j in range(5)]
+    products = [(r1 + r0 * x) * sum(s[j] * x ** j for j in range(5)) for x in points]
+    u = [sum(product * x ** ((5 - degree) % 5) for product, x in zip(products, points)).reveal()
+         for degree in range(1, 5)]
+    check_point()
+    return u
+
+
+def decode_public(u):
+    # All branching, lookup, and division here concerns PUBLIC masked values.
+    selected = Array(n, regint); selected.assign_all(0)
+    decoded = MemValue(regint(0))
+    delta = u[0] * u[2] + u[1] * u[1]
+    @if_e(delta == cgf2n(0))
+    def _():
+        @if_e(u[0] == cgf2n(0))
+        def _():
+            decoded.write((u[1] == cgf2n(0)) * (u[2] == cgf2n(0)) * (u[3] == cgf2n(0)))
+        @else_
+        def _():
+            location = u[1] / u[0]
+            consistent = (u[2] == u[0] * location ** 2) * (u[3] == u[0] * location ** 3)
+            for i in range(n):
+                selected[i] = (location == labels[i]) * consistent
+            decoded.write(sum(selected[i] for i in range(n)) == 1)
+    @else_
+    def _():
+        c1 = (u[0] * u[3] + u[1] * u[2]) / delta
+        c0 = (u[1] * u[3] + u[2] * u[2]) / delta
+        for i in range(n):
+            selected[i] = (labels[i] ** 2 + c1 * labels[i] + c0 == cgf2n(0))
+        @if_(sum(selected[i] for i in range(n)) == 2)
+        def _():
+            roots = Array(2, cgf2n); count = MemValue(regint(0))
+            for i in range(n):
+                @if_(selected[i])
+                def _():
+                    roots[count.read()] = labels[i]; count.write(count.read() + 1)
+            a, b = roots[0], roots[1]
+            wa = (u[1] + u[0] * b) / (a + b)
+            wb = u[0] + wa
+            consistent = (wa != cgf2n(0)) * (wb != cgf2n(0))
+            for j in range(4):
+                consistent *= (u[j] == wa * a ** j + wb * b ** j)
+            decoded.write(consistent)
+    return selected, decoded.read()
+
+
+@for_range(batches)
+def batch(batch_index):
+    # Each party supplies an additive share; neither runtime reads the other file.
+    values = [sgf2n.get_input_from(0) + sgf2n.get_input_from(1) for i in range(n)]
+    check_point()
+    determinants = []
+    for repetition in range(2):
+        xs = public_nonzero(3)
+        determinants.append(det3([[polynomial(values, cgf2n(3) ** r * x)
+                                   for x in xs] for r in range(3)]))
+    gate = blind_open(norm(determinants[0], determinants[1]))
+    # 0=ALL_VALID, 1=LOCATED, 2=MANY, 3=INCONCLUSIVE.
+    status = MemValue(regint(3)); done = MemValue(regint(0))
+    support = Array(n, regint); support.assign_all(0)
+    attempts = MemValue(regint(0))
+    @if_e(gate != cgf2n(0))
+    def _():
+        status.write(2); done.write(1)
+    @else_
+    def _():
+        if mode == 'coordinate':
+            # Strong baseline: same gate, same allowed leakage, exact support
+            # given <=2 nonzeros; each amplitude independently uniformly hidden.
+            openings = [(sgf2n.get_random_inverse()[0] * value).reveal() for value in values]
+            check_point()
+            for i in range(n): support[i] = (openings[i] != cgf2n(0))
+            status.write(sum(support[i] for i in range(n)) != 0)
+            attempts.write(1); done.write(1)
+        else:
+            for attempt in range(attempt_limit):
+                @if_(done.read() == 0)
+                def _():
+                    attempts.write(attempts.read() + 1)
+                    u = moments(values)
+                    selected, decoded = decode_public(u)
+                    @if_e(decoded)
+                    def _():
+                        # Candidate fixed before fresh challenges are generated.
+                        check_point()
+                        xs = public_nonzero(2)
+                        remaining = [values[i] * cgf2n(1 - selected[i]) for i in range(n)]
+                        e0, e1 = [polynomial(remaining, x) for x in xs]
+                        verification = blind_open(norm(e0, e1))
+                        @if_(verification == cgf2n(0))
+                        def _():
+                            for i in range(n): support[i] = selected[i]
+                            status.write(sum(selected[i] for i in range(n)) != 0)
+                            done.write(1)
+                    @else_
+                    def _():
+                        done.write(1)  # Status remains INCONCLUSIVE.
+    check_point()
+    print_ln('RESULT batch=%s status=%s attempts=%s', batch_index, status.read(), attempts.read())
+    for i in range(n):
+        @if_(support[i])
+        def _(): print_ln('SUPPORT batch=%s index=%s', batch_index, i)
+check_point()
+print_ln('PROTOCOL_DONE')

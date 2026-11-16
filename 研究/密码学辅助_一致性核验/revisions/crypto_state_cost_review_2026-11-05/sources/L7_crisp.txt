@@ -1,0 +1,1322 @@
+[PDF_PAGE 1]
+CRISP: Confidentiality, Rollback, and Integrity
+Storage Protection for Confidential Cloud-Native
+Computing
+Ardhi Putra Pratama Hartono
+TU Dresden
+Andrey Brito
+Universidade Federal de Campina Grande
+Christof Fetzer
+TU Dresden
+Abstract—Trusted execution environments (TEEs) protect the
+integrity and confidentiality of running code and its associated
+data. Nevertheless, TEEs’ integrity protection does not extend to
+the state saved on disk. Furthermore, modern cloud-native appli-
+cations heavily rely on orchestration (e.g., through systems such
+as Kubernetes) and, thus, have their services frequently restarted.
+During restarts, attackers can revert the state of confidential
+services to a previous version that may aid their malicious intent.
+This paper presents CRISP, a rollback protection mechanism that
+uses an existing runtime for Intel SGX and transparently prevents
+rollback. Our approach can constrain the attack window to a
+fixed and short period or give developers the tools to avoid the
+vulnerability window altogether. Finally, experiments show that
+applying CRISP in a critical stateful cloud-native application may
+incur a resource increase but only a minor performance penalty.
+Index Terms —confidential computing, rollback-protection,
+stateful computing, data CIF (Confidentiality, Integrity, and
+Freshness), Intel SGX
+I. I NTRODUCTION
+Guaranteeing confidentiality and integrity of data and ap-
+plications is a traditional challenge in computer science. Nev-
+ertheless, recent trends made this quest even more relevant:
+Digital transformation moves in-person and paper procedures
+to remote digital platforms [1]; Edge computing moves ser-
+vices and data from well-protected data centers to smaller edge
+clusters managed by third parties [2]; IoT collects detailed
+sensitive data that is processed remotely to generate valuable
+insights on industrial applications [3].
+Confidential computing is a powerful tool to help pro-
+tect data and code processed in remote cloud and edge
+infrastructures [3]. Tools for confidential computing can pro-
+vide a confidentiality- and integrity-protected environment for
+services during execution, complementing the general good
+practices for encrypting data in transit [4] and at rest [5, 6].
+Nevertheless, while these Trusted Execution Environments
+(TEEs) protect memory’s integrity and freshness during the
+execution, the state persisted to storage is not protected off-
+the-shelf and can still be rolled back if developers do not
+apply explicit mitigations [7, 8, 9]. Unfortunately, stateful
+cloud-native applications rely heavily on orchestration, having
+frequent container restart and rescaling operations. During
+such a restart, attackers can replace the current state with a
+previous version [10].
+Interestingly, even if the attacker can only revert the state
+without being able to modify or even read its content, several
+powerful attacks can provide good leverage to their malicious
+goals. For example, cloud operators may access sensitive data
+and then roll back audit systems to hide their actions. In
+another example, an adversary could circumvent access revo-
+cations and undo undesired actions (e.g., through a repudiation
+attack) with the same approach. In general, reverting recent
+undesired changes can be a powerful attack instrument even
+when the data is confidentiality- and integrity-protected. Our
+goal is to indirectly protect a stateful confidential application
+by protecting its state, especially against rollback attacks.
+This work extends tools for confidential computing to
+enable transparent rollback protection on services with existing
+integrity and confidentiality protection. With CRISP, we lever-
+age an existing runtime to execute unmodified applications
+with Intel SGX enclaves. We combine the runtime with a
+monotonic counter to embed counter values with write opera-
+tions from the runtime, ensuring rollback protection. Although
+binding a monotonic counter with a state is not particularly
+novel [11, 12, 13, 14], we add multiple distinctive mechanisms
+while exposing interfaces to mitigate performance losses also
+with a tunable parameter. CRISP can acknowledge operations
+more optimistically or pessimistically, thereby offering devel-
+opers additional design-space options. Our generic interface
+allows for a controllable trade-off between performance and
+potential vulnerability windows. We show that having both
+controllable- and known-vulnerability windows can be easily
+mitigated by external approaches from both client and server.
+Ensuring a confidential application has access to trusted
+storage is not trivial. Related works were able to provide
+confidentiality and basic integrity protection to storage such
+as Protected Files in Graphene [15, 16] and File System
+Protection File in SCONE [17]. Unfortunately, both store the
+metadata in the filesystem, which is vulnerable to rollback
+attacks. Some approaches can withstand a rollback attack by
+involving a trusted remote party over the network, at the cost
+of significant performance degradation [18, 9, 19], or through
+specialized storage [20, 21, 14]. Our approach uses the regular
+filesystem and can work with different sources for a monotonic
+counter, such as ROTE [8], ADAM-CS [22], or LCM [7].
+Our approach is compatible with the community version of
+the SCONE runtime. We also evaluated it with an identity pro-
+arXiv:2408.06822v2  [cs.CR]  15 Aug 2024
+
+[PDF_PAGE 2]
+visioning system for zero-trust architectures, SPIRE (SPIFFE
+Runtime Environment) [23]. SPIRE uses a local soft state and
+a persistent state on an SQL backend (SQLite, PostgreSQL,
+or MySQL). Combining our approach with a highly available
+database such as MariaDB shows that our protected SPIRE
+incurs minimal performance degradation. The contributions of
+this paper are the following:
+1) We detail an approach for tunable rollback-protected
+storage for confidential stateful services, helping to ensure
+confidentiality, integrity, and freshness of the data.
+2) Our approach is incremental and equipped with multiple
+levels of involvement. Applications initially use CRISP
+transparently but can later incorporate checks to avoid
+vulnerability windows. We also discuss possible opti-
+mizations and their consequences.
+3) We show that our approach incurs minimal performance
+overhead, evaluating it with microbenchmarks and experi-
+ments with realistic workloads, confirming its practicality.
+We organize the rest of the paper as follows. Section II
+presents background information on trusted execution en-
+vironments, monotonic counters, and the considered threat
+model for confidential computing. Sections III and IV discuss
+CRISP’s architecture and its implementation, respectively.
+Section V presents our experimental evaluation. Sections VI
+and VII present related work and some concluding remarks.
+II. B ACKGROUND AND THREAT MODEL
+A. Trusted Execution Environments, Intel SGX, and SCONE
+Using Trusted Execution Environments (TEEs) is one ap-
+proach to enable trusted computing, where computations are
+protected from malicious actors even if they compromise in-
+frastructure components. One of the most popular approaches
+to such an environment is Intel SGX [24]. With SGX, pro-
+cesses can create enclaves, segregated regions of memory that
+are accessible only to the enclave that created it. This approach
+protects the enclave memory from other applications in the
+same host and even from components with higher privileges,
+such as the operating system and the hypervisor [25].
+Unfortunately, the minimization of the trusted computing
+base that enables secure enclaves also comes with a cost: the
+operating system is untrusted, and, therefore, enclaves cannot
+perform system calls [25]. Such limitation required software
+redesign so that data could be fed to and collected from the
+enclaves. To address the limitation, the community proposed
+several approaches. Some argue that a minimum operating
+system should be part of the enclave, such as a library OS
+(e.g., Graphene [15]). Others argue that a mediator should
+handle the system calls and ensure the operating system cannot
+compromise operations (e.g., SCONE [17]). In this case, the
+mediator can block or transform risky operations.
+We build our work atop SCONE as it has a community
+version that offers several features we can leverage. Legacy
+applications run in SCONE by being recompiled with the
+SCONE compiler. When starting a SCONE application, an
+enclave is created and subsequently communicates with a
+remote Configuration and Attestation Service (CAS) server,
+providing information about itself, which then receives secure
+configurations [18]. In a trusted environment, such configu-
+rations include application inputs, environment variables, and
+application secrets.
+The SCONE runtime supports data confidentiality and in-
+tegrity through the file system shield [26], known as FSPF. The
+runtime encrypts all read and write operations transparently to
+the application. To ensure the integrity of the files, SCONE
+uses a Merkle tree. The root hash is named the tag and is
+checked or updated inside the enclave. When a program starts,
+the runtime retrieves the expected tag from CAS. When a
+program finishes or does some disk synchronization ( fsync,
+fdatasync, or similar mechanism), it also updates the tag with
+its CAS server [18, 26]. Therefore, this mechanism can be
+used to detect initial filesystem integrity and could be used to
+detect rollbacks if the runtime sends all writes to the remote
+CAS. Unfortunately, sending the tag to CAS on every disk
+synchronization is expensive.
+SCONE offers a feature called vault file to address the
+performance cost of communicating with a remote CAS. When
+using this feature, the SCONE application performs the initial
+attestation and obtains configurations from the remote CAS,
+but afterward stores them in the vault file. The application can
+then read the configurations and filesystem expected tag from
+the local vault file as needed. In addition, when using the vault
+file, the application can store the updated file system tags on
+the local storage, improving performance. However, since all
+data to restart the application is on the local storage, rolling
+back the state of an application only requires the attacker to
+replace the state of the local filesystem with a previous version,
+which also includes the previous version of the vault file.
+B. Monotonic Counters
+A monotonic counter is a mechanism often used to prevent
+rollback attacks in trusted systems [22, 8, 27, 28, 11]. Since
+a monotonic counter is incremented but not decremented or
+reset, systems can use the counter to track process evolution.
+Monotonic counters are available through different imple-
+mentations. Intel SGX has made monotonic counters available
+inside enclaves for some processors. However, their perfor-
+mance and usage limits rendered it impractical [8]. Trusted
+Platform Modules (TPM) also provide monotonic counters,
+which, unfortunately, also suffer the same performance issues,
+being rather short-lived [8, 28]. The Embedded Multi Media
+Card (eMMC) standard, starting from version 4.4, introduced
+Replay Protected Memory Block (RPMB) [29], which stores
+a secure-monotonic counter [5].
+Table I shows a comparison between the monotonic counter
+implementations. Although we do not require a specific
+implementation, we adopt an RPMB-based F-Secure USB
+Armory [30] as our monotonic counter model. The emmc-
+RPMB has a much longer life, improving maintainability, and
+lower latency when compared to the other commercial-off-
+the-shelf (COTS) products. Our aim is to keep the stack as
+common and straightforward as possible. Although monotonic
+
+[PDF_PAGE 3]
+TABLE I: Performance of considered monotonic counter
+implementations
+Implementation Usage limit Write latency Read latency
+SGX [8] 1.05 million 80 − 250 ms 60 − 140 ms
+TPM [28] 300k - 1.4m ≈ 25ms ≈ 15 ms
+4 ROTE [8] servers unlimited 1 − 3 ms ≈ 15 ms
+emmc-RPMB 232-1 19.97 ms 3.8 ms
+counter services such as ROTE [8] and ADAM-CS [22] offer
+higher performance, their complex implementation hinders
+wide adaptation.
+C. Threat Model
+Our work builds on Intel SGX. We, therefore, start with
+Intel SGX’s threat model. This model states that the processor
+and application code are bug-free. In addition, the attacker
+resources do not enable them to physically inspect the internals
+of a running processor or break currently-recommended cryp-
+tographic algorithms. Side-channel and availability attacks are
+out of scope. The adversary aims to compromise the integrity
+and confidentiality of data and code and has full administrative
+access to the hardware and software stack.
+In addition to the threats mentioned above, we consider
+attacks against storage. Specifically, we focus on ensuring
+data CIF (Confidentiality, Integrity, and Freshness), especially
+rollback protection to files in storage volumes. Adversaries
+can also gain complete storage control, including taking and
+restoring old snapshots and having multiple replicas.
+We assume the adversary cannot roll back or tamper with
+the monotonic counter. We assume the provisioning of the
+monotonic counter (e.g., RPMB’s one-time key generation) is
+fully trusted (within enclaves or controlled by the operator of
+the secure application). Replacing the counter hardware can,
+therefore, be detected. Another important assumption is access
+to a trusted time source. Detailing such implementation is out
+of the scope of this paper. A simple solution is to have one
+or more enclaves that access a trusted remote time server and
+track time locally. SGX version 2 enclaves have access to the
+TSC register, which is trusted as long as the enclave does not
+lose the CPU. Because they detect when they get evicted from
+the CPU, enclaves can track and serve time and resynchronize
+with external sources if all lose CPU simultaneously.
+Although our threat model does not include side channels
+and availability issues, they are of practical value. Thus, we
+consider mitigations to them. More specifically, we consider
+a layered security approach where enclaves run in hardened
+(virtual or physical) machines that use cured signed images
+and measured boots (e.g., assisted by a TPM), or even runtime
+machine attestation such as in [31]. This makes it more
+challenging to collocate malicious workloads and secure en-
+claves. Runtime features such as Varys [32] and BROFY [33]
+also help make side channels even harder to exploit. Then,
+we mitigate availability attacks by using cloud orchestrators
+such as Kubernetes. Because service unavailability is visible
+externally and may also affect the income of cloud providers,
+all involved parties have the incentive to address them.
+III. A RCHITECTURE
+To protect against data rollback, we use a trusted Monotonic
+Counter (MC). In Section III-A, we will show that the MC
+is incremented and included in the state saved on each local
+disk synchronization. Throughout our explanation, we denote
+‘disk synchronization’ as fsync, although other invocations
+(e.g., sync, fdatasync) are also included. The combination
+of MC increment, data encryption, and metadata handling
+makes the data durable and protected against rollback attacks.
+However, this approach may be impractical in a program
+that does intensive synchronization. Next, in Section III-B,
+we elaborate on a batching mechanism to counter this issue.
+Despite introducing an unavailability window, as we disclose
+in Section III-D, this approach may significantly improve the
+performance since it reduces the frequency of increments.
+We then introduce a mechanism for developers to eliminate
+vulnerability windows.
+In summary, we use SCONE runtime to ensure the confi-
+dentiality of the application. The data is always encrypted at
+rest (through SCONE FSPF), during processing (through Intel
+SGX), and in transit (through SCONE network shield [26]
+or existing protocols such as TLS). Should the data be com-
+promised at rest ( integrity violation), the runtime detects it at
+the program startup thanks to SCONE FSPF and our rollback-
+protection mechanism. To guarantee freshness, we set up the
+runtime to commit (increment MC and update tag) on two
+crucial occasions: on each explicit disk synchronization and
+when closing the file or ending the program. Therefore, data
+written to the disk is guaranteed to be protected.
+A. Transparently Protect Storage
+Our primary approach is incrementing the MC on every
+flush (e.g., fsync) and referring to it as part of the storage
+metadata. Using SCONE FSPF, the data at rest will be
+encrypted. Here, a protection key will be randomly generated
+and then stored with CAS. The runtime will then store a data
+chunk in a secure memory before encrypting it and writing
+it to the disk. Nevertheless, an application can still read it
+transparently via the runtime, and no modification is needed.
+In this approach, we update the FSPF tag in three situations:
+disk flush, file close, and program exit. The latter two are
+particularly important since both are well-known gateways to
+rollback attacks.
+Since each flush will increment the MC, we bind each
+tag update to an MC value, all saved in the local vault
+file. Although pushing the MC value to the SCONE CAS is
+possible, there is no benefit. Rolling back only the vault file
+can be easily detected, as the MC value in a rolled-back vault
+file will be lower than the one on the actual MC.
+Adversaries can attempt to roll back the whole environment:
+vault file, encrypted data, and the MC. However, tampering
+with or resetting the MC is difficult and is not included in
+our threat model. Similarly, replacing the MC with a new one
+with an equivalent counter is detectable because the initial
+provisioning ties the device to a key. Tampering with an Intel
+
+[PDF_PAGE 4]
+SGX enclave is also challenging and assumed to be unfeasible
+in our threat model.
+When a program starts, it loads the vault file and the FSPF
+volume (metadata). First, the runtime checks the integrity of
+these files. Specifically, the latest volume tag will be loaded
+from the vault file and matched with an Merkle tree root hash
+for the relevant part of the filesystem (e.g., a directory). Then,
+the runtime will compare the MC value tied with the loaded
+tag to the one in the MC. If the value in the MC is higher than
+the stored one, a rollback is suspected, and the runtime halts.
+Restarting the program is only possible after both the FSPF
+volume and vault file are either restored to the correct state or
+removed. When restarting with a new state, a new counter is
+created in the same device.
+The protection described above is transparent to the appli-
+cation and requires no source code or library modifications.
+Nevertheless, the MC latency will considerably slow down the
+write operations. The following section describes an approach
+to mitigate this issue.
+B. Optimistic Batching
+We introduce optimistic batching , an approach that com-
+bines multiple tag updates from flush operations into a single
+MC increment. In such a case, the runtime promises an
+MC value for every tag update but does not immediately
+increment the MC. We implement this approach by adding a
+separate loop thread to the runtime portion inside the enclave,
+named the mc-thread. This loop thread is independent
+of the application threads and will process the accumulated
+operations, update the tag once, and increment the MC once.
+Note that in this approach, we squash all tag updates into a
+single tag.
+As illustrated in Figure 1, we identify flush requests received
+by the runtime from the application with s1, s2, . . ., sN.
+The runtime acknowledges immediately but puts each request
+into a time-aware queue. Periodically, it consolidates multiple
+requests, generating a single tag and one MC value. For
+example, in Figure 1, s1 and s2 are included in batch 6.
+Any requests after this point (denoted as A) are on the next
+batch. After confirming the writes to the FSPF volume and
+vault file, the runtime issues MC increments. Batch 6 is only
+protected after the runtime receives the acknowledgment from
+the MC (denoted as A’). Note that at this point, batch 7, which
+includes s3, is not yet (rollback) protected, even though its
+contents are already flushed to the disk.
+Although flush requests execute asynchronously, other sys-
+tem calls that trigger disk-related synchronization are still done
+synchronously, namely close and exit system calls. The
+runtime does not batch these operations as they may represent
+the end of data processing from the application. Consequently,
+these calls are blocked until all outstanding asynchronous
+requests are committed, including vault-file writes and MC
+increments, guaranteeing a consistent state.
+The introduction of optimism with the batching is especially
+relevant to enable reasonable throughputs for the slower yet
+widely available hardware monotonic counters, like those on
+5 6 7
+App
+Runtime
+MC
+s1 s2
+s2,6
+tag(s1,s2),6ok
+inc_mc() 6
+s3
+7inc_mc()
+data vault
+s1,6
+data data
+s3,7 tag(s3),7ok
+vault
+A A' A''
+Fig. 1: Batching request process
+SGX or TPM. However, the consequence is that an adversary
+can roll back the updates within a batch. We discuss this
+vulnerability window in Section III-D. Our following approach
+reduces transparency to give more control to applications,
+enabling them to know whether the data they committed to
+disk (e.g., through fsync) are already rollback protected.
+C. Checker API
+To complement optimistic batching, we introduce the
+Checker API to enable applications to ensure that flushed
+writes are MC-protected. The call to this API is blocking,
+meaning the runtime is waiting for the confirmation of the
+asynchronous operations. This API is language-agnostic and
+is available on a local network connection. The blue lines in
+Figure 2 illustrate the following example. Suppose a multi-
+threaded service that calls the Checker API after the return of
+s2; CRISP holds two internal values in the runtime, local and
+stable, represented as L and S. Local is the latest value written
+to the vault file and represents the promised MC value. Stable
+is the latest MC value.
+The Checker API returns only when the current stable value
+is greater or equal to the local value at the moment of the call
+(condition shown as L <= S’ in the figure). For example,
+the first check() call sees 6 and 5 as local and stable,
+respectively, and waits until stable reaches at least 6.
+Developers can combine optimistic batching and call to the
+Checker API at their discretion, enjoying the flexibility of
+design-space options. One approach to maintain transparency
+in the application is to implement calls to the Checker API
+at a library level. For example, libraries that abstract storage
+interactions (such as with databases, logging, or filesystems)
+or that handle communication with external parties can use
+the Checker API, eliminating the need to implement this in
+the application. The application operator controls optimism by
+configuring shorter batch time limits or forcing the Checker
+API after each flush, which results in synchronous behavior as
+discussed in Section III-A. Alternatively, one could consider
+all flush-related system calls as we exemplify in Section IV-A
+with exposed frequency configuration. Note that a rogue
+cloud operator cannot change these configurations as they are
+included in the secure configuration after getting attested.
+
+[PDF_PAGE 5]
+5 6 7
+App
+Runtime
+MC
+s1 s2
+s2,6 tag(s1,s2),6
+ok
+inc_mc()
+6
+s3
+7inc_mc()
+data vault
+s1,6
+data data
+s3,7
+check()
+(L=6,S=5)
+(L'=7,S'=6)
+L <= S'
+(L=7,S=5)
+check()
+(L'=7,S'=7)L <= S'
+Fig. 2: Checker API course
+D. Discussion on Vulnerabilities
+Availability: If the adversary rollbacks the data, the vault file,
+or both, the runtime detects and blocks the execution. Also,
+suppose the application crashes at specific points, for example,
+after writing a new tag to the vault file but before the increment
+of the MC. In that case, the program will not be able to start
+due to the MC value discrepancy. Another unavailability will
+arise if the application crashes when the data has been written
+(for example, on s3 in Figure 1). If the tag is not up-to-date in
+the vault file (point A’), the application also cannot be started
+since the hash of the disk state (in this case, s3) will not
+match against the one in the vault. In both of those cases, a
+fresh environment is required to be able to execute the program
+again. Finally, adversaries can hold the MC hostage and slow
+it down. If the waiting time on the queue exceeds the timeout
+threshold, the runtime will halt. Such scenarios introduce a
+tradeoff between integrity and availability. In production use
+cases, protected systems may need additional replication to
+cope with the increased failure rates.
+Integrity: As discussed in the previous section, combining
+batching and optimism introduces a vulnerability window .
+In Figure 1, if an attacker wants to roll back the filesystem
+changes incurred by s3, the vulnerability window starts from
+the submission of s3 to the point when the increment of the
+MC from 6 to 7 happens internally at the MC. Because the
+runtime acknowledges writes optimistically (before the MC
+is available for another increment), the vulnerability window
+can last twice the maximum write latency, resulting in 40 ms
+for our RPMB-based MC (see Table I). For this particular
+case, we emphasize the relevance of the Checker API. If the
+service calls the API before externalizing any information that
+is a consequence of s3, the application will be blocked until
+the MC is up-to-date (see the second check() in Figure 2).
+When the developer adds check calls after critical writes,
+the service will not externalize any information that needs
+to be protected against rollbacks. Thus, if the adversary rolls
+back the system, it will be equivalent to a benign crash-restart,
+where operation s3 may or may not have made it to disk, and
+the client that triggered the operation may not have assumed
+an acknowledgment. Since the only writes that can be rolled
+back did not need to be protected, there is no effective window
+of vulnerability.
+Note that CRISP does not batch the fsync call itself; it
+batches the call to the FSPF metadata population and MC
+increment. Therefore, it doesn’t deteriorate fsync-semantics.
+Figure 1, label A’ describes where data has persisted but is
+not necessarily protected against rollbacks. Furthermore, with
+the adversary presence, fsync also does not guarantee the
+changes are durable since they could roll back changes beyond
+any fsync, which is prevented by CRISP.
+IV. I MPLEMENTATION
+In our approach, we protect applications without source
+code modifications. To ease wide adaptation, we deliberately
+choose commercial off-the-shelf (COTS) MCs with interfaces
+accessible from within the SCONE runtime. Consequently,
+the configuration and optimization options can be executed
+securely and communicated through SCONE CAS [18].
+We applied CRISP to MariaDB, a popular database, to val-
+idate our approach and guide optimizations. We then evaluate
+how to extend this protection to SPIRE. SPIRE is the open-
+source SPIFFE reference implementation [23]. SPIFFE is an
+open-source standard defining identity formats, interfaces, and
+workflows for automated management of identity provisioning
+processes [34]. Both SPIFFE and SPIRE are graduate projects
+of the Cloud Native Computing Foundation, which are con-
+sidered stable and proven in production [35].
+As with other modern cloud-native applications, container
+orchestrators can scale and manage SPIRE services. Thus,
+SPIRE delegates the management of its state to a separate
+storage, in this case, MariaDB. Because the MariaDB stores
+mappings between selectors and IDs, it is a critical component
+for the security of the role cluster and needs to be protected.
+Stack details. We do not assume a particular MC implemen-
+tation. However, we use the data from Table I to simulate an
+RPMB-based MC on the same machine due to its being a
+COTS product with a lower adaptation barrier. Our stack uses
+MariaDB version 10.11.4, SPIRE version 0.12.0, and SCONE
+Community Edition version 5.7. CRISP’s implementation is
+in the SCONE runtime, keeping the source code of MariaDB
+and SPIRE unmodified. For this scenario, the developer could
+
+[PDF_PAGE 6]
+Listing 1: Checker API example usage in gorm.
+func cb_checkerAPI(...) {
+connection,_ :=dial("tcp",checkerAPI_address)
+connection.write(...) //this line will block
+connection.read(...) //returning MC value
+connection.close()
+}
+func init() {
+....
+register_callback("gorm:after_update",
+cb_checkerAPI)
+....
+}
+include the Checker API usage in gorm1 (an ORM library used
+in SPIRE), in SPIRE , or in MariaDB itself.
+A. Checker API
+The implementation of the Checker API spawns a new
+thread for each check request that is received through a TCP
+connection. First, it will check the latest promised MC value
+that has been written to the vault file, named as local. It will
+then check the value on the MC periodically (named stable)
+until the condition is satisfied ( stable is greater or equal to
+local). Local is not necessarily bound to the preceding fsync
+request. Therefore, there might be a case where the callee
+needs to wait for at most one new increment to be completed.
+Furthermore, if the queue is empty and there is no pending
+increment, the Checker API will return immediately.
+CRISP exposes an option to enable internal probabilistic
+checking out of the box. When enabled, all fsync-related calls
+will be intercepted, and the blocking Checker API call will be
+triggered according to the chosen probability. Effectively, this
+will block the callee’s thread progression. In this approach,
+no new thread is spawned as there is no TCP connection
+to handle. This option must be securely enabled as a secret
+provisioning via SCONE CAS, preventing an adversary from
+prolonging the batch size.
+Additional design-space options. The combination of the
+known vulnerability window and the Checker API explores
+additional design-space options. The latter offers great flexi-
+bility in where and when it is used. As shown in Listing 1,
+one could call the Checker API after every update query
+in gorm, which could be implemented using a minimally
+invasive callback mechanism. The Checker API can also be
+integrated with other framework components. For example,
+communication interceptors (e.g., SCONE network shield, ser-
+vice mesh) could prevent the externalization of uncommitted
+critical values (such as access control changes or certificate
+renewals). A flexible approach could also be taken on the client
+side, such as reconfirming selected operations after the known
+vulnerability window on the server. Ultimately, developers
+have a wide range of options to iteratively reduce either
+overhead or vulnerability windows, or discover the balance
+between both.
+1https://gorm.io
+B. Optimization parameters
+CRISP exposes other tuning parameters: MC rate limit and
+Queue timeout.
+MC Rate Limit aims to prevent the fast exhaustion of the
+MC. Setting the MC rate limit to a value higher than its write
+latency provides two benefits: reduced overhead and a longer
+lifetime of the MC hardware. For example, setting a 100 ms
+value leads to increased batch sizes, reducing tags generated
+and encryption tasks. The security impact is the same as using
+a slower MC: a larger vulnerability window.
+Queue timeout regulates the tolerance for MC increment
+latencies and aims to prevent attackers from slowing down
+MC operations to increment the window of vulnerability. It is
+tuned according to the write latency of the MC implementation
+at hand and is especially relevant when the Checker API is
+not used. When a request waits in the queue longer than the
+timeout, the runtime will exit prematurely.
+Default parameter settings. We decided on various pa-
+rameters related to our approach based on a few initial
+microbenchmarks. We set the number of enclave threads
+(application threads available inside the enclave) depending on
+the application, namely 4 for multithreaded and 1 for single-
+threaded applications. When not explicitly mentioned, MC
+Rate Limit and queue timeout optimization are disabled. If
+the MC Rate Limit is enabled, the queue timeout will add the
+rate-limiting delay to the actual MC timeout.
+V. E VALUATION
+We consider four evaluation scenarios. First, we show raw
+disk benchmarks on a single-threaded application. Second, we
+evaluate the impact of calling the Checker API on performance
+and vulnerability windows. Then, we show how CRISP-
+equipped MariaDB fares on a benchmark suite. Lastly, we
+show the performance in production-like experiments with
+SPIRE, including in a distributed SPIRE scenario. We per-
+formed all experiments in servers equipped with Icelake-SP
+processors (experimental versions that precede the recently
+released Xeon Scalable 3rd Generation).
+Throughout the experiments, we refer to Native and HW
+as the runs executed in a default native environment and
+on top of the SCONE runtime with Intel SGX hardware
+protection, respectively. HW+FSPF adds SCONE’s filesystem
+protection (FSPF encryption). MC and MC-Optimized are
+based on CRISP without and with optimization, respectively.
+The optimization adheres to SCONE’s recommendations for
+improving IO responsiveness of IO-bound loads by exercising
+spinning before blocking on a system call queue. In an
+optimized variant, we also set the MC Rate Limit to 100 ms
+in order to improve the MC’s lifetime to a reasonable extent.
+For MariaDB, we enable MariaDB table encryption in the
+native version and when using SCONE without FSPF. We also
+set the page size to 4096 bytes and enabled 1-page caching
+to increment MC more often, protecting the state as fine-
+grained as possible. When run on top of a trusted environment,
+
+[PDF_PAGE 7]
+the memory heap is set to 4 GB. We left other MariaDB
+configurations as default.
+A. Basic evaluation: Raw disk experiment
+Here, we experimented with a simple disk benchmark. We
+limit the file size to 256 M B and vary the buffer size, with a
+maximum size of 32768 bytes according to POSIX standards.
+We call the write() system call to write the buffer to an
+opened file. Then, fsync() is immediately called afterward.
+As for the reading, read() system call is called with the
+identical buffer size as writing.
+The writing performance with an MC variant is faster than
+the native, except for the largest buffer size. This improvement
+is due to the caching mechanism when using both FSPF
+and optimistic batching. The performance is slightly worse
+with an increased MC rate limit to 100 ms, as depicted by
+HW+Rate Limit. When CRISP is active, the runtime will cache
+all write operations and flush them to a memory-mapped IO
+when a threshold is reached, which, in this case, is close
+to the SSIZE_MAX from limits.h, defined by POSIX.
+Therefore, the runtime ensures that the file and the cache stay
+synchronized in multiple chunks. The advantage is two-fold:
+reducing the context switch caused by system calls and hiding
+the encryption cost from end-users since it encrypts the whole
+chunk on a single flush.
+Run type HW HW + FSPF
+MC + Rate LimitMC
+Native
+0
+20
+40
+512 1024 2048 4096 81921638432768
+Buffer size (byte) − log scale
+Write throughput (kByte/s)
+(a) Raw writing
+1000
+2000
+3000
+4000
+5000
+512 1024 2048 4096 81921638432768
+Buffer size (byte) − log scale
+Read throughput (kByte/s) (b) Raw Read
+Fig. 3: Raw disk performance experiment
+Figure 3a depicts the write overhead throughput across
+multiple execution types. As expected, the HW+FSPF version
+performs poorly since it needs to perform the encryption,
+update the tag, and write to three different files on every flush
+(the actual data file on disk, the vault metadata file, and the
+FSPF metadata). Meanwhile, the HW version only has a slight
+overhead due to system call handling in SCONE for Intel SGX.
+Although CRISP’s caching usage consistently masks write
+overheads, we cannot see the same effect when reading.
+Figure 3b illustrates the results of reading the file sequentially.
+A single read operation in native translates to three reads in all
+variants with FSPF (actual data file on disk, vault metadata,
+and FSPF metadata), including CRISP. On top of this, there
+is also the FSPF decryption. This phenomenon does not occur
+in the HW version, which does not use file protection and,
+hence, shows no slowdown.
+B. Examining the Checker API
+This section assesses various aspects of Checker API usage,
+including its impact on vulnerability windows, its performance
+when batching is disregarded, and its feasibility of conscious
+use.
+Checker API and vulnerability window size . Here, we
+evaluate to what extent the length of vulnerability windows
+can be reduced as well as the impact on performance. Figure 4
+illustrates the effect of the Checker API in the previous
+raw disk experiment. Following the prototype specified in
+Section IV-A, the callee is implemented internally in the
+runtime. Note that for practical usage of the Checker API, the
+developer should place the checker calls just after the relevant
+operations (e.g., could skip logging operations).
+We set the probability of having the Checker API called to
+1%, 10%, and 20%, in which, representing MC-1%, MC-10%,
+and MC-20% in Figure 4, respectively.MC-0% is a variant that
+does not invoke the Checker API (0% probability).
+First, we note that invoking the Checker API on a single-
+threaded disk-intensive application heavily impacts through-
+put. With 1% checker probability, the average relative through-
+put compared to native and MC-0% is 77% and 31%, respec-
+tively. Increasing the probability to 10% is enough to bring it
+below the HW+FSPF variant.
+Table II illustrates the effect of internally invoked Checker
+API on various probabilities. Two batching metrics per incre-
+mented MC are of interest: size, represented by the number
+of disk synchronizations ( fsync) for a single tag update, and
+duration, which denotes for the time taken to confirm a single
+batch protection. On a single-threaded application, calling the
+Checker API lessens the contention between the mc-thread
+and the main thread for a write access to the file system. It
+occasionally pauses the main thread, letting the mc-thread
+to promptly proceed with the subsequent batch. This results
+in a smaller batch size and shorter duration.
+Calling the Checker API more often also decreases the
+number of disk synchronization ( fsync) on a single batch.
+Since the window of vulnerability is min-bounded by the MC’s
+HW
+HW+FSPF
+HW+FSPF (#205)
+HW+FSPF (#46)
+MC−1%
+MC−10%
+MC−20%
+Native
+MC + Rate limit
+MC−0%
+0
+20
+40
+60
+512 1024 2048 4096 8192 16384 32768
+Buffer size (byte) − log scale
+Write throughput (kByte/s)
+Fig. 4: Raw write throughput with various configurations
+
+[PDF_PAGE 8]
+TABLE II: Calling Checker API effect on batching metrics
+(vulnerability window length) - single-thread application.
+Check prob. (%) avg. #fsync avg. duration (ms)
+0 205.97 63.49
+1 46.99 (22.8%) 33.528 (52.8%)
+10 7.30 (3.5%) 34.158(53.7%)
+20 3.922 (1.9%) 35.269 (55.5%)
+latency, by having fewer fsync calls, the attack window is
+reduced. In our experiment, having a 1% probability already
+considerably improves the length of the vulnerability window,
+despite having only a 31% average throughput compared to the
+MC variant on a single-threaded case. Note also that without
+optimistic batching, the number of fsync is exactly one,
+while the duration is at the minimum equal to MC’s latency.
+Furthermore, in our experiment, as the check probability
+increases, the duration’s variance is negligible.
+CRISP’s performance with no batching . For completeness,
+we also add a comparison with an imaginary case where
+HW+FSPF is batching requests with the size of 205 and 46,
+inspired by with 1% checks call and without, respectively
+(See Table II, 2 nd column). MC variant without the call is
+15% faster than HW with FSPF (batch size 205), shown as
+HW+FSPF (#205) in Figure 4. Meanwhile, MC with 1% call
+is 47% slower than HW with FSPF (batch size 46), shown as
+HW+FSPF (#46). Here we show that our optimistic batching
+performs well, even if we disregard the batching itself. How-
+ever, our internal checks approach is suboptimal, especially
+in this particular worst-case scenario (single-threaded and IO-
+intensive). Placing the checks properly could significantly
+improve the performance, although it is case-dependent.
+Conscious use of Checker API on multithreaded setting .
+For the second experiment, we evaluate the impact of a
+conscious use of the Checker API, where the developer knows
+that some of the write operations do not need to be rollback
+protected (e.g., statistics logging). We implemented a thread
+pool-based webservice in Rust. Each request will be served by
+exactly one of these operations: (#1) Read a file, then return;
+(#2) Read a file, write to a file, call fsync, then return; And,
+(#3) read a file, write to a file, call fsync, call the Checker API,
+then return. Thus, operations #1 and #2 do not trigger the
+Checker API, simulating non-critical operations. We specify
+operation #2 to serve 20% of the requests. We vary the
+threadpool size to match the number of parallel connections
+in the Apache HTTP Benchmarking tool ( ab)2. We also vary
+operation #3 likelihood and then observe the overall average
+latency on each run as well as its batching metrics. We ran
+this experiment 500 times with 1000 requests each.
+As expected, consciously calling the Checker API in mul-
+tithreaded settings thrives better compared to in a single-
+threaded setting, especially when it is done more often. In
+a single-thread program, calling Checker API means that
+no other operations could continue since it is a blocking
+2https://httpd.apache.org/docs/2.4/programs/ab.html
+Operation #3 (%) 0% 1% 10% 20%
+(a) Avg. latency overhead
+ (b) Batching metrics
+Fig. 5: Checker API-enabled webservice experiment on mul-
+tithreaded settings
+operation. Multithreaded programs are able to alleviate this
+issue and result in lower latency, given that not all threads
+check the API simultaneously. As depicted in Figure 5a, on
+32 threads, the overall latency overhead is 4%, 34%, and 65%
+for operation #3 being 1%, 10%, and 20% of all the operations,
+respectively.
+Regarding the batching metrics, the multithreaded appli-
+cation has shown the same behavior as the single-threaded
+one: more checking means shorter overall duration and smaller
+batch size. Higher thread usage, however, causes the impact
+on calling the API to be less significant. With two threads, the
+fsync frequency and duration without invoking the API are
+3.3× and 1.2× higher compared to operation #3 being 20%
+(half of all writes), respectively. Meanwhile, with 32 threads, it
+is only 0.9× and 1.04×. Figure 5b portrays this phenomenon
+as the thread number increases.
+Increasing the threads will increase the number of possible
+operations: Multiple threads lead to higher utilization (less idle
+waiting) and, hence, more fsync operations on a particular
+time window. Thread contention and IO bottleneck also make
+the duration longer, leading to more pending operations.
+Nevertheless, suppose the Checker API was used for all critical
+operations. In that case, this is not a vulnerability window
+as no return will be provided for a relevant request, and
+rolling back the system is equivalent to a benign crash, as
+we discussed in Section III-D.
+C. TPC-C Benchmark on CRISP-enabled MariaDB
+Next, we experiment with a realistic IO-intensive applica-
+tion, namely MariaDB. In particular, we run a TPC-C bench-
+mark [36], which aims to emulate an e-commerce system. It
+measures not only IO operations but also the computation
+power of a database system by involving complex database
+
+[PDF_PAGE 9]
+Run type HW HW+FSPF MC MC Optimized Native
+0.15
+0.25
+0.5
+0.85
+1
+1 2 5
+Number of warehouses
+Relative tpmC count (w.r.t Native) − log scale
+(a) Relative tpmC throughput
+with varying warehouses
+0.2
+0.25
+0.5
+0.85
+1
+1 2 4 8
+Number of parallel connections
+Relative tpmC count (w.r.t Native) − log scale
+(b) Relative tpmC throughput
+with varying connections
+Fig. 6: MariaDB TPC-C experiment
+transactions, expressing the results in transactions per minute
+(tpmC). We vary the number of warehouses and connections
+to simulate a higher level of complexity on the server and
+increase the load of simultaneous requests.
+As seen in Figure 6, as the number of warehouses and con-
+nections increases, CRISP (with MC Optimized) is able to keep
+up with the native version. The non-optimized variant also
+scales, albeit with lower performance, showing that CRISP’s
+design is compatible with a higher workload. For both MC and
+MC-Optimized, the existence of the exclusive mc-thread
+relieves each connection from waiting for the IO operation
+to complete since the request will be immediately replied.
+Moreover, optimistic batching combines several expensive
+disk-synchronization operations into a single one, improving
+performance. As a result, the optimized version with CRISP
+shows 0.83×, 1.59×, and 3.7× throughput compared to the
+native, HW, and non-optimized versions, respectively.
+Meanwhile, using FSPF dramatically reduces performance
+and hinders scalability. The HW variant, however, is relatively
+consistent with roughly half of the native’s performance.
+Employing CRISP’s approach addresses both issues with more
+respectable performance and additional protection.
+D. Production-like evaluation with SPIRE
+Here, we observe how a typical application using our
+approach at the data store will behave. In this case, we deploy
+SPIRE, which typically consists of the server and one or more
+agents. The agent performs service (workload) attestation for
+users, while the server attests agents and acts as a centralized
+signing authority. The server manages identities and workload
+entries on a backend (MariaDB, in our case). We do not change
+any part of the SPIRE code.
+We aim to observe day-to-day SPIRE operation, namely the
+certificate signing throughput. First, we deploy a single SPIRE
+server and create the entries for the upcoming agents. Then,
+every 15 minutes, we spawn a new agent for a maximum
+of 25 instances. Each agent should be responsible for 9000
+SVID entries. We set up the SVID’s TTL randomly between
+MariaDB type
+MC
+Native
+MC−20% checked
+Observation type
+SPIRE server %CPU
+Backend %CPU
+Number of SVID 
+signing/second
+0
+200
+400
+600
+800
+0
+5000
+10000
+0 1224364860728496108120132144156168180192204216228240252264276288300312324336348360372384396
+timestamp (in minutes)
+%CPU usage
+Signed SVID certificate/second
+Fig. 7: Certificate signing throughput with CPU load on the
+SPIRE server and MariaDB backend
+20 to 120 seconds. For SVIDs halfway through expiration,
+agents will send a certificate signing request to the server,
+adding extra work. The server will then perform the signing
+of such a request, update the entry on its cache, and send the
+acknowledgment back. We note the number of certificates the
+server could successfully sign per second. We also observe the
+CPU usage on both the server and MariaDB.
+As depicted in Figure 7, where both the agents and the
+server are deployed in a native environment, the throughput
+constantly increases as the number of active agents increases
+over time. However, the SCONE configuration favors spinning
+over blocking to enhance IO performance, leading to high
+CPU usage from the CRISP-powered MariaDB perspective.
+Meanwhile, IO usage on the backend (not shown in the graph)
+is relatively constant and indistinguishable between CRISP and
+native execution.
+We also refer back to the performance penalty caused by
+calling the Checker API. Similar to in Section V-B, the callee
+is implemented internally. Figure 7 shows that despite having
+a modest check probability ( 20%), the overhead of SVID
+certificate signing is negligible. This performance contrasts
+with our previous experiment in Figure 4, in which 20%
+checks reduced the throughput to merely 2% on average for
+the native case. In this experiment, the number of writing
+operations from the SPIRE server to the CRISP-equipped
+MariaDB is not intensive; therefore, there is no significant
+overhead.
+For the sake of completeness, we also deployed a SPIRE
+server in a trusted environment. As expected, the additional
+overhead prevents the server from keeping up with the load,
+as shown in Figure 8 (highlighted with a red line). This is es-
+pecially prominent as we do not optimize SCONE parameters
+on the server to reflect a simpler adoption process.
+We then demonstrate that such a scenario can be mitigated
+horizontally and there is no bottleneck on our CRISP-equipped
+MariaDB. We deploy multiple TEE-equipped servers to split
+the load sent by the agents. These servers, deployed with an
+8 GB SCONE heap, share the same CRISP-enabled MariaDB
+
+[PDF_PAGE 10]
+backend. Similar to the previous experiment, the agents run in
+native mode. Figure 8 shows the certificate signing throughput
+on multiple (up to 15) SPIRE servers in a trusted environment.
+0
+2500
+5000
+7500
+0 1224364860728496108120132144156168180192204216228240252264276288300312324336348360372384396
+timestamp (in minutes)
+Signed SVID certificate/second
+Number of SPIRE server
+base (native)
+15
+12
+10
+5
+2
+1
+Fig. 8: Certificate signing throughput on one or more trusted
+SPIRE servers
+Our result shows that despite having a shared CRISP-based
+MariaDB backend, adding more SPIRE servers helps to scale
+the throughput on certificate signing. As a note, adding more
+than 10 servers for 25 agents offers no gain, as shown in
+the figure. Compared with a single native SPIRE server, the
+average overhead with 10 and 5 servers is 25% and 30%,
+respectively; whereas none of them is caused by CRISP.
+VI. R ELATED WORK
+Integrity protection through Intel SGX . The current work
+leverages existing state-of-the-art for protecting the integrity
+of applications running on top of Intel SGX. For example,
+BROFY [33] is a multi-language compatible toolchain that
+can protect basic integrity, namely CPU and memory, without
+source code modification. LibSeal [37] can be used to discover
+integrity violations between the user and the service. Depend-
+ing on the threat model, applications protected by various
+implementations of Shielded Execution [15, 17, 27, 38, 39, 40]
+should have some extent of integrity protection. Our approach
+extends the TEE protection to prevent storage rollback attacks.
+Protecting untrusted storage. Pesos [20] is a policy-aware
+trusted object storage using Seagate Kinetic disks. Intel has
+released Intel PFS (Protected File System) [41] for use with
+its SGX SDK. It guarantees confidentiality and integrity but is
+still prone to rollback attacks. DISKSHIELD [21] extends Intel
+PFS and provides a defense mechanism against data tampering
+despite requiring SSD firmware modification. BesFS [6] is
+a library compatible with POSIX-compliant filesystem API
+specification. It ensures the enclave sees the last saved state,
+but checks are explicit. Our approach targets data CIF (Con-
+fidentiality, Integrity, and Freshness), which includes rollback
+resistance. Moreover, we enable protection without additional
+hardware besides a monotonic counter, a COTS product that
+is available in most servers through the TPM [8, 28].
+Preventing rollback attack. Our approach targets rollback
+attacks on top of protecting data CIF. Brandenburger et al.
+provides basic rollback protection support to persistent Intel
+SGX applications [7]. They implement LCM (Lightweight
+Collective Memory) as an alternative to a low-performance
+monotonic counter, similar to ROTE [8] and ADAM-CS [22].
+However, all of those assume distributed settings where mul-
+tiple components interact with each other through a network,
+adding implementation complexity. Meanwhile, CRISP applies
+to a single-running application with access to a monotonic
+counter of choice. CURE [14] requires hardware modification
+to enable flexible enclaves and RPMB-powered monotonic
+counter, of which is limited in size and adoptability. They in-
+crement the monotonic counter only at the enclave’s teardown,
+which exposes runtime vulnerability while having a low-
+performance penalty. CRISP maintains the balance between
+protection and performance by having a tunable configuration.
+PALÆMON (SCONE CAS) [18] has rollback protection
+on its server based on a monotonic counter and tag update.
+However, it relies on a single remote party (CAS), which
+only gives us consistency and freshness as long as it is
+available. SecureFS [9] is a file system library for Intel SGX
+that can prevent replay attacks. It compares its approach
+to another Intel SGX framework, Graphene. Nimble [19]
+employs replicated endorsers and coordinators in place of the
+monotonic counter as the trusted entity. Moreover, Nimble,
+as well as CURE [14], also require application modification.
+The aforementioned approaches rely on a trusted third party to
+verify the local disk state. With CRISP, we delegate this task
+to any monotonic counter of choice, providing more flexibility.
+Confidential stateful application. The existence of TEE
+provides robust security and trust against a powerful adver-
+sary. However, primarily, it focuses more on the stateless
+system [15, 17]. For stateful applications, one needs to im-
+plement additional techniques to support integrity protection.
+Speicher [11] is a RocksDB implementation built on Intel
+SGX with a data CIF guarantee. It uses a monotonic counter
+and encrypted storage in the form of an LSM (Log-Structured
+Merge Tree) data structure. EnclaveDB [13], an in-memory
+database server, and SGX-Log [12], which persists a secure
+system log, offer rollback protection by also using a monotonic
+counter. Despite sharing goals, previous works target their
+solution to a particular system. In contrast, we have no
+assumptions about the application. Falc˜ao et al. extends SPIRE
+to enable attestation of Intel SGX workloads [42]; they also
+run SPIRE on SGX enclaves but do not consider rollback
+protection for the storage. The SPIRE backend stores the
+access control details, making it essential to protect its storage.
+VII. C ONCLUSION
+This paper proposed an approach to protect stateful ap-
+plications executed within TEEs. Our design leverages the
+SCONE runtime and its protected filesystem to embed version
+numbers from a monotonic counter in writing operations.
+The combination of Intel SGX, SCONE FSPF, and CRISP
+
+[PDF_PAGE 11]
+guarantees CIF (confidentiality, integrity, and freshness) of
+data, including protection against rollback attacks.
+Although simple, the approach combines novel mecha-
+nisms to improve the performance to acceptable levels while
+providing mechanisms to control the vulnerability window
+introduced by optimistic batching. For example, the Checker
+API can block and wait for the monotonic counter to commit
+before exposing critical information if the application cannot
+afford any vulnerability window.
+Finally, our evaluation includes demanding use cases with
+MariaDB and SPIRE. The experiments, from low-level raw
+disk experiments to high-complexity TPC-C benchmark,
+showed reasonable tradeoffs. In some cases, CRISP even out-
+performs native execution due to its asynchronous operations
+and caches. Calling the Checker API to force pessimism
+can reduce performance, but if critical information is not
+externalized often, the impact of the checking can be small.
+For the SPIRE case, the impact perceived by users and client
+services is almost nonexistent because of the nature of the
+most frequent operations (SVID certificate signings). We also
+demonstrated that our approach works well in distributed
+SPIRE settings.
+Future work. Currently, our approach combining batching
+and the Checker API introduces a configurable vulnerability
+window. Therefore, optimizing performance still requires mod-
+ifications in the application. We wish to alleviate this barrier
+by integrating the Checker API only at critical points. For
+example, integration of the Checker API with the SCONE
+network shield [26] enables communication to external parties
+to be blocked if pending increments exist. Furthermore, we
+intend to extend our approach in order to accommodate the
+possibility of breaking crashes. Specifically, we intend to
+adjust how FSPF is formed by applying a Write-Ahead Log
+(W AL), thereby enabling the reconstruction of the protected
+file system. Finally, this approach can be extended to other
+runtimes or embedded into processes within a confidential
+virtual machine.
+ACKNOWLEDGMENTS
+We thank Gabriel P. Fernandez for the initial input on mono-
+tonic counter performance. We also thank all the reviewers for
+their work and helpful comments. This publication was funded
+by the Deutsche Forschungsgemeinschaft (DFG) as part of
+Germany’s Excellence Strategy – EXC 2050/1 – Project ID
+390696704 – Cluster of Excellence ”Centre for Tactile Internet
+with Human-in-the-Loop” (CeTI) of Technische Universit ¨at
+Dresden, by DFG Grant 389792660 as part of TRR 248
+(Foundations of Perspicuous Software Systems - CPEC), by
+BMBF (Federal Ministry of Education and Research) in the
+programme of ”Souver ¨an. Digital. Vernetzt.” on project 6G-
+life – Project ID 16KISK001K, and by European Commission
+through the Horizon Europe Research and Innovation program
+under Grant Agreement No. 101092646 (CloudSkin) and No.
+101092644 (NearData).
+REFERENCES
+[1] A. Nguyen Duc and A. Chirumamilla, “Identifying security
+risks of digital transformation-an engineering perspective,” in
+Digital Transformation for a Sustainable Society in the 21st
+Century: 18th IFIP WG 6.11 Conference on e-Business, e-
+Services, and e-Society, I3E 2019, Trondheim, Norway, Septem-
+ber 18–20, 2019, Proceedings 18. Springer, 2019, pp. 677–688.
+[2] Y . Xiao, Y . Jia, C. Liu, X. Cheng, J. Yu, and W. Lv, “Edge com-
+puting security: State of the art and challenges,” Proceedings of
+the IEEE, vol. 107, no. 8, pp. 1608–1631, 2019.
+[3] M. S. Islam, M. S. Ozdayi, L. Khan, and M. Kantarcioglu,
+“Secure iot data analytics in cloud via intel sgx,” in 2020 IEEE
+13th International Conference on Cloud Computing (CLOUD) ,
+2020, pp. 43–52.
+[4] E. Rescorla, “Http over tls,” Tech. Rep., 2000.
+[5] B. Dickens III, H. S. Gunawi, A. J. Feldman, and H. Hoff-
+mann, “Strongbox: Confidentiality, integrity, and performance
+using stream ciphers for full drive encryption,” SIGPLAN Not.,
+vol. 53, no. 2, p. 708–721, mar 2018.
+[6] S. Shinde, S. Wang, P. Yuan, A. Hobor, A. Roychoudhury, and
+P. Saxena, “BesFS: A POSIX filesystem for enclaves with a
+mechanized safety proof,” in 29th USENIX Security Symposium
+(USENIX Security 20) . USENIX Association, Aug. 2020, pp.
+523–540.
+[7] M. Brandenburger, C. Cachin, M. Lorenz, and R. Kapitza,
+“Rollback and forking detection for trusted execution envi-
+ronments using lightweight collective memory,” in 2017 47th
+Annual IEEE/IFIP International Conference on Dependable
+Systems and Networks (DSN) . Los Alamitos, CA, USA: IEEE
+Computer Society, jun 2017, pp. 157–168.
+[8] S. Matetic, M. Ahmed, K. Kostiainen, A. Dhar, D. Sommer,
+A. Gervais, A. Juels, and S. Capkun, “ROTE: Rollback protec-
+tion for trusted execution,” in26th USENIX Security Symposium
+(USENIX Security 17). Vancouver, BC: USENIX Association,
+Aug. 2017, pp. 1289–1306.
+[9] S. Kumar and S. R. Sarangi, “Securefs: A secure file system
+for intel sgx,” in 24th International Symposium on Research
+in Attacks, Intrusions and Defenses , ser. RAID ’21. New
+York, NY , USA: Association for Computing Machinery, 2021,
+p. 91–102.
+[10] M. Ahmadvand, A. Pretschner, K. Ball, and D. Eyring, “In-
+tegrity protection against insiders in microservice-based in-
+frastructures: From threats to a security framework,” in Soft-
+ware Technologies: Applications and Foundations, M. Mazzara,
+I. Ober, and G. Sala ¨un, Eds., 2018.
+[11] M. Bailleu, J. Thalheim, P. Bhatotia, C. Fetzer, M. Honda, and
+K. Vaswani, “Speicher: securing LSM-based key-value stores
+using shielded execution,” USENIX Conference on File and
+Storage Technologies, pp. 173–190, Feb. 2019.
+[12] V . Karande, E. Bauman, Z. Lin, and L. Khan, “Sgx-log:
+Securing system logs with sgx,” in Proceedings of the 2017
+ACM on Asia Conference on Computer and Communications
+Security, ser. ASIA CCS ’17. New York, NY , USA:
+Association for Computing Machinery, 2017, p. 19–30.
+[Online]. Available: https://doi.org/10.1145/3052973.3053034
+[13] C. Priebe, K. Vaswani, and M. Costa, “Enclavedb: A secure
+database using sgx,” in 2018 IEEE Symposium on Security and
+Privacy (SP), 2018, pp. 264–278.
+[14] R. Bahmani, F. Brasser, G. Dessouky, P. Jauernig,
+M. Klimmek, A.-R. Sadeghi, and E. Stapf, “CURE: A security
+architecture with CUstomizable and resilient enclaves,” in
+30th USENIX Security Symposium (USENIX Security 21) .
+USENIX Association, Aug. 2021, pp. 1073–1090. [Online].
+Available: https://www.usenix.org/conference/usenixsecurity21/
+presentation/bahmani
+[15] C.-C. Tsai, D. E. Porter, and M. Vij, “Graphene-sgx: A practical
+
+[PDF_PAGE 12]
+library os for unmodified applications on sgx.” in USENIX
+Annual Technical Conference, 2017, pp. 645–658.
+[16] Gramine. (2023) Gramine encrypted files manifest.
+[Online]. Available: https://gramine.readthedocs.io/en/stable/
+manifest-syntax.html#encrypted-files
+[17] S. Arnautov, B. Trach, F. Gregor, T. Knauth, A. Martin,
+C. Priebe, J. Lind, D. Muthukumaran, D. O’Keeffe, M. L.
+Stillwell, D. Goltzsche, D. Eyers, R. Kapitza, P. Pietzuch, and
+C. Fetzer, “SCONE: Secure linux containers with intel SGX,”
+in 12th USENIX Symposium on Operating Systems Design
+and Implementation (OSDI 16) . Savannah, GA: USENIX
+Association, Nov. 2016, pp. 689–703.
+[18] F. Gregor, W. Ozga, S. Vaucher, R. Pires, D. Le Quoc, S. Ar-
+nautov, A. Martin, V . Schiavoni, P. Felber, and C. Fetzer, “Trust
+management as a service: Enabling trusted execution in the
+face of byzantine stakeholders,” in2020 50th Annual IEEE/IFIP
+International Conference on Dependable Systems and Networks
+(DSN), 2020, pp. 502–514.
+[19] S. Angel, A. Basu, W. Cui, T. Jaeger, S. Lau, S. Setty,
+and S. Singanamalla, “Nimble: Rollback protection for
+confidential cloud services,” in 17th USENIX Symposium on
+Operating Systems Design and Implementation (OSDI 23) .
+Boston, MA: USENIX Association, Jul. 2023, pp. 193–208.
+[Online]. Available: https://www.usenix.org/conference/osdi23/
+presentation/angel
+[20] R. Krahn, B. Trach, A. Vahldiek-Oberwagner, T. Knauth,
+P. Bhatotia, and C. Fetzer, “Pesos: Policy enhanced secure
+object store,” in Proceedings of the Thirteenth EuroSys Con-
+ference, ser. EuroSys ’18. New York, NY , USA: ACM, 2018,
+pp. 25:1–25:17.
+[21] J. Ahn, J. Lee, Y . Ko, D. Min, J. Park, S. Park, and Y . Kim,
+“Diskshield: A data tamper-resistant storage for intel sgx,” in
+Proceedings of the 15th ACM Asia Conference on Computer and
+Communications Security, ser. ASIA CCS ’20. New York, NY ,
+USA: Association for Computing Machinery, 2020, p. 799–812.
+[22] A. Martin, C. Lian, F. Gregor, R. Krahn, V . Schiavoni, P. Felber,
+and C. Fetzer, “Adam-cs: Advanced asynchronous monotonic
+counter service,” in 2021 51st Annual IEEE/IFIP International
+Conference on Dependable Systems and Networks (DSN), 2021,
+pp. 426–437.
+[23] D. Feldman, E. Fox, E. Gilman, I. Haken, F. Kautz, U. Khan,
+M. Lambrecht, B. Lum, A. M. Fay ´o, E. Nesterov et al., Solving
+the Bottom Turtle: a SPIFFE way to establish trust in your
+infrastructure via universal identity . Book Sprints, 2020.
+[24] Intel, “Intel software guard extensions,” 2006. [Online].
+Available: https://www.intel.com/content/www/us/en/developer/
+tools/software-guard-extensions/overview.html
+[25] V . Costan and S. Devadas, “Intel sgx explained,” Cryptology
+ePrint Archive, 2016.
+[26] SCONTAIN. (2023) Scone documentation. [Online]. Available:
+https://sconedocs.github.io/
+[27] D. Levin, J. R. Douceur, J. R. Lorch, and T. Moscibroda,
+“TrInc: Small trusted hardware for large distributed systems,”
+in 6th USENIX Symposium on Networked Systems Design and
+Implementation (NSDI 09). Boston, MA: USENIX Association,
+Apr. 2009.
+[28] R. Strackx and F. Piessens, “Ariadne: A minimal approach to
+state continuity,” in25th USENIX Security Symposium (USENIX
+Security 16) . Austin, TX: USENIX Association, Aug. 2016,
+pp. 875–892.
+[29] A. K. Reddy, P. Paramasivam, and P. B. Vemula, “Mobile secure
+data protection using emmc rpmb partition,” in 2015 Interna-
+tional Conference on Computing and Network Communications
+(CoCoNet), 2015, pp. 946–950.
+[30] WithSecure. (2023) USB armory. [Online].
+Available: https://www.withsecure.com/en/solutions/innovative-
+security-hardware/usb-armory
+[31] W. Ozga, D. Le Quoc, and C. Fetzer, “Triglav: Remote at-
+testation of the virtual machine’s runtime integrity in public
+clouds,” in 2021 IEEE 14th International Conference on Cloud
+Computing (CLOUD), 2021, pp. 1–12.
+[32] O. Oleksenko, B. Trach, R. Krahn, M. Silberstein, and
+C. Fetzer, “Varys: Protecting SGX enclaves from practical
+Side-Channel attacks,” in 2018 USENIX Annual Technical
+Conference (USENIX ATC 18) . Boston, MA: USENIX
+Association, Jul. 2018, pp. 227–240. [Online]. Available: https:
+//www.usenix.org/conference/atc18/presentation/oleksenko
+[33] A. P. P. Hartono and C. Fetzer, “Brofy: Towards essential in-
+tegrity protection for microservices,” in 2021 40th International
+Symposium on Reliable Distributed Systems (SRDS) , 2021, pp.
+154–163.
+[34] SPIFFE. (2023) Secure Production Identity Framework for
+Everyone (SPIFFE). [Online]. Available: https://github.com/
+spiffe/spiffe/blob/main/standards/SPIFFE.md
+[35] CNCF. (2023) Graduanted and incubating projects. [Online].
+Available: https://www.cncf.io/projects/
+[36] S. T. Leutenegger and D. Dias, “A modeling study of the tpc-c
+benchmark,” ACM Sigmod Record , vol. 22, no. 2, pp. 22–31,
+1993.
+[37] P.-L. Aublin, F. Kelbert, D. O’Keeffe, D. Muthukumaran,
+C. Priebe, J. Lind, R. Krahn, C. Fetzer, D. Eyers, and P. Piet-
+zuch, “Libseal: Revealing service integrity violations using
+trusted execution,” in Proceedings of the Thirteenth EuroSys
+Conference, ser. EuroSys ’18. Association for Computing
+Machinery, 2018.
+[38] M. Orenbach, P. Lifshits, M. Minkin, and M. Silberstein, “Eleos:
+Exitless os services for sgx enclaves,” in Proceedings of the
+Twelfth European Conference on Computer Systems , 2017, pp.
+238–253.
+[39] A. Baumann, M. Peinado, and G. Hunt, “Shielding applications
+from an untrusted cloud with haven,” ACM Transactions on
+Computer Systems (TOCS) , vol. 33, no. 3, pp. 1–26, 2015.
+[40] S. Shinde, D. Le Tien, S. Tople, and P. Saxena, “Panoply: Low-
+tcb linux applications with sgx enclaves.” in NDSS, 2017.
+[41] Intel, “Overview of intel protected file system library
+using software guard extensions.” [Online]. Available:
+https://www.intel.com/content/www/us/en/developer/articles/
+technical/overview-of-intel-protected-file-system-library-
+using-software-guard-extensions.html
+[42] E. Falc ˜ao, M. Silva, A. Luz, and A. Brito, “Supporting Confi-
+dential Workloads in SPIRE,” in 2022 IEEE International Con-
+ference on Cloud Computing Technology and Science (Cloud-
+Com), Dec. 2022, pp. 186–193.

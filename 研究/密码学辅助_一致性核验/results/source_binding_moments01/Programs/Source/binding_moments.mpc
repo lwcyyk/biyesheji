@@ -1,0 +1,284 @@
+"""Port of the fixed-input k=2 protocol to authenticated GF(2^128).
+
+No true-support input, public deterministic challenges, fake preprocessing,
+or diagnostic mask disclosure is used. Clear Prony decoding operates ONLY
+on the four opened masked moments. Output is provisional until process exit 0.
+"""
+from Compiler.types import sgf2n, cgf2n, regint, Array, MemValue
+from Compiler.library import print_ln, check_point, if_, if_e, else_, for_range
+
+n = int(program.args[1]) if len(program.args) > 1 else 8
+batches = int(program.args[2]) if len(program.args) > 2 else 4
+mode = 'moments'
+assert 3 <= n <= 256 and 1 <= batches <= 64
+assert mode in ('moments', 'coordinate')
+attempt_limit = 2
+norm_c = cgf2n(0x2000000000000000000000000000000)
+fifth = cgf2n(0x7959d70ce1ee694253b85b6402b1e849)
+labels = [cgf2n(3) ** i for i in range(n)]
+
+
+def norm(a, b):
+    return a * a + a * b + norm_c * (b * b)
+
+
+def public_nonzero(count):
+    # Live malicious-secure inverse preprocessing supplies uniform nonzero a.
+    result = [sgf2n.get_random_inverse()[0].reveal() for _ in range(count)]
+    check_point()  # Authenticate public challenges BEFORE using them.
+    return result
+
+
+def secret_uniform():
+    # Fresh independent triple, discard b and c. Includes zero as required.
+    a, unused_b, unused_c = sgf2n.get_random_triple()
+    return a
+
+
+def blind_open(value):
+    rho, unused = sgf2n.get_random_inverse()
+    opened = (rho * value).reveal()
+    check_point()  # No branch on an unauthenticated opening.
+    return opened
+
+
+def polynomial(coefficients, point):
+    value = sgf2n(0)
+    for coefficient in reversed(coefficients):
+        value = value * point + coefficient
+    return value
+
+
+def det3(matrix):
+    a, b, c = matrix[0]
+    d, e, f = matrix[1]
+    g, h, i = matrix[2]
+    return a * (e * i + f * h) + b * (d * i + f * g) + c * (d * h + e * g)
+
+
+def moments(values):
+    r0, r1 = secret_uniform(), secret_uniform()
+    s = [sum(values[i] * labels[i] ** j for i in range(n)) for j in range(5)]
+    points = [fifth ** j for j in range(5)]
+    products = [(r1 + r0 * x) * sum(s[j] * x ** j for j in range(5)) for x in points]
+    u = [sum(product * x ** ((5 - degree) % 5) for product, x in zip(products, points)).reveal()
+         for degree in range(1, 5)]
+    check_point()
+    return u
+
+
+def decode_public(u):
+    # All branching, lookup, and division here concerns PUBLIC masked values.
+    selected = Array(n, regint); selected.assign_all(0)
+    decoded = MemValue(regint(0))
+    delta = u[0] * u[2] + u[1] * u[1]
+    @if_e(delta == cgf2n(0))
+    def _():
+        @if_e(u[0] == cgf2n(0))
+        def _():
+            decoded.write((u[1] == cgf2n(0)) * (u[2] == cgf2n(0)) * (u[3] == cgf2n(0)))
+        @else_
+        def _():
+            location = u[1] / u[0]
+            consistent = (u[2] == u[0] * location ** 2) * (u[3] == u[0] * location ** 3)
+            for i in range(n):
+                selected[i] = (location == labels[i]) * consistent
+            decoded.write(sum(selected[i] for i in range(n)) == 1)
+    @else_
+    def _():
+        c1 = (u[0] * u[3] + u[1] * u[2]) / delta
+        c0 = (u[1] * u[3] + u[2] * u[2]) / delta
+        for i in range(n):
+            selected[i] = (labels[i] ** 2 + c1 * labels[i] + c0 == cgf2n(0))
+        @if_(sum(selected[i] for i in range(n)) == 2)
+        def _():
+            roots = Array(2, cgf2n); count = MemValue(regint(0))
+            for i in range(n):
+                @if_(selected[i])
+                def _():
+                    roots[count.read()] = labels[i]; count.write(count.read() + 1)
+            a, b = roots[0], roots[1]
+            wa = (u[1] + u[0] * b) / (a + b)
+            wb = u[0] + wa
+            consistent = (wa != cgf2n(0)) * (wb != cgf2n(0))
+            for j in range(4):
+                consistent *= (u[j] == wa * a ** j + wb * b ** j)
+            decoded.write(consistent)
+    return selected, decoded.read()
+
+
+
+from Compiler.library import runtime_error_if
+
+# Generated standard AES arithmetic; no novel cipher claim.
+def linearized(value, coefficients, ops):
+    powers = [value]
+    for _ in range(7): powers.append(ops.mul(powers[-1], powers[-1]))
+    return ops.total(ops.public(c, x) for c, x in zip(coefficients, powers))
+
+def sbox(value, ops):
+    x2 = ops.mul(value, value); x3 = ops.mul(x2, value)
+    x6 = ops.mul(x3, x3); x12 = ops.mul(x6, x6)
+    x15 = ops.mul(x12, x3); x30 = ops.mul(x15, x15)
+    x60 = ops.mul(x30, x30); x120 = ops.mul(x60, x60)
+    x240 = ops.mul(x120, x120); x252 = ops.mul(x240, x12)
+    inverse = ops.mul(x252, x2)
+    return ops.add(linearized(inverse, ops.params['sbox_linear'], ops), ops.const(0x63))
+
+def expand_key(key, ops):
+    assert len(key) == 16
+    words = [list(key[4 * i:4 * i + 4]) for i in range(4)]
+    rcon = 1
+    for i in range(4, 44):
+        temp = words[-1][:]
+        if i % 4 == 0:
+            temp = [sbox(x, ops) for x in temp[1:] + temp[:1]]
+            temp[0] = ops.add(temp[0], ops.const(rcon))
+            rcon = (rcon << 1) ^ (0x11b if rcon & 128 else 0)
+        words.append([ops.add(a, b) for a, b in zip(words[i - 4], temp)])
+    return [sum(words[4 * r:4 * r + 4], []) for r in range(11)]
+
+def encrypt_block(block, keys, ops):
+    state = [ops.add(a, b) for a, b in zip(block, keys[0])]
+    for round_number in range(1, 11):
+        state = [sbox(x, ops) for x in state]
+        state = [state[4 * ((c + r) % 4) + r] for c in range(4) for r in range(4)]
+        if round_number < 10:
+            mixed = []
+            for c in range(4):
+                column = state[4 * c:4 * c + 4]
+                doubled = [ops.public(ops.const(2), x) for x in column]
+                mixed += [ops.total([doubled[i], doubled[(i + 1) % 4], column[(i + 1) % 4],
+                                     column[(i + 2) % 4], column[(i + 3) % 4]]) for i in range(4)]
+            state = mixed
+        state = [ops.add(a, b) for a, b in zip(state, keys[round_number])]
+    return state
+
+def pack_embedded(block, ops):
+    if len(block) != 16: raise ValueError('full block only')
+    return ops.total(ops.public(1 << (8 * i), linearized(x, ops.params['reverse_linear'], ops))
+                     for i, x in enumerate(block))
+
+def pack_public(block):
+    if len(block) != 16: raise ValueError('full block only')
+    return int(f'{int.from_bytes(block, "big"):0128b}'[::-1], 2)
+
+def ghash(h, aad, ciphertext, ops):
+    value = 0
+    for data in (aad, ciphertext):
+        for i in range(0, len(data), 16):
+            block = data[i:i + 16].ljust(16, b'\0')
+            value = ops.mul(ops.add(value, pack_public(block)), h)
+    length = (len(aad) * 8).to_bytes(8, 'big') + (len(ciphertext) * 8).to_bytes(8, 'big')
+    return ops.mul(ops.add(value, pack_public(length)), h)
+
+PARAMS = {'theta': 6965574434652545465630059012743548429, 'embed': [0, 1, 6965574434652545465630059012743548429, 6965574434652545465630059012743548428, 102291965150891912891666904486995603169, 102291965150891912891666904486995603168, 98078311240815338173532973287246160108, 98078311240815338173532973287246160109, 71349304542258400213175835388324431528, 71349304542258400213175835388324431529, 64555281342886972109706356658460526757, 64555281342886972109706356658460526756, 161303063649109504187482472818972682313, 161303063649109504187482472818972682312, 165345171394507364227261564490592888388, 165345171394507364227261564490592888389, 18335101023579501410071862723786741833, 18335101023579501410071862723786741832, 11914761122307989455696034213571483204, 11914761122307989455696034213571483205, 86729551323209395307987223860549662376, 86729551323209395307987223860549662377, 90397975811359358724211650388317108389, 90397975811359358724211650388317108388, 74968127062978706962298422728901254881, 74968127062978706962298422728901254880, 81559693680349034655020869381522919660, 81559693680349034655020869381522919661, 154953092307360496365066760600655196160, 154953092307360496365066760600655196161, 151113446173714116352526313058021129741, 151113446173714116352526313058021129740, 112444723121532526838232015624237449908, 112444723121532526838232015624237449909, 108527233035772246931904557865368243385, 108527233035772246931904557865368243384, 32465639998463839291762011186589281365, 32465639998463839291762011186589281364, 38968897109326975461175382677673730648, 38968897109326975461175382677673730649, 129212592772354423425305127693593003036, 129212592772354423425305127693593003037, 132969327093830470590160726543445395985, 132969327093830470590160726543445395984, 60821428158408994937606822273863019261, 60821428158408994937606822273863019260, 54478931882432494193471050437821637872, 54478931882432494193471050437821637873, 118733036254689599516247525796284275453, 118733036254689599516247525796284275452, 122863453548065642395395931696493090032, 122863453548065642395395931696493090033, 28783860561730633594554235417836499996, 28783860561730633594554235417836499997, 22067681354706156661646625971774519825, 22067681354706156661646625971774519824, 144876905108663552818751003389017742421, 144876905108663552818751003389017742420, 140585407533058915613602156714218263128, 140585407533058915613602156714218263129, 42592120500544276594085786524024369844, 42592120500544276594085786524024369845, 49469385060399746995024433863492648121, 49469385060399746995024433863492648120, 285127952263475530311128706253368459042, 285127952263475530311128706253368459043, 281443912851203587456296310978797187375, 281443912851203587456296310978797187374, 205308978648003052098885410845828403651, 205308978648003052098885410845828403650, 211724169357802743952678080552494538702, 211724169357802743952678080552494538703, 301967214834916339664196784173214120330, 301967214834916339664196784173214120331, 305812015240540762083054299220622735239, 305812015240540762083054299220622735238, 233738755545226030127355462807370864491, 233738755545226030127355462807370864490, 227162808912676259032158765272777415014, 227162808912676259032158765272777415015, 291488146216963350027803270266540222315, 291488146216963350027803270266540222314, 295706954389723444363300367327086750054, 295706954389723444363300367327086750055, 201700702623749906118818392463305591178, 201700702623749906118818392463305591179, 194750748185688322479422267672165287815, 194750748185688322479422267672165287814, 317560619907174666119768068636697567683, 317560619907174666119768068636697567682, 313502897245692068939119218430355894222, 313502897245692068939119218430355894223, 215434970918601305604725684153394040610, 215434970918601305604725684153394040611, 222223844915987793592486556227627532591, 222223844915987793592486556227627532590, 172933128880578684211816198068198079894, 172933128880578684211816198068198079895, 179633693172766185339039714921064084379, 179633693172766185339039714921064084378, 275051598128564855751714995668148999031, 275051598128564855751714995668148999030, 270916031634431989139636015554496699770, 270916031634431989139636015554496699771, 244187672507259555789835406987032214334, 244187672507259555789835406987032214335, 237315562208859486354532094916526601523, 237315562208859486354532094916526601522, 333970532201308064011442216170678883807, 333970532201308064011442216170678883806, 338277649772255899254222083438425103314, 338277649772255899254222083438425103315, 191172659150182204995927978211284411871, 191172659150182204995927978211284411870, 184674556312525532133957312333057633234, 184674556312525532133957312333057633235, 259397832288722896581569257083613498174, 259397832288722896581569257083613498175, 263330942360551194623474648551132005683, 263330942360551194623474648551132005682, 247900443188568579812602893993354568567, 247900443188568579812602893993354568566, 254227324539175641996602272010208111994, 254227324539175641996602272010208111995, 327713535465105758766624221914531696022, 327713535465105758766624221914531696023, 323951651950929472905903112437228749723, 323951651950929472905903112437228749722, 12379431633421062009319237724621175228, 12379431633421062009319237724621175229, 16520353470973124333127317257528424369, 16520353470973124333127317257528424368, 92570993353463515952209321523951851357, 92570993353463515952209321523951851356, 85865074985507419932069585078907214160, 85865074985507419932069585078907214161, 81068980477628716586903921371693170452, 81068980477628716586903921371693170453, 76767216675522591782335634180271993113, 76767216675522591782335634180271993112, 148924932950824881654428646789754589685, 148924932950824881654428646789754589684, 155791688212732641013297993765806923768, 155791688212732641013297993765806923769, 6121867266739218761680699536059163125, 6121867266739218761680699536059163124, 2193786752135566371455213751814893560, 2193786752135566371455213751814893561, 96284332853674509936234290918408113940, 96284332853674509936234290918408113941, 102777404866455936327711046477332611353, 102777404866455936327711046477332611352, 65414646452710124170263878797541582685, 65414646452710124170263878797541582684, 69181560484834695308314409124493388112, 69181560484834695308314409124493388113, 167165030217082601365414832507963673020, 167165030217082601365414832507963673021, 160833119616177853542307291651614787505, 160833119616177853542307291651614787504, 124657352211872625244061878598490749704, 124657352211872625244061878598490749705, 118247516538483188253633364596051784965, 118247516538483188253633364596051784964, 22911470741640447958167067802628117993, 22911470741640447958167067802628117992, 26590156385152736767871725356823419876, 26590156385152736767871725356823419877, 138765466174549761594365570187382767008, 138765466174549761594365570187382767009, 145346766882950486207665752773250839469, 145346766882950486207665752773250839468, 48610099990823392611611919098895438657, 48610099990823392611611919098895438656, 44759944241697417037004995842488950092, 44759944241697417037004995842488950093, 106354298029602006584990504589812032321, 106354298029602006584990504589812032320, 113309281717879219470409822589698649420, 113309281717879219470409822589698649421, 38504146557967105230406908192800591264, 38504146557967105230406908192800591265, 34280307867340780830649072948861436845, 34280307867340780830649072948861436844, 135157920040053550676891427629166142953, 135157920040053550676891427629166142952, 128374076867624666603643650139030711268, 128374076867624666603643650139030711269, 54969562866131847669016652494142573320, 54969562866131847669016652494142573321, 59022255970307440572797206482337842437, 59022255970307440572797206482337842436, 297506043943160612960264312922490472094, 297506043943160612960264312922490472095, 290997433073349653592395678022744131731, 290997433073349653592395678022744131730, 195589344189781188906888828366142548095, 195589344189781188906888828366142548094, 199512189302139892829909093408858662514, 199512189302139892829909093408858662515, 311688149594364630035589284879158624310, 311688149594364630035589284879158624311, 318025290517008706195681398473322565179, 318025290517008706195681398473322565178, 221359368637392723371264792029385125591, 221359368637392723371264792029385125590, 217607988401598501152808054154986922202, 217607988401598501152808054154986922203, 279276168734044562828814122754634260183, 279276168734044562828814122754634260182, 285987317433033907799379072881845162202, 285987317433033907799379072881845162203, 211254225424220418881721858573848358966, 211254225424220418881721858573848358967, 207128837371228907146679692909144571451, 207128837371228907146679692909144571450, 308005801893326587275072263713657510015, 308005801893326587275072263713657510014, 301123507766352659539953133703925864050, 301123507766352659539953133703925864051, 227648248687975866680314507464834315934, 227648248687975866680314507464834315935, 231944777098349560857289761067182373011, 231944777098349560857289761067182373010, 185144418027086590385499042188121375786, 185144418027086590385499042188121375787, 189352717851398982639427952952327555623, 189352717851398982639427952952327555622, 265498766201044366875656389800751278795, 265498766201044366875656389800751278794, 258538547119806604693045356959140996294, 258538547119806604693045356959140996295, 253741804723629538898144547951986721410, 253741804723629538898144547951986721411, 249694341951715311308544593822628514959, 249694341951715311308544593822628514958, 321757947834077262358902104660832513123, 321757947834077262358902104660832513122, 328557324792314458373971186738786050670, 328557324792314458373971186738786050671, 178795177208919814361874872493911710819, 178795177208919814361874872493911710818, 175121721885918435274849798384206926446, 175121721885918435274849798384206926447, 269116859545061205897655412593068257922, 269116859545061205897655412593068257923, 275542229013533532704019009957672942735, 275542229013533532704019009957672942734, 238180120706475823395168087639011842763, 238180120706475823395168087639011842762, 242014737599819727550459079531727393990, 242014737599819727550459079531727393991, 340092317700249190533052763314779845674, 340092317700249190533052763314779845675, 333505781590831938335802156230743636519, 333505781590831938335802156230743636518], 'sbox_linear': [102291965150891912891666904486995603168, 71349304542258400213175835388324431529, 238180120706475823395168087639011842762, 32465639998463839291762011186589281364, 269116859545061205897655412593068257922, 1, 38504146557967105230406908192800591265, 155791688212732641013297993765806923769], 'reverse_linear': [228722581460852680588111077146347597586, 321145831898411962343088389715120460493, 295681492452183187219082175816769858436, 196208365153087937598285970763469274503, 327430803067131101983473204518556639564, 158246963609149406925313880045088917256, 54938617432980865956434952211750431499, 245134458031539107099197485013430986259], 'modulus': 340282366920938463463374607431768211591}
+PUBLIC_CASES = [[{'nonce': b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01', 'aad': b'AI-record=0;key-epoch=7', 'ciphertext': b'\x82Bx\xcbe\xa1p\x87\xc77\xe3\xcas\xc1\xf0j', 'tag': b'\x10e\x86\xac\xa1&\xcc\xa9\xb4\xf6\x91\xd9\x1c\xeb\xb3}'}, {'nonce': b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02', 'aad': b'AI-record=1;key-epoch=7', 'ciphertext': b'\x8b\x04\xc3\xa1\xf53T\x07\xc21\x19~\x9a\x91T\xf5', 'tag': b'\xebf\x92@\xcce\x7f\x19\x97\xc7\xc4\xfb;\t\xc9s'}], [{'nonce': b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01', 'aad': b'AI-record=0;key-epoch=7', 'ciphertext': b'\x82Bx\xcbe\xa1p\x87\xc77\xe3\xcas\xc1\xf0j', 'tag': b'\x11e\x86\xac\xa1&\xcc\xa9\xb4\xf6\x91\xd9\x1c\xeb\xb3}'}, {'nonce': b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02', 'aad': b'AI-record=1;key-epoch=7', 'ciphertext': b'\x8b\x04\xc3\xa1\xf53T\x07\xc21\x19~\x9a\x91T\xf5', 'tag': b'\xebf\x92@\xcce\x7f\x19\x97\xc7\xc4\xfb;\t\xc9s'}], [{'nonce': b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01', 'aad': b'AI-record=0;key-epoch=7', 'ciphertext': b'\x82Bx\xcbe\xa1p\x87\xc77\xe3\xcas\xc1\xf0j', 'tag': b'\x10e\x86\xac\xa1&\xcc\xa9\xb4\xf6\x91\xd9\x1c\xeb\xb3}'}, {'nonce': b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02', 'aad': b'AI-record=1;key-epoch=7', 'ciphertext': b'\x8b\x04\xc3\xa1\xf53T\x07\xc21\x19~\x9a\x91T\xf5', 'tag': b'\xebf\x92@\xcce\x7f\x19\x97\xc7\xc4\xfb;\t\xc9s'}], [{'nonce': b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01', 'aad': b'AI-record=0;key-epoch=7', 'ciphertext': b'\x82Bx\xcbe\xa1p\x87\xc77\xe3\xcas\xc1\xf0j', 'tag': b'\x11e\x86\xac\xa1&\xcc\xa9\xb4\xf6\x91\xd9\x1c\xeb\xb3}'}, {'nonce': b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02', 'aad': b'AI-record=1;key-epoch=7', 'ciphertext': b'\x8b\x04\xc3\xa1\xf53T\x07\xc21\x19~\x9a\x91T\xf5', 'tag': b'\xebf\x92@\xcce\x7f\x19\x97\xc7\xc4\xfb;\t\xc9s'}], [{'nonce': b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01', 'aad': b'AI-record=0;key-epoch=7', 'ciphertext': b'\x82Bx\xcbe\xa1p\x87\xc77\xe3\xcas\xc1\xf0j', 'tag': b'\x10e\x86\xac\xa1&\xcc\xa9\xb4\xf6\x91\xd9\x1c\xeb\xb3}'}, {'nonce': b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02', 'aad': b'AI-record=1;key-epoch=7', 'ciphertext': b'\x8b\x04\xc3\xa1\xf53T\x07\xc21\x19~\x9a\x91T\xf5', 'tag': b'\xebf\x92@\xcce\x7f\x19\x97\xc7\xc4\xfb;\t\xc9s'}], [{'nonce': b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01', 'aad': b'AI-record=0;key-epoch=7', 'ciphertext': b'\x83Bx\xcbe\xa1p\x87\xc77\xe3\xcas\xc1\xf0j', 'tag': b'\x10e\x86\xac\xa1&\xcc\xa9\xb4\xf6\x91\xd9\x1c\xeb\xb3}'}, {'nonce': b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02', 'aad': b'AI-record=1;key-epoch=7', 'ciphertext': b'\x8b\x04\xc3\xa1\xf53T\x07\xc21\x19~\x9a\x91T\xf5', 'tag': b'\xebf\x92@\xcce\x7f\x19\x97\xc7\xc4\xfb;\t\xc9s'}], [{'nonce': b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01', 'aad': b'AI-record=0;key-epoch=7', 'ciphertext': b'\x82Bx\xcbe\xa1p\x87\xc77\xe3\xcas\xc1\xf0j', 'tag': b'\x10e\x86\xac\xa1&\xcc\xa9\xb4\xf6\x91\xd9\x1c\xeb\xb3}'}, {'nonce': b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02', 'aad': b'@I-record=1;key-epoch=7', 'ciphertext': b'\x8b\x04\xc3\xa1\xf53T\x07\xc21\x19~\x9a\x91T\xf5', 'tag': b'\xebf\x92@\xcce\x7f\x19\x97\xc7\xc4\xfb;\t\xc9s'}], [{'nonce': b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01', 'aad': b'AI-record=0;key-epoch=7', 'ciphertext': b'\x82Bx\xcbe\xa1p\x87\xc77\xe3\xcas\xc1\xf0j', 'tag': b'\x11e\x86\xac\xa1&\xcc\xa9\xb4\xf6\x91\xd9\x1c\xeb\xb3}'}, {'nonce': b'\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02', 'aad': b'AI-record=1;key-epoch=7', 'ciphertext': b'\x8b\x04\xc3\xa1\xf53T\x07\xc21\x19~\x9a\x91T\xf5', 'tag': b'\xeaf\x92@\xcce\x7f\x19\x97\xc7\xc4\xfb;\t\xc9s'}]]
+
+class MPCOps:
+    params = PARAMS
+    def add(self, a, b): return a + b
+    def total(self, values): return sum(values)
+    def mul(self, a, b): return a * b
+    def public(self, a, b): return cgf2n(a) * b
+    def const(self, byte): return cgf2n(PARAMS['embed'][byte])
+
+ops = MPCOps()
+left = [sgf2n.get_input_from(0) for _ in range(16)]
+right = [sgf2n.get_input_from(1) for _ in range(16)]
+claims = [[sgf2n.get_input_from(0) + sgf2n.get_input_from(1) for _ in range(2)] for _ in PUBLIC_CASES]
+check_point()
+# Validate both parties' AES-byte subfield inputs; honest-domain openings are
+# always zero. Invalid-party inputs abort before any AES or diagnostic output.
+for value in left + right:
+    power256 = value
+    for _ in range(8): power256 = power256 * power256
+    valid_opening = blind_open(power256 + value)
+    runtime_error_if(valid_opening != cgf2n(0), 'INPUT_DOMAIN_INVALID')
+key = [a + b for a, b in zip(left, right)]
+keys = expand_key(key, ops)
+def aes_packed(block):
+    return pack_embedded(encrypt_block([ops.const(x) for x in block], keys, ops), ops)
+h = aes_packed(bytes(16))
+tag_masks = [aes_packed(r['nonce'] + (1).to_bytes(4, 'big')) for r in PUBLIC_CASES[0]]
+streams = [aes_packed(r['nonce'] + (2).to_bytes(4, 'big')) for r in PUBLIC_CASES[0]]
+residuals = Array(len(PUBLIC_CASES) * 4, sgf2n)
+for case_index, records in enumerate(PUBLIC_CASES):
+    for record_index, record in enumerate(records):
+        assert record['nonce'] == PUBLIC_CASES[0][record_index]['nonce']
+        assert len(record['ciphertext']) == 16 and len(record['tag']) == 16
+        tag = tag_masks[record_index] + ghash(h, record['aad'], record['ciphertext'], ops)
+        actual_plaintext = streams[record_index] + cgf2n(pack_public(record['ciphertext']))
+        residuals[4 * case_index + 2 * record_index] = tag + cgf2n(pack_public(record['tag']))
+        residuals[4 * case_index + 2 * record_index + 1] = actual_plaintext + claims[case_index][record_index]
+check_point()
+
+def diagnose(batch_index, values):
+    check_point()
+    determinants = []
+    for repetition in range(2):
+        xs = public_nonzero(3)
+        determinants.append(det3([[polynomial(values, cgf2n(3) ** r * x) for x in xs] for r in range(3)]))
+    gate = blind_open(norm(determinants[0], determinants[1]))
+    status = MemValue(regint(3))
+    done = MemValue(regint(0))
+    support = Array(n, regint)
+    support.assign_all(0)
+    attempts = MemValue(regint(0))
+
+    @if_e(gate != cgf2n(0))
+    def _():
+        status.write(2)
+        done.write(1)
+
+    @else_
+    def _():
+        if mode == 'coordinate':
+            openings = [(sgf2n.get_random_inverse()[0] * value).reveal() for value in values]
+            check_point()
+            for i in range(n):
+                support[i] = openings[i] != cgf2n(0)
+            status.write(sum((support[i] for i in range(n))) != 0)
+            attempts.write(1)
+            done.write(1)
+        else:
+            for attempt in range(attempt_limit):
+
+                @if_(done.read() == 0)
+                def _():
+                    attempts.write(attempts.read() + 1)
+                    u = moments(values)
+                    selected, decoded = decode_public(u)
+
+                    @if_e(decoded)
+                    def _():
+                        check_point()
+                        xs = public_nonzero(2)
+                        remaining = [values[i] * cgf2n(1 - selected[i]) for i in range(n)]
+                        e0, e1 = [polynomial(remaining, x) for x in xs]
+                        verification = blind_open(norm(e0, e1))
+
+                        @if_(verification == cgf2n(0))
+                        def _():
+                            for i in range(n):
+                                support[i] = selected[i]
+                            status.write(sum((selected[i] for i in range(n))) != 0)
+                            done.write(1)
+
+                    @else_
+                    def _():
+                        done.write(1)
+    check_point()
+    print_ln('RESULT batch=%s status=%s attempts=%s', batch_index, status.read(), attempts.read())
+    for i in range(n):
+
+        @if_(support[i])
+        def _():
+            print_ln('SUPPORT batch=%s index=%s', batch_index, i)
+
+@for_range(len(PUBLIC_CASES))
+def binding_case(index):
+    diagnose(index, [residuals[4 * index + j] for j in range(4)])
+check_point()
+print_ln('BINDING_SCOPE AES128_GCM_96BIT_NONCE_TWO_SINGLE_BLOCK_RECORDS')
+print_ln('PROTOCOL_DONE')

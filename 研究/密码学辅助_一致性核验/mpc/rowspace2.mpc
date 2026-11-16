@@ -1,0 +1,133 @@
+"""k=2 row-space diagnosis: same gate, secret uniform GL2 mask, no omission check.
+
+All masks are fresh. Sampler retries are input-independent and bounded at two.
+An output is final only after both parties terminate successfully.
+"""
+from Compiler.types import sgf2n, cgf2n, regint, Array, MemValue
+from Compiler.library import print_ln, check_point, if_, if_e, else_, for_range
+
+n = int(program.args[1]) if len(program.args) > 1 else 8
+batches = int(program.args[2]) if len(program.args) > 2 else 8
+assert 3 <= n <= 256 and 1 <= batches <= 64
+labels = [cgf2n(3) ** i for i in range(n)]
+norm_c = cgf2n(0x2000000000000000000000000000000)
+# Inverse of the GF(2^128) Vandermonde matrix at 0,1,2,3.
+inverse = [
+    [1, 0, 0, 0],
+    [170141183460469231731687303715884105664, 1, 170141183460469231731687303715884105795, 340282366920938463463374607431768211330],
+    [0, 170141183460469231731687303715884105665, 340282366920938463463374607431768211330, 170141183460469231731687303715884105795],
+    [170141183460469231731687303715884105665] * 4]
+points = [cgf2n(i) for i in range(4)]
+# Public compile-time field constants are also checked by runtime public arithmetic.
+for i in range(4):
+    for j in range(4):
+        from Compiler.library import runtime_error_if
+        value = sum(points[i] ** a * cgf2n(inverse[a][j]) for a in range(4))
+        runtime_error_if(value != cgf2n(int(i == j)), 'TRANSFORM_CONSTANT_MISMATCH')
+
+
+def norm(a, b): return a * a + a * b + norm_c * (b * b)
+
+
+def public_nonzero(count):
+    result = [sgf2n.get_random_inverse()[0].reveal() for _ in range(count)]
+    check_point()
+    return result
+
+
+def blind_open(value):
+    rho = sgf2n.get_random_inverse()[0]
+    result = (rho * value).reveal()
+    check_point()
+    return result
+
+
+def polynomial(values, x):
+    result = sgf2n(0)
+    for value in reversed(values): result = result * x + value
+    return result
+
+
+def det3(matrix):
+    a, b, c = matrix[0]; d, e, f = matrix[1]; g, h, i = matrix[2]
+    return a * (e * i + f * h) + b * (d * i + f * g) + c * (d * h + e * g)
+
+
+def decode_public(c):
+    # Cross-product decoder operates only on the authenticated public 2x3 matrix.
+    a, b = c
+    cross = [a[1] * b[2] + a[2] * b[1],
+             a[2] * b[0] + a[0] * b[2],
+             a[0] * b[1] + a[1] * b[0]]
+    selected = Array(n, regint); selected.assign_all(0)
+    valid = MemValue(regint(0))
+    rank_two = 1 - (cross[0] == cgf2n(0)) * (cross[1] == cgf2n(0)) * (cross[2] == cgf2n(0))
+    @if_e(rank_two)
+    def _():
+        for i in range(n):
+            selected[i] = (cross[0] + cross[1] * labels[i] + cross[2] * labels[i] ** 2 == cgf2n(0))
+        valid.write(sum(selected[i] for i in range(n)) == 2)
+    @else_
+    def _():
+        a_zero = (a[0] == cgf2n(0)) * (a[1] == cgf2n(0)) * (a[2] == cgf2n(0))
+        row = [cgf2n(a_zero) * b[j] + cgf2n(1 - a_zero) * a[j] for j in range(3)]
+        @if_e(row[0] == cgf2n(0))
+        def _(): valid.write((row[1] == cgf2n(0)) * (row[2] == cgf2n(0)))
+        @else_
+        def _():
+            label = row[1] / row[0]
+            for i in range(n): selected[i] = (label == labels[i])
+            valid.write((sum(selected[i] for i in range(n)) == 1) * (row[2] == row[0] * label ** 2))
+    return selected, valid.read()
+
+
+@for_range(batches)
+def batch(index):
+    values = [sgf2n.get_input_from(0) + sgf2n.get_input_from(1) for i in range(n)]
+    check_point()
+    determinants = []
+    for repetition in range(2):
+        xs = public_nonzero(3)
+        determinants.append(det3([[polynomial(values, cgf2n(3) ** r * x) for x in xs] for r in range(3)]))
+    gate = blind_open(norm(determinants[0], determinants[1]))
+    status = MemValue(regint(3)); attempts = MemValue(regint(0))
+    support = Array(n, regint); support.assign_all(0)
+    @if_e(gate != cgf2n(0))
+    def _(): status.write(2)
+    @else_
+    def _():
+        ready = MemValue(regint(0)); mask = Array(4, sgf2n)
+        for attempt in range(2):
+            @if_(ready.read() == 0)
+            def _():
+                attempts.write(attempts.read() + 1)
+                # Fresh uniform matrix; NEVER reveal its determinant or force det=1.
+                proposal = [sgf2n.get_random_triple()[0] for _ in range(4)]
+                opening = blind_open(proposal[0] * proposal[3] + proposal[1] * proposal[2])
+                @if_(opening != cgf2n(0))
+                def _():
+                    for i in range(4): mask[i] = proposal[i]
+                    ready.write(1)
+        @if_(ready.read())
+        def _():
+            s = [sum(values[i] * labels[i] ** j for i in range(n)) for j in range(4)]
+            transposed = [sum(s[j] * cgf2n(inverse[j][h]) for j in range(4)) for h in range(4)]
+            c = []
+            for row in range(2):
+                products = [(mask[2 * row] + mask[2 * row + 1] * x) * v
+                            for x, v in zip(points, transposed)]
+                c.append([sum(z * x ** j for z, x in zip(products, points)).reveal() for j in range(3)])
+            check_point()
+            selected, valid = decode_public(c)
+            @if_(valid)
+            def _():
+                for i in range(n): support[i] = selected[i]
+                status.write(sum(selected[i] for i in range(n)) != 0)
+    check_point()
+    print_ln('RESULT batch=%s status=%s attempts=%s', index, status.read(), attempts.read())
+    for i in range(n):
+        @if_(support[i])
+        def _(): print_ln('SUPPORT batch=%s index=%s', index, i)
+check_point()
+print_ln('ATTEMPT_KIND GL2_sampler')
+print_ln('PROTOCOL_DONE')
