@@ -1,0 +1,552 @@
+# DCL-R6-B-Repair：资源监督器故障根因分析、严格硬界修复与 F1/F4 验证恢复
+
+## 一、你的任务
+
+继续担任本硕士毕业设计的形式化验证工程师、Windows 系统资源管理专家和独立技术审查员。
+
+主课题：
+
+《面向用户与 AI 智能体的全生命周期密码与凭据管理系统》
+
+当前 DCL-R6 阶段 B 已获得专项授权，并创建了八个程序，但因资源资格校准失败而停止。
+
+本轮优先解决资源监督器的真实故障，恢复 F1/F4 的验证条件。
+
+**当前任务的首要目标是：解释并修复资源监控与硬界之间的不一致，使整个批次满足可核验的资源上界。**
+
+随后，按照授权边界推进完整校准和正式模型验证。
+
+当前的协议与研究裁决继续保留：
+
+- D1-PBFT-SEAL/1.1 = CONDITIONAL_PROTOCOL_COMPLETE。
+- D2 有限精确模型具备条件可靠性和完备性。
+- F1 = UNRUN_RESOURCE_GATE。
+- F4 = UNRUN_RESOURCE_GATE。
+- RESOURCE_GATE = FAILED。
+- PASS_BOUNDED = 空集合。
+- IMPLEMENTATION_GATE = CLOSED。
+- 强 G 覆盖维持。
+- 严格分离实例为 0。
+
+本轮以修复资源验证基础设施为主。禁止将资源失败归类为 D1/D2 的协议安全反例。
+
+## 二、首先读取原始证据
+
+项目研究目录：
+
+`D:\毕业设计\research_main_innovation\decentralized_credential_lifecycle`
+
+隔离验证目录：
+
+`D:\毕业设计\DCL-R6-isolated-verification\batch01`
+
+重点阅读：
+
+- `DCL-R6/R6_FINAL_DECISION.md`
+- `DCL-R6/R6_RESOURCE_CALIBRATION_REPORT.md`
+- `DCL-R6/R6_EXECUTION_MANIFEST.md`
+- `DCL-R6/R6_TOOLCHAIN_AND_PERMISSION.md`
+- `DCL-R6/R6_COUNTEREXAMPLE_REGISTER.md`
+- `DCL-R6/R6_F1_SPECIFICATION.md`
+- `DCL-R6/R6_F4_SPECIFICATION.md`
+- `DCL-R6/R6_F1_RESULTS.md`
+- `DCL-R6/R6_F4_RESULTS.md`
+
+还必须直接检查：
+
+- `batch01/src/guard.py`
+- `batch01/src/guard_probe.py`
+- `batch01/versions/v1`
+- `batch01/versions/v2`
+- `batch01/inputs/batch01.json`
+- `batch01/raw/`
+- `batch01/calibration/`
+- `batch01/evidence/`
+- `batch01/DCL-R6-B_EVIDENCE.zip`
+
+核对 ZIP 中全部原始证据、manifest、SHA-256 和实际执行版本。
+
+尤其检查：
+
+- `RESOURCE_SETUP.s1.json`
+- `RESOURCE_CALIBRATION.s2.json`
+- `BATCH.2.json`
+- `RUN_RESULTS.json`
+- `BATCH.2.watchdog.json`
+- `visits.bin`
+- `BATCH_STATE`
+- 首次失败日志及异常栈
+
+以实际目录结构为准。
+
+优先通过只读方式获取信息。保留原始 v1/v2 及失败证据。
+
+## 三、第一任务：独立复核资源失败的实际原因
+
+必须从 Windows API 调用、程序源码及原始计数器出发，重新建立完整证据链。
+
+当前存在两条关键失败。
+
+### RG-SETUP-1：Job 初始化失败
+
+已知：
+
+- v1 调用 SetInformationJobObject 返回错误 87。
+- v2 将 Job 总限制和成员 Working Set 限制分开设置后，初始化成功。
+
+要求：
+
+1. 核对 v1 调用的确切信息类和字段。
+2. 检查 `ctypes` 结构定义、字段大小、对齐及长度参数。
+3. 检查 32/64 位类型是否正确。
+4. 检查 LimitFlags 的组合是否合法。
+5. 检查 Job 创建和限制设置的调用顺序。
+6. 检查进程是否已经属于其他 Job。
+7. 确认 v2 具体修复了哪些条件。
+8. 区分真正确定的根因和仅有相关性的修订。
+
+不得只因 v2 能成功初始化，就断言错误 87 的唯一原因已经确定。
+
+### RG-MEMORY-2：内存峰值与限制值不一致
+
+已知：
+
+测试 Job 提交限额：
+
+`100663296 bytes = 96 MiB`
+
+报告提交峰值：
+
+`115167232 bytes = 109.83203125 MiB`
+
+超出报告值：
+
+`14503936 bytes`
+
+单进程 HardWS：
+
+`33554432 bytes = 32 MiB`
+
+报告进程峰值：
+
+`33558528 bytes`
+
+差值：
+
+`4096 bytes`
+
+同时观察到：
+
+- HARDWS_MAX 已启用。
+- Python MemoryError 已捕获。
+- 测试程序实际保留五个 16 MiB 分配块。
+- 进程正常退出。
+- 整批精确 Working Set 峰值仍然为 null。
+
+要求独立解释以上现象。
+
+重点核查：
+
+**A. Job 提交内存计数**
+
+- `JobMemoryLimit` 的真实含义。
+- `PeakJobMemoryUsed` 的真实计数范围。
+- Job hard limit 的错误返回和失败路径。
+- 峰值统计是否具有历史状态或暂态影响。
+- 是否可能计入失败分配请求。
+- 是否使用了错误的 Job 句柄或查询时点。
+- 是否存在嵌套 Job 或进程归属问题。
+- 是否存在实际提交与记录峰值的时间差。
+
+**B. Working Set 计数**
+
+- `SetProcessWorkingSetSizeEx` 的设置参数。
+- `GetProcessWorkingSetSizeEx` 的读取结果。
+- HARDWS_MAX 的真实标志。
+- 工作集峰值计数器的实际来源。
+- 当前工作集与历史峰值的区别。
+- Windows 页面粒度。
+- 进程退出前后的查询时点。
+- 进程创建、初始化和限制应用顺序。
+- 是否存在不同结构体计数口径混用。
+
+**C. 进程树归属**
+
+确认：
+
+- Controller
+- Watchdog
+- Worker
+- Probe
+- 子进程
+- 可能存在的附加辅助进程
+
+是否全部纳入预期资源边界。
+
+核查进程数限制、进程启动顺序、Job 关联以及异常退出路径。
+
+### 必须遵守的判定原则
+
+Windows Job 提交内存与物理 Working Set 属于不同资源指标。
+
+不能使用以下方式直接宣告通过：
+
+- 将 4 KiB 差值作为未经证明的容差。
+- 将 Job commit 上限替代树 Working Set 上限。
+- 将采样峰值替代严格峰值上界。
+- 将 Python 堆限制视作整进程限制。
+- 将 MemoryError 视作整批资源限制成立的充分证据。
+- 将 `flags=6` 视作所有资源门通过。
+- 将配置计算的 3 GiB 视作已校准硬保证。
+
+先建立实际原因与可审查的上界，再修改资格判据。
+
+## 四、第二任务：核验 Windows 官方 API 语义
+
+优先阅读并引用微软一手文档：
+
+Job 扩展限制结构：
+
+https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_extended_limit_information
+
+Working Set 硬限制：
+
+https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-setprocessworkingsetsizeex
+
+Working Set 限制读取：
+
+https://learn.microsoft.com/en-us/windows/win32/api/memoryapi/nf-memoryapi-getprocessworkingsetsizeex
+
+Job Objects：
+
+https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects
+
+同时核对：
+
+- `QueryInformationJobObject`
+- `GetProcessMemoryInfo`
+- `JOBOBJECT_BASIC_PROCESS_ID_LIST`
+- `JOBOBJECT_EXTENDED_LIMIT_INFORMATION`
+- `PROCESS_MEMORY_COUNTERS_EX`
+- Job 对进程创建、继承和 breakaway 的限制
+
+根据源码实际使用的结构体补充官方文档。
+
+每个 API 建立：
+
+`设置值 → 读取值 → 实际执行约束 → 峰值统计 → 安全结论`
+
+尤其注意：
+
+**峰值查询值大于配置限额时，应先确认两个值是否具有相同的统计定义和时间范围。**
+
+文档无法说明的内部 Windows 计账细节，明确记录为未决机制。
+
+不要将未经证实的“失败分配预留”或“页面取整”写成已经证明的根因。
+
+## 五、第三任务：设计严格的资源上界
+
+保持原始授权指标：
+
+- 总访问状态数 ≤ 1,000,000。
+- 总墙钟时间 ≤ 1,800 秒。
+- 进程树 Working Set 峰值 ≤ 4 GiB。
+
+资源上界必须覆盖完整批次，包括校准、失败、参考枚举、变异测试和证据重放。
+
+### 5.1 内存上界
+
+如果采用每进程 HardWS 限制与进程数量限制组合，应证明：
+
+`全部可能同时存在进程的严格驻留内存上界之和 ≤ 4294967296 bytes`
+
+必须覆盖：
+
+- 全部允许角色。
+- 允许的最大同时进程数。
+- 控制器与监督器自身。
+- 子孙进程。
+- Windows 页面粒度或已证实的额外资源项。
+- 限制生效之前的启动阶段。
+- 进程被替换、退出和重新创建的阶段。
+
+若存在不能证明的额外峰值，应将其归为未决上界，保留安全余量或采用有正式依据的更强机制。
+
+降低单进程预算可以作为修复候选，但新的上界必须有依据。不能通过修改报告阈值掩盖原有失败。
+
+### 5.2 访问计数
+
+原 batch01 已实际消耗：
+
+`visits = 27`
+
+必须保留。
+
+核对：
+
+- 每次状态展开是否先获得额度。
+- DP 缓存命中是否按合同计费。
+- 参考枚举是否获得独立额度。
+- 变异测试是否计费。
+- 反例重放是否计费。
+- 失败或崩溃时预留额度是否保留。
+- 多进程写入是否可能丢失或重复计数。
+
+禁止清零或重新解释历史访问。
+
+### 5.3 墙钟时间
+
+原 batch01 已登记：
+
+`118.7340827 秒`
+
+必须保留为历史实际消耗。
+
+同时核对原始批次的绝对 deadline。
+
+batch01 已经按资源失败分支停止。禁止延长其原有 deadline、重置计数或把新会话解释为新的免费时间窗口。
+
+若原批次 deadline 已经过期，保持停止状态。
+
+新的独立运行批次应取得明确新授权。
+
+### 5.4 监督器自身失败
+
+还需检查：
+
+- Controller 崩溃。
+- Watchdog 崩溃。
+- 父进程意外退出。
+- 系统终止子进程。
+- 子进程拒绝退出。
+- Job 句柄提前关闭。
+- 异常退出导致日志未完整写入。
+- 出现未登记子进程。
+- 发生 breakaway。
+- 进程计数达到上界。
+
+要求默认执行安全停止，记录已知资源消耗和未完成证据。
+
+## 六、第四任务：监督器修复
+
+在保存 v1/v2 原始版本及哈希后，设计 v3 修订。
+
+只允许修改资源监督、探针及必要的行政计数代码。
+
+保持 F1/F4 的业务状态转换、正式不变量和冻结输入不变。
+
+优先修改：
+
+- `guard.py`
+- `guard_probe.py`
+- 必要的 `run_batch.py` 资源接入部分
+
+每项修改必须登记：
+
+1. 发现的具体问题。
+2. 修改的源码位置。
+3. 改动原因。
+4. 新增或强化的安全约束。
+5. 对原授权资源口径的影响。
+6. 对原始证据的影响。
+7. 修复后的验证方法。
+
+新版本存入独立 `versions/v3`，保留 v1/v2 原样。
+
+先完成静态差异检查。
+
+若证明当前 Windows API 组合无法满足用户要求的严格树峰值合同，应停止该修复路线，提出具有明确资源语义的替代方案及其授权要求。
+
+## 七、第五任务：重新校准的完整计划
+
+在资源口径和监督器静态修复完成之后，准备完整校准。
+
+必须覆盖：
+
+| 校准项 | 要求 |
+|---|---|
+| 正常退出 | 正确记录进程结束、资源和日志 |
+| 访问计数超限 | 超额状态处理被阻止 |
+| Job commit 限制 | 证明设置及计费口径 |
+| HardWS 限制 | 证明设置、读取和峰值上界 |
+| 整树内存 | 证明完整进程集合的聚合上界 |
+| 墙钟超时 | 超限后完整进程树停止 |
+| 异常退出 | 保留原始错误和证据 |
+| 父进程失败 | 监督器及子孙按合同终止 |
+| 子进程逃逸 | 禁止或检测未经许可的 breakaway |
+| 重复启动 | 保留原始预算和版本状态 |
+| 中断恢复 | 不重新获得已消费额度 |
+
+必须使用低资源、确定行为的合成探针，避免影响冻结主工程。
+
+每个校准需要有：
+
+- 原始输入。
+- 执行命令。
+- 预期停止条件。
+- 实际结果。
+- OS 计数器记录。
+- 运行资源数据。
+- 退出码。
+- 日志和版本 SHA-256。
+- 明确 PASS/FAIL/INCONCLUSIVE。
+
+只有全部必要资格条件成立，才能获得：
+
+`RESOURCE_GATE_PASS`
+
+如果任一关键硬界仍无法证明，保持：
+
+`RESOURCE_GATE_FAILED`
+
+并停止正式 F1/F4。
+
+## 八、F1/F4 正式验证的恢复条件
+
+本轮研究目标包含恢复正式验证，但恢复必须满足：
+
+1. 资源上界口径已经闭合。
+2. 监督器 v3 已经完成静态审查。
+3. 所有必要资源校准实际通过。
+4. 版本、输入、命令和权限已锁定。
+5. 运行批次仍具有合法有效的授权及资源额度。
+
+若需要新批次，则创建独立批次计划并申请授权。
+
+新批次禁止覆盖 batch01。
+
+原 batch01 的历史消耗作为既有失败证据保留；新批次额度须明确标记为新的授权，不能由旧许可自动生成。
+
+### 正式验证顺序
+
+资源资格成立且执行许可有效后：
+
+**F1：**
+
+- SMOKE
+- BRANCH
+- 已知变异 M1–M7
+- CHAIN
+- KEY
+- 反例重放
+
+重点检查 INV1–INV8。
+
+**F4：**
+
+- 固定 COST1/CE5 等夹具
+- D2-DP
+- TRACE-REF
+- 压缩开关交叉检查
+- G64
+- 变异
+- 反例重放
+
+必须保留逻辑独立参考。
+
+每项运行继续按既定方式记录状态访问、时间、内存、输入、轨迹和完整结果。
+
+资源不足时，已完整检查的子域单列结果，未完成范围标记 INCONCLUSIVE_LIMIT。
+
+## 九、协议和论文裁决要求
+
+本轮资源修复本身属于验证基础设施工作。
+
+它可以提高协议验证的可信度，但不自动形成 D1/D2 的原创安全机制。
+
+本轮不重新提出 I1/I2/I3。
+
+不得将以下事项作为新的协议创新：
+
+- Job Object 组合。
+- Working Set 限制。
+- 监督器修复。
+- 普通有界状态枚举。
+- 标准动态规划。
+- 标准反例重放。
+
+D1/D2 维持现有协议版本 1.1，除非正式验证发现满足全部假设的协议反例。
+
+保持：
+
+`IMPLEMENTATION_GATE = CLOSED`
+
+F2/F3、Casdoor 构建、原生 T1–T4、外部联系与上传均在本轮范围之外。
+
+## 十、输出与验收
+
+在研究目录内新增：
+
+`DCL-R6-Repair/`
+
+交付：
+
+- `RESOURCE_FAILURE_ROOT_CAUSE.md`
+- `WINDOWS_MEMORY_ACCOUNTING_AUDIT.md`
+- `RESOURCE_BOUND_PROOF.md`
+- `GUARD_V3_CHANGELOG.md`
+- `CALIBRATION_RETRY_PLAN.md`
+- `BATCH01_ACCOUNTING_LOCK.md`
+- `NEXT_BATCH_AUTHORIZATION.md`
+- `FINAL_DECISION.md`
+
+同时更新根目录：
+
+- `CURRENT_VERDICT.md`
+- `NEXT_ACTION.md`
+- 证据索引。
+
+所有源代码修订保留独立版本和哈希。
+
+明确区分：
+
+- 已经确认的根因。
+- 仍待验证的假设。
+- 已完成的静态修复。
+- 已执行的校准。
+- 已获得的硬界保证。
+- 未运行的正式 F1/F4。
+- 需要独立授权的新批次。
+
+### 本轮 Gate
+
+**Gate RG-1：根因审查**
+
+具有源码、API 和原始证据支撑的故障分析。
+
+**Gate RG-2：监督器修复**
+
+v3 修订与原始 v1/v2 差异明确，原失败保留。
+
+**Gate RG-3：硬资源资格**
+
+全部必要校准实际通过后才可标记 PASS。
+
+**Gate RG-4：模型验证资格**
+
+只有 RG-3 通过、有效执行许可存在时，才能进入 F1/F4。
+
+## 十一、立即执行
+
+首先做以下工作：
+
+1. 读取 batch01 的完整原始证据包。
+2. 独立核对 v1/v2。
+3. 重建错误 87 的调用过程。
+4. 核对 96 MiB 与 109.832 MiB 的计账定义。
+5. 核对 HardWS 超出 4096 字节的真实来源。
+6. 检查全部进程与子孙归属。
+7. 研究完整树 Working Set 的严格上界。
+8. 形成必要的 v3 修复。
+9. 设计完整资源资格校准。
+10. 核对 batch01 的停止状态、原始 deadline 和剩余额度。
+11. 对需要新运行批次的部分提出独立授权申请。
+12. 更新研究裁决。
+
+当前先完成原始证据分析、静态修复和验证方案。
+
+对于仍需新授权的校准或正式模型运行，保留待执行状态，并给出准确的权限范围。
+
+**本轮的成功标准是建立可信的资源控制条件，并使 F1/F4 的恢复运行具有明确、可验证的准入依据。**
+
+现在开始 DCL-R6-B-Repair。

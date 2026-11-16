@@ -1,0 +1,109 @@
+"""Offline source/data construction only; no target imports or test execution."""
+import ast,copy,hashlib,io,json,tokenize
+from pathlib import Path
+B=Path(r'D:\毕业设计\research_main_innovation\decentralized_credential_lifecycle');W=Path(r'D:\毕业设计\DCL-R6-isolated-verification\pt01');E=B/'DCL-R6-PreT0-Fix/evidence'
+def load(p):return json.loads(Path(p).read_bytes())
+def put(p,x):Path(p).write_text(json.dumps(x,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+def rename(s):return s.replace('DCL-R6-ManagerRecovery-Fix','DCL-R6-PreT0-Fix').replace('ManagerRecovery-static-1/r5','PreT0Recovery-static-1/r1').replace('ManagerRecovery-static-1','PreT0Recovery-static-1').replace('batch10','batch11').replace('BATCH10','BATCH11').replace('mr01','pt01')
+changes=[]
+for p in [*W.glob('src/*.py'),*W.glob('host/*.py')]:
+ raw=p.read_bytes().decode('utf-8');offset=[0]
+ for line in raw.splitlines(keepends=True):offset.append(offset[-1]+len(line))
+ edits=[]
+ for t in tokenize.generate_tokens(io.StringIO(raw).readline):
+  if t.type!=tokenize.STRING:continue
+  try:v=ast.literal_eval(t.string)
+  except (ValueError,SyntaxError):continue
+  if isinstance(v,str) and rename(v)!=v:edits.append((offset[t.start[0]-1]+t.start[1],offset[t.end[0]-1]+t.end[1],repr(rename(v))))
+ for a,z,s in reversed(edits):raw=raw[:a]+s+raw[z:]
+ if edits:p.write_bytes(raw.encode('utf-8'));changes.append({'file':str(p.relative_to(W)),'kind':'offline namespace/version literals','count':len(edits)})
+def conv(x):
+ if isinstance(x,str):return rename(x)
+ if isinstance(x,list):return [conv(v) for v in x]
+ if isinstance(x,dict):return {rename(k):conv(v) for k,v in x.items()}
+ return x
+for p in W.glob('inputs/*.json'):
+ d=load(p);n=conv(d)
+ if d!=n:put(p,n)
+(W/'inputs/dclr6batch10.slice').rename(W/'inputs/dclr6batch11.slice')
+def edit(name,a,z,count=1):
+ p=W/name;s=p.read_text(encoding='utf-8');assert s.count(a)==count,(name,s.count(a),a[:80]);p.write_text(s.replace(a,z),encoding='utf-8');changes.append({'file':name,'old':a,'new':z,'count':count})
+# Ordinary runtime checkpoint stays strict; only a minted initial-query scope uses PRE_WINDOW.
+edit('src/manager_recovery.py',"    if record:G.root_checkpoint()\n    before=G.stamp();remaining=until-G.now()", "    if record:\n        import startup_lifecycle as P\n        P.manager_checkpoint(G);until=P.query_deadline(G,until)\n    before=G.stamp();remaining=until-G.now()")
+edit('src/guard.py',"    M.guard_liveness(sys.modules[__name__],s)\n    return s", "    M.guard_liveness(sys.modules[__name__],s)\n    if s is not None:\n        import startup_lifecycle as P\n        P.runtime_checkpoint(sys.modules[__name__],s)\n    return s")
+edit('src/guard.py',"    if not resume:M.health(sys.modules[__name__],False)", "    import startup_lifecycle as P\n    if not resume:\n        P.enter(sys.modules[__name__])\n        with P.initial_query_scope(sys.modules[__name__]):M.health(sys.modules[__name__],False)\n        P.qualify(sys.modules[__name__])\n        if a['scope']=='PT_STARTUP_DIAGNOSTIC_ONLY' and a['startup_probe_mode']=='PREWINDOW_ABORT':return P.expected_prewindow_abort(sys.modules[__name__])")
+edit('src/guard.py',"    expected_scope=('MR_RECOVERY_DIAGNOSTIC_ONLY' if a['scope']=='MR_RECOVERY_DIAGNOSTIC_ONLY' and calibrate_only else ('CALIBRATE_S1S9_ONLY' if calibrate_only else 'CALIBRATE_S1S9_THEN_F1_F4'))", "    expected_scope=('PT_STARTUP_DIAGNOSTIC_ONLY' if a['scope']=='PT_STARTUP_DIAGNOSTIC_ONLY' and calibrate_only else ('MR_RECOVERY_DIAGNOSTIC_ONLY' if a['scope']=='MR_RECOVERY_DIAGNOSTIC_ONLY' and calibrate_only else ('CALIBRATE_S1S9_ONLY' if calibrate_only else 'CALIBRATE_S1S9_THEN_F1_F4')))")
+edit('src/guard.py',"            t0=now(); s=", "            P.begin_runtime(sys.modules[__name__])\n            P.initialization_guard(sys.modules[__name__])\n            t0=now(); s=")
+edit('src/guard.py',"            _root_write(ROOT/'inputs/batch_state.json',s);init_counter(OUT/'visits.bin',VISIT_CAP)", "            _root_write(ROOT/'inputs/batch_state.json',s)\n            P.initialization_guard(sys.modules[__name__])\n            init_counter(OUT/'visits.bin',VISIT_CAP)\n            P.runtime_ready(sys.modules[__name__])")
+edit('src/guard.py',"        if info.get('TasksMax')!='4': raise AdmissionBlocked('PARENT_LIMIT_NOT_CONFIGURED')", "        if info.get('TasksMax')!='4': raise AdmissionBlocked('PARENT_LIMIT_NOT_CONFIGURED')\n        if not resume:P.arm(sys.modules[__name__])")
+edit('src/guard.py',"def launch_one(case):\n    root_checkpoint()", "def launch_one(case):\n    import startup_lifecycle as P\n    P.require_work(sys.modules[__name__])\n    root_checkpoint()")
+edit('src/guard.py',"            if c=='C00':\n                import readiness_regression", "            if c=='C00':\n                import startup_regression\n                startup_regression.run_suite(sys.modules[__name__])\n                if a['scope']=='PT_STARTUP_DIAGNOSTIC_ONLY':\n                    stop_tree('PT_MINIMAL_RUNTIME_DIAGNOSTIC_COMPLETE');return 0\n                import readiness_regression")
+edit('src/guard.py',"    M.formal_gate(sys.modules[__name__])", "    M.formal_gate(sys.modules[__name__])\n    import startup_lifecycle as P\n    P.formal_gate(sys.modules[__name__])")
+# No invented deadline: ask the authenticated startup context, then preserve original runtime fallbacks.
+edit('src/manager_recovery.py',"    if s is None:\n        try:\n            start=G.trusted", "    if s is None:\n        try:\n            import startup_lifecycle as P\n            authority=P.cleanup_deadline(G);deadline=authority['deadline']\n        except BaseException:\n            authority=None\n        try:\n            if authority is not None:raise LookupError('PT_AUTHORITY_ALREADY_FOUND')\n            start=G.trusted")
+# The original fallback should not overwrite a successfully inherited startup deadline.
+edit('src/manager_recovery.py',"        except BaseException:\n            try:\n                arm=G.trusted(G.ROOT/'inputs/STOP_ARMED.json')", "        except BaseException:\n            try:\n                if authority is not None:raise LookupError('PT_AUTHORITY_ALREADY_FOUND')\n                arm=G.trusted(G.ROOT/'inputs/STOP_ARMED.json')")
+edit('src/manager_recovery.py',"            except BaseException:notes.append('DEADLINE_UNKNOWN')", "            except BaseException:\n                if authority is None:notes.append('DEADLINE_UNKNOWN')")
+edit('src/manager_recovery.py',"def seal(G,external_tail=False):\n    if G._COORDINATOR_ID", "def seal(G,external_tail=False):\n    import startup_lifecycle as P\n    applicability=P.seal_applicability(G)\n    if applicability!='RUNTIME_NATIVE_SEAL_APPLICABLE':return P.defer_startup_seal(G,applicability)\n    if G._COORDINATOR_ID")
+edit('src/guard.py',"a['scope'] not in ('CALIBRATE_S1S9_THEN_F1_F4','CALIBRATE_S1S9_ONLY','MR_RECOVERY_DIAGNOSTIC_ONLY')", "a['scope'] not in ('CALIBRATE_S1S9_THEN_F1_F4','CALIBRATE_S1S9_ONLY','MR_RECOVERY_DIAGNOSTIC_ONLY','PT_STARTUP_DIAGNOSTIC_ONLY')")
+edit('src/guard.py',"    if a.get('manager_contract_sha256')!=m['manager_contract_sha256']", "    if a.get('startup_contract_sha256')!=m['startup_contract_sha256']:raise AdmissionBlocked('PT_CONTRACT_AUTHORIZATION')\n    if a['scope']=='PT_STARTUP_DIAGNOSTIC_ONLY' and (a.get('PreT0_diagnostic_explicitly_approved') is not True or a.get('startup_probe_mode') not in ('NORMAL_START','PREWINDOW_ABORT') or a.get('Full_conditional_chain_explicitly_approved') is not False):raise AdmissionBlocked('PT_DIAGNOSTIC_SCOPE')\n    if a['scope']=='PT_STARTUP_DIAGNOSTIC_ONLY' and a['startup_probe_mode']=='PREWINDOW_ABORT' and a.get('PreWindow_abort_injection_explicitly_approved') is not True:raise AdmissionBlocked('PT_INJECTION_NOT_APPROVED')\n    if a.get('manager_contract_sha256')!=m['manager_contract_sha256']")
+edit('src/boot_continuity.py',"auth.get('scope') not in ('CALIBRATE_S1S9_THEN_F1_F4','CALIBRATE_S1S9_ONLY','MR_RECOVERY_DIAGNOSTIC_ONLY')", "auth.get('scope') not in ('CALIBRATE_S1S9_THEN_F1_F4','CALIBRATE_S1S9_ONLY','MR_RECOVERY_DIAGNOSTIC_ONLY','PT_STARTUP_DIAGNOSTIC_ONLY')")
+edit('src/boot_continuity.py',"    if auth.get('manager_contract_sha256')!=m['manager_contract_sha256']", "    if auth.get('startup_contract_sha256')!=m['startup_contract_sha256']:raise Rejected('PT_CONTRACT_AUTHORIZATION')\n    if auth['scope']=='PT_STARTUP_DIAGNOSTIC_ONLY' and (auth.get('PreT0_diagnostic_explicitly_approved') is not True or auth.get('startup_probe_mode') not in ('NORMAL_START','PREWINDOW_ABORT') or auth.get('Full_conditional_chain_explicitly_approved') is not False):raise Rejected('PT_DIAGNOSTIC_SCOPE')\n    if auth['scope']=='PT_STARTUP_DIAGNOSTIC_ONLY' and auth['startup_probe_mode']=='PREWINDOW_ABORT' and auth.get('PreWindow_abort_injection_explicitly_approved') is not True:raise Rejected('PT_INJECTION_NOT_APPROVED')\n    if auth.get('manager_contract_sha256')!=m['manager_contract_sha256']")
+edit('src/root_ipc.py',"'MR_DIAGNOSTIC_RESULT.json',", "'MR_DIAGNOSTIC_RESULT.json','PT_RUNTIME_CHECKPOINT.json','PT_QUALIFICATION.json',")
+edit('src/boot_continuity.py',"'MR_DIAGNOSTIC_RESULT.json')", "'MR_DIAGNOSTIC_RESULT.json','PT_QUALIFICATION.json')")
+# The post-exit hook is automatic, preserves the original return code and never runs tests.
+edit('host/windows_entry.py',"    raise SystemExit(code)", "    try:\n        sys.path.insert(0,str(package/'host'))\n        from startup_finalize import finalize\n        finalize(package,receipt_path.parent,code)\n    except BaseException as exc:\n        (receipt_path.parent/'STARTUP_FINALIZATION_ERROR.json').write_text(json.dumps({'administrative_seal_status':'ADMIN_EVIDENCE_UNRESOLVED','error':repr(exc),'original_exit_code':code}),encoding='utf-8')\n        if code==0:code=125\n    raise SystemExit(code)")
+
+def f(op,**changes):
+ d={'op':op,'binding':True,'boot':True,'owner':True,'deadline':True,'checkpoint_integrity':True,'exited':True,'admin_integrity':True,'native_success':True};d.update(changes);return d
+pre=[f('enter'),f('precheck'),f('qualify')];full=pre+[f(x) for x in ['begin','state','counter','checkpoint','arm','work']]
+base=[('fresh_pre',pre),('normal_full',full),('pre_missing_runtime_normal',pre),('ready_inspection',full[:-2]),('normal_first_work',full),
+ ('pre_context_missing',[f('precheck')]),('bad_pre_receipt',[f('enter',binding=False),f('precheck',binding=False)]),('bad_pre_boot',[f('enter',boot=False),f('precheck',boot=False)]),
+ ('root_init_failure',pre+[f('fail')]),('launcher_init_failure',pre+[f('fail')]),('exception_before_T0',pre+[f('fail'),f('seal')]),
+ ('budget_creation_interrupted',pre+[f('begin'),f('state'),f('fail'),f('seal',native_success=False)]),('stop_source_lost',pre+[f('fail',exited=False)]),
+ ('exit_unconfirmed',pre+[f('fail',exited=False),f('seal',exited=False)]),('admin_write_failed',pre+[f('fail'),f('seal',admin_integrity=False)]),
+ ('runtime_checkpoint_missing',full+[f('lose_checkpoint'),f('work')]),('runtime_checkpoint_corrupt',full+[f('work',checkpoint_integrity=False)]),
+ ('runtime_batch_wrong',full+[f('work',binding=False)]),('runtime_boot_wrong',full+[f('work',boot=False)]),('budget_identity_wrong',full+[f('work',checkpoint_integrity=False)]),
+ ('closed_begin_rejected',pre+[f('fail'),f('begin')]),('duplicate_T0',full[:-1]+[f('state')]),('duplicate_counter',full[:-1]+[f('counter')]),
+ ('pre_native_not_applicable',pre+[f('fail'),f('seal')]),('native_failure',full+[f('fail'),f('seal',native_success=False)]),
+ ('admin_partial_file',pre+[f('fail'),f('seal',admin_integrity=False)]),('manifest_incomplete',pre+[f('fail'),f('seal',admin_integrity=False)]),
+ ('digest_mismatch',pre+[f('fail'),f('seal',admin_integrity=False)]),('exit_known_app_unknown',pre+[f('fail'),f('seal',admin_integrity=False)]),
+ ('seal_repeat',pre+[f('fail'),f('seal'),f('seal')]),('failure_repeat',pre+[f('fail'),f('repeat_fail')]),
+ ('pre_deadline_expired',[f('enter'),f('precheck',deadline=False)]),('pre_owner_wrong',[f('enter',owner=False),f('precheck',owner=False)]),
+ ('active_deadline_expired',full+[f('work',deadline=False)]),('pre_qualify_without_context',[f('qualify')]),
+ ('work_before_begin',pre+[f('work')]),('work_during_init',pre+[f('begin'),f('state'),f('work')]),
+ ('work_before_arm',full[:-2]+[f('work')]),('partial_state_abort',pre+[f('begin'),f('state'),f('fail')]),
+ ('partial_counter_abort',pre+[f('begin'),f('state'),f('counter'),f('fail')]),
+ ('ready_then_abort',full[:-2]+[f('fail')]),('closed_precheck',pre+[f('fail'),f('precheck')]),
+ ('late_work',full+[f('fail'),f('work')]),('native_success',full+[f('fail'),f('seal')]),
+ ('pre_snapshot_io_error',pre+[f('fail'),f('seal',admin_integrity=False)]),('runtime_owner_wrong',full+[f('work',owner=False)])]
+assert len(base)==46
+jobs=[{'case_id':'P.'+n,'frames':copy.deepcopy(fr),'mutant':None,'allowed_violations':[],'expected_violation':None} for n,fr in base]
+mut=[('force_runtime_pre',pre[:2],'PREWINDOW_CYCLE',['PREWINDOW_CYCLE']),
+ ('delete_pre_validation',[f('enter',binding=False),f('precheck',binding=False)],'INVALID_PREWINDOW_ACCEPTED',['INVALID_PREWINDOW_ACCEPTED']),
+ ('missing_checkpoint_pass',full+[f('lose_checkpoint'),f('work')],'INVALID_RUNTIME_WORK',['INVALID_RUNTIME_WORK']),
+ ('no_auto_stop',pre+[f('fail')],'NO_AUTO_STOP',['NO_AUTO_STOP','REACTIVATION']),
+ ('missing_deadline',[f('enter'),f('precheck',deadline=False)],'INVALID_PREWINDOW_ACCEPTED',['INVALID_PREWINDOW_ACCEPTED']),
+ ('unknown_as_success',pre+[f('fail',exited=False)],'FALSE_CLEANUP',['FALSE_CLEANUP']),
+ ('admin_as_native',pre+[f('fail'),f('seal')],'ADMIN_AS_NATIVE',['ADMIN_AS_NATIVE','PREWINDOW_NATIVE_SEAL']),
+ ('new_budget_after_fail',full+[f('fail'),f('repeat_fail')],'BUDGET_CREATED_AFTER_FAILURE',['BUDGET_CREATED_AFTER_FAILURE','WINDOW_RESET']),
+ ('reactivate_closed',full+[f('fail'),f('work')],'REACTIVATION',['REACTIVATION'])]
+for n,fr,expected,allowed in mut:
+ jobs.append({'case_id':'M.'+n+'.safe','frames':copy.deepcopy(fr),'mutant':None,'allowed_violations':[],'expected_violation':None})
+ jobs.append({'case_id':'M.'+n+'.mutant','frames':fr,'mutant':n,'allowed_violations':allowed,'expected_violation':expected})
+assert len(jobs)==64 and max(len(j['frames']) for j in jobs)<=12
+for j in jobs:
+ j.update(origin='PT-SIMULATION/1',fault_point=j['case_id'],raw_evidence=['actual input','observed phase decision','actual objects/T0/R','cleanup and distinct seal statuses'],failure_rule='First unaccepted job stops, no retry',oracle='startup_oracle.py')
+cfg={'schema':'PRET0-CONTRACT/1','profile':'PRET0-LIFECYCLE/1','version':'PreT0Recovery-static-1/r1','batch_id':'batch11','jobs':jobs,'driver_prepay':16,'regression_completed_visits':1089,'regression_hard_visits':1536,
+ 'startup_deadline_source':'Inherited sealed preflight_deadline=start+120; never a new budget window','admin_max_files':256,'admin_max_bytes':33554432,
+ 'mode_normal':'C00 then PT64 and close; no READY/MR64/C09/S/gate18/models','mode_abort':'After prewindow qualified, declared failure77 before runtime intent/T0','dynamic_status':'UNRUN'}
+put(W/'inputs/startup_contract.json',cfg)
+x=load(W/'inputs/execution_lock.json');identity=load(W/'inputs/batch_identity.json');x['allowed_scopes']+=['PT_STARTUP_DIAGNOSTIC_ONLY'];x['launch_commands_by_scope']['PT_STARTUP_DIAGNOSTIC_ONLY']=x['calibrate_only_launch_command']
+x['authorization_receipt_required_fields']+=['startup_contract_sha256','PreT0_diagnostic_explicitly_approved','PreWindow_abort_injection_explicitly_approved','startup_probe_mode']
+x['startup_post_exit_command']=x['windows_single_call'][:6]+['/usr/bin/python3.12','-I','-S','-B','/var/lib/dcl-r6/pt01/src/startup_lifecycle.py','--post-exit-export']
+x['startup_schedule']=['sealed initial entry','PT context/initial query scope','prequalify','optional PREWINDOW_ABORT77 with no T0','exclusive runtime intent','original T0/state/counter','runtime checkpoint ready','STOP armed and parent resource checks','arm/work gate','C00','NORMAL_START PT64 then close OR full inherited chain with PT64 added']
+x['startup_limits']={'regression_hard':1536,'regression_completed':1089,'normal_minimal_visits_hard':1537,'full_calibration_hard':65618,'preflight_TCB_seconds':120,'new_time_window':False,'admin_files':256,'admin_bytes':33554432}
+x['source_version']='PreT0Recovery-static-1';x['static_revision']='PreT0Recovery-static-1/r1';x['current_authorization']='STATIC_ONLY; all new dynamic receipts absent';put(W/'inputs/execution_lock.json',x)
+m=load(W/'inputs/static_manifest.json');m.update(version='PreT0Recovery-static-1',static_revision='PreT0Recovery-static-1/r1',startup_delta=x['startup_limits'],inherited_semantics='ManagerRecovery-static-1/r5 including unchanged normal manager rules');put(W/'inputs/static_manifest.json',m)
+put(E/'STATIC_TRANSFORMATION_LOG.json',{'changes':changes,'target_imports':0,'dynamic_tests':0,'runtime_namespace_replacement':0})
+print(json.dumps({'PT_jobs':64,'mutants':9,'max_frames':max(len(j['frames']) for j in jobs),'namespace':'batch11/pt01','target_runs':0}))

@@ -1,0 +1,903 @@
+--- C09Fix-static-1/r1/c09_handoff.py
++++ RootIPC-static-1/r1/c09_handoff.py
+@@ -76,14 +76,14 @@
+     # Root-owned append log; state publication follows a completed log barrier.
+     rec={'event':kind,'handoff_id':h['id'],'revision':h['revision'],'identity':G.identity(),
+          'window':h['window'],**G.stamp(),**data}
+-    p=G.ROOT/'inputs/c09_events.jsonl'
+-    fd=os.open(p,os.O_WRONLY|os.O_CREAT|os.O_APPEND|os.O_NOFOLLOW,0o640)
++    p=G.ROOT/'inputs/root_private/c09_events.jsonl'
++    fd=os.open(p,os.O_WRONLY|os.O_CREAT|os.O_APPEND|os.O_NOFOLLOW,0o600)
+     try:
+-        os.fchmod(fd,0o640);os.fchown(fd,0,G.pwd.getpwnam('dcl-r6').pw_gid)
++        os.fchown(fd,0,0);os.fchmod(fd,0o600)
+         G._full(fd,(canonical(rec)+'\n').encode());os.fsync(fd)
+     finally:os.close(fd)
+ def publish(G,h,stage,**extra):
+-    if (G.ROOT/'inputs/CLOSED.json').exists():raise G.AdmissionBlocked('C09_CLOSED_ABSORBING')
++    G.root_checkpoint()
+     h={**h,**extra,'stage':stage,'revision':h['revision']+1,'updated':G.stamp()}
+     event(G,h,stage)
+     G._root_write(paths(G)['state'],h)
+@@ -93,7 +93,7 @@
+     ident=arm['identity']
+     if h is not None and ident!=h['receiver']:raise G.AdmissionBlocked('C09_RECEIVER_IDENTITY')
+     if not alive(G,ident):raise G.AdmissionBlocked('C09_RECEIVER_DEAD')
+-    info=G.unit_show('dclr6batch05-stop.service')
++    info=G.unit_show('dclr6batch06-stop.service')
+     if info.get('ActiveState')!='active' or int(info.get('MainPID','0'))!=ident['pid']:
+         raise G.AdmissionBlocked('C09_STOP_SOURCE_NOT_ACTIVE')
+     if info.get('ControlGroup','')=='/'+G.PARENT or info.get('ControlGroup','').startswith('/'+G.PARENT+'/'):
+@@ -115,7 +115,7 @@
+ def check_base(G,h,require_sender_live=False):
+     if G.stopped():raise G.AdmissionBlocked('C09_CLOSED_OR_STOP')
+     s=G.state()
+-    if h['window']!=window(G,s) or h['id']!=sha({'nonce':h['nonce'],'window':h['window'],
++    if not G.root_ipc().same_binding(h['window'],window(G,s)) or h['id']!=sha({'nonce':h['nonce'],'window':h['window'],
+                                                 'sender':h['sender'],'coordinator':h['coordinator']}):
+         raise G.AdmissionBlocked('C09_BINDING_MISMATCH')
+     if h['expected_exit']!=23 or h['case']!='C09' or h['revision']<1:
+@@ -136,17 +136,19 @@
+     pid,uid,gid=struct.unpack('3i',sock.getsockopt(socket.SOL_SOCKET,socket.SO_PEERCRED,12))
+     return pid,uid,gid
+ def rpc(G,message,expected_peer,until):
++    G.root_checkpoint()
+     remaining=min(12,until-G.now())
+     if remaining<=0:raise G.LimitReached('C09_RPC_DEADLINE')
+     c=socket.socket(socket.AF_UNIX,socket.SOCK_SEQPACKET)
+-    c.settimeout(remaining)
++    c.settimeout(min(.05,remaining))
+     try:
+         c.connect(str(paths(G)['socket']))
+         pid,uid,_=peer(c)
+         if uid!=0 or G.identity(pid)!=expected_peer:raise G.AdmissionBlocked('C09_RPC_PEER')
+         raw=canonical(message).encode()
+         if len(raw)>65536:raise G.AdmissionBlocked('C09_RPC_SIZE')
+-        c.sendall(raw);reply=c.recv(65537)
++        G.root_checkpoint()
++        c.sendall(raw);reply=G.root_ipc().receive(G,c,until)
+         if len(reply)>65536:raise G.AdmissionBlocked('C09_RPC_REPLY_SIZE')
+         out=json.loads(reply)
+         if out.get('error'):raise G.AdmissionBlocked('C09_RPC_REJECTED:'+out['error'])
+@@ -154,6 +156,7 @@
+     finally:c.close()
+ def qualified_regression(G):
+     import c09_oracle
++    G.root_ipc().verify_qualification(G)
+     q=G.trusted(G.ROOT/'inputs/C09H_QUALIFICATION.json')
+     if (q['binding']!=G.safety_binding() or q['checker_sha256']!=G.digest(G.SOURCE/'c09_oracle.py') or
+         q['contract_sha256']!=G.digest(G.SOURCE.parent/'inputs/c09_contract.json')):
+@@ -201,13 +204,14 @@
+     def close(self):self.sock.close()
+     def poll(self):
+         G=self.G
++        G.root_checkpoint()
+         try:c,_=self.sock.accept()
+         except BlockingIOError:return
+-        c.settimeout(.5)
++        c.settimeout(.05)
+         try:
+             pid,uid,_=peer(c)
+             if uid!=0:raise G.AdmissionBlocked('C09_CONTROL_UID')
+-            raw=c.recv(65537)
++            raw=G.root_ipc().receive(G,c,min(G.state()['deadline'],G.now()+.5))
+             if len(raw)>65536:raise G.AdmissionBlocked('C09_CONTROL_SIZE')
+             request=json.loads(raw)
+             with lifecycle_lock(G):
+@@ -237,7 +241,9 @@
+                         raise G.AdmissionBlocked('C09_WITNESS_IDENTITY')
+                     reply={'id':h['id'],'witness_observed':True}
+                 else:raise G.AdmissionBlocked('C09_UNKNOWN_CONTROL_OP')
+-            c.sendall(canonical(reply).encode())
++            with lifecycle_lock(G):
++                G.root_checkpoint()
++                c.sendall(canonical(reply).encode())
+         except BaseException as exc:
+             try:c.sendall(canonical({'error':str(exc)}).encode())
+             except OSError:pass
+--- C09Fix-static-1/r1/guard.py
++++ RootIPC-static-1/r1/guard.py
+@@ -32,7 +32,7 @@
+ AS_CAP = 1 << 30
+ VISIT_CAP = 1000000
+ CASES = tuple('C%02d' % i for i in range(13))
+-ROOTS = (Path('/var/lib/dcl-r6/c09f01'), Path('/var/lib/dcl-r6/batch05'))
++ROOTS = (Path('/var/lib/dcl-r6/ri01'), Path('/var/lib/dcl-r6/batch06'))
+ def _arg(name, default=None):
+     return sys.argv[sys.argv.index(name)+1] if name in sys.argv else default
+ ROOT = Path(_arg('--batch-root', str(ROOTS[0]))).resolve()
+@@ -116,8 +116,16 @@
+ def _full(fd, data):
+     # A short write poisons the operation; the caller never grants credit.
+     if os.write(fd, data) != len(data): raise AdmissionBlocked('SHORT_WRITE')
++def root_ipc():
++    if str(SOURCE) not in sys.path:sys.path.insert(0,str(SOURCE))
++    import root_ipc as RI
++    return RI
++def root_checkpoint(allow_uninitialized=False):
++    return root_ipc().checkpoint(sys.modules[__name__],allow_uninitialized)
+ def atomic(path, data, root_record=False, timing_stage='metadata.atomic'):
+     _check_root()
++    if os.geteuid()==0:
++        return root_ipc().publish(sys.modules[__name__],path,data,root_record,timing_stage)
+     p = _inside(path, ROOT if root_record and os.geteuid() == 0 else OUT)
+     p.parent.mkdir(parents=True, exist_ok=True)
+     raw = timed(timing_stage+'.encode',lambda:json.dumps(data,ensure_ascii=False,sort_keys=True,indent=2).encode('utf-8'))
+@@ -183,7 +191,7 @@
+             'identity':identity(),'query_before':before,'query_after':stamp()}
+ def manifest():
+     m=trusted(SOURCE.parent/'inputs/static_manifest.json')
+-    if str(SOURCE)!='/var/lib/dcl-r6/c09f01/src' or str(SOURCE)!=m['source_directory']:
++    if str(SOURCE)!='/var/lib/dcl-r6/ri01/src' or str(SOURCE)!=m['source_directory']:
+         raise AdmissionBlocked('UNTRUSTED_SOURCE_DIRECTORY')
+     if sys.platform != 'linux' or tuple(sys.version_info[:3]) != (3,12,3):
+         raise AdmissionBlocked('RUNTIME_VERSION_DRIFT')
+@@ -207,8 +215,8 @@
+ def authorization():
+     _check_root(); m=manifest()
+     a=trusted(ROOT/'inputs/execution_authorization.json')
+-    if ROOT.name != 'batch05' or a['batch_id'] != 'batch05' or a['scope'] not in ('CALIBRATE_S1S9_THEN_F1_F4','CALIBRATE_S1S9_ONLY'):
+-        raise AdmissionBlocked('NO_DYNAMIC_BATCH05_AUTHORIZATION')
++    if ROOT.name != 'batch06' or a['batch_id'] != 'batch06' or a['scope'] not in ('CALIBRATE_S1S9_THEN_F1_F4','CALIBRATE_S1S9_ONLY'):
++        raise AdmissionBlocked('NO_DYNAMIC_BATCH06_AUTHORIZATION')
+     if a['profile'] != 'CPY312-UBU24/1' or a['limits'] != [1000000,1800,1740,AS_CAP,4]:
+         raise AdmissionBlocked('CONTRACT_MISMATCH')
+     if a['static_manifest_sha256'] != digest(SOURCE.parent/'inputs/static_manifest.json'):
+@@ -218,7 +226,10 @@
+         raise AdmissionBlocked('SAFETY_TEST_SCOPE_MISSING')
+     if a.get('c09_contract_sha256')!=m['c09_contract_sha256'] or a.get('handoff_profile')!='C09-DURABLE-RPC/1':
+         raise AdmissionBlocked('C09_HANDOFF_SCOPE_MISSING')
+-    if a['authorization_text_sha256'] != digest(ROOT/'inputs/BATCH05_AUTHORIZATION_TEXT.txt'):
++    if (a.get('root_ipc_contract_sha256')!=m.get('root_ipc_contract_sha256') or
++        a.get('root_ipc_profile')!='ROOT-IPC/1' or a.get('RootIPC_helpers_explicitly_approved') is not True):
++        raise AdmissionBlocked('ROOT_IPC_SCOPE_MISSING')
++    if a['authorization_text_sha256'] != digest(ROOT/'inputs/BATCH06_AUTHORIZATION_TEXT.txt'):
+         raise AdmissionBlocked('AUTHORIZATION_SOURCE_MISMATCH')
+     # This is explicit scope acceptance, never a substitute for OS limit checks.
+     if a.get('special_mapping_scope') != 'ORDINARY_AS_ACCOUNTED;KERNEL_SPECIALS_SEPARATELY_REVIEWED':
+@@ -648,7 +659,7 @@
+     text=_run(['/usr/bin/systemctl','show',unit,*['--property='+f for f in fields]])
+     return dict(line.split('=',1) for line in text.splitlines() if '=' in line)
+ def service_argv(case):
+-    unit='dclr6batch05-'+case.lower()+'.service'
++    unit='dclr6batch06-'+case.lower()+'.service'
+     props={'User':'dcl-r6','Group':'dcl-r6','Type':'exec','Slice':PARENT,
+            'LimitAS':str(AS_CAP)+':'+str(AS_CAP),'TasksMax':'4','TasksAccounting':'yes',
+            'MemoryAccounting':'yes','MemoryMax':str(4*AS_CAP),'MemorySwapMax':'0',
+@@ -810,13 +821,15 @@
+             'scope':'bounded in-memory aggregates; this final write is outside the snapshot; abrupt exit may lose telemetry',
+             'sample':stamp()})
+ def launch_one(case):
++    root_checkpoint()
+     argv=service_argv(case)
+     lock=trusted(SOURCE.parent/'inputs/execution_lock.json')
+     if argv!=lock['payload_commands'][case]: raise AdmissionBlocked('PAYLOAD_ARGV_DRIFT')
+     _run(argv)
+-    unit='dclr6batch05-'+case.lower()+'.service'; until=now()+14
++    unit='dclr6batch06-'+case.lower()+'.service'; until=now()+14
+     info={}
+     while now()<until:
++        root_checkpoint()
+         info=unit_show(unit); pid=int(info.get('MainPID','0'))
+         if pid: break
+         time.sleep(.02)
+@@ -831,12 +844,17 @@
+     if case=='C09H':t['c09h_visit_ceiling']=min(100000,count()+5000)
+     _root_write(ROOT/('inputs/ticket_'+case+'.json'),t)
+     if case=='C09':
+-        while not (OUT/'C09.ready.json').exists() and now()<limit: time.sleep(.05)
+-        if not (OUT/'C09.ready.json').exists(): raise AdmissionBlocked('C09_NOT_READY')
+         import c09_handoff as H
++        def c09_live():
++            return H.alive(sys.modules[__name__],t['main_identity']) and H.alive(
++                sys.modules[__name__],trusted(ROOT/'inputs/STOP_ARMED.json')['identity'])
++        root_ipc().wait_ready(sys.modules[__name__],OUT/'C09.ready.json',limit,c09_live)
++        root_checkpoint()
+         H.sender_prepare(sys.modules[__name__],_COORDINATOR_ID)
++        root_checkpoint()
+         os._exit(23)  # one predeclared crash; resume retains T0/deadline/ledger
+     while now()<limit+5:
++        root_checkpoint()
+         info=unit_show(unit)
+         if info.get('ActiveState') in ('inactive','failed'): break
+         time.sleep(.05)
+@@ -868,10 +886,11 @@
+     _root_write(ROOT/('inputs/result_'+case+'.json'),result)
+     return result
+ def seal():
++    if _COORDINATOR_ID is not None and identity()!=_COORDINATOR_ID:return None
+     # Wait for the independent writer to finish before freezing evidence.
+     until=now()+20
+     while now()<until:
+-        if unit_show('dclr6batch05-stop.service').get('ActiveState') in ('inactive','failed'): break
++        if unit_show('dclr6batch06-stop.service').get('ActiveState') in ('inactive','failed'): break
+         time.sleep(.05)
+     else: raise AdmissionBlocked('EXTERNAL_STOP_NOT_CLOSED; evidence remains unsealed')
+     rows={}
+@@ -905,14 +924,14 @@
+                 'deadline':t0+1800,'launcher_identity':identity(),'resume_count':0,'expected_launcher_exit':None}
+             s['execution_mode']=expected_scope;s['coordinator_identity']=_COORDINATOR_ID
+             _root_write(ROOT/'inputs/batch_state.json',s);init_counter(OUT/'visits.bin',VISIT_CAP)
+-            stop_argv=['/usr/bin/systemd-run','--no-block','--unit=dclr6batch05-stop.service','--property=Type=exec',
++            stop_argv=['/usr/bin/systemd-run','--no-block','--unit=dclr6batch06-stop.service','--property=Type=exec',
+                   '--property=Restart=no','--property=User=root',PYTHON,'-I','-S','-B',str(SOURCE/'guard.py'),
+                   '--role','external-stop','--batch-root',str(ROOT)]
+             if stop_argv!=trusted(SOURCE.parent/'inputs/execution_lock.json')['external_stop_command']:
+                 raise AdmissionBlocked('STOP_ARGV_DRIFT')
+             _run(stop_argv)
+             until=now()+14
+-            while not (ROOT/'inputs/STOP_ARMED.json').exists() and now()<until: time.sleep(.02)
++            root_ipc().wait_ready(sys.modules[__name__],ROOT/'inputs/STOP_ARMED.json',until)
+             armed=trusted(ROOT/'inputs/STOP_ARMED.json')
+             if armed['stop_at']!=s['stop_at'] or identity(armed['identity']['pid'])!=armed['identity']:
+                 raise AdmissionBlocked('EXTERNAL_STOP_NOT_ARMED')
+@@ -927,10 +946,15 @@
+         info=unit_show(PARENT)
+         if info.get('TasksMax')!='4': raise AdmissionBlocked('PARENT_LIMIT_NOT_CONFIGURED')
+         for c in remaining:
++            root_checkpoint()
+             if c=='C09':
+                 htest=launch_one('C09H')
+                 if htest['status']!='PASS':stop_tree('C09H_REGRESSION_FAILED');return 65
+                 root_verify_c09h()
++                root_checkpoint()
++                import root_ipc_regression
++                root_ipc_regression.run_suite(sys.modules[__name__])
++                root_ipc().verify_qualification(sys.modules[__name__])
+             r=launch_one(c)
+             if r['status']!='PASS': stop_tree('CALIBRATION_'+r['status']);return 65
+         r=launch_one('RANGE')
+@@ -945,7 +969,10 @@
+             'sample':stamp()})
+         if calibrate_only:
+             stop_tree('CALIBRATION_S1S9_COMPLETE');seal();return 0
+-        s=state();s['status']='FORMAL';_root_write(ROOT/'inputs/batch_state.json',s)
++        import c09_handoff as H
++        with H.lifecycle_lock(sys.modules[__name__]):
++            root_checkpoint()
++            s=state();s['status']='FORMAL';_root_write(ROOT/'inputs/batch_state.json',s)
+         r=launch_one('FORMAL')
+         stop_tree('FORMAL_COMPLETE' if r['status']=='PASS' else 'FORMAL_FAILED')
+         seal();return 0 if r['status']=='PASS' else 65
+@@ -985,18 +1012,27 @@
+             sys.stdout.flush();sys.stderr.flush();os._exit(code)
+         except BaseException:os._exit(125)
+     os.close(ready_w);os.close(go_r)
+-    fd=None
++    fd=None;child_reaped=False
+     try:
+-        if not select.select([ready_r],[],[],5)[0]:raise AdmissionBlocked('COORDINATOR_CHILD_HANDSHAKE')
++        root_ipc().wait_fd(sys.modules[__name__],ready_r,now()+5)
+         child_identity=json.loads(os.read(ready_r,4096))
+         if child_identity!=identity(child):raise AdmissionBlocked('COORDINATOR_CHILD_IDENTITY')
+         fd=os.pidfd_open(child)
+         if child_identity!=identity(child):raise AdmissionBlocked('COORDINATOR_CHILD_PIDFD_RACE')
+         _full(go_w,b'G');os.close(go_w);go_w=None
+-        startup_until=now()+15
++        startup_until=now()+15;terminal_seen=None
+         while True:
+             ended,status=os.waitpid(child,os.WNOHANG)
+             if ended:break
++            flags=root_ipc().observe(sys.modules[__name__])
++            if any(flags.values()):
++                if terminal_seen is None:
++                    terminal_seen=now()
++                    if not flags['closed']:stop_tree('COORDINATOR_STOP_REQUEST')
++                # Child observes cancellation, cleans and returns. Finite grace protects
++                # against a scheduler that fails to cooperate; no new work is admitted.
++                if now()>=terminal_seen+30:
++                    signal.pidfd_send_signal(fd,signal.SIGKILL)
+             p=ROOT/'inputs/batch_state.json'
+             if p.exists():
+                 s=trusted(p);limit=s['deadline']
+@@ -1005,6 +1041,11 @@
+             if now()>=limit:raise LimitReached('COORDINATOR_ABSOLUTE_LIMIT')
+             time.sleep(.02)
+         code=os.waitstatus_to_exitcode(status)
++        child_reaped=True
++        raw_state=trusted(ROOT/'inputs/batch_state.json') if (ROOT/'inputs/batch_state.json').exists() else None
++        _root_write(ROOT/('inputs/root_private/waitpid_%s.json'%child),{
++            'schema':'ROOT-IPC-WAITPID/1','child':child_identity,'coordinator':coordinator,
++            'raw_wait_status':status,'exit_code':code,'state':raw_state,'sample':stamp()})
+         if H.paths(sys.modules[__name__])['state'].exists() and not (ROOT/'inputs/CLOSED.json').exists():
+             verified=H.coordinator_witness(sys.modules[__name__],child_identity,status)
+             if code==23 and verified is None:raise AdmissionBlocked('C09_NO_VERIFIED_HANDOFF')
+@@ -1014,6 +1055,25 @@
+         if fd is not None and not select.select([fd],[],[],0)[0]:
+             try:signal.pidfd_send_signal(fd,signal.SIGKILL)
+             except OSError:pass
++        if not child_reaped:
++            if fd is None:
++                try:os.kill(child,signal.SIGKILL)
++                except ProcessLookupError:pass
++            reap_until=now()+5
++            while now()<reap_until:
++                ended,cleanup_status=os.waitpid(child,os.WNOHANG)
++                if ended:
++                    child_reaped=True
++                    try:_root_write(ROOT/('inputs/root_private/waitpid_%s.json'%child),{
++                        'schema':'ROOT-IPC-WAITPID/1','child':child_identity if 'child_identity' in locals() else {'pid':child},
++                        'coordinator':coordinator,'raw_wait_status':cleanup_status,
++                        'exit_code':os.waitstatus_to_exitcode(cleanup_status),'sample':stamp(),'reason':'COORDINATOR_EXCEPTION'})
++                    except BaseException:pass
++                    break
++                time.sleep(.02)
++            if not child_reaped:
++                try:stop_tree('COORDINATOR_REAP_UNCONFIRMED')
++                finally:raise AdmissionBlocked('COORDINATOR_REAP_UNCONFIRMED')
+         if (ROOT/'inputs/batch_state.json').exists():
+             try:stop_tree('COORDINATOR_FAILURE:'+str(exc))
+             except BaseException:pass
+@@ -1022,6 +1082,10 @@
+         os.close(ready_r)
+         if go_w is not None:os.close(go_w)
+         if fd is not None:os.close(fd)
++        if child_reaped and (ROOT/'inputs/CLOSED.json').exists() and _empty() and not (OUT/'EVIDENCE.zip').exists():
++            try:seal()
++            except BaseException as exc:
++                _root_write(ROOT/'inputs/SEAL_ERROR.json',{'error':repr(exc),'sample':stamp()})
+ def main():
+     parser=argparse.ArgumentParser()
+     parser.add_argument('--role',choices=('controller','watchdog','external-stop','launcher'),required=True)
+--- /dev/null
++++ RootIPC-static-1/r1/root_ipc.py
+@@ -0,0 +1,211 @@
++"""RootIPC/1 publication and cancellable waits. Runtime requires separate authorization."""
++from contextlib import contextmanager
++import errno
++import json
++import os
++from pathlib import Path
++import re
++import select
++import socket
++import stat
++import time
++
++PROFILE = 'ROOT-IPC/1'
++UID, GID = 999, 989
++
++
++def same_binding(observed,expected):
++    return type(observed) is dict and type(expected) is dict and observed==expected
++
++
++def policy(G, path, root_record=False):
++    # Lexical containment precedes every open; resolve() would follow an attacker link.
++    p = Path(path)
++    if not p.is_absolute() or '..' in p.parts or '.' in p.parts:
++        raise G.AdmissionBlocked('IPC_LEXICAL_PATH')
++    try: rel = p.relative_to(G.ROOT).as_posix()
++    except ValueError: raise G.AdmissionBlocked('IPC_PATH_OUTSIDE_BATCH')
++    if not root_record and rel == 'out/visits.bin.intent.json':
++        return rel, (UID, GID, 0o600)
++    if not root_record and rel == 'out/STOP_REQUEST.json':
++        return rel, (UID, GID, 0o600)
++    if not root_record and rel == 'out/EVIDENCE_MANIFEST.json':
++        return rel, (0, 0, 0o600)
++    if re.fullmatch(r'out/ipc_fixture_[0-9]{3}\.json', rel):
++        return rel, (UID, GID, 0o600)
++    if root_record and re.fullmatch(r'inputs/ipc_readable_fixture_[0-9]{3}\.json',rel):
++        return rel,(0,GID,0o640)
++    if root_record and re.fullmatch(r'inputs/root_private/(waitpid_[0-9]+|ipc_case_[0-9]{3}|ipc_suite)\.json', rel):
++        return rel, (0, 0, 0o600)
++    allowed = {'batch_state.json','CLOSED.json','STOP_ARMED.json','SEAL_ERROR.json',
++               'C09H_QUALIFICATION.json','ROOT_IPC_QUALIFICATION.json','GATE_NEGATIVE_AUDIT.json',
++               'RANGE_QUALIFICATION.json','RESOURCE_QUALIFICATION.json',
++               'c09_handoff.json','c09_commit.json','c09_exit_witness.json'}
++    if root_record and rel.startswith('inputs/') and len(Path(rel).parts) == 2:
++        name = Path(rel).name
++        if name in allowed or re.fullmatch(r'(ticket|result)_(C(?:0[0-9]|1[0-2])|C09H|RANGE|FORMAL)\.json',name) or re.fullmatch(r'stop_(event|result)_[0-9]+_[0-9]+\.json',name):
++            return rel, (0, GID, 0o640)
++    raise G.AdmissionBlocked('IPC_UNREGISTERED_ROOT_TARGET:'+rel)
++
++
++def _metadata(st):
++    return st.st_uid, st.st_gid, stat.S_IMODE(st.st_mode)
++
++
++def _dir(parent, name, expected=None):
++    fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
++    s = os.fstat(fd)
++    if not stat.S_ISDIR(s.st_mode) or (expected is not None and _metadata(s) != expected) or (expected is None and (s.st_uid != 0 or s.st_mode & 0o022)):
++        os.close(fd)
++        raise PermissionError('IPC_DIRECTORY_METADATA:'+name)
++    return fd
++
++
++@contextmanager
++def directories(G):
++    if os.geteuid() != 0 or str(G.ROOT) != '/var/lib/dcl-r6/batch06':
++        raise G.AdmissionBlocked('IPC_ROOT_CURRENT_BATCH_REQUIRED')
++    fds=[]
++    try:
++        fd=os.open('/',os.O_RDONLY|os.O_DIRECTORY|os.O_CLOEXEC);fds.append(fd)
++        for name in G.ROOT.parts[1:-1]:
++            fd=_dir(fd,name);fds.append(fd)
++        batch=_dir(fd,G.ROOT.name,(0,GID,0o750));fds.append(batch)
++        inp=_dir(batch,'inputs',(0,GID,0o750));fds.append(inp)
++        private=_dir(inp,'root_private',(0,0,0o700));fds.append(private)
++        out=_dir(batch,'out',(UID,GID,0o700));fds.append(out)
++        if os.fstat(private).st_dev != os.fstat(out).st_dev:
++            raise G.AdmissionBlocked('IPC_CROSS_DEVICE_PUBLICATION')
++        yield {'inputs':inp,'private':private,'out':out}
++    finally:
++        for fd in reversed(fds):os.close(fd)
++
++
++def publish(G,path,data,root_record=False,timing_stage='metadata.atomic',fixture_fault=None):
++    rel,expected=policy(G,path,root_record)
++    fixture=bool(re.fullmatch(r'out/ipc_fixture_[0-9]{3}\.json',rel))
++    if fixture_fault is not None and (not fixture or fixture_fault not in ('after_create','file_fsync','rename','directory_fsync')):
++        raise G.AdmissionBlocked('IPC_FAULT_OUTSIDE_SYNTHETIC_FIXTURE')
++    raw=G.timed(timing_stage+'.encode',lambda:json.dumps(data,ensure_ascii=False,sort_keys=True,indent=2).encode())
++    with directories(G) as ds:
++        destination=ds['out'] if rel.startswith('out/') else ds['private'] if '/root_private/' in rel else ds['inputs']
++        name=Path(rel).name
++        try:
++            old=os.stat(name,dir_fd=destination,follow_symlinks=False)
++            if not stat.S_ISREG(old.st_mode) or old.st_nlink!=1:
++                raise G.AdmissionBlocked('IPC_TARGET_TYPE_OR_LINK')
++        except FileNotFoundError:pass
++        tmp='.publish.'+str(os.getpid())+'.'+os.urandom(16).hex()
++        fd=os.open(tmp,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_CLOEXEC,0o600,dir_fd=ds['private'])
++        # Failure leaves the private staging object as evidence. No grant follows.
++        try:
++            os.fchown(fd,expected[0],expected[1]);os.fchmod(fd,expected[2])
++            if _metadata(os.fstat(fd))!=expected:raise G.AdmissionBlocked('IPC_PREPUBLICATION_METADATA')
++            if fixture_fault=='after_create':raise OSError(errno.EIO,'IPC_FIXTURE_AFTER_CREATE')
++            G.timed(timing_stage+'.write',G._full,fd,raw)
++            if fixture_fault=='file_fsync':raise OSError(errno.EIO,'IPC_FIXTURE_FILE_FSYNC')
++            G.sync_fd(fd,timing_stage+'.file')
++            published_inode=os.fstat(fd)
++            if fixture_fault=='rename':raise OSError(errno.EIO,'IPC_FIXTURE_RENAME')
++            os.replace(tmp,name,src_dir_fd=ds['private'],dst_dir_fd=destination)
++            if fixture_fault=='directory_fsync':raise OSError(errno.EIO,'IPC_FIXTURE_DIRECTORY_FSYNC')
++            # Two directories participate in cross-directory rename.
++            G.sync_fd(destination,timing_stage+'.directory')
++            if destination!=ds['private']:G.sync_fd(ds['private'],timing_stage+'.staging_directory')
++            after=os.stat(name,dir_fd=destination,follow_symlinks=False)
++            if (_metadata(after)!=expected or not stat.S_ISREG(after.st_mode) or after.st_nlink!=1 or
++                (after.st_dev,after.st_ino)!=(published_inode.st_dev,published_inode.st_ino)):
++                raise G.AdmissionBlocked('IPC_POSTPUBLICATION_METADATA_OR_IDENTITY')
++            return {'uid':after.st_uid,'gid':after.st_gid,'mode':stat.S_IMODE(after.st_mode),
++                    'device':after.st_dev,'inode':after.st_ino,'bytes':after.st_size}
++        finally:os.close(fd)
++
++
++def marker(path):
++    # Presence of a malformed marker also cancels; contents never create a grant.
++    try:os.lstat(path);return True
++    except FileNotFoundError:return False
++
++
++def observe(G):
++    return {'closed':marker(G.ROOT/'inputs/CLOSED.json'),
++            'stop_request':marker(G.OUT/'STOP_REQUEST.json')}
++
++
++def checkpoint(G,allow_uninitialized=False):
++    flags=observe(G)
++    if flags['closed']:raise G.AdmissionBlocked('IPC_CLOSED_DOMINATES')
++    if flags['stop_request']:raise G.AdmissionBlocked('IPC_STOP_REQUEST_DOMINATES')
++    p=G.ROOT/'inputs/batch_state.json'
++    if not p.exists():
++        if allow_uninitialized:return None
++        raise G.AdmissionBlocked('IPC_STATE_MISSING')
++    s=G.trusted(p)
++    if s['boot_id']!=G.boot_id():raise G.AdmissionBlocked('IPC_BOOT_DRIFT')
++    if s['status'] not in ('CALIBRATING','FORMAL','AWAIT_EXPECTED_RESUME'):
++        raise G.AdmissionBlocked('IPC_TERMINAL_STATE')
++    if G.now()>=min(s['deadline'],s['stop_at']):raise G.LimitReached('IPC_ABSOLUTE_LIMIT')
++    return s
++
++
++def wait_ready(G,path,until,live=None):
++    while True:
++        checkpoint(G)
++        if live is not None and not live():raise G.AdmissionBlocked('IPC_REQUIRED_PROCESS_EXITED')
++        if marker(path):
++            checkpoint(G)
++            return
++        if G.now()>=until:raise G.LimitReached('IPC_READY_TIMEOUT')
++        time.sleep(min(.05,max(0,until-G.now())))
++
++
++def wait_fd(G,fd,until):
++    while G.now()<until:
++        checkpoint(G,allow_uninitialized=True)
++        if select.select([fd],[],[],min(.05,max(0,until-G.now())))[0]:
++            checkpoint(G,allow_uninitialized=True)
++            return
++    raise G.LimitReached('IPC_FD_TIMEOUT')
++
++
++def receive(G,sock,until):
++    while G.now()<until:
++        checkpoint(G)
++        sock.settimeout(min(.05,max(.001,until-G.now())))
++        try:
++            raw=sock.recv(65537)
++            checkpoint(G)
++            if not raw or len(raw)>65536:raise G.AdmissionBlocked('IPC_PACKET_SIZE_OR_EOF')
++            return raw
++        except socket.timeout:continue
++    raise G.LimitReached('IPC_RECEIVE_TIMEOUT')
++
++
++def contract(G):
++    p=G.SOURCE.parent/'inputs/root_ipc_contract.json'
++    a,m=G.authorization()
++    if G.digest(p)!=m['root_ipc_contract_sha256'] or a.get('root_ipc_contract_sha256')!=G.digest(p):
++        raise G.AdmissionBlocked('IPC_CONTRACT_BINDING')
++    cfg=G.trusted(p)
++    if cfg['version']!='RootIPC-static-1' or cfg['future_batch_id']!=G.ROOT.name:
++        raise G.AdmissionBlocked('IPC_CONTRACT_VERSION')
++    return cfg
++
++
++def verify_qualification(G):
++    import root_ipc_oracle
++    q=G.trusted(G.ROOT/'inputs/ROOT_IPC_QUALIFICATION.json')
++    cfg=contract(G);binding=G.safety_binding()
++    if q['binding']!=binding or q['contract_sha256']!=G.digest(G.SOURCE.parent/'inputs/root_ipc_contract.json') or q['checker_sha256']!=G.digest(G.SOURCE/'root_ipc_oracle.py'):
++        raise G.AdmissionBlocked('IPC_QUALIFICATION_BINDING')
++    # Raw review records are root-private. Payload verifies their protected receipt;
++    # Root rechecks every raw byte before producing it and before resume.
++    if os.geteuid()==0:
++        fresh=root_ipc_oracle.check_suite(G.ROOT/'inputs/root_private',cfg,binding)
++        if not fresh['accepted'] or fresh['results']!=q['results']:raise G.AdmissionBlocked('IPC_RAW_QUALIFICATION')
++    expected={j['case_id']:j for j in cfg['jobs']}
++    if not q['accepted'] or len(q['results'])!=len(expected) or {r['case_id'] for r in q['results']}!=set(expected):raise G.AdmissionBlocked('IPC_INCOMPLETE_QUALIFICATION')
++    for row in q['results']:
++        job=expected[row['case_id']]
++        target='PASS' if job['variant']=='safe' else 'MUTATION_DETECTED'
++        if row['accepted'] is not True or row['status']!=target or not set(row['violations']).issubset(job['allowed_violation_set']):raise G.AdmissionBlocked('IPC_REQUIRED_RESULT')
+--- /dev/null
++++ RootIPC-static-1/r1/root_ipc_oracle.py
+@@ -0,0 +1,101 @@
++"""Independent raw IPC oracle. Imports no guard, publisher, subject or handoff module."""
++import hashlib
++import json
++import os
++from pathlib import Path
++import stat
++
++
++def canon(x):return json.dumps(x,sort_keys=True,separators=(',',':'))
++
++
++def load(p):
++    fd=os.open(p,os.O_RDONLY|os.O_NOFOLLOW)
++    try:
++        s=os.fstat(fd)
++        if not stat.S_ISREG(s.st_mode) or s.st_nlink!=1 or s.st_uid!=0 or s.st_gid!=0 or stat.S_IMODE(s.st_mode)!=0o600 or s.st_size>131072:
++            raise ValueError('IPC_RAW_PROVENANCE')
++        raw=os.read(fd,s.st_size+1)
++        if len(raw)!=s.st_size:raise ValueError('IPC_RAW_SHORT')
++        return raw,json.loads(raw)
++    finally:os.close(fd)
++
++
++def violations(job,r):
++    v=set();scenario=job['scenario'];subject=r['subject']
++    if r['kind']=='file':
++        if 'probe' in r:
++            p=r['probe']
++            if p['rlimit_as']!=[1073741824,1073741824] or p['raw_wait_status']!=0:raise ValueError('IPC_PROBE_WITNESS')
++            expected_uid=65534 if scenario=='unauthorized' else 999
++            if p['uid']!=expected_uid or p['gid']!=(65534 if expected_uid==65534 else 989) or p['groups']!= ([] if expected_uid==65534 else [989]):raise ValueError('IPC_PROBE_CREDENTIALS')
++            if scenario=='receipt_read':
++                m=r['metadata']
++                if (m['uid'],m['gid'],m['mode'])!=(0,989,0o640) or not p['allowed']:v.add('IPC-1')
++                if p.get('sha256')!=r.get('payload_sha256'):raise ValueError('IPC_PROBE_DIGEST')
++            elif scenario=='receipt_write':
++                if p['allowed']:v.add('IPC-2')
++            elif scenario not in ('unauthorized','private_write','private_read'):
++                m=r['metadata'];valid=(m['uid'],m['gid'],m['mode'],m['nlink'],m['regular'])==(999,989,0o600,1,True)
++                if subject=='ADMITTED' and (not valid or not p['allowed']):v.add('IPC-1')
++                if subject=='ADMITTED' and not valid:v.add('IPC-3')
++                if valid and not p['allowed']:v.add('IPC-1')
++                if p['allowed'] and p.get('sha256')!=r.get('payload_sha256'):raise ValueError('IPC_PROBE_DIGEST')
++            elif p['allowed']:v.add('IPC-2' if scenario.startswith('private') else 'IPC-1')
++            if scenario in ('historical','bad_metadata') and (r['metadata']['uid']!=0 or r['metadata']['mode']!=0o600 or p['allowed']):raise ValueError('IPC_HISTORICAL_FAULT_NOT_EXERCISED')
++        if 'actual_binding' in r and r['actual_binding']!=r['expected_binding'] and subject=='ADMITTED':v.add('IPC-5')
++        if scenario in ('outside','symlink','hardlink'):
++            if subject!='BLOCKED':v.add('IPC-4')
++            if 'anchor_before' in r and r['anchor_before']!=r['anchor_after']:v.add('IPC-4')
++        if scenario.startswith('fault_') and (subject!='BLOCKED' or r.get('errno')!=5):v.add('IPC-3')
++        if scenario in ('historical','bad_metadata') and subject!='BLOCKED':v.add('IPC-1')
++    elif r['kind']=='wait':
++        if any(r['actual_flags'].values()) and subject=='ADMITTED':v.add('IPC-7')
++        if r['actual_flags']['closed'] and subject=='ADMITTED':v.add('IPC-8')
++        if scenario!='ready' and subject=='ADMITTED' and not job.get('mutant'):v.add('IPC-7')
++        if scenario=='ready' and subject!='ADMITTED':v.add('IPC-1')
++    else:
++        f=dict(closed=False,binding_ok=True,sender_ok=True,version_ok=True,window_ok=True,
++               budget_ok=True,receiver_ready=True,receiver_alive=True,stop_alive=True,
++               witness=None,now=0,expires=12,prepared=False,commit=False,durable_ack=False,exit_observed=False)
++        if len(r['rows'])!=len(r['events']):raise ValueError('IPC_EVENT_SET')
++        for e,row in zip(r['events'],r['rows']):
++            if e=='prepare':f['prepared']=True
++            elif e=='close':f['closed']=True
++            elif e=='commit':f['commit']=True;f['durable_ack']=True
++            elif e=='exit23':f['exit_observed']=True
++            elif e=='witness23':f['witness']=23
++            elif e not in ('observe','repeat'):raise ValueError('IPC_UNFROZEN_EVENT')
++            if row['facts']!=f or row['event']!=e:raise ValueError('IPC_EVENT_TRUTH')
++            if row['subject_state']=='VERIFIED':
++                if not(f['prepared'] and f['commit'] and f['durable_ack'] and f['exit_observed'] and f['witness']==23):v.add('IPC-6')
++                if f['closed']:v.add('IPC-8')
++            if row['classification_count']>1:v.add('IPC-9')
++    return sorted(v)
++
++
++def check_job(base,job,i,binding):
++    try:
++        raw,row=load(Path(base)/('ipc_case_%03d.json'%i))
++        if row['binding']!=binding or row['case_id']!=job['case_id'] or row['input_sha256']!=hashlib.sha256(canon(job).encode()).hexdigest():raise ValueError('IPC_INPUT_BINDING')
++        if row['actor']['boot_id']!=binding['boot_id'] or row['after']['boot_id']!=binding['boot_id'] or row['after']['boottime']<row['before']['boottime']:raise ValueError('IPC_ACTOR_TIME')
++        if not 0<row['global_after']-row['global_before']<=8:raise ValueError('IPC_RAW_CHARGE')
++        if 'expected_binding' in row['result'] and row['result']['expected_binding']!=binding:raise ValueError('IPC_REFERENCE_BINDING')
++        v=violations(job,row['result'])
++        accepted=(not v) if job['variant']=='safe' else job['expected_violation'] in v
++        if not set(v).issubset(job['allowed_violation_set']):accepted=False
++        if job['variant']=='safe':
++            expected=job['expected_subject']
++            accepted=accepted and row['result']['subject']==expected
++        return {'case_id':job['case_id'],'accepted':accepted,'status':('PASS' if job['variant']=='safe' else 'MUTATION_DETECTED') if accepted else 'FAIL',
++                'violations':v,'raw_sha256':hashlib.sha256(raw).hexdigest()}
++    except (OSError,ValueError,KeyError,TypeError) as exc:
++        return {'case_id':job['case_id'],'accepted':False,'status':'EVIDENCE_MISSING','error':repr(exc)}
++
++
++def check_suite(base,cfg,binding):
++    expected_files={'ipc_case_%03d.json'%i for i in range(len(cfg['jobs']))}
++    actual_files={p.name for p in Path(base).glob('ipc_case_*.json') if p.name!='ipc_case_999.json'}
++    if actual_files!=expected_files:raise ValueError('IPC_RAW_JOB_SET')
++    results=[check_job(base,job,i,binding) for i,job in enumerate(cfg['jobs'])]
++    return {'schema':'ROOT-IPC-QUALIFICATION/1','binding':binding,'accepted':all(r['accepted'] for r in results),'results':results}
+--- /dev/null
++++ RootIPC-static-1/r1/root_ipc_regression.py
+@@ -0,0 +1,241 @@
++"""Frozen Root-only IPC fixtures; invocation is gated by a future batch06 receipt."""
++import errno
++import hashlib
++import json
++import os
++from pathlib import Path
++import resource
++import select
++import signal
++import socket
++import stat
++import time
++import root_ipc as R
++
++
++def canonical(x):return json.dumps(x,sort_keys=True,separators=(',',':'))
++def metadata(p):
++    try:
++        s=os.lstat(p)
++        return {'uid':s.st_uid,'gid':s.st_gid,'mode':stat.S_IMODE(s.st_mode),
++                'inode':s.st_ino,'device':s.st_dev,'nlink':s.st_nlink,'regular':stat.S_ISREG(s.st_mode)}
++    except FileNotFoundError:return None
++
++
++def probe(G,path,uid,write=False):
++    # One short-lived extra TCB child, sequential, with its own timer and AS limit.
++    read_fd,write_fd=os.pipe2(os.O_CLOEXEC)
++    child=os.fork()
++    if child==0:
++        os.close(read_fd)
++        try:
++            signal.signal(signal.SIGALRM,signal.SIG_DFL);signal.alarm(2)
++            resource.setrlimit(resource.RLIMIT_AS,(G.AS_CAP,G.AS_CAP))
++            os.setgroups([R.GID] if uid==R.UID else [])
++            os.setresgid(R.GID if uid==R.UID else 65534,R.GID if uid==R.UID else 65534,R.GID if uid==R.UID else 65534)
++            os.setresuid(uid,uid,uid)
++            result={'uid':os.geteuid(),'gid':os.getegid(),'groups':os.getgroups(),
++                    'rlimit_as':list(resource.getrlimit(resource.RLIMIT_AS)),'write':write}
++            try:
++                fd=os.open(path,(os.O_WRONLY if write else os.O_RDONLY)|os.O_NOFOLLOW|os.O_NONBLOCK)
++                try:
++                    if write:os.write(fd,b'forbidden-write')
++                    else:result['sha256']=hashlib.sha256(os.read(fd,65536)).hexdigest()
++                finally:os.close(fd)
++                result['allowed']=True;result['errno']=None
++            except OSError as exc:result.update(allowed=False,errno=exc.errno)
++            os.write(write_fd,canonical(result).encode());os.close(write_fd);os._exit(0)
++        except BaseException:os._exit(126)
++    os.close(write_fd);pidfd=os.pidfd_open(child);until=min(G.now()+3,G.state()['T0']+300,G.state()['stop_at'])
++    status=None;data=b''
++    try:
++        while G.now()<until:
++            G.root_checkpoint()
++            if select.select([read_fd],[],[],.05)[0]:
++                data=os.read(read_fd,65537)
++                break
++        while G.now()<until:
++            ended,status=os.waitpid(child,os.WNOHANG)
++            if ended:break
++            status=None;G.root_checkpoint();time.sleep(.01)
++        if status is None:raise G.LimitReached('IPC_PROBE_TIMEOUT')
++        if os.waitstatus_to_exitcode(status)!=0 or not data:raise G.AdmissionBlocked('IPC_PROBE_FAILED')
++        out=json.loads(data);out.update(child_pid=child,raw_wait_status=status)
++        return out
++    finally:
++        if status is None:
++            try:signal.pidfd_send_signal(pidfd,signal.SIGKILL)
++            except ProcessLookupError:pass
++            until=G.now()+3
++            while G.now()<until:
++                ended,_=os.waitpid(child,os.WNOHANG)
++                if ended:break
++                time.sleep(.01)
++            else:raise G.AdmissionBlocked('IPC_PROBE_REAP_UNCONFIRMED')
++        os.close(read_fd);os.close(pidfd)
++
++
++class WaitContext:
++    def __init__(self,G,base,trigger=None):
++        self.G=G;self.ROOT=base;self.OUT=base/'out';self.trigger=trigger;self.reads=0
++        (base/'inputs').mkdir(parents=True);self.OUT.mkdir()
++        self.document={'boot_id':G.boot_id(),'status':'CALIBRATING','deadline':G.now()+2,'stop_at':G.now()+2}
++        (base/'inputs/batch_state.json').write_text(canonical(self.document))
++        self.AdmissionBlocked=G.AdmissionBlocked;self.LimitReached=G.LimitReached
++    def now(self):return self.G.now()
++    def boot_id(self):return self.G.boot_id()
++    def trusted(self,path):
++        self.reads+=1
++        if self.trigger=='read_error':raise OSError(errno.EIO,'IPC_FIXTURE_READ')
++        if self.trigger=='stop_after_read' and self.reads==1:(self.OUT/'STOP_REQUEST.json').write_text('{}')
++        if self.trigger=='closed_after_read' and self.reads==1:(self.ROOT/'inputs/CLOSED.json').write_text('{}')
++        return json.loads(Path(path).read_text())
++
++
++def permission_case(G,job,index,binding):
++    scenario=job['scenario'];path=G.OUT/('ipc_fixture_%03d.json'%index)
++    data={'binding':binding,'case_id':job['case_id']};out={'kind':'file','scenario':scenario}
++    private=G.ROOT/'inputs/root_private/ipc_case_999.json'
++    if scenario in ('receipt_read','receipt_write'):
++        target=G.ROOT/('inputs/ipc_readable_fixture_%03d.json'%index)
++        R.publish(G,target,data,True)
++        out['probe']=probe(G,target,R.UID,scenario=='receipt_write')
++        out['metadata']=metadata(target);out['payload_sha256']=G.digest(target)
++        out['subject']='ADMITTED' if scenario=='receipt_read' else 'BLOCKED'
++        return out
++    if scenario in ('private_write','private_read'):
++        R.publish(G,private,data,True);target=private
++        out['probe']=probe(G,target,R.UID,scenario=='private_write')
++        out['metadata']=metadata(target);out['subject']='BLOCKED';return out
++    if scenario in ('bad_batch','bad_boot','bad_lock','bad_digest'):
++        actual=dict(binding);key={'bad_batch':'batch_id','bad_boot':'boot_id','bad_lock':'execution_lock_sha256','bad_digest':'static_manifest_sha256'}[scenario]
++        actual[key]='wrong-frozen-value';out.update(actual_binding=actual,expected_binding=binding)
++        if job.get('mutant')=='ignore_batch':out['subject']='ADMITTED'
++        else:out['subject']='BLOCKED' if not R.same_binding(actual,binding) else 'ADMITTED'
++        # Same production envelope comparison as the current handoff window checks.
++        out['binding_equal']=actual==binding
++        return out
++    if scenario=='outside':
++        try:R.publish(G,G.ROOT.parent/'unregistered.json',data)
++        except (G.AdmissionBlocked,OSError) as exc:out.update(subject='BLOCKED',error=str(exc))
++        else:out['subject']='ADMITTED'
++        return out
++    if scenario in ('symlink','hardlink'):
++        anchor=G.OUT/('ipc_fixture_%03d.json'%(index+100));R.publish(G,anchor,data)
++        if scenario=='symlink':os.symlink(anchor,path)
++        else:os.link(anchor,path)
++        out['anchor_before']=G.digest(anchor)
++        try:R.publish(G,path,data)
++        except (G.AdmissionBlocked,OSError) as exc:out.update(subject='BLOCKED',error=str(exc))
++        else:out['subject']='ADMITTED'
++        out['anchor_after']=G.digest(anchor);out['metadata']=metadata(path);return out
++    if scenario.startswith('fault_'):
++        try:R.publish(G,path,data,fixture_fault=scenario[6:])
++        except OSError as exc:out.update(subject='BLOCKED',errno=exc.errno,error=str(exc))
++        else:out['subject']='ADMITTED'
++        out['metadata']=metadata(path);return out
++    old_umask=os.umask(0o777 if scenario=='umask' else 0o077)
++    try:
++        R.publish(G,path,data);first=metadata(path)
++        if scenario in ('replace','repeat'):
++            R.publish(G,path,data);out['before']=first
++        if scenario in ('historical','bad_metadata') or job.get('mutant') in ('root600','ignore_permissions'):
++            # Mutants affect this synthetic object exclusively, never visits.bin.
++            tmp=path.with_name(path.name+'.historical')
++            fd=os.open(tmp,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
++            try:os.fchmod(fd,0o600);G._full(fd,canonical(data).encode());os.fsync(fd)
++            finally:os.close(fd)
++            os.replace(tmp,path)
++        out['metadata']=metadata(path)
++        out['probe']=probe(G,path,65534 if scenario=='unauthorized' else R.UID)
++        bad=(out['metadata']['uid'],out['metadata']['gid'],out['metadata']['mode'])!=(R.UID,R.GID,0o600)
++        out['subject']='BLOCKED' if (bad and job.get('mutant') not in ('root600','ignore_permissions')) or scenario=='unauthorized' else 'ADMITTED'
++        out['payload_sha256']=G.digest(path)
++        return out
++    finally:os.umask(old_umask)
++
++
++def wait_case(G,job,index,binding):
++    scenario=job['scenario'];mutant=job.get('mutant')
++    base=G.ROOT/'inputs/root_private'/('wait_fixture_%03d'%index)
++    trigger='stop_after_read' if scenario in ('stop_after_ready','ack_stop','stale') else 'closed_after_read' if scenario=='closed_wait' else 'read_error' if scenario=='read_error' else None
++    f=WaitContext(G,base,trigger);ready=f.OUT/'ready.json'
++    if scenario not in ('timeout','closed_wait'):ready.write_text('{}')
++    if scenario in ('stop_before','repeat_stop','socket_cancel','fd_cancel'):(f.OUT/'STOP_REQUEST.json').write_text('{}')
++    if scenario in ('closed','late_ack'):(f.ROOT/'inputs/CLOSED.json').write_text('{}')
++    if scenario=='deadline':f.document['deadline']=G.now()-1;(base/'inputs/batch_state.json').write_text(canonical(f.document))
++    observed=f
++    if mutant in ('ignore_stop','ignore_closed'):
++        shadow=WaitContext(G,base/'shadow')
++        if mutant=='ignore_stop':(f.OUT/'STOP_REQUEST.json').write_text('{}')
++        else:(f.ROOT/'inputs/CLOSED.json').write_text('{}')
++        f=shadow
++    result={'kind':'wait','scenario':scenario,'mutant':mutant,'subject':'BLOCKED'}
++    try:
++        if scenario=='fd_cancel':
++            a,b=os.pipe()
++            try:R.wait_fd(f,a,G.now()+.1)
++            finally:os.close(a);os.close(b)
++        elif scenario in ('socket_cancel','socket_eof'):
++            a,b=socket.socketpair(socket.AF_UNIX,socket.SOCK_SEQPACKET)
++            try:
++                if scenario=='socket_eof':b.close()
++                R.receive(f,a,G.now()+.1)
++            finally:a.close();b.close()
++        else:
++            def live():
++                if scenario=='exception':raise OSError(errno.EIO,'IPC_FIXTURE_PROCESS_OBSERVATION')
++                return scenario not in ('payload_dead','receiver_dead')
++            R.wait_ready(f,ready,G.now() if scenario=='timeout' else G.now()+.1,live)
++        result['subject']='ADMITTED'
++    except (G.AdmissionBlocked,G.LimitReached,OSError) as exc:result['error']=str(exc)
++    result['actual_flags']=R.observe(observed);result['state_read_count']=observed.reads
++    result['state_document']=observed.document
++    return result
++
++
++def semantic_case(G,job):
++    import c09_regression
++    mutant=job.get('mutant');mapping={'exit23':'exit23_only','reactivate':'reopen_closed','duplicate':'duplicate_classification'}
++    subject=c09_regression.Subject(mapping.get(mutant))
++    events={'exit_only':['prepare','exit23','witness23','observe'],
++            'reactivate':['prepare','close','commit','exit23','witness23','observe'],
++            'duplicate':['prepare','commit','exit23','witness23','observe','repeat']}[job['scenario']]
++    rows=[subject.step(e) for e in events]
++    return {'kind':'semantic','events':events,'rows':rows,'subject':rows[-1]['subject_state']}
++
++
++def run_suite(G):
++    if os.geteuid()!=0:raise G.AdmissionBlocked('IPC_ROOT_SUITE_REQUIRED')
++    cfg=R.contract(G);binding=G.safety_binding();old=G._TICKET
++    G._TICKET=G.ticket('C09H');base=G.count();calls=0
++    def charge():
++        nonlocal calls
++        if G.count()-base>=cfg['hard_visits']:raise G.LimitReached('IPC_VISIT_CAP')
++        G.c09h_charge();calls+=1
++    try:
++        charge()
++        for index,job in enumerate(cfg['jobs']):
++            G.root_checkpoint();start=G.count();charge()
++            row={'schema':'ROOT-IPC-RAW/1','case_id':job['case_id'],'input_sha256':hashlib.sha256(canonical(job).encode()).hexdigest(),
++                 'binding':binding,'actor':G.identity(),'before':G.stamp()}
++            charge()
++            if job['kind']=='file':result=permission_case(G,job,index,binding)
++            elif job['kind']=='wait':result=wait_case(G,job,index,binding)
++            else:result=semantic_case(G,job)
++            charge();row.update(result=result,after=G.stamp(),global_before=start,global_after=G.count())
++            G._root_write(G.ROOT/('inputs/root_private/ipc_case_%03d.json'%index),row)
++            import root_ipc_oracle
++            charge()
++            immediate=root_ipc_oracle.check_job(G.ROOT/'inputs/root_private',job,index,binding)
++            if not immediate['accepted']:raise G.AdmissionBlocked('IPC_FIRST_JOB_FAILURE:'+job['case_id'])
++        import root_ipc_oracle
++        for job in cfg['jobs']:charge()
++        report=root_ipc_oracle.check_suite(G.ROOT/'inputs/root_private',cfg,binding)
++        if not report['accepted']:raise G.AdmissionBlocked('IPC_RAW_ORACLE_FAILED')
++        report.update(contract_sha256=G.digest(G.SOURCE.parent/'inputs/root_ipc_contract.json'),
++                      checker_sha256=G.digest(G.SOURCE/'root_ipc_oracle.py'),
++                      global_before=base,global_after=G.count(),root_charges=calls,sample=G.stamp())
++        G._root_write(G.ROOT/'inputs/ROOT_IPC_QUALIFICATION.json',report)
++        return report
++    finally:G._TICKET=old

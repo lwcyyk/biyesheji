@@ -1,0 +1,618 @@
+# DCL-R6-RootIPC-Fix：Root/Payload 文件权限修复、停止竞态收敛与 batch06 验证准入
+
+## 一、研究目标与专项授权
+
+继续推进硕士毕业设计《面向用户与 AI 智能体的全生命周期密码与凭据管理系统》的 DCL 形式化验证研究。
+
+当前已完成 DCL-R6-batch05，最终结果为：
+
+`RESOURCE_GATE_FAILED`
+
+本轮重点修复两个已经由真实运行证据定位的问题：
+
+- Root 协调器覆盖共享 intent 后造成 UID999 读取失败。
+- Root 等待循环未及时处理已发布的 CLOSED/STOP_REQUEST。
+
+**我明确授权针对上述两个问题开展有限静态代码修复、权限安全审查、回归测试设计和 batch06 执行准入准备。**
+
+本次允许：
+
+1. 读取 batch05 原始证据、Root 协调器源码和 C09 交接模块。
+2. 独立复核共享 intent 的实际创建、替换和访问过程。
+3. 修复 Root/Payload 之间的文件所有权及访问权限合同。
+4. 修复 Root 在停止或关闭状态下继续等待的问题。
+5. 补充权限、文件替换和终止时序的正反测试。
+6. 审查修复对现有 C09H、C00–C12 和 S1–S9 的影响。
+7. 完成静态语法、控制流、权限模型和安全不变量检查。
+8. 在独立静态工作区生成新版本，并冻结源码、输入和命令摘要。
+9. 准备 batch06 的新执行授权申请。
+
+本次不授权：
+
+- 动态故障注入。
+- 运行 C00–C12。
+- 运行 C09H 或新增回归。
+- 运行 S1–S9。
+- 运行 F1/F4。
+- 创建或启动 batch06。
+- 修改实际 systemd 单位及全局资源配置。
+- 修改真实 UID/GID。
+- 安装依赖。
+- 修改主系统机制代码。
+- 执行 Casdoor 或原生 T1–T4。
+- 删除、迁移或覆盖历史证据。
+
+所有实际修复应放入新静态版本，batch05 原件保持冻结。
+
+## 二、恢复 batch05 全部证据
+
+研究目录：
+
+`D:\毕业设计\research_main_innovation\decentralized_credential_lifecycle`
+
+优先完整读取：
+
+- `DCL-R6-batch05/BATCH05_FINAL_DECISION.md`
+- `DCL-R6-batch05/BATCH05_COUNTEREXAMPLES.md`
+- `DCL-R6-batch05/BATCH05_ROOT_COORDINATOR_RESULTS.md`
+- `DCL-R6-batch05/BATCH05_C09_HANDOFF_RESULTS.md`
+- `DCL-R6-batch05/BATCH05_C09_REGRESSION_RESULTS.md`
+- `DCL-R6-batch05/BATCH05_RESOURCE_CALIBRATION.md`
+- `DCL-R6-batch05/BATCH05_RESOURCE_ACCOUNTING.md`
+- `DCL-R6-batch05/BATCH05_AUTHORIZATION_AND_LOCK.md`
+- `DCL-R6-C09Fix/C09_HANDOFF_STATE_MACHINE.md`
+- `DCL-R6-C09Fix/C09_SAFETY_PROPERTIES.md`
+- `DCL-R6-C09Fix/SOURCE_AND_INPUT_LOCK.md`
+
+同时读取 batch05 真实执行目录中的：
+
+- Root 协调器日志。
+- Payload stderr/stdout。
+- 共享 intent 文件元数据。
+- 原始 handoff 记录。
+- systemd journal。
+- 资源账。
+- 完整证据 ZIP。
+- manifest 及 SHA-256。
+
+首先确认真实代码版本和文件布局，再开始修改。
+
+### 已确认的事实
+
+- batch05 预检通过。
+- C00–C08 全部 PASS。
+- C09H 共 34 项得到预期结果。
+- 其中 28 项 PASS，6 项 MUTATION_DETECTED。
+- 真实 C09 在入口处发生权限失败。
+- Root 以 euid0 改写共享 intent。
+- 改写后的文件为 root:root/0600。
+- UID999 Payload 读取失败。
+- Payload 正确请求停止。
+- T0+20.909951317 已进入关闭状态。
+- T0+20.927591657 Payload 组空得到确认。
+- Root 延迟到 T0+300.043546214 才最终退出。
+- 真实交接的持久 ACK、waitpid 退出见证及成功分类仍未完成验证。
+- 最终预算为 37,293/1,000,000。
+- 303 组 PREPARED/COMMITTED 事务完整配对。
+- batch05 已经关闭。
+- S1–S9、17 项负向门和 F1/F4 均未运行。
+
+保留以上历史事实。
+
+不得将 C09H 的合成回归通过解释为真实 C09 已经通过。
+
+## 三、第一阶段：重建共享 intent 的权限变化
+
+首先从实际源码建立文件生命周期。
+
+至少追踪：
+
+1. intent 的初始创建者。
+2. 初始文件所有者、组和权限。
+3. Payload 如何读取 intent。
+4. Root 为什么需要访问 intent。
+5. Root 是否需要修改原 intent。
+6. Root 写入时使用的实际系统调用。
+7. 是否使用临时文件及 rename。
+8. 临时文件由谁创建。
+9. rename 后所有权如何变化。
+10. 文件模式是否受到 umask 影响。
+11. Payload 下一次读取发生的时间。
+12. 实际 EACCES 发生的源码位置。
+13. 文件所在目录的权限。
+14. 文件路径是否包含符号链接或其他可替换对象。
+
+重点区分：
+
+- 文件内容错误。
+- 文件路径错误。
+- 文件所有权错误。
+- 文件权限错误。
+- 原子替换导致的 inode 变化。
+- 目录权限限制。
+- Root 与 Payload 对同一文件的职责冲突。
+
+形成精确的文件访问矩阵。
+
+每个对象明确：
+
+- 创建者。
+- 写入者。
+- 读取者。
+- 删除权限。
+- 文件所有者。
+- 所属组。
+- mode。
+- 实际路径。
+- 所需持久化语义。
+
+最终必须解释 Root 的独立审查为什么会影响 Payload 的后续读取。
+
+## 四、第二阶段：设计安全的 Root/Payload 共享文件合同
+
+优先采用职责分离方案。
+
+建议区分：
+
+**A. Payload 可读取的交接意图对象**
+
+用于承载当前批次、交接请求及必要的状态引用。
+
+**B. Root 私有的审查记录**
+
+用于保存 Root 独立验证结果、退出观察和内部管理事实。
+
+**C. 持久交接 ACK**
+
+用于证明满足既定状态机要求的接收方确认及持久化结果。
+
+这三个对象的权限合同必须分别定义。
+
+Root 私有记录可以保持 root:root/0600。
+
+Payload 必须读取的文件，应明确赋予 UID999 对应的读取权限。
+
+可以评估：
+
+- root:989/0640。
+- 其他符合实际 UID/GID 与目录权限的最小授权方式。
+- 独立的受控 Unix Domain Socket。
+- Root 与 Payload 分离的命名空间。
+
+选择以实际源码和原有信任边界为准。
+
+**不能直接使用 0666、0777 或取消身份验证来解决权限错误。**
+
+如果 Root 需要发布 Payload 可读取的对象，必须确保目标所有者、组和 mode 在发布前已经正确设置。
+
+如果 Payload 需要修改意图，则应通过明确的受控请求接口完成，避免双方不受约束地覆盖同一文件。
+
+### 4.1 原子文件发布
+
+若继续使用文件方式，审查：
+
+- 临时文件创建。
+- O_CREAT/O_EXCL。
+- O_NOFOLLOW。
+- 目标目录权限。
+- fchown/fchmod。
+- 文件内容写入。
+- fsync。
+- rename。
+- 父目录 fsync。
+- 发布后的 stat。
+- 路径替换及 TOCTOU。
+- 错误后的清理。
+- 重复发布与幂等。
+
+同时核对实际 Linux 文件系统和 Python 接口的语义。
+
+不能仅凭 rename 原子性宣称全部持久性和权限条件已经成立。
+
+### 4.2 信任边界
+
+Root 具有更高权限，因此必须检查：
+
+1. Payload 是否能够伪造 Root 审查结果。
+2. Payload 是否能够修改 Root 私有 ACK。
+3. Payload 是否能够诱导 Root 覆盖任意路径。
+4. Payload 是否能够通过符号链接进行路径替换。
+5. Root 是否接受了未经核验的用户可写内容。
+6. batch_id、boot_id、执行锁是否绑定。
+7. 交接文件是否可能跨批次复用。
+8. 文件权限失败是否仍能安全停止。
+
+权限修复不得削弱原有的交接真实性。
+
+## 五、第三阶段：修复 Root 等待循环
+
+第二个独立问题：
+
+Payload 已在 T0+20.928 秒退出，Root 最终延迟至约 T0+300 秒才完成。
+
+必须定位 Root scheduler 的实际等待逻辑。
+
+重点检查：
+
+- ready 等待循环。
+- CLOSED 状态读取。
+- STOP_REQUEST 状态读取。
+- waitpid/pidfd。
+- socket 接收阻塞。
+- 等待超时。
+- 轮询间隔。
+- 文件状态缓存。
+- 事件通知。
+- 任务取消。
+- finally 清理流程。
+
+### 5.1 停止状态优先级
+
+建立明确的状态优先级。
+
+当出现以下情况时：
+
+- STOP_REQUEST 已确认。
+- CLOSED 已确认。
+- 当前批次进入终止状态。
+- 必要交接失败。
+- 接收方退出。
+- 资源资格失败。
+
+Root 应立即进入相应的停止处理流程。
+
+必须定义停止与 ACK 并发时的顺序规则。
+
+如果成功 ACK 发生在关闭之后，不得重新激活批次。
+
+### 5.2 状态读取
+
+避免在等待循环中长期复用旧状态快照。
+
+根据实际实现选择：
+
+- 每轮 fresh-read。
+- 有限阻塞等待配合状态复查。
+- 明确的事件通知。
+- 可取消的等待操作。
+
+任何等待方式都必须继续遵守当前批次 deadline。
+
+不能引入无限等待。
+
+### 5.3 异常与清理
+
+检查：
+
+- Root 收到 STOP_REQUEST 后停止创建新操作。
+- 终止通知是否只发一次。
+- 已有进程是否得到正确回收。
+- 账和原始日志是否保留。
+- 已确认 CLOSED 后无法恢复执行资格。
+- Root 异常退出时外部停止机制是否仍生效。
+
+应在合理的工程响应期限内完成停止处理，但具体延迟保证需要实际动态测试。
+
+不得将尚未测量的停止响应时间写成已证明的硬界。
+
+## 六、第四阶段：新增安全性质
+
+本轮修复至少检查以下性质。
+
+**IPC-1：AuthorizedRead**
+
+当前有效 Payload 能够读取其合同要求的交接意图对象。
+
+**IPC-2：RootIntegrity**
+
+Payload 无权伪造或覆盖 Root 私有审查结果。
+
+**IPC-3：AtomicPublication**
+
+交接对象的发布具有明确的原子性和失败语义。
+
+**IPC-4：NoPathSubstitution**
+
+不允许通过符号链接或未授权路径替换改变发布目标。
+
+**IPC-5：IdentityBinding**
+
+所有交接对象绑定当前 batch_id、boot_id、身份和执行锁。
+
+**IPC-6：NoFalseHandoff**
+
+缺少真实 ACK 或 receiver 确认时不得宣告交接成功。
+
+**IPC-7：StopDominance**
+
+已确认的停止或关闭状态能够阻止继续发放执行资格。
+
+**IPC-8：NoReactivation**
+
+CLOSED 后的迟到消息不能重新激活旧批次。
+
+**IPC-9：SingleClassification**
+
+同一交接事件只能得到一个有效终态分类。
+
+**IPC-10：BudgetPreservation**
+
+权限修复和停止流程不得修改原预算及 deadline。
+
+各性质必须对应实际源码中的检查点和未来验证证据。
+
+## 七、第五阶段：测试夹具与变异设计
+
+为修复建立专项正反测试。
+
+### 7.1 文件权限测试
+
+至少覆盖：
+
+- 正确 owner/group/mode。
+- root:root/0600 的历史失败复现。
+- UID999 合法读取。
+- 未授权 UID 读取拒绝。
+- Root 私有文件拒绝 Payload 写入。
+- 文件替换后的权限保持。
+- 临时文件发布中断。
+- 文件路径错误。
+- 符号链接替换。
+- 错误 batch_id。
+- 错误 boot_id。
+- 旧执行锁。
+- 收据内容或摘要不匹配。
+
+### 7.2 停止循环测试
+
+至少覆盖：
+
+- 正常 ready。
+- ready 前 STOP_REQUEST。
+- ready 后 STOP_REQUEST。
+- 等待期间 CLOSED。
+- ACK 与 STOP_REQUEST 交错。
+- Root 收到重复停止事件。
+- Payload 已退出。
+- receiver 已退出。
+- socket 或文件读取失败。
+- 旧状态快照。
+- 迟到 ACK。
+- 超时和异常退出。
+
+### 7.3 变异
+
+刻意引入：
+
+- Root 再次把共享文件替换成 root:root/0600。
+- 忽略共享文件权限。
+- 忽略 STOP_REQUEST。
+- 忽略 CLOSED。
+- 仅凭退出 23 判成功。
+- CLOSED 后允许 ACK 恢复。
+- 不检查当前 batch_id。
+- 重复分类同一退出事件。
+
+各变异必须被独立检查器检出。
+
+本轮仅实现静态测试夹具。
+
+动态执行须另行授权。
+
+## 八、第六阶段：最小代码修改
+
+只允许修改直接关联以下功能的文件：
+
+- Root 协调器。
+- C09 IPC/handoff。
+- 共享文件发布。
+- Root 状态等待与停止。
+- 对应的专项测试夹具。
+- 必要的权限和状态检查器。
+
+实际修改文件以 batch05 证据和冻结源码为依据。
+
+保持以下内容不变：
+
+- F1/F4 五份业务源码。
+- D2-DP 和 TRACE-REF 语义。
+- 现有预算核心。
+- 原 C00–C12 校准探针。
+- S1–S9 的 34 项测试。
+- 17 项资源资格门负向测试。
+- AS4-PAYLOAD/1 合同。
+- CPY312-UBU24/1 合同。
+- systemd 资源配置。
+
+如果修复必须修改预算核心、系统级权限或已有业务代码，应停止对应修改并提交独立理由。
+
+### 版本要求
+
+新版本建议：
+
+`RootIPC-static-1`
+
+原：
+
+`C09Fix-static-1/r1`
+
+保持冻结。
+
+所有修改保存：
+
+- 原源码。
+- 新源码。
+- 完整 diff。
+- SHA-256。
+- 静态检查。
+- 安全性质映射。
+- 未决动态验证责任。
+
+## 九、第七阶段：回归影响审查
+
+必须检查本轮修复是否影响：
+
+- C07 Controller 崩溃。
+- C08 Watchdog 崩溃。
+- C09 真实交接。
+- C09H 的 34 项合成回归。
+- C10 子进程封闭。
+- C11 持久化故障。
+- C12 CLOSED 和恢复拒绝。
+- S7 持久化故障。
+- S8 关闭与身份失效。
+- 17 项负向资格门。
+
+特别确保：
+
+**修复共享文件权限后，Root 的身份验证和交接安全条件仍然完整。**
+
+停止循环修复之后，缺少 ACK 的交接仍然必须失败关闭。
+
+不得为了获得 C09 PASS 而跳过原有安全判据。
+
+## 十、batch06 执行准入
+
+batch05 已经关闭。
+
+本次只准备新的独立 batch06。
+
+建议执行路径：
+
+`D:\毕业设计\DCL-R6-isolated-verification\batch06`
+
+本轮不创建运行账、不初始化 T0、不启动单位。
+
+新的执行申请必须明确覆盖：
+
+1. RootIPC-static-1 新源码摘要。
+2. 原有不变源码摘要。
+3. 新文件权限及停止测试输入。
+4. 新增回归测试数量。
+5. Root 协调器权限。
+6. UID999/GID989。
+7. 实际 Linux 路径和目录权限。
+8. systemd 单位与资源配置。
+9. 实际执行 argv。
+10. 当前运行时摘要。
+11. 新批次资源上限。
+12. 完整 C00–C12 校准。
+13. C09H 原有 34 项回归。
+14. 新增权限及停止测试。
+15. S1–S9 的 34 项测试。
+16. 17 项负向资格门。
+17. RESOURCE_GATE_PASS 的强制条件。
+18. F1/F4 条件自动执行。
+19. 首次失败停止。
+20. 证据封存。
+
+### 资源预算
+
+建议继续保持：
+
+- 总访问 ≤1,000,000。
+- 总墙钟 ≤1,800 秒。
+- 校准软窗口 300 秒。
+- 校准软访问额度 100,000。
+- 单进程 AS≤1 GiB。
+- 父 slice TasksMax=4。
+
+新测试必须重新计算静态访问上界。
+
+如果新测试无法纳入原 300 秒软窗口，形成准确的资源合同差异并申请批准。
+
+### 后续动态顺序
+
+建议：
+
+`预检 → C00–C08 → C09H → 新权限/停止回归 → 真实C09 → C10–C12 → S1–S9 → 17项负向检查 → RESOURCE_GATE_PASS → F1 → F4`
+
+具体顺序以冻结测试依赖为准。
+
+任何关键失败仍立即停止。
+
+## 十一、交付文件
+
+在研究目录建立：
+
+`DCL-R6-RootIPC-Fix/`
+
+交付：
+
+- `ROOT_INTENT_FILE_LIFECYCLE.md`
+- `ROOT_PAYLOAD_PERMISSION_CONTRACT.md`
+- `ROOT_SHARED_FILE_ATOMICITY.md`
+- `ROOT_STOP_WAIT_ANALYSIS.md`
+- `ROOT_STOP_STATE_MACHINE.md`
+- `ROOT_IPC_SAFETY_PROPERTIES.md`
+- `ROOT_IPC_FIX_IMPLEMENTATION.md`
+- `ROOT_IPC_REGRESSION_PLAN.md`
+- `STATIC_VERIFICATION_RESULTS.md`
+- `SOURCE_AND_INPUT_LOCK.md`
+- `BATCH06_EXECUTION_REQUEST.md`
+- `FINAL_DECISION.md`
+
+同步更新：
+
+- `CURRENT_VERDICT.md`
+- `NEXT_ACTION.md`
+- 研究证据索引。
+
+保留 batch05 原始 ZIP 和全部历史哈希。
+
+## 十二、验收门
+
+### Gate RI-1：权限根因
+
+能够从源码和实际文件证据解释 Root 改写共享 intent 导致 UID999 读取失败的全过程。
+
+### Gate RI-2：权限安全修复
+
+Root 私有对象和 Payload 可读对象具有明确权限边界，原子发布和失败行为得到静态审查。
+
+### Gate RI-3：停止行为修复
+
+CLOSED/STOP_REQUEST 的优先级、fresh-read、退出分类和清理规则已明确实现。
+
+### Gate RI-4：回归与版本
+
+新增专项正反测试、源码检查、历史哈希及 batch06 申请完整。
+
+分别使用：
+
+- PASS_STATIC。
+- CONDITIONAL_PASS。
+- PARTIAL。
+- FAIL。
+- UNRESOLVED。
+
+当前动态结果保持 UNRUN。
+
+## 十三、立即执行
+
+本轮明确授权 RootIPC 的最小静态修复。
+
+执行顺序：
+
+1. 完整读取 batch05 原始失败证据。
+2. 重建共享 intent 的创建、替换、读取和失败路径。
+3. 明确 Root 私有记录与 Payload 可读数据的职责。
+4. 设计最小权限安全方案。
+5. 修复 Root 文件发布及所有权处理。
+6. 定位 Root 等待循环对 CLOSED/STOP_REQUEST 的处理缺口。
+7. 修复停止状态的及时复查和安全退出。
+8. 保留持久 ACK、waitpid、fresh-read 和一次分类机制。
+9. 增加权限和停止行为正反测试。
+10. 静态检查对原 C/S 资格门的影响。
+11. 核对业务源码及预算核心哈希。
+12. 冻结 RootIPC-static-1。
+13. 生成 batch06 独立执行申请。
+14. 更新最终裁决。
+
+如果本轮修复发现新的安全前提缺失，应保存明确的反例和未决证明责任。
+
+不得通过放宽权限、删除交接验证或绕过停止规则来获得表面通过。
+
+**本轮目标：在不削弱 Root/Payload 信任边界的前提下，消除 batch05 已确认的权限冲突与停止延迟，使真实 C09 交接能够进入后续动态验证。**
+
+现在开始 DCL-R6-RootIPC-Fix。
