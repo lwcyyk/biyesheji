@@ -1,0 +1,1658 @@
+PAGE 1
+Open access to the Proceedings of  
+the 15th USENIX Symposium on Networked 
+Systems Design and Implementation 
+is sponsored by USENIX.
+zkLedger: Privacy-Preserving Auditing 
+for Distributed Ledgers
+Neha Narula, MIT Media Lab; Willy Vasquez, University of Texas at Austin;  
+Madars Virza, MIT Media Lab
+https://www.usenix.org/conference/nsdi18/presentation/narula
+This paper is included in the Proceedings of the 
+15th USENIX Symposium on Networked 
+Systems Design and Implementation (NSDI ’18).
+April 9–11, 2018 • Renton, WA, USA
+ISBN 978-1-939133-01-4
+
+PAGE 2
+zkLedger: Privacy-Preserving Auditing for Distributed Ledgers
+Neha Narula
+MIT Media Lab
+Willy Vasquez
+University of Texas at Austin∗
+Madars Virza
+MIT Media Lab
+Abstract
+Distributed ledgers (e.g. blockchains) enable ﬁnancial in-
+stitutions to efﬁciently reconcile cross-organization trans-
+actions. For example, banks might use a distributed ledger
+as a settlement log for digital assets. Unfortunately, these
+ledgers are either entirely public to all participants, re-
+vealing sensitive strategy and trading information, or are
+private but do not support third-party auditing without
+revealing the contents of transactions to the auditor. Au-
+diting and ﬁnancial oversight are critical to proving insti-
+tutions are complying with regulation.
+This paper presents zkLedger, the ﬁrst system to protect
+ledger participants’ privacy and provide fast, provably cor-
+rect auditing. Banks create digital asset transactions that
+are visible only to the organizations party to the transac-
+tion, but are publicly veriﬁable. An auditor sends queries
+to banks, for example “What is the outstanding amount
+of a certain digital asset on your balance sheet?” and
+gets a response and cryptographic assurance that the re-
+sponse is correct. zkLedger has two important beneﬁts
+over previous work. First, zkLedger provides fast, rich
+auditing with a new proof scheme using Schnorr-type non-
+interactive zero-knowledge proofs. Unlike zk-SNARKs,
+our techniques do not require trusted setup and only rely
+on widely-used cryptographic assumptions. Second, zk-
+Ledger provides completeness; it uses a columnar ledger
+construction so that banks cannot hide transactions from
+the auditor, and participants can use rolling caches to
+produce and verify answers quickly. We implement a dis-
+tributed version of zkLedger that can produce provably-
+correct answers to auditor queries on a ledger with a
+hundred thousand transactions in less than 10 millisec-
+onds.
+1 Introduction
+Institutions engage trusted third-party auditors to prove
+that they are complying with laws and regulation. Tradi-
+tionally this is done by auditing companies like Deloitte,
+Pricewaterhouse Coopers, Ernst and Young, and KPMG
+(known as the “Big Four”), which together audit 99% of
+* Work completed at the MIT Media Lab.
+† Source code and full version of the paper: zkledger.org.
+the companies in the S&P 500 [19]. This type of audit-
+ing is laborious and time-consuming, so regulators and
+investors do not get real-time access to information about
+the ﬁnancial status of institutions. In addition, trusted
+third parties can make mistakes. The most well-known
+example of this is the collapse of Arthur Anderson in
+2002, after it failed to catch Enron’s $100 billion account-
+ing fraud.
+Recently, ﬁnancial institutions are exploring distributed
+ledgers (or blockchains) to reduce veriﬁcation and recon-
+ciliation costs in an environment with multiple distrusting
+parties. Distributed ledgers enable real-time validation
+by all participants (known as public veriﬁability), but at
+the cost of privacy—every participant must download
+all transactions in order to verify their integrity. This is
+untenable for institutions that rely on secrecy to protect
+strategy and intellectual property (e.g. trading strategies),
+and for organizations that have to comply with laws and
+regulation around data privacy (for example, the General
+Data Protection Regulation in Europe [24]).
+Distributed ledgers that support privacy generally op-
+erate in one of two ways: either by only committing to
+hashes of transactions on the ledger, using trusted third
+parties to independently verify transactions [22, 23], or
+by using cryptographic commitment schemes to hide the
+content of transactions [17, 42, 47, 51]. The former class
+of ledgers suffers from the fact that participants can no
+longer verify the integrity of private transactions, elimi-
+nating the distributed ledger beneﬁt. The latter class still
+has public veriﬁability, but either reveals the transaction
+graph [17, 42] or requires trusted setup, which, if compro-
+mised, would let an adversary undetectably create new
+assets [47, 51]. None of the existing privacy-preserving
+distributed ledgers offer an important property for real-
+world systems—efﬁcient auditing.
+This paper presents zkLedger, the ﬁrst distributed
+ledger system to support strong transaction privacy, pub-
+lic veriﬁability, and practical, useful auditing. zkLedger
+provides strong transaction privacy: an adversary cannot
+tell who is participating in a transaction or how much is
+being transacted, and crucially, zkLedger does not reveal
+the transaction graph, or linkages between transactions.
+The time of transactions and the type of asset being trans-
+ferred are public. All participants in zkLedger can still
+USENIX Association 15th USENIX Symposium on Networked Systems Design and Implementation    65
+
+PAGE 3
+verify transactions are maintaining important ﬁnancial
+invariants, like conservation of assets, and an auditor can
+issue a rich set of auditing queries to the participants
+and receive answers that are provably consistent with the
+ledger. zkLedger supports a useful set of auditing primi-
+tives including sums, moving averages, variance, standard
+deviation, and ratios. An auditor can use these primitives
+to measure ﬁnancial leverage, asset illiquidity, counter-
+party risk exposures, and market concentration, for the
+system as a whole or for individual participants.
+A set of banks might use zkLedger to construct a set-
+tlement log for an over-the-counter market trading digital
+assets. In these markets, buyers and sellers are matched
+via electronic exchanges, trades are frequent and fast set-
+tlement helps lower counterparty risk. Once a trade is
+conﬁrmed, a bank can initiate the transfer of the asset as
+a transaction in zkLedger, which, when accepted in the
+ledger, settles the transaction. Each bank stores plain-text
+transaction data in its own private datastores. In zkLed-
+ger, instead of storing plain-text transactions, participants
+store value commitments on the distributed ledger. Im-
+portantly, these commitments can be homomorphically
+combined. A bank can prove to an auditor how much of
+an asset it has on its balance sheet by opening up the prod-
+uct of all transaction commitments it has referencing that
+asset. The auditor can conﬁrm that the opened product
+is consistent with the product of the commitments on the
+ledger.
+Designing zkLedger required overcoming three key
+challenges:
+Providing privacy and auditing . The ﬁrst challenge
+is to preserve privacy while still allowing an auditor to
+compute provably correct measurements over the data
+in the ledger. zkLedger is the ﬁrst system to simultane-
+ously achieve this, by combining several cryptographic
+primitives. To hide values, zkLedger uses Pedersen com-
+mitments [41]. Pedersen commitments can be homomor-
+phically combined, so a veriﬁer can, for example, conﬁrm
+that the sum of the outputs is less than or equal to the
+sum of the inputs, conserving assets. More than that,
+an auditor can combine commitments to compute linear
+combinations of values in different rows in the ledger.
+Previous conﬁdential blockchain systems also use Ped-
+ersen commitments to hide values but end up revealing
+linkages between transactions, and do not support private
+auditing [17, 34, 42].
+zkLedger uses an interactivemap/reduce paradigm over
+the ledger with non-interactive zero-knowledge proofs
+(NIZKs) to compute measurements that go beyond sums.
+These are Generalized Schnorr Proofs [48], which are fast
+and rely only on widely accepted cryptographic assump-
+tions. Banks can provably recommit to functions over
+values in the ledger, such as f : v→ v2, which lets the
+auditor compute measurements like variance, skew, and
+outliers without revealing individual transaction details.
+Auditing completeness. Since an auditor cannot deter-
+mine who was involved in which transactions, zkLed-
+ger must ensure that during auditing, a participant can-
+not leave out transactions to hide assets from the audi-
+tor. We call this property completeness. At the same
+time, we do not want to reveal to the auditor who was
+involved in which transactions. zkLedger uses a novel
+table-construction in the ledger. A transaction is a row
+which includes an entry for every participant, and an
+empty entry is indistinguishable from an entry involving a
+transfer of assets. All of a participant’s transfers are in its
+column in the ledger. An auditor audits every transaction
+when auditing a participant, meaning a participant can-
+not hide transactions. This presents efﬁciency challenges,
+which zkLedger addresses by using commitment caches
+and audit tokens, described below.
+Efﬁciency. The third challenge is supporting all of this
+efﬁciently. zkLedger implements a number of optimiza-
+tions: every participant and the auditor keeps commitment
+caches, which are rolling products of every participants’
+column in the ledger; this makes it fast to generate asset
+proofs and to answer audits. To reduce communication
+costs, zkLedger is designed so that participants do not
+have to interact to construct the proofs for the transac-
+tion; the spender can create the transaction alone (this is
+similar to how other blockchain systems work). But a
+malicious spender could try to encode incorrect values in
+the commitments for other banks—we must ensure all of
+the commitments and proofs are correct and that every
+participant has what they need to later respond to an audit.
+To do this, we designed a set of proofs that everyone can
+publicly verify—transactions with incorrect proofs will be
+ignored. These proofs ensure that every participant has an
+audit token, which they can use to later open up commit-
+ments for that row, and that all proofs and commitments
+are consistent. The audit token and the consistency proofs
+are publicly veriﬁable, but do not leak any transaction
+information. They are also non-interactive, so zkLedger
+makes progress even if banks cannot communicate, and
+they are encoded for a speciﬁc bank, so a token for one
+bank cannot be used by another bank to lie to the auditor.
+The slowest part of transaction creation and validation
+are range proofs, which ensure that an asset’s value is in
+a pre-speciﬁed range, and prevent a malicious attacker
+from undetectably creating new assets. Range proofs are
+10× the size of the other proofs and take 5 × as much
+time to prove and verify. A naive implementation of
+66    15th USENIX Symposium on Networked Systems Design and Implementation USENIX Association
+
+PAGE 4
+zkLedger might require multiple range proofs, but by
+using disjunctive proofs, we can multiplex different values
+into one range proof per entry.
+In summary, the contributions of this paper are:
+• zkLedger, the ﬁrst distributed ledger system to achieve
+strong privacy and complete auditing;
+• a design combining fast, well-understood cryptographic
+primitives using audit tokens and map/reduce to com-
+pute provably correct answers to queries;
+• an evaluation of zkLedger showing efﬁcient transaction
+creation and auditing; and
+• an analysis of the types of queries zkLedger can support,
+suggesting that zkLedger can efﬁciently handle a useful
+set of auditing measurements.
+2 Related Work
+zkLedger is related to work in auditing or computing on
+private data and privacy-preserving blockchains. zkLed-
+ger achieves fast, provably correct auditing by creating
+a new distributed ledger table model and applying a new
+scheme using zero-knowledge proofs.
+2.1 Computing on Private Data
+Previous work proposed a multi-party computation
+scheme in which participants use a secure protocol to
+compute the results of functions which answer questions
+about systemic ﬁnancial risk, the same problem which zk-
+Ledger aims to address [3, 10], and network security [14].
+This work provides privacy beneﬁts over existing analyt-
+ics systems by allowing participants to keep their data
+secret. However, it only supports overall system auditing,
+it is not a solution to audit individual participants. There
+is also nothing preventing participants from lying in the
+inputs to the multi-party computation; they do not achieve
+completeness.
+Provisions [21] is a way for Bitcoin exchanges to prove
+they are solvent without revealing their total holdings.
+Provisions uses Proof of Assets and Proof of Liabilities,
+which are very similar to the zero-knowledge proofs we
+use in zkLedger. However, in Provisions, an exchange
+could “borrow” private keys from another Bitcoin holder
+and thus prove assets they do not actually hold; in fact
+multiple exchanges could share the same assets. More-
+over, Provisions does not provide completeness. By using
+a columnar construction with a distributed ledger, zkLed-
+ger achieves completeness.
+In Prio [18], untrusted servers can compute privately
+on mobile client data. Prio does not operate on distributed
+ledgers, and thus does not guarantee public veriﬁability.
+Prio requires all servers to cooperate in order for client
+proofs to validate; zkLedger can tolerate non-cooperating
+participants.
+Several systems provide private and correct computing
+using trusted hardware [4–6, 49, 52]. In our setting, we
+cannot guarantee that all participants will trust the same
+hardware provider. In addition, it would be a conﬂict
+of interest to use such a system to audit the company
+providing the trusted hardware.
+There are many systems which compute on encrypted
+data to protect user conﬁdentiality in the event of a server
+compromise [25, 31, 32, 40, 43, 44, 50]. These systems
+address a different problem than what zkLedger is trying
+to solve. Instead, we provide interactive, provably correct
+auditing over private data generated by many parties.
+2.2 Privacy-preserving blockchains
+Bitcoin, a decentralized cryptocurrency released in 2009,
+was the ﬁrst blockchain [37]. Many companies have ex-
+plored using a blockchain to record the transfer of assets.
+These systems are marked by the following characteris-
+tics: (1) Multiple, possibly distrusting participants, all
+with write permissions and no single point of failure or
+control; (2) A consensus protocol to construct an append-
+only, globally ordered log with a chain of hashes to pre-
+vent tampering with the past; and (3) Digitally signed
+transactions to indicate intent to transfer ownership.
+In Bitcoin and most other blockchains, all transactions
+are public: every participant receives each transaction,
+and can verify all the details. Users create pseudonyms
+by generating one-time use public keys for payment ad-
+dresses, but transaction amounts and the links between
+transactions are still globally visible. Conﬁdential Trans-
+actions [34] and Conﬁdential Assets [17, 42] are exten-
+sions to Bitcoin which blind the assets and amounts in
+transactions while still ensuring that all participants can
+validate transactions. Though these systems hide assets
+and amounts, they leak the transaction graph and do not
+support private auditing—an auditor would require ac-
+cess to all plain-text transactions in order to ensure com-
+pleteness. The transaction graph alone leaks substantial
+information [36, 38, 45, 46]; for example, the FBI fol-
+lowed linked transactions to trace bitcoins and used this
+as evidence in court [28]. zkLedger provides stronger
+transaction privacy and private auditing, but at the cost
+of scalability. Transactions in zkLedger are sized order
+the number of participants in the whole system, requiring
+more time to produce and verify as the number of par-
+ticipants grows. This makes zkLedger more suitable to
+ledgers with fewer participants who require more privacy.
+Solidus [16] is a distributed ledger system that uses
+Oblivious RAM to hide the transaction graph and trans-
+USENIX Association 15th USENIX Symposium on Networked Systems Design and Implementation    67
+
+PAGE 5
+action amount between bank customers. While this con-
+struction also provides private transactions, Solidus can
+only support auditing by revealing all of the keys used in
+the system to an auditor, and opening transactions. zk-
+Ledger achieves performance similar to Solidus while
+providing private auditing.
+R3’s Corda [22], and Digital Asset Holding’s Global
+Synchronization Log (GSL) [23] are distributed ledgers
+geared towards ﬁnancial institutions that rely on trusted
+third parties to pass through information. In Corda, no-
+taries verify transactions and maintain privacy of partici-
+pants, while GSL segments its ledger, only storing a hash
+of the values globally and limiting access to ﬁne-grained
+transaction data. Neither support private auditing.
+Another approach is that of Zerocash [47], and its re-
+lated implementation Zcash [51], an anonymous cryp-
+tocurrency based on Bitcoin. Zerocash uses zk-SNARKs
+[7] to hide transaction amounts, participants, and the
+transaction graph. The zk-SNARKs as used in Zcash
+can be extended to handle policies to enforce regulations,
+KYC/AML laws, and taxes [27]. These policies do not
+support arbitrary queries, but instead put limits on the
+new types of transactions that can take place. These ideas
+have not yet been implemented in a practical system.
+zk-SNARKs are quite efﬁcient for some statements
+but unfortunately, the price of this efﬁciency is paid in
+setup assumptions: as of now, all concretely efﬁcient
+zk-SNARKs require a trusted third party for setup. The
+consequences of incorrect or compromised setup are po-
+tentially disastrous: an adversary who can learn the secret
+randomness used during setup can make fraudulent proofs
+of false statements that are indistinguishable from proofs
+of true statements. In our setting (international bank-
+ing), such proofs would permit unrestricted creation or
+destruction of ﬁnancial assets or liabilities. There may
+not even be a viable party to perform the one-time trusted
+setup. For example, Russia might not trust the Federal
+Reserve or the European Central Bank, or it might not
+be politically expedient to be seen as doing so. While it
+is possible to mitigate this concern, e.g., by distributing
+the setup between multiple parties [8, 11, 12], this process
+is onerous and expensive. Ideally, the ﬁnancial integrity
+of the system would not rely on trusted setup at all. We
+choose to base consensus-critical portions of zkLedger’s
+design on standard NIZKs.
+3 zkLedger Overview
+3.1 Architecture
+System participants. There are n participants which we
+call banks that issue transactions to transfer digital assets,
+Bank1, . . . ,Bankn and an auditor Auditor, that veriﬁes
+certain operational aspects of transactions performed by
+the banks (e.g. “is a particular bank Banki solvent?”).
+These roles are not distinct; a bank could also audit. A
+Depositor or set of Depositors can issue and withdraw
+assets from the system; for example, the European Cen-
+tral Bank might issue 1M C to Banki in the system. Is-
+suance and withdrawal of all assets are controlled by the
+Depositors and are global, public events.
+Transactions. Banks exchange assets by creating trans-
+fer transactions, whose details are hidden. A transfer
+transaction captures an event where Banki is transferring
+v shares of asset t to Bank j. Our scheme supports a bank
+transferring to multiple other banks, but for simplicity we
+assume there is one spending and one receiving bank in
+each transaction. Banks determine the details of a trans-
+fer transaction outside of zkLedger, perhaps through an
+exchange. We assume they use encrypted channels.
+Append-only ledger. Banks submit transactions to an
+append-only ledger, which globally orders all valid trans-
+actions. If a digital asset only exists on the ledger, then
+transfer on the ledger is change in legal custody of the dig-
+ital assets, not merely a record of ownership change, and
+an Auditor is guaranteed a Bank is not hiding assets. This
+ledger could be maintained by a trusted third party, by the
+banks themselves, or via a blockchain like Ethereum or
+Bitcoin. Maintaining a fault-tolerant, globally ordered log
+is outside the scope of this paper, but can be done using
+standard techniques [15, 30, 39].
+3.2 Cryptographic building blocks
+Commitment schemes. To protect their privacy partici-
+pant banks do not broadcast payment details, such as the
+transaction amount, in plain. Instead the banks post hid-
+ing commitments to the append-only ledger; in particular,
+zkLedger uses Pedersen commitments [41]. Let G be a
+cyclic group with s =|G| elements, and let g and h be two
+random generators of G. Then a Pedersen commitment to
+an integer v∈{ 0,1, . . . ,s− 1} is formed as follows: pick
+commitment randomness r, and return the commitment
+cm := COMM(v,r) = gvhr.
+Pedersen commitments are perfectly hiding: the com-
+mitment cm reveals nothing about the committed value v.
+In a similar way, the commitments are also computation-
+ally binding: if an adversary can open a commitment cm
+in two different ways (for the same r, two different values
+v and v′), then the same adversary can be used to compute
+logh(g) and thus break the discrete logarithm problem in
+G. In zkLedger we choose G to be the group of points on
+the elliptic curve secp256k1.
+A very useful property of Pedersen commitments is
+that they are additively homomorphic. If cm1 and cm2 are
+68    15th USENIX Symposium on Networked Systems Design and Implementation USENIX Association
+
+PAGE 6
+Use Commitment 
+Cache to prove answer
+0 $
+1 €
+2 $
+TX DB
+Commitment Cache
+Bank of America
+13:05:58 2/17/18
+13:05:59 2/17/18
+13:06:01 2/17/18
+Add transaction
+Notify of new transaction
+Determine 
+trade 
+details
+Commitment Cache
+Auditor
+Notify of new transaction
+TX DB
+Commitment Cache
+JPMorgan
+Respond 
+to Audit Audit
+Use Commitment 
+Cache to verify audit
+Bank of America Goldman Sachs JP Morgan
+transaction commitments and proofs
+Figure 1 : Overall zkLed-
+ger system design showing
+the interactions between the
+three main entities (banks,
+auditor, and the shared
+ledger) in our system. Each
+bank maintains private state,
+consisting of the transaction
+database for transactions the
+bank originated, and the
+bank’s secret key.
+two commitments to values v1 and v2, using commitment
+randomness r1 and r2, respectively, then cm := cm1· cm2
+is a commitment to v1 + v2 using randomness r1 + r2, as
+cm = (gv1hr1)·(gv2hr2) = gv1+v2hr1+r2. To speed up trans-
+action generation and auditing zkLedger makes extensive
+use of the ability to additively combine commitments.
+Public-key encryption. Every bank i also generates a
+Schnorr signature keypair keypair consisting of a secret
+key ski and public key pki := hski, and distributes the
+public key pki to all other system participants.
+Non-interactive zero-knowledge proofs. To make
+privacy-preserving assertions about payment details zk-
+Ledger relies on non-interactive zero-knowledge proofs
+(NIZKs) [9]. In brief, zero-knowledge proofs concern
+two parties: the prover, who holds some private data, and
+the veriﬁer, who wishes to be convinced of some property
+about this private data. For example, the prover might
+know the opening of a commitment cm, and wish to con-
+vince the veriﬁer that the committed value v is in some
+range, e.g., 0≤ v < 106. Using NIZKs, the prover can
+produce a binary string π, the proof, that simultaneously
+persuades the veriﬁer, yet does not reveal anything else
+about v. Verifying π does not require any interaction
+between the prover and the veriﬁer, and the prover can
+append π to the ledger, where it can be veriﬁed by any
+party of the system.
+In theory, NIZK proof systems exist for all properties
+in NP whereas the practical feasibility of NIZKs is highly-
+dependent on the complexity of the property at hand. In
+particular, algebraic properties in cyclic groups, such as,
+knowledge of discrete logarithm, equality of values com-
+mitted in Pedersen commitments, or similar have very
+efﬁcient NIZK proof systems. The design of zkLedger is
+carefully structured so that all NIZK proofs have particu-
+larly efﬁcient constructions.
+3.3 Security Goals
+The goals of zkLedger are to hide the amounts, partici-
+pants, and links between transactions while maintaining a
+veriﬁable transaction ledger, and for theAuditor to receive
+reliable answers to its queries. Speciﬁcally, zkLedger lets
+banks issue hidden transfer transactions which are still
+publicly veriﬁable by all other participants; every partici-
+pant can conﬁrm a transaction conserves assets and assets
+are only transferred with the spending bank’s authority.
+For example, if Banki transfers 10,000 C to Bank j, both
+the banks and amount are hidden. The asset ( C) and time
+of the transaction are not hidden. zkLedger also hides the
+transaction graph, meaning which previous transaction(s)
+supplied the 10,000 C to Banki in the ﬁrst place.
+An Auditor can query a Bank about its contents on the
+ledger, for example “How many euros does Bank j hold?”
+A bank should be able to produce commitments which
+will convince the auditor that the bank’s answer to the
+auditing query is correct, meaning consistent with the
+transactions on the ledger. zkLedger ensures that if a bank
+gives the Auditor an answer that is inconsistent with the
+ledger, the Auditor will catch such attempt of cheating
+with high probability (and of course, a trustworthy answer
+must always be accepted).
+3.4 Threat model
+zkLedger does not assume that banks will behave
+honestly—they can attempt to steal assets, hide assets,
+manipulate their account balances, or lie to auditors. We
+assume banks can arbitrarily collude. zkLedger keeps the
+amounts and participants of transactions private as long
+as neither the spender nor receiver in a transaction collude
+with an observer, like the Auditor. We assume that the
+ledger does not omit transactions and is available. zkLed-
+ger does not protect against an adversary who observes
+trafﬁc on the network; for example, if only two banks
+are exchanging messages, it’s reasonable to assume the
+transactions in the ledger involve those banks. Nothing
+USENIX Association 15th USENIX Symposium on Networked Systems Design and Implementation    69
+
+PAGE 7
+beyond what is necessarily leaked by an audit is revealed.
+However, frequent auditing might reveal transaction con-
+tents; e.g. if an auditor asks for banks’ assets after every
+transaction.
+4 Design
+The challenge in creating zkLedger is to practically sup-
+port complete, conﬁdential auditing—anAuditor should
+not be able to see individual bank transactions, but aBank
+should not be able to hide assets from the Auditor dur-
+ing an audit, and the auditor should be able to detect an
+incorrect answer.
+Figure 1 shows a general overview of zkLedger. There
+are banks which determine transactions out of band and
+then settle them by appending transactions to the ledger.
+The ledger makes sure all banks and any auditors see
+new transactions. Each bank and auditor maintains a
+commitment cache, which are commitments to summed
+values used to make creating transactions and responding
+to audits faster. Each bank also has private stores of plain-
+text transaction data.
+The rest of this section describes the zkLedger trans-
+action format, how banks create transactions, and how a
+bank can answer a simple query from the auditor.
+4.1 Transactions
+The ledger in zkLedger is a table where transactions cor-
+respond to rows, and Banks correspond to columns. Each
+transaction has an entry for each Bank. Figure 2 shows a
+ledger with n banks. Each entry in a transaction includes
+a commitment to a value which is the amount of the asset
+that is being debited or credited to the bank. For exam-
+ple, if Banki wants to transfer 100 shares of an asset to
+Bank j, i’s entry in the transaction would contain a com-
+mitment to -100 and j’s would contain a commitment to
+100. All other entries in the transaction would contain
+commitments to 0, since none of the other bank balances
+were changed. This scheme has the nice property that
+an outside observer can look at a bank’s entire column
+and know that this represents the entirety of the bank’s
+holdings.
+Hiding amounts. As described in §3.2, zkLedger does
+not include the value in plain-text in the transaction. In-
+stead, zkLedger uses Pedersen commitments to commit
+to the value in transfer transactions. This makes value
+commitments completely indistinguishable—an outside
+observer cannot tell the difference between a commitment
+to a positive value, a negative value, or 0. Recall that a
+commitment to a value v is cm := COMM(v,r) = gvhr.
+If desired, a prover can reveal v and r to a veriﬁer who
+knows cm and the veriﬁer can conﬁrm this is consistent.
+Since a transaction in zkLedger contains an entry for
+every Bank, there is a size- n vector ⃗cm committing to
+values in ⃗v. Each commitment cmk uses a fresh com-
+mitment randomness rk. Most of the entries will contain
+commitments to 0, for banks that are not involved with the
+transaction, but this is not apparent to an outside observer.
+zkLedger maintains the following ﬁnancial invariants:
+• A transfer transaction cannot create or destroy assets
+• The spending bank must give consent to the transfer
+and must actually own enough of the particular asset to
+execute this transaction
+In a public blockchain, the validators could simply
+conﬁrm that these things are true by looking at the history
+of transactions and the current transaction, and making
+sure the spending bank has the funds to spend. However,
+in zkLedger these values are not public. Instead, we
+create a set of proofs that the spender can create to prove
+the invariants are maintained. The spender can create
+a transaction without interacting with any of the other
+banks.
+First, zkLedger introduces a Proof of Balance (π B).
+This is a proof that the transaction conserves assets; no
+assets are created or destroyed (of course, public is-
+suance and withdrawal transactions do not have such
+proofs). More formally, the committed values should
+satisfy ∑n
+k=1 vk = 0. To prove this, the prover chooses the
+rk carefully: it should also be the case that ∑n
+k=1 rk = 0.
+If this is true and the values also sum to 0, then the ver-
+iﬁer can check to make sure that ∏n
+k=1 cmk = 1 for the
+commitments in the row.
+Next, zkLedger must ensure that the spending bank
+actually has the assets to transfer. To do this, zkLedger in-
+troduces a Proof of Assets (π A). Other privacy-preserving
+blockchain systems use Unspent Transaction Outputs ,
+or UTXOs, to show proof of assets and prevent double
+spending. For example, if Alice wants to send a coin to
+Bob, she chooses one of her coins, creates a new trans-
+action addressing the coin to Bob, and includes a pointer
+to the previous transaction where she received the coin.
+This previous transaction is an output. All of the valida-
+tors in the system maintain the invariant that outputs can
+only be spent once. Unfortunately, in systems without zk-
+SNARKs, this leaks the transaction graph. In zkLedger, a
+bank proves it has assets by creating a commitment to the
+sum of the values for the asset in its column, including
+this transaction. If the sum is greater than or equal to 0,
+then the bank has assets to transfer. Note that this is true
+since the bank’s column represents all the assets it has
+received or spent, and the Pedersen commitments can be
+homomorphically added in columns as well as in rows. In
+70    15th USENIX Symposium on Networked Systems Design and Implementation USENIX Association
+
+PAGE 8
+order to produce a proof with the correct sum, the bank
+must have seen every previous transaction. This implies
+that banks must create transactions serially. In its own
+entry where the value is negative, the bank includes proof
+of knowledge of secret key to show that it authorized the
+transaction. This requires creating a disjunctive proof—
+either the committed value for entry i has vi≥ 0, or the
+creator of the transaction knows the secret key for Banki.
+Range proofs. Because commitment values are in an
+elliptic curve group and rely on modulus, we need to make
+sure that the commited values are within an acceptable
+range. To see why, note that if N is the order of the
+group, then COMM(v,r) = COMM(v + N,r); there is no
+way to distinguish between the two. Without a check
+to make sure the commited value is within the range
+[0,N− 1], a malicious bank could undetectably create
+assets. To address this, we use range proofs as described
+in Conﬁdential Assets [42], which uses Borromean ring
+signatures [35]. zkLedger supports asset value amounts
+up to a trillion. Range proofs are the most expensive
+part of the transaction; as described, our scheme requires
+two range proofs—one for the commitment value, and
+another for the sum of assets in the column. We can
+squash the two range proofs down to one range proof by
+introducing an auxiliary commitment, cm′i. cm′i is either
+a re-commitment to the value in cmi or the sum of the
+values in the column up to row m, ∑m
+k=0 vk, which can be
+achieved by computing the product of the commitments
+in the column, ∏m
+k=0 cmk. Then, we can do one range
+proof on the value in cm′i. Either this is the spending
+bank, in which case cm′i must be a commitment to the
+sum, or it is another bank which is receiving funds or not
+involved, in which case cm′i could be either (and it does
+not matter which it is).
+This satisﬁes the ﬁnancial invariants described above.
+However, a particular design choice we made in zkLedger
+is that a spending bank can create a transaction spending
+its own assets without interacting with other banks. This
+means that a malicious bank could create transactions
+which maintain ﬁnancial invariants but are ill-formed. We
+will address this problem after describing how auditing
+works.
+Once created, a bank broadcasts the transaction, and
+it will be appended to the ledger. If the banks are main-
+taining the ledger, each bank is responsible for validating
+the transaction before accepting it to the ledger. If a third
+party is maintaining the ledger, then the third party should
+verify the proofs in a transaction before accepting it.
+Example transaction . Figure 2 shows a transaction
+where Bank of America is transferring one million euros
+to Goldman Sachs. Bank of America creates the transfer
+transaction, publishing the transaction id, timestamp, and
+asset type (euros) publicly. Bank of America commits to
+the amount deducted from its own assets, −1,000,000,
+in its own entry and 1,000,000 in Goldman Sachs’s en-
+try. For every other bank, Bank of America commits to
+0. This serves to hide the banks involved in the transfer;
+no one except Bank of America can distinguish between
+the commitments to determine which are commiting to
+nonzero values. Bank of America then broadcasts the
+transaction to the ledger. The ledger maintainer validates
+the transaction and appends it to the ledger. Once ac-
+cepted to the ledger, this serves as a complete transfer
+of 1,000,000 euros from Bank of America to Goldman
+Sachs.
+4.2 Auditing Protocol
+The Auditor has a copy of the ledger and interacts with
+the banks to calculate functions on their private data, in
+order to get a view of the ﬁnancial system represented by
+the ledger.
+The Auditor audits Banki by issuing a query to Banki,
+for example, “How many euros do you hold at time t?”.
+Banki responds to the auditor with an answer and a proof
+that the answer is consistent with the transactions on the
+ledger. The Auditor multiplies the commitments on the
+ledger in Banki’s column for euros, and veriﬁes the proof
+and answer with the total. This is a commitment to the
+the total amount of euros Banki holds.
+The key insight here is that given this table construction,
+the Auditor can read bank i’s column and know that it
+is seeing every asset transfer involving i. There is no
+way for i to “hide” assets on the ledger without actually
+transferring assets and giving control to another bank. In
+contrast, during a traditional audit, a bank could simply
+not show the auditor some of its balance sheet.
+Banks could collude to hold assets for each other tem-
+porarily; for example Bank j might transfer assets to
+Banki and take them back later. For that time period,
+the assets would be part of Banki’s holdings. But banks
+cannot collude after an Auditor poses a query because
+the Auditor has already speciﬁed the timet at which the
+query applies. Any transfer would necessarily have to be
+after t. So at this point, it is too late for a malicious bank
+to create a new transaction transferring assets to another
+bank.
+As described above, a bank can create a transaction
+transferring its own assets without any interaction. This
+is common with most blockchain systems, where only
+the signature of the sender is required to create a valid
+transaction. There is no in-protocol way for a receiver to
+object to a transfer. Given our table construction, every
+bank is affected by every transaction, because a bank must
+USENIX Association 15th USENIX Symposium on Networked Systems Design and Implementation    71
+
+PAGE 9
+Metadata Bank1 Bank2 Bank3 . . . Bankn
+ID Asset Time (Bank of America) (Goldman Sachs) (JPMorgan) . . . (Citigroup)
+1 e 13:06:01 COMM(−106,r1) COMM(106,r2) COMM(0,r3) ··· COMM(0,rn)
+2/17/18 Token1 Token2 Token2 ··· Tokenn
+π A
+1 , π B
+1 , π C
+1 π A
+2 , π B
+2 , π C
+2 π A
+3 , π B
+3 , π C
+3 ··· π A
+n , π B
+n , π C
+n
+Figure 2: Contents of the ledger pertaining to a transaction that sends 106 euros from Bank1 to Bank2. Note that while asset type (euro) is visible
+as part of the metadata, the transaction amount (106 e) and participating institutions (Bank of America and Goldman Sachs) remain private. We
+use Pedersen commitments, so the commitment part of the row has values g−106
+hr1 , g106
+hr2 ,and hr3, . . ., hrn. Similarly, audit tokens pictured
+have values (pk1)r1 , (pk2)r2 , . . .. For each bank Banki, the corresponding column also includes proof-of-assets π A
+i , proof-of-balance π B
+i , and
+proof-of-consistency π C
+i .
+total all of the commitments in its column to respond to
+the Auditor—even commitments for transactions in which
+it was not involved. A malicious Banki could create a
+transaction and not inform the another Bank j of the r j
+used in its entry, even if it is not transferring assets to
+Bank j. Bank j would be unable to respond to theAuditor
+because it would not be able to open up the product of the
+commitments in its column.
+In order to prove the integrity of a transfer transaction,
+zkLedger must ensure an additional invariant:
+• All banks have enough information in the transaction
+to open up commitments for the Auditor
+zkLedger does this by requiring the spending bank to
+include a publicly veriﬁable Token in every entry. This
+is deﬁned asTokenk := (pkk)rk. Bankk uses this token to
+open up the product of its commitments for the Auditor,
+without needing to know rk.
+Using audit tokens. Consider a query for a sum of values
+in a bank’s column. One way of answering this query
+would be to reveal ∑vk and ∑rk. Then the auditor would
+simply check that these plain values are consistent with
+the homomorphically computed value ∏ cmk = g∑vkh∑rk.
+However, a bank does not necessarily know all the
+commitment randomnesses rk (in particular, these values
+are unknown for any transaction that the bank was not
+party to), so the naive approach does not work.
+One approach could be to ask the preparer of the trans-
+action (i.e. the sender) to encrypt rk so that the non-
+participating bank Bankk can decrypt it. To prevent the
+sending bank from placing a “garbage” ciphertext on the
+ledger (and thus making Bankk fail the auditor’s queries),
+one would need a zero-knowledge proof of consistency
+between the encrypted value and the commitment. Con-
+structing a concretely efﬁcient proof for this statement is
+non-trivial: in a nutshell, standard encryption schemes
+(e.g. ElGamal) embed plain-text in a group element, while
+Pedersen commitments would have this value in the expo-
+nent.
+Our insight is that Bankk does not need to open ∑rk
+to prove that ∑vk is correct. Instead, suppose that Bankk
+wants to claim that s = g∑vkh∑rk opens up to a value
+∑vk. To do so, the bank computess′ = s/g∑vk = h∑rk and
+t = ∏k Tokenk = hsk ∑rk. Note that the auditor can also
+compute the values of s′ and t from the ledger and the
+claimed answer ∑vk.
+It sufﬁces for the bank to prove that logs′ t = logh pk.
+Observe that both logarithms evaluate to sk so a bank can
+produce this proof without knowing ∑ri. Moreover, if
+this equation holds then t1/sk = s′ = s/g∑v, but if the ∑v
+was incorrect then knowledge of sk would reveal a linear
+relationship between g and h, which is ruled out by our
+security assumption.
+To show that the r in the Tokenk is the same as the
+r in rk, we require an additional Proof of Consistency
+(π C). This is a zero-knowledge proof asserting that for
+each k the value rk used to form cmk and Tokenk is the
+same. (See Appendix B for details of how such proof is
+constructed.)
+Note that audit tokens are only useful to the bank open-
+ing its commitment; though public, a malicious bank
+cannot use another bank’s Token to successfully open an
+incorrect result or learn information about other bank’s
+transactions.
+4.3 Final transaction construction
+For a transfer transaction in row m, each entry i contains
+the following items:
+• Commitment (cmi): (gvihri) a Pedersen commitment
+to the value we are transferring.
+• Audit Token (Tokeni): (pki)ri. This is used to answer
+audits without knowing the randomness used in the
+commitment.
+• Proof of Balance (π B): a zero-knowledge proof assert-
+ing that the committed values satisfy ∑n
+k=1 vk = 0.
+• Proof of Assets (π A): a new commitment cm′i, corre-
+sponding token Token′
+i, and a zero-knowledge proof
+asserting that either cm′i is a re-commitment of the
+value in cmi or a recommitment to the sum of the val-
+ues in ∏m
+j=0 cm j, and cm′i is in range [0,240). If the
+committed value in cmi is negative, the proof asserts
+bank i consented to the transfer.
+72    15th USENIX Symposium on Networked Systems Design and Implementation USENIX Association
+
+PAGE 10
+• Proof of Consistency ( π C): two zero-knowledge
+proofs asserting the randomness used incmi and Tokeni
+are the same, and the randomness used in cm′i and
+Token′
+i are the same. This is to prevent a malicious
+bank from adding data to the ledger that would stop
+another bank from being able to open its commitments
+for the Auditor.
+Transactions may contain additional metadata in plain-
+text or not. For example, banks might want to include
+encrypted account numbers, addresses, or identifying in-
+formation on behalf of a customer to satisfy the Travel
+Rule speciﬁed in the Bank Secrecy Act of 1970 [1]. zk-
+Ledger supports auditing over metadata in the transaction
+as well, but it does not have a way to publicly verify
+additional metadata.
+4.4 Adding or removing banks
+zkLedger can support dynamically adding or removing
+banks if done so publicly. The participants (or another
+authority) append a signed transaction to the ledger indi-
+cating which banks, and thus columns, should be added
+or removed. For example, to add a new bank to the
+ledger shown in Figure 2, the involved banks would ap-
+pend a transaction to the ledger indicating an intent to
+add Bankn+1. From that point forward, all transactions
+should contain n + 1 entries. The Proof of Assets for
+Bankn+1’s entry in each transaction will start at the row
+where Bankn+1 was added. Similarly, if a bank is re-
+moved, later transactions should not include entries for
+that bank. Since all participants can see which banks
+were added or removed, they can adjust their proofs and
+veriﬁcations accordingly.
+4.5 Optimizations
+zkLedger employs several optimizations to make produc-
+ing and verifying these proofs faster, and to support faster
+auditing. First, caching the product of the commitments
+in a bank’s column improves auditing and proof creation
+speed. Each bank stores a rolling product of commitments
+by row and by asset so that it can quickly produce proofs
+of assets and answer queries from auditors. Using these
+caches, a bank can quickly answer an auditor’s query on
+a subset of rows in the ledger.
+Most transactions in zkLedger do not include every
+bank. Every bank can pre-generate many range proofs
+for the value 0. We speedup transaction throughput by
+parallelizing range proof generation and validation.
+5 Auditing
+Auditing is a critical component of the ﬁnancial system,
+and regulators use various techniques to measure systemic
+ﬁnancial risk. Through the use of sums, means, ratios,
+variance, co-variance, and standard deviation, an auditor
+in zkLedger can determine the following, among other
+measurements:
+• Leverage ratios. zkLedger can show how much of an
+asset a bank has on its books compared to its other
+holdings. This is helpful to estimate counterparty risk.
+• Concentration. Regulators use a measure called the
+Herﬁndahl-Hirschman Index (HHI) to measure how
+competitive an industry is [29].
+• Real-time price indexes. Auditors can get a sense of
+the price of assets that are traded over-the-counter and
+thus not tracked through exchanges.
+Natively, zkLedger supports sums, which means linear
+combinations of values stored in the ledger. This comes
+from the additive structure of Pedersen commitments.
+But zkLedger also supports a more general query model,
+which can be considered in two parts: A map step and a
+reduce step.
+Basic auditing. Consider the basic example where an
+auditor wants to determine how much of an asset a bank
+has on its books. As described in §4.2, the auditor will
+ﬁlter the rows by asset, multiply the entries in the bank’s
+column, and then ask the bank to open the commitment
+product. This only requires one round of communica-
+tion between the auditor and the bank and the messages
+are a constant size, independent of the number of rows.
+Because of zkLedger’s commitment caches, this is very
+fast.
+Map/reduce. An auditor can issue more complex queries
+that might require the exchange of more data or might
+require the participants to look at most of the rows in the
+ledger. Let’s consider an auditor which wants to know the
+mean transaction size for a given bank and asset. An au-
+ditor cannot verify a bank’s answer by simply totaling the
+bank’s column of commitments and dividing the opened
+value by the number of rows, because such a computation
+would have an incorrect denominator. Namely, when the
+bank is not involved in a transaction, its column in the
+row will be commitment to 0, and should be discounted.
+In order to determine the correct denominator, the auditor
+and the bank run the following protocol:
+1. Filter. The bank will ﬁlter the rows by asset.
+2. Produce new commitments. For each row, the bank
+will commit to a single bit b, 1 or 0, depending on if
+the bank was involved in the transaction or not, and cre-
+ate a proof that the bank has done this recommitment
+correctly. Crucially, the auditor cannot distinguish
+between these commitments and so the bank’s trans-
+actions are not revealed. We call this act of producing
+new commitments the map step. The map step also
+requires producing proofs that the new values were
+USENIX Association 15th USENIX Symposium on Networked Systems Design and Implementation    73
+
+PAGE 11
+correctly computed; in our example, for each transac-
+tion, the bank would produce a NIZK proof that b = 1
+if and only if the transaction value was not equal to 0.
+3. Compute number of non-zero transactions. The
+bank computes the homomorphic sum of the new com-
+mitments to bits ⃗b and opens it to reveal how many
+transactions were non-zero. This is the reduce step.
+This is the correct denominator to compute the mean
+transaction size. The auditor cannot tell anything about
+the values in⃗b beyond what is revealed by the sum.
+4. Respond to auditor. The bank then sends the auditor
+the sum of the values in its column, the vector of bit
+commitments and corresponding NIZK proofs, the
+number of its non-zero transactions n, and the sum of
+the r values in the commitments.
+5. Veriﬁcation. The auditor veriﬁes the map step by
+verifying the commitments were done correctly, and
+veriﬁes the reduce step and the number of non-zero
+transactions by conﬁrming that the product of the vec-
+tor of bit commitments is gnh∑N
+k=1 rk.
+6. Compute answer. The auditor computes the mean
+from the sum of the bank’s column and the number of
+non-zero transactions.
+An auditor could ask a bank for outlier transactions
+using a similar technique. For each row, the bank will
+commit to a bit b where b = 1 if a transaction’s value for
+that bank is outside a speciﬁed range. As when computing
+the mean, the auditor can verify these commitments were
+produced correctly and obtain the sum. The bank can then
+open only the transactions where b = 1, and the auditor
+knows exactly how many transactions should be opened.
+More complex auditing queries require multiple map
+and reduce computations. For example, here is how
+an auditor can learn the variance of transaction values
+v1, . . . ,vN:
+1. Compute the average transaction value. Execute
+the protocol described above to compute the number
+of non-zero transactions n, and their average value ¯v.
+2. Apply the squaring map. For each entry vi in its row,
+the bank produces a fresh commitment cm′
+i to v2
+i and
+sends these commitments to the auditor. The bank also
+supplies NIZK proofs that the value hidden in each
+cm′
+i is exactly the square of the value vi committed to
+on the ledger.
+3. Apply the reduce step. The auditor computes the
+product of the commitments cm′
+i, and the bank opens
+up this commitment as V = v2
+1 +··· + v2
+N by revealing
+R = ∑N
+i=1 ri. The auditor conﬁrms that the product of
+the commitments is equal to gV hR.
+The auditor now computes the variance σ as follows:
+σ 2 = 1
+n ∑vi̸=0(vi− ¯v)2 = 1
+nV− ¯v2.
+We note that whereas the square mapping used above
+corresponds to the second moment (variance), zkLedger
+can also compute higher statistical moments (e.g. skew-
+ness and kurtosis) using similar techniques and using
+cubing and fourth power mappings, respectively. See Ap-
+pendix A for a list of measurements zkLedger supports.
+zkLedger can support limited information release by
+using more complex reduce mappings. For example, in-
+stead of releasing the sum of values, the bank can produce
+a commitment to the rounded sum of values (e.g. to the
+ﬁrst two decimal places), and use range proofs, also im-
+plemented in zkLedger, to show that the rounding was
+done correctly. Revealing just the order of magnitude of
+the quantity at hand lets the parties balance the granularity
+of information disclosure.
+6 Implementation
+To evaluate zkLedger’s design, we implemented a pro-
+totype of zkLedger in Go. Our prototype uses a modi-
+ﬁed version of thebtcec library [2] that contains the pa-
+rameters and methods to compute with the elliptic curve
+secp256k1. We use Go’s built-in SHA-256 implementa-
+tion for our cryptographic hash function, and determin-
+istically pick g and h by applying point decompression
+to the “nothing-up-my-sleeve” strings SHA256(0) and
+SHA256(1). Our prototype consists of approximately
+3,200 lines of code, of which 40% implement crypto-
+graphic tools used by zkLedger (zero-knowledge proofs,
+range proofs, etc).
+The implementation of the curve in zkLedger uses Go’s
+big.Int type, which we make no effort to compress or
+serialize in an efﬁcient way. A more optimized imple-
+mentation could compress curve points. Our range proofs
+implement the protocol used in Conﬁdential Assets [42].
+Our NIZKs are based on Generalized Schnorr Proofs,
+which are three move interactive protocols; to make them
+non-interactive we apply the Fiat-Shamir heuristic [26],
+where we instantiate the random oracle using the SHA-
+256 hash function. Our prototype implementation does
+not implement the complex queries described in §5, and
+thus we do not evaluate them in §7.
+7 Evaluation
+Our evaluation answers the following questions:
+• How expensive is it to store, prove and verify the differ-
+ent proofs in zkLedger? (§7.2)
+• How does auditing scale with the size of the ledger?
+(§7.3)
+• How does zkLedger scale with the number of banks?
+(§7.4)
+74    15th USENIX Symposium on Networked Systems Design and Implementation USENIX Association
+
+PAGE 12
+# Component Create Verify Size
+2k Commitment 0 .5 ms 0 .5 ms 64 B
+2k Consistency 0 .7 ms 0 .8 ms 224 B
+k Disjunctive 0 .9 ms 0 .9 ms 288 B
+k Range 4 .7 ms 3 .5 ms 3936 B
+Table 1: Number of each proof component in a transaction for k banks.
+Size of and time to create and verify the components with 12 cores. The
+range proof create and verify beneﬁt from the additional cores.
+7.1 Experimental setup
+Microbenchmarks. We run microbenchmarks on a 12
+core Intel machine with i7-X980 3.33 GHz CPUs and
+24GB of RAM, running 64-bit Linux 4.4.0 on Ubuntu
+16.04.3. Each microbenchmark runs the same code a
+Bank runs to create and validate transactions.
+Distributed experiment. We run the distributed experi-
+ments on a set of 12 virtual machines each with 4 cores of
+Intel Xeon E5-2640 2.5 GHz processors, 24GB of RAM,
+and the same software setup as above. There is one au-
+ditor, one server providing the service of the ledger, and
+a varying number of banks, one per server. Servers com-
+municate using the net/rpc Go package over TCP. All
+experiments use Go version 1.9.
+7.2 Proof overhead in zkLedger
+Table 1 shows the time to prove and verify the proofs in a
+transaction in zkLedger. There are two commitments, two
+consistency proofs, and one each of the disjunctive and
+range proofs in a transaction entry. There is a transaction
+entry per Bank. Table 1 also shows the sizes of the various
+proofs, in bytes. These sizes are estimated based on the
+size of the underlying ﬁelds in the struct in memory;
+these proofs could be further compressed. Range proofs
+dominate the size of the transactions.
+The left graph in Figure 3 shows the time it takes to
+create and verify a transaction varying the number of
+overall banks, which increases the number of entries per
+transaction. This indicates that as we increase the number
+of banks, both transaction creation and veriﬁcation times
+per bank increase linearly, but parallelization helps. Prov-
+ing and validating range proofs dominates transaction
+creation and veriﬁcation, but this cost is also highly paral-
+lelizable. 12 cores gives a 2.8× speedup when creating a
+transaction with 20 banks; a bank can create or validate a
+transaction for up to 20 banks in less than 200ms.
+As described in §4.1, zkLedger uses Borromean ring
+signatures to prove that a value is in a certain range, and
+supports values up to 240. Reducing the supported range
+of values would reduce range proof cost since that cost is
+linear in the number of bits in the size of the range. There
+are also newer proof systems, such as Bulletproofs, which
+might create much smaller range proofs [13]. We plan to
+evaluate zkLedger with Bulletproofs in future work.
+7.3 Cost of auditing ledgers
+The left graph in Figure 4 shows that for certain func-
+tions, the time to audit is independent of the number of
+transactions in the ledger. This is because the Auditor
+and Banks maintain commitment caches, which already
+have the commitment product necessary to prove to the
+auditor the sum of the values in its column. The audit
+function is measuring the Herﬁndhal-Hirschman Index,
+so the auditor communicates with each bank.
+When the auditor cannot use a commitment cache, per-
+haps because it was ofﬂine, it must process the whole
+ledger to compute the commitment product. This also
+applies to more complex auditing like the types described
+in §5, when the auditor has to verify recommitments for
+every row in the ledger. These costs are shown in the
+middle graph in Figure 4. This graph shows how long it
+takes the auditor to compute the Herﬁndahl-Hirschman
+Index on a ledger of varying sizes without using the com-
+mitment caches, so the auditor must process every row of
+the ledger. In these measurements, the auditor does not
+verify each row. As expected, this time increases linearly
+with the number of rows. This indicates that maintaining
+commitment caches is important for real-time auditing.
+However, even without commitment caches, auditing time
+is reasonable: 3.5 seconds for 100K transactions. This
+suggests the complex auditing queries, in which the au-
+ditor computes a similar set of operations per row, will
+also be on the order of many seconds. zkLedger currently
+only maintains commitment product caches per asset per
+bank, but could maintain more.
+For a ﬁxed size ledger, this audit function costs order
+the number of banks. The right graph in Figure 4 demon-
+strates the auditing costs of computing the Herﬁndahl-
+Hirschman Index on a ledger of 2000 transactions as we
+vary the number of banks, both with and without com-
+mitment caches. The auditor audits the banks in parallel.
+Auditing cost for this function grows slightly with the
+number of banks, since more banks increase the variabil-
+ity in parallel auditing and the auditor must wait for the
+last bank to respond before computing the ﬁnal answer.
+In these ﬁgures, each point is the mean of running the
+auditing query 20 times, with error bars representing one
+standard deviation from the mean.
+7.4 Scaling with more banks
+There are two signiﬁcant costs that grow with the number
+of banks in zkLedger: a serial step to create transactions
+that increases linearly, and verifying transactions which
+increases quadratically with the number of banks. As
+USENIX Association 15th USENIX Symposium on Networked Systems Design and Implementation    75
+
+PAGE 13
+ 0
+ 100
+ 200
+ 300
+ 400
+ 500
+ 600
+ 2  4  6  8  10  12  14  16  18  20
+Time (ms)
+number of banks
+verify-1
+create-1
+verify-12
+create-12
+ 0
+ 200
+ 400
+ 600
+ 800
+ 1000
+ 2  3  4  5  6  7  8  9  10
+Time (ms)
+number of banks
+complete transactions
+ 0
+ 2
+ 4
+ 6
+ 8
+ 10
+ 12
+ 2  3  4  5  6  7  8  9  10
+Throughput (txns/sec)
+number of banks
+all banks transacting
+one bank transacting
+Figure 3: Transaction creation and veriﬁcation time for one bank (left), varying the number of entries in the transaction. Single-threaded and
+multi-threaded performance, with 12 threads. Time to fully process a transaction including creation, broadcast to ledger, banks and auditor, and
+veriﬁcation by all parties (middle). Throughput (right) varying the number of banks.
+ 0
+ 2
+ 4
+ 6
+ 8
+ 10
+ 12
+0K 20K 40K 60K 80K 100K
+Auditing time (ms)
+Transactions in ledger
+online auditor
+ 0
+ 500
+ 1000
+ 1500
+ 2000
+ 2500
+ 3000
+ 3500
+0K 20K 40K 60K 80K 100K
+Transactions in ledger
+offline auditor
+ 0
+ 20
+ 40
+ 60
+ 80
+ 100
+ 120
+ 2  3  4  5  6  7  8  9  10
+Number of banks
+offline auditor
+online auditor
+Figure 4: Time to audit ledgers of different sizes (4 banks), and with a varying number of banks (2000 row ledger). Audit time is independent of the
+size of the ledger (left) thanks to commitment caches maintained by the online auditor. When commitment cache optimization is turned off (middle)
+the audit time is linear in the size of the ledger. Audit time grows with the number of banks (right) and is much higher without commitment caches.
+described in §4.1, a bank needs to use its entry from
+transaction n−1 to create transaction n. So though a bank
+can use many cores to produce the proofs for a single
+transaction in parallel, multiple banks cannot produce
+different transactions in parallel. In zkLedger, banks start
+creating transaction n before seeing n− 1 but the bank
+cannot complete the transaction until n− 1 is accepted to
+the ledger and veriﬁed, causing an inherent bottleneck.
+The second major cost is around veriﬁcation. Every
+bank must verify every transaction, so the more banks,
+the larger each transaction and thus the more work that
+needs to be done by each bank. The middle graph in
+Figure 3 measures the time it takes one bank to create
+and all participants in zkLedger to completely process
+a transaction. One bank creates a transaction and sends
+it to the ledger, which then broadcasts the transaction to
+all banks and an online auditor. The auditor and every
+bank verify the transaction. As we increase the number
+of banks, work increases quadratically; however, banks
+can verify transactions in parallel so the time to process
+transactions only increases linearly. The right graph in
+Figure 3 shows that as we surmised, zkLedger’s through-
+put worsens with more banks. The one bank transacting
+line in this graph is the same data as the middle graph.
+Since range proofs dominate the costs of transaction
+creation and veriﬁcation, we are optimistic that a faster
+range proof implementation will directly improve perfor-
+mance. zkLedger’s current performance is comparable
+to Solidus, a privacy-preserving distributed ledger which
+achieves 3-4 transactions per second with online valida-
+tion but, unlike zkLedger, does not support auditing.
+8 Future work
+zkLedger focuses on providing provably correct auditing
+over private transaction data, but zkLedger does not have
+a way to recover if the distributed ledger is corrupted. In
+this case, the parties maintaining the ledger would have
+to come together to recreate historical transactions. zk-
+Ledger also does not provide recourse if a bank commits
+an unintended transaction to the ledger. A future ver-
+sion of zkLedger might provide rectifying transactions or
+participant agreed-upon rollback.
+9 Conclusion
+zkLedger is the ﬁrst distributed ledger system to provide
+strong transaction privacy, public veriﬁability, and com-
+plete, provably correct auditing. zkLedger supports a rich
+set of auditing queries which are useful to measure the
+ﬁnancial health of a market. We developed a design using
+non-interactive zero-knowledge proofs to prove transac-
+tions maintain ﬁnancial invariants and to support auditing.
+Our evaluation shows that zkLedger has reasonable per-
+formance for transaction settlement and auditing.
+10 Acknowledgements
+We thank Alexander Chernyakhovsky, Thaddeus Dryja,
+David Lazar, Ronald L. Rivest, C.J. Williams, and our
+shepherd and reviewers for helpful comments. The re-
+search leading to these results has received funding from:
+the Center for Science of Information (CSoI), an NSF
+Science and Technology Center, under grant agreement
+CCF-0939370; and the Ethics and Governance of Artiﬁ-
+cial Intelligence Fund.
+76    15th USENIX Symposium on Networked Systems Design and Implementation USENIX Association
+
+PAGE 14
+References
+[1] Bank secrecy act of 1970, October 1970. 12 U.S.C. 103.
+[2] Package btcec implements support for the elliptic curves
+needed for Bitcoin., July 2017.https://godoc.org/
+github.com/btcsuite/btcd/btcec.
+[3] ABBE , E. A., K HANDANI , A. E., AND LO, A. W.
+Privacy-preserving methods for sharing ﬁnancial risk ex-
+posures. The American Economic Review 102, 3 (2012),
+65–70.
+[4] ARASU , A., B LANAS , S., E GURO , K., K AUSHIK , R.,
+KOSSMANN , D., R AMAMURTHY , R., AND VENKATE -
+SAN , R. Orthogonal security with cipherbase. In CIDR
+(2013).
+[5] BAJAJ , S., AND SION , R. Trusteddb: A trusted hardware-
+based database with privacy and data conﬁdentiality.IEEE
+Transactions on Knowledge and Data Engineering 26, 3
+(2014), 752–765.
+[6] BAUMANN , A., P EINADO , M., AND HUNT, G. Shielding
+applications from an untrusted cloud with haven. ACM
+Transactions on Computer Systems (TOCS) 33, 3 (2015),
+8.
+[7] BEN-SASSON , E., C HIESA , A., G ENKIN , D., T ROMER ,
+E., AND VIRZA , M. SNARKs for C: Verifying program
+executions succinctly and in zero knowledge. In Advances
+in Cryptology–CRYPTO 2013. Springer, 2013, pp. 90–108.
+[8] BEN-S ASSON , E., C HIESA , A., G REEN , M., T ROMER ,
+E., AND VIRZA , M. Secure sampling of public parameters
+for succinct zero knowledge proofs. In Proceedings of the
+2015 IEEE Symposium on Security and Privacy (2015),
+SP ’15, pp. 287–304.
+[9] BLUM , M., F ELDMAN , P., AND MICALI , S. Non-
+interactive zero-knowledge and its applications. In Pro-
+ceedings of the 20th Annual ACM Symposium on Theory
+of Computing (1988), STOC ’88, pp. 103–112.
+[10] BOGDANOV , D., T ALVISTE , R., AND WILLEMSON , J.
+Deploying secure multi-party computation for ﬁnancial
+data analysis. In International Conference on Financial
+Cryptography and Data Security (2012), Springer, pp. 57–
+64.
+[11] BOWE, S., G ABIZON , A., AND GREEN , M. A multi-
+party protocol for constructing the public parameters of
+the Pinocchio zk-SNARK. Cryptology ePrint Archive,
+Report 2017/602, 2017.
+[12] BOWE, S., G ABIZON , A., AND MIERS , I. Scalable multi-
+party computation for zk-SNARK parameters in the ran-
+dom beacon model. Cryptology ePrint Archive, Report
+2017/1050, 2017.
+[13] B ¨UNZ , B., B OOTLE , J., B ONEH , D., P OELSTRA , A.,
+AND MAXWELL , G. Bulletproofs: Short proofs for Con-
+ﬁdential Transactions and more. InSecurity and Privacy
+(SP), 2018 IEEE Symposium on (2018), IEEE.
+[14] BURKHART , M., S TRASSER , M., M ANY, D., AND DIM-
+ITROPOULOS , X. Sepia: Privacy-preserving aggregation
+of multi-domain network events and statistics. Network 1,
+101101 (2010).
+[15] CASTRO , M., AND LISKOV, B. Practical byzantine fault
+tolerance. In OSDI (1999), vol. 99, pp. 173–186.
+[16] CECCHETTI , E., Z HANG , F., J I, Y., KOSBA , A., J UELS ,
+A., AND SHI, E. Solidus: Conﬁdential distributed ledger
+transactions via pvorm.
+[17] CHAIN , I. Conﬁdential assets. https:
+//blog.chain.com/hidden-in-plain-
+sight-transacting-privately-on-a-
+blockchain-835ab75c01cb.
+[18] CORRIGAN -GIBBS , H., AND BONEH , D. Prio: Private,
+robust, and scalable computation of aggregate statistics.
+arXiv preprint arXiv:1703.06255 (2017).
+[19] COUNCIL , F. R. Developments in audit 2016/2017
+full report, 2017. http://www.frc.org.uk/
+getattachment/915c15a4-dbc7-4223-b8ae-
+cad53dbcca17/Developments-in-Audit-
+2016-17-Full-report.pdf .
+[20] CRAMER , R., D AMG ˚ARD , I., AND SCHOENMAKERS ,
+B. Proofs of partial knowledge and simpliﬁed design of
+witness hiding protocols. In Advances in Cryptology -
+CRYPTO ’94, 14th Annual International Cryptology Con-
+ference, Santa Barbara, California, USA, August 21-25,
+1994, Proceedings (1994), pp. 174–187.
+[21] DAGHER , G. G., B ¨UNZ , B., B ONNEAU , J., C LARK , J.,
+AND BONEH , D. Provisions: Privacy-preserving proofs
+of solvency for Bitcoin exchanges. In Proceedings of the
+22nd ACM SIGSAC Conference on Computer and Com-
+munications Security (Denver, CO, 2015), ACM, pp. 720–
+731.
+[22] Corda, 2017. https://github.com/corda/
+corda.
+[23] Digital asset holdings, 2017. http://digitalasset.
+com.
+[24] Regulation (EU) 2016/679 of the European Parliament
+and of the Council of 27 April 2016 on the protection of
+natural persons with regard to the processing of personal
+data and on the free movement of such data, and repealing
+Directive 95/46/EC (General Data Protection Regulation).
+Ofﬁcial Journal of the European Union L119 (May 2016),
+1–88.
+[25] FELDMAN , A. J., Z ELLER , W. P., F REEDMAN , M. J.,
+AND FELTEN , E. W. Sporc: Group collaboration us-
+ing untrusted cloud resources. In OSDI (2010), vol. 10,
+pp. 337–350.
+[26] FIAT, A., AND SHAMIR , A. How to prove yourself:
+practical solutions to identiﬁcation and signature problems.
+In Proceedings of the 6th Annual International Cryptology
+Conference (1987), CRYPTO ’87, pp. 186–194.
+[27] GARMAN , C., G REEN , M., AND MIERS , I. Accountable
+privacy for decentralized anonymous payments. Cryp-
+tology ePrint Archive, Report 2016/061, 2016. http:
+//eprint.iacr.org/2016/061.
+[28] GREENBERG , A. Fbi says it’s seized $28.5 million in
+bitcoins from ross ulbricht, alleged owner of silk road.
+Forbes 25 (2013).
+USENIX Association 15th USENIX Symposium on Networked Systems Design and Implementation    77
+
+PAGE 15
+[29] H ERFINDAHL , O. C. Concentration in the steel industry.
+PhD thesis, Columbia University New York, 1950.
+[30] LAMPORT , L., ET AL . Paxos made simple. ACM Sigact
+News 32, 4 (2001), 18–25.
+[31] LI, J., K ROHN , M. N., M AZIERES , D., AND SHASHA ,
+D. E. Secure untrusted data repository (sundr). In OSDI
+(2004), vol. 4, pp. 9–9.
+[32] MAHAJAN , P., S ETTY, S., L EE, S., C LEMENT , A.,
+ALVISI , L., D AHLIN , M., AND WALFISH , M. Depot:
+Cloud storage with minimal trust. ACM Transactions on
+Computer Systems (TOCS) 29, 4 (2011), 12.
+[33] MAURER , U. Unifying zero-knowledge proofs of knowl-
+edge. Proceedings of the 2nd International Conference on
+Cryptology in Africa (2009), 272–286.
+[34] MAXWELL , G. Conﬁdential transactions. https:
+//people.xiph.org/˜greg/confidential_
+values.txt (Accessed 8/2017) (2015).
+[35] MAXWELL , G., AND POELSTRA , A. Borromean ring
+signatures. https://raw.githubusercontent.
+com/Blockstream/borromean_paper/
+master/borromean_draft_0.01_34241bb.
+pdf (Accessed 6/2017) (2015).
+[36] MEIKLEJOHN , S., P OMAROLE , M., J ORDAN , G.,
+LEVCHENKO , K., M CCOY, D., V OELKER , G. M., AND
+SAVAGE, S. A ﬁstful of bitcoins: characterizing payments
+among men with no names. In Proceedings of the 2013
+conference on Internet measurement conference (2013),
+ACM, pp. 127–140.
+[37] NAKAMOTO , S. Bitcoin: A peer-to-peer electronic cash
+system, 2008.
+[38] OBER , M., K ATZENBEISSER , S., AND HAMACHER , K.
+Structure and anonymity of the bitcoin transaction graph.
+Future internet 5, 2 (2013), 237–250.
+[39] ONGARO , D., AND OUSTERHOUT , J. K. In search of an
+understandable consensus algorithm. In USENIX Annual
+Technical Conference(2014), pp. 305–319.
+[40] PAPADIMITRIOU , A., B HAGWAN , R., C HANDRAN , N.,
+RAMJEE , R., H AEBERLEN , A., S INGH , H., M ODI , A.,
+AND BADRINARAYANAN , S. Big data analytics over
+encrypted datasets with seabed. In OSDI (2016), pp. 587–
+602.
+[41] PEDERSEN , T. P. Non-interactive and information-
+theoretic secure veriﬁable secret sharing. In Proceedings
+of the 11th Annual International Cryptology Conference
+(1992), CRYPTO ’91, pp. 129–140.
+[42] POELSTRA , A., B ACK, A., F RIEDENBACH , M.,
+MAXWELL , G., AND WUILLE , P. Conﬁdential assets,
+2017. 4th Workshop on Bitcoin and Blockchain Research.
+[43] POPA, R. A., R EDFIELD , C., Z ELDOVICH , N., AND BAL-
+AKRISHNAN , H. CryptDB: protecting conﬁdentiality with
+encrypted query processing. In Proceedings of the Twenty-
+Third ACM Symposium on Operating Systems Principles
+(2011), ACM, pp. 85–100.
+[44] POPA, R. A., S TARK, E., H ELFER , J., V ALDEZ , S., Z EL-
+DOVICH , N., K AASHOEK , M. F., AND BALAKRISHNAN ,
+H. Building web applications on top of encrypted data
+using mylar. In NSDI (2014), pp. 157–172.
+[45] REID , F., AND HARRIGAN , M. An analysis of anonymity
+in the bitcoin system. In Security and privacy in social
+networks. Springer, 2013, pp. 197–223.
+[46] RON, D., AND SHAMIR , A. Quantitative analysis of
+the full bitcoin transaction graph. In International Confer-
+ence on Financial Cryptography and Data Security(2013),
+Springer, pp. 6–24.
+[47] SASSON , E. B., C HIESA , A., G ARMAN , C., G REEN ,
+M., M IERS , I., T ROMER , E., AND VIRZA , M. Zerocash:
+Decentralized anonymous payments from Bitcoin. In Se-
+curity and Privacy (SP), 2014 IEEE Symposium on(2014),
+IEEE, pp. 459–474.
+[48] S CHNORR , C.-P. Efﬁcient signature generation by smart
+cards. Journal of cryptology 4, 3 (1991), 161–174.
+[49] SCHUSTER , F., COSTA, M., F OURNET , C., G KANTSIDIS ,
+C., P EINADO , M., M AINAR -RUIZ , G., AND RUSSI -
+NOVICH , M. Vc3: Trustworthy data analytics in the cloud
+using sgx. In Security and Privacy (SP), 2015 IEEE Sym-
+posium on (2015), IEEE, pp. 38–54.
+[50] TU, S., K AASHOEK , M. F., M ADDEN , S., AND ZEL-
+DOVICH , N. Processing analytical queries over encrypted
+data. In Proceedings of the VLDB Endowment (2013),
+vol. 6, VLDB Endowment, pp. 289–300.
+[51] Zcash, 2017. http://z.cash.
+[52] ZHENG , W., D AVE, A., B EEKMAN , J. G., P OPA, R. A.,
+GONZALEZ , J. E., AND STOICA , I. Opaque: An oblivious
+and encrypted distributed analytics platform. In NSDI
+(2017), pp. 283–298.
+A Auditing Queries
+Figure 5 is a list of the types of measurements zkLedger
+supports, including the estimated running time and the
+data beyond the measurement that is leaked. For example,
+as described in §5, computing transaction size variance
+requires leaking the mean transaction size and number of
+transactions per bank.
+B Zero-knowledge proofs and privacy
+guarantees
+To build our zero-knowledge protocols we rely on the
+following general result of Maurer (Theorem 3, [33]):
+Theorem B.1. Let (H1, ⋆) and (H2,⊗) be two (not-
+necessarily commutative) groups and f : H1→ H2 be a
+group homomorphism: f (x ⋆ y) = f (x)⊗ f (y). Let ℓ∈ Z,
+u∈ H1, C⊂ Z be such that:
+1. gcd(c1− c2, ℓ) = 1 for all c1,c2∈ C (with c1̸= c2),
+and
+2. f (u) = zℓ.
+There exists a 2-extractable Σ-protocol for language
+L :={z :∃w s.t. z = f (w)}. Moreover, a protocol con-
+78    15th USENIX Symposium on Networked Systems Design and Implementation USENIX Association
+
+PAGE 16
+Measurement Time Additional information leaked
+Sum total of asset(s) per bank O(1) none
+Outlier transactions per bank O(n) none
+Concentration O(k) Sum totals per bank
+Ratio holdings O(k) Sum totals per bank, number of transactions per bank
+Mean transaction size per bank O(kn) Number of transactions per bank
+Variance, skew, kurtosis O(kn) Mean per bank, number of transactions per bank
+Real-time price averages O(kn) Number of transactions and average per bank over time period t
+Figure 5: Types of supported auditing queries, their running time to audit based on the number of banks k and the number of rows in the ledger n,
+and a description of what information is leaked to the auditor.
+sisting of s rounds is proof-of-knowledge if1/|C|s is negli-
+gible, and zero-knowledge if|C| is polynomially bounded.
+Using Theorem B.1 we can now unify the treatment
+of most of the zero-knowledge proofs used in our sys-
+tem. For example, the consistency proofs π C rely on the
+following result:
+Theorem B.2. Let G be an order- r cyclic group and
+g,h, pk be any three elements of G. There exists a
+2-extractable Σ-protocol for language Laux :={(cm,
+Token) :∃v,r s.t. cm = gvhr∧ Token = pkr}.
+Proof. Consider H1 = Zr× Zr, deﬁning the group opera-
+tion to be component-wise addition, and let H2 = G× G,
+similarly deﬁning group operation to be component-
+wise. Then f (x,y) := (gxhy, pky) is a group homomor-
+phism between H1 and H2. Indeed, f (x1 + x2,y1 + y2) =
+(gx1+x2hy1+y2, pky1+y2) = f (x1,y1)⊗ f (x2,y2). Further-
+more, setting ℓ = r and u = (0,0) we have that for all
+z∈ H2 the following holds: zℓ = (1,1) = f (u). Therefore,
+we can apply Theorem B.1 and conclude that Laux has a
+2-extractable Σ-protocol.
+To summarize, the three proofs in zkLedger (see Sec-
+tion 4.3) that relate commitments cmi :=: gvihri and audit
+tokens Tokeni := (pki)ri have the following form:
+• Proof of Assets ( π A). This proof consists of a new
+commitment cm′i, together with an audit token Token′
+i,
+and a zero-knowledge proof asserting that either cm′i is
+a re-commitment of the value incmi or a recommitment
+to the sum of the values in ∏m
+j=0 cm j. To create this
+proof zkLedger relies on Theorem B.1 for constituent
+proofs; as these are Sigma-protocols we apply the stan-
+dard OR-composition [20] to get the ﬁnal disjunctive
+zero-knowledge proof. To prove that the commited
+value is in the range we use the range proofs in Conﬁ-
+dential Assets [42]. We are investigating more recent
+proof systems (e.g. Bulletproofs [13]) to further reduce
+the proof size.
+• Proof of Balance ( π B). In our implementation this
+proof is an empty string: the prover simply chooses the
+commitment randomness subject to condition ∑ri = 0.
+With such a choice the auditor homomorphically adds
+the commitments and checks that this addition results
+in the neutral element of the group ∏ cmi = g∑vih∑ri =
+g0h0 = 1.
+• Proof of Consistency (π C). We use two proofs derived
+from Theorem B.2 to assert that the randomness used
+in cmi and Tokeni are the same, and the randomness
+used in cm′i and Token′
+i are the same.
+C Privacy in the combined system
+Pedersen commitments provide information-theoretic pri-
+vacy. In zkLedger Pedersen commitments are published
+together with authentication tokens and zero-knowledge
+proofs. We note that zero-knowledge proofs indeed don’t
+spoil the information-theoretic privacy of committed val-
+ues: the output of the zero-knowledge proof simulator
+is identical to the output produced by parties in the sys-
+tem. However, when combining Pedersen commitments
+and authentication tokens, the privacy guarantees become
+computational as we now explain.
+The commitment, audit token, and public key
+triple (cm, Token) is of the form (gvhr, pkr, pk) =
+(gvhr,hsk·r,hsk), and these three values uniquely deter-
+mine the v. That is, if an adversary could break the dis-
+crete logarithm problem, it could solve forsk, use that and
+value of Token to infer r, and ﬁnally recoverv. That said,
+under the Decisional Difﬁe-Hellman (DDH) assumption,
+no information is leaked. Furthermore, the DDH assump-
+tion is widely assumed to hold in zkLedger’s elliptic curve
+group.
+Recall, that DDH holds if no polynomially-bounded
+adversary can distinguish between tuples of the form
+(h,ha,hb,hab) and (h,ha,hb,hc) for a randomly chosen
+generator h and exponents a,b,c. Assume that a state-
+ful adversary AzkL, when given input (g,h, pk) is able to
+produce two values v1 and v2 such that it can distinguish
+commitments (and associated audit tokens) to v1 from
+commitments (and audit tokens) to v2, i.e. the adversary
+is able to distinguish the distributions (gv1hr,hsk·r,hsk)
+USENIX Association 15th USENIX Symposium on Networked Systems Design and Implementation    79
+
+PAGE 17
+and (gv2hr,hsk·r,hsk). We now show how to use AzkL to
+construct an adversary ADDH breaking the DDH assump-
+tions.
+After receiving its challenge (h,x,y,z), where (x,y,z)
+is distributed either as (ha,hb,hab) or as (ha,hb,hc), the
+adversary ADDH proceeds as follows. It samples a random
+generator g and calls AzkL on input (g,h,x), x now serving
+the role of the bank’s public key. When AzkL returns
+two values v1 and v2, the DDH adversary ADDH picks a
+random k∈{ 1,2} and prepares cmk = gvky, Token = z
+and sends (cmk, Token) to AzkL. Finally, if AzkL’s guess
+for k is correct, ADDH responds that the DDH challenge
+was of the form (h,ha,hb,hab) (i.e. a DDH quadruple),
+otherwise it responds that the DDH challenge was of the
+form (h,ha,hb,hc) (i.e. a random quadruple).
+Note that when ADDH’s challenge is a DDH quadru-
+ple, the zkLedger adversary AzkL is run on a distribution
+it expects. In particular, all of its inputs are correctly
+formed with respect to sk = a and r = b. Whereas, when
+ADDH’s challenge is a random quadruple, the inputs to
+AzkL have information-theoretically no information about
+the committed value: indeed, Token = hc is unrelated to
+cm = gvhb. Therefore, if the zkLedger adversary AzkL
+wins the commitment hiding game with non-negligible
+advantage, so does ADDH in the DDH game. Note that
+the proof extends to the multiple entry case by a standard
+hybrid argument.
+80    15th USENIX Symposium on Networked Systems Design and Implementation USENIX Association

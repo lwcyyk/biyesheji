@@ -1,0 +1,1338 @@
+draft-das-finality-bound-revocation-00
+Light
+Dark
+Auto
+Internet-Draft
+Finality-Bound Revocation
+September 2026
+Das
+Expires 20 March 2027
+[Page]
+Workgroup:
+Individual Submission
+Internet-Draft:
+draft-das-finality-bound-revocation-00
+Published:
+16 September 2026
+Intended Status:
+Informational
+Expires:
+20 March 2027
+Author:
+S. Das
+Independent
+Revoked but Still Executable: Closing the Authorization-to-Effect Gap with Finality-Bound Revocation
+Abstract
+Revocation is often treated as a property of a credential, token, session, grant,
+policy, or identity record.  In consequence-bearing systems, however, an authorization
+can be completely legitimate when issued and still become unsafe before the authorized
+operation becomes externally effective.  The security question is therefore not only
+whether revocation exists, but whether a revocation that becomes authoritative before a
+protected commit is guaranteed to control that commit.  The severity is deployment-
+dependent, but can be high in financial, administrative, AI-agent, cloud-control,
+confidential-compute, device, industrial, or other environments where a stale-but-valid
+authorization can produce an irreversible or externally consequential effect.¶
+This document describes a finality-bound revocation model.  A Candidate Act remains in
+a Non-Effective State after upstream authorization.  The authorization is bound to an
+act-specific revocation basis, such as a protected revocation generation, epoch, status
+root, or equivalent authority state.  Immediately before the protected consequence is
+committed, a Finality Sink verifies that no applicable revocation, suspension,
+narrowing, or superseding authorization state has become load-bearing.  Where the
+revocation state changed, the act is rejected, re-authorized, or explicitly shown to
+survive the change under an authoritative rule.  With authoritative current state,
+atomic check-and-commit semantics, and complete mediation of all effectuation paths,
+this is intended as a prevention property for the protected stale act; deployments that
+permit bounded staleness or incomplete path coverage obtain mitigation rather than the
+same prevention guarantee.¶
+The model complements existing mechanisms rather than replacing them.  OAuth Token
+Revocation [RFC7009] and Token Introspection [RFC7662]
+provide standardized token-state mechanisms; Microsoft Entra Continuous Access
+Evaluation [MS-CAE] demonstrates event-driven rejection of otherwise
+unexpired tokens; Amazon Verified Permissions and Cedar
+[AWS-VERIFIED-PERMISSIONS] provide fine-grained policy-evaluation
+mechanisms; Google Cloud IAM [GOOGLE-IAM-DENY] provides centrally
+managed deny-policy controls; and confidential-computing and attestation platforms
+such as NVIDIA attestation [NVIDIA-ATTEST] and Arm CCA
+[ARM-CCA] can provide protected execution and trust inputs.  These
+technologies are cited as industrial alignment and integration points, not as
+assertions of vulnerability, deficiency, non-conformance, affiliation, or endorsement.¶
+The proposed delta is an effectuation-bound invariant: if revocation becomes authoritative
+before an act crosses the protected effectuation boundary, a previously valid permit must
+not remain sufficient merely because its signature, expiry, sender constraint, earlier
+authorization decision, or cached status result is still valid.  The document therefore
+focuses on the ordering and binding between revocation state and the exact protected
+commit, including queued work, multi-hop delegation, alternate effectuation paths,
+rollback, crash recovery, and TOCTOU races.¶
+The document asks the IETF community whether existing standards or deployed mechanisms
+already provide this invariant in full, where the correct effectuation boundary lies,
+and what interoperability work, if any, is justified.  Criticism, corrections,
+counterexamples, implementation experience, and pointers to existing equivalent
+mechanisms are explicitly invited.¶
+Status of This Memo
+This Internet-Draft is submitted in full conformance with the
+provisions of BCP 78 and BCP 79.¶
+Internet-Drafts are working documents of the Internet Engineering Task
+Force (IETF). Note that other groups may also distribute working
+documents as Internet-Drafts. The list of current Internet-Drafts is
+at https://datatracker.ietf.org/drafts/current/.¶
+Internet-Drafts are draft documents valid for a maximum of six months
+and may be updated, replaced, or obsoleted by other documents at any
+time. It is inappropriate to use Internet-Drafts as reference
+material or to cite them other than as "work in progress."¶
+This Internet-Draft will expire on 20 March 2027.¶
+Copyright Notice
+Copyright (c) 2026 IETF Trust and the persons identified as the
+document authors. All rights reserved.¶
+This document is subject to BCP 78 and the IETF Trust's Legal
+Provisions Relating to IETF Documents
+(https://trustee.ietf.org/license-info) in effect on the date of
+publication of this document. Please review these documents
+carefully, as they describe your rights and restrictions with
+respect to this document. Code Components extracted from this
+document must include Revised BSD License text as described in
+Section 4.e of the Trust Legal Provisions and are provided without
+warranty as described in the Revised BSD License.¶
+▲
+Table of Contents
+1. Introduction
+Security systems routinely issue authority that remains usable for some period of time.
+Access tokens, session credentials, signed permits, workload credentials, delegated
+grants, capability objects, and application-specific approvals permit useful decoupling
+between authorization and execution.¶
+During that interval, circumstances can change.  A principal can be disabled, an
+administrator can revoke a grant, a service principal can be suspended, a resource can
+change owner, a destination can be blocked, a purpose can be withdrawn, an attestation
+reference state can be invalidated, a fraud system can raise risk, or an emergency policy
+can prohibit an operation that was allowed seconds earlier.¶
+The central question in this document is therefore:¶
+If authorization was valid at t0, but applicable authority is
+revoked or narrowed at t1, what MUST be true at t2 before the
+protected effect is allowed to occur?
+¶
+The proposed answer is an execution-finality invariant: revocation that is authoritative
+before protected commit must be made load-bearing at the effectuation boundary.  A
+previously valid authorization is not itself a right to outlive a later authoritative
+revocation.¶
+2. Conventions and Requirements Language
+The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT", "SHOULD",
+"SHOULD NOT", "RECOMMENDED", "NOT RECOMMENDED", "MAY", and "OPTIONAL" in this
+document are to be interpreted as described in BCP 14 [RFC2119]
+[RFC8174] when, and only when, they appear in all capitals, as shown
+here.¶
+3. Direct Question: What Threat Does This Architecture Solve?
+The principal threat is not limited to stolen credentials, forged tokens, or expired
+authorization.  The difficult case is a credential or permit that is authentic,
+unexpired, correctly sender-constrained where applicable, and legitimately held by the
+same principal that was authorized earlier.¶
+t0                         t1                         t2
+|                          |                          |
+| authorize exact act C    | revoke/narrow authority | effect C
+| under revocation R17     | advance to R18          |
+|--------------------------|--------------------------|
+|                          |                          |
+v                          v                          v
+Permit[C,R17]            Revocation R18            Finality Sink
+signature valid          is authoritative          must decide
+expiry valid                                      using current state
+Figure 1:
+The revocation-to-effectuation threat window
+If the sink checks only the earlier signature, expiry, or possession proof, the act can
+survive the revocation window.  The architecture described here makes the current
+applicable revocation state part of the final authorization predicate immediately before
+the consequence is committed.¶
+The architecture therefore targets revocation lag at the protected consequence boundary,
+including stale-token use, stale introspection, cached allow decisions, policy narrowing,
+multi-hop delegation, crash recovery, network partition, alternate effectuation paths,
+and races between revocation and commit.¶
+4. Motivating Scenario: Valid at Issuance, Revoked Before Effectuation
+Consider a service or autonomous agent that prepares a consequential operation C.  At
+time t0, principal A is authorized to perform C and a permit is issued.  At t1, before C
+is externally effective, an authority disables A, revokes the grant, narrows the allowed
+destination set, or marks the relevant credential or workload as no longer acceptable.¶
+The revocation does not necessarily alter the bytes or signature of the already-issued
+permit.  A verifier that considers only issuance-time facts can therefore accept a permit
+that is authentic but no longer applicable.¶
+The required property is not that every revocation must propagate instantaneously through
+every system.  The required property is that the deployment explicitly defines the point
+at which revocation becomes authoritative for the protected consequence, and that an act
+cannot cross the protected commit after that point without satisfying the new state.¶
+5. Problem Space
+5.1. Revocation Is Not Expiry
+Short token lifetimes reduce exposure but do not eliminate the interval between a
+security-state change and expiry.  A one-minute token can still be used fifty-nine
+seconds too long for a sufficiently consequential operation.  Conversely, event-driven
+revocation can permit longer token lifetimes while maintaining stronger responsiveness.¶
+5.2. Revocation Is Not an Authenticity Failure
+A revoked permit can remain cryptographically authentic.  Signature verification
+establishes integrity and issuer authentication; it does not by itself establish that
+the authority represented by the signed object remains applicable now.¶
+5.3. Revocation Notification Is Not Effectuation Enforcement
+A push event, stream update, revocation list, introspection response, cache invalidation,
+or policy update can communicate a revocation.  The security property addressed here is
+achieved only when the consequence-bearing path cannot commit the protected effect after
+the revocation has become authoritative under the deployment's ordering rule.¶
+5.4. Revoking a Token Is Not Always the Same as Revoking an Act
+A transaction can be derived from a token and then queued, delegated, translated,
+transformed, or handed to a downstream subsystem.  Revoking the upstream token after
+that transformation may not automatically cancel the already-instantiated operation.
+High-consequence deployments therefore need to identify which pending acts are still
+revocable and where that revocation is enforced.¶
+6. Threat Model and Assurance Scope
+6.1. Threat Severity and Applicability
+This document does not assign one universal severity score because consequence varies by
+deployment.  The threat deserves high attention where a stale authorization can cause an
+externally consequential or difficult-to-reverse effect, including transfer of funds,
+privilege or identity changes, release of sensitive data or model artifacts, cloud-control
+mutations, device actions, protected I/O, confidential-compute transitions, industrial
+operations, or other high-consequence state changes.¶
+The distinctive risk is that compromise or forgery is not required.  A legitimate principal
+can hold a cryptographically valid, unexpired, correctly sender-constrained authorization
+that was valid at issuance but should no longer control the protected effect after an
+authoritative revocation, suspension, narrowing, ownership change, trust-state change, or
+superseding policy decision.¶
+For low-consequence operations, short token lifetimes or bounded revocation propagation may
+be an acceptable engineering tradeoff.  For high-assurance operations, the deployment SHOULD
+explicitly identify the maximum acceptable revocation-staleness interval and the boundary at
+which stale authority is no longer permitted to cause the protected effect.¶
+6.2. Adversary Capabilities
+The adversary MAY control or compromise the requester, agent, application process,
+orchestration layer, ordinary host software, untrusted caches, or communication paths
+outside the protected enforcement boundary.  The adversary MAY possess a legitimately
+issued authorization object and MAY have been legitimately authorized at an earlier
+time.  The adversary MAY delay, replay, reorder, suppress, or selectively route
+revocation notifications; exploit cached introspection or policy decisions; restore
+snapshots; induce crash recovery; race an effect against a revocation; or seek an
+alternate path that does not consult current revocation state.¶
+The adversary is not required to forge a signature, steal another principal's token,
+defeat proof-of-possession, or break cryptography.  The core attack succeeds if a
+previously valid authorization remains usable after the authoritative revocation point.¶
+6.3. Baseline Revocation-Finality Profile
+In the baseline profile, the requester and network are untrusted.  The revocation
+authority, the source of current revocation state, and the Finality Sink are trusted to
+follow the protocol.  Cached or presented revocation state from the requester MUST NOT
+be treated as authoritative merely because the requester supplies it.¶
+6.4. High-Assurance Revocation-Finality Profile
+A higher-assurance deployment MAY additionally assume compromise of the general-purpose
+host operating system, application runtime, agent framework, policy-distribution cache,
+or orchestration software.  In that profile, the authoritative revocation generation,
+consumption state, and protected commit MUST be anchored in a protection domain not
+writable by those compromised components, such as an appropriately isolated TEE, HSM,
+security processor, DPU, SmartNIC, protected firmware component, or equivalent trusted
+enforcement boundary.¶
+6.5. Trusted Roots and Limits
+The base model assumes that configured cryptographic primitives and at least one
+required root of revocation authority remain trustworthy.  Compromise of every ultimate
+revocation authority or of the Finality Sink itself is outside the base threat model.
+Deployments requiring tolerance of authority compromise MAY add threshold control,
+independent authorities, transparency mechanisms, separation of duties, or replicated
+protected state.¶
+6.6. Denial of Service
+An adversary can attempt to make current revocation state unavailable.  The architecture
+does not convert availability failure into authorization.  For operations whose threat
+model requires current revocation state, "unknown" MUST NOT silently become "not
+revoked".  Deployments can explicitly define bounded-staleness profiles for lower-risk
+operations, but the resulting risk acceptance is a policy choice rather than an
+equivalent high-assurance property.¶
+7. Design Goals and Non-Goals
+The primary goal is to bind the applicability of revocation to the moment at which a
+protected consequence becomes effective.  A revocation that is authoritative before
+protected commit MUST be capable of preventing a still-pending Candidate Act from
+completing when that revocation applies to the act.¶
+This document does not define a universal identity system, universal revocation transport,
+universal policy language, new OAuth grant type, consensus protocol, blockchain, or
+globally synchronized clock.  It also does not require every revocation to cancel every
+pending action.  Deployments define the scope and semantics of revocation; the finality
+mechanism enforces those semantics at the protected boundary.¶
+The document does not claim to roll back a consequence that has already become externally
+effective.  Where compensating transactions are possible, they are a separate application
+concern.  Revocation finality is primarily prospective with respect to acts that remain
+non-effective.¶
+8. Prevention and Mitigation Property
+The architecture distinguishes prevention from mitigation.  A deployment can claim the
+prevention property described here only for a protected consequence whose effectuation paths
+are completely mediated by an enforcement boundary that obtains authoritative revocation
+state and couples the final revocation decision atomically, or under an equivalent protected
+ordering rule, to the protected commit.¶
+Revocation committed before protected effect
++
+authoritative current revocation state
++
+exact-act binding
++
+atomic/equivalent final check and commit
++
+no bypassing effectuation path
+|
+v
+stale authorization cannot produce the protected effect
+¶
+Where a deployment accepts cached status with bounded staleness, performs only periodic
+checks, leaves alternate paths outside the Finality Sink, or cannot serialize revocation
+against effectuation, the mechanism can still reduce exposure and shorten the stale-authority
+window, but that is mitigation rather than the same prevention guarantee.¶
+The architecture does not reverse a consequence that is already externally effective.
+Compensation, rollback of application state, recovery, and incident response remain separate
+concerns unless a particular application defines them as part of its protected commit model.¶
+9. Existing Mechanisms and the Proposed Delta
+Existing mechanisms solve important parts of revocation and continuous authorization.  This
+document is not premised on those mechanisms being absent or defective.  The comparison below
+identifies the additional invariant being examined.¶
+9.1. OAuth Revocation and Introspection
+OAuth Token Revocation [RFC7009] defines a standardized way to revoke tokens.
+OAuth Token Introspection [RFC7662] allows a protected resource to query token
+activity and metadata.  These mechanisms can directly satisfy the proposed invariant when
+the Resource Server is itself the complete, non-bypassable consequence boundary, obtains
+sufficiently current status, and couples that status decision to the protected effect.
+The proposed delta concerns deployments where authorization acceptance and consequence occur
+at different components or times, including queues, downstream services, device APIs,
+payment or storage commits, and other deferred effectuation paths.¶
+9.2. Continuous Access and Externalized Policy
+Continuous-access systems and externalized policy engines can react rapidly to account,
+risk, policy, or entitlement changes.  They are complementary inputs to this architecture.
+The proposed question is whether the resulting current decision remains load-bearing at the
+exact boundary where a pending act becomes externally effective, including after work has
+left the component that performed the earlier authorization check.¶
+9.3. Attestation and Protected Compute
+RATS, EAT, confidential-computing, and hardware-rooted mechanisms can establish fresh trust
+evidence and protect enforcement state.  The proposed delta is not a new attestation format;
+it is the binding of applicable revocation state to the final protected act and commit.¶
+9.4. What Is New in This Document
+The document's proposed contribution is the explicit, vendor-neutral finality invariant and
+its associated ordering model: an authorization that was valid at issuance is insufficient
+after an applicable revocation has become authoritative if the protected act has not yet
+crossed the effectuation boundary.  The invariant binds the exact Candidate Act, current
+revocation basis, authorized-use state, and protected commit; requires re-authorization or
+authoritative survival evidence when the basis changes; and treats bypass, rollback, cached
+status, multi-hop delegation, crash recovery, and revocation/effectuation races as part of
+the same end-to-end property.¶
+This is a proposed protocol/security-architecture delta, not a claim that no existing product
+or deployment already implements an equivalent property.  Reviewers are specifically invited
+to identify systems or standards that already provide the same invariant end to end.¶
+10. Terminology
+Candidate Act: A proposed operation capable of producing an external, persistent, financial, administrative, physical, disclosure, or other protected consequence, but which has not yet been permitted to produce that consequence.¶
+Non-Effective State: A condition in which a Candidate Act can be generated, queued, authorized, or validated while the requester still lacks the means to create the protected consequence without final enforcement.¶
+Revocation Event: An authoritative change that withdraws, suspends, narrows, supersedes, or otherwise makes previously applicable authority no longer sufficient for one or more protected acts.¶
+Revocation Authority: An authority whose revocation state is recognized by the deployment for the affected principal, credential, grant, policy, resource, destination, purpose, operation class, or other security-relevant scope.¶
+Revocation Generation: A monotonically advancing epoch, generation, sequence, authenticated status root, or equivalent protected value identifying revocation state.¶
+Revocation Cutoff: The deployment-defined ordering point after which a particular revocation is authoritative for a protected act.¶
+Revocation Basis: The security-relevant revocation state against which an authorization or Candidate Act was evaluated.¶
+Revocation Evidence: Protected evidence establishing the applicable revocation state, or the relationship between issuance-time and effectuation-time revocation state.¶
+Execution Handle: Narrowly scoped authorization bound to a Candidate Act, its relevant revocation basis, and authorized-use constraints.  Possession of the handle is not intended to confer authority after an applicable revocation.¶
+Finality Sink: The protected functional boundary controlling the first operation that makes the Candidate Act externally effective.  It verifies or re-establishes revocation applicability immediately before protected commit.¶
+Protected Commit: The serialization or transition point at which the protected act becomes externally effective or irreversibly enters a consequence-bearing subsystem under the deployment's model.¶
+11. Revocation Classes
+11.1. Principal or Workload Revocation
+The subject itself becomes unauthorized, disabled, suspended, or unacceptable for the affected operation.¶
+11.2. Credential or Session Revocation
+A credential, token, session, key binding, or delegated credential ceases to be usable even if the subject remains generally valid.¶
+11.3. Grant or Delegation Revocation
+A previously issued permission or delegation is withdrawn or narrowed while other grants may remain valid.¶
+11.4. Resource, Destination, or Ownership Revocation
+The principal remains valid, but the target resource, destination, ownership epoch, or recipient relationship changes so that the specific act is no longer permitted.¶
+11.5. Purpose or Operation-Class Revocation
+A use purpose, operation class, action type, or safety authorization is withdrawn while unrelated operations remain allowed.¶
+11.6. Trust or Attestation-State Revocation
+A previously acceptable software, firmware, device, key, endorsement, reference value, or attestation state becomes unacceptable for the protected act.¶
+12. Revocation-Binding Model
+Let C contain the concrete security-relevant Candidate Act parameters.  Let R_eval represent the revocation basis observed when the act is authorized.¶
+C = (subject, operation, object, destination, parameters,
+purpose, nonce, constraints)
+R_eval = (principal_rev_gen,
+credential_rev_gen,
+grant_rev_gen,
+resource_rev_gen,
+trust_rev_gen,
+policy_rev_gen)
+D_C = H(Encode(C))
+D_R = H(Encode(R_eval))
+EH = Protect(D_C, D_R, UseConstraints, Freshness,
+IssuerContext, SingleUseState)
+¶
+A deployment need not use every field.  It MUST include or re-establish each revocation
+dimension whose change can make the specific Candidate Act unauthorized.¶
+The semantic rule is:¶
+Authorized(C, R17) does not imply Authorized(C, R18)
+when an applicable revocation represented by R18 invalidates,
+suspends, narrows, or supersedes authority for C.
+¶
+12.1. Formal Revocation-Basis Identity
+Let C be the canonical security-relevant Candidate Act, R_eval the revocation basis
+observed when C was authorized, and R_now the authoritative revocation basis observed at the
+Finality Sink immediately before protected commit.  Let D_C and D_R be collision-resistant
+digests of the canonical Candidate Act and the evaluation-time revocation basis.¶
+C = canonical security-relevant Candidate Act
+R_eval = (
+principal_rev_gen,
+credential_rev_gen,
+grant_rev_gen,
+resource_rev_gen,
+trust_rev_gen,
+policy_rev_gen
+)
+R_now = authoritative current revocation basis
+D_C = H(Encode(C))
+D_R = H(Encode(R_eval))
+EH = Protect(
+D_C,
+D_R,
+RevocationScope,
+UseConstraints,
+Freshness,
+IssuerContext,
+SingleUseState)
+¶
+The tuple is illustrative.  A deployment need not use every component, but each revocation
+dimension whose change can make C unauthorized MUST either be bound into the evaluation basis or
+re-established from authoritative state at finalization.¶
+12.2. Revocation Applicability Predicate
+A revocation event is security-relevant only if it applies to the pending Candidate Act.
+This is important for selective revocation: a principal-wide revocation, a credential revocation,
+a grant revocation, a resource-state change, and a purpose-specific revocation need not have the
+same scope.¶
+Applies(E_rev, C, EH) :=
+ScopeMatches(E_rev.scope, C, EH.revocation_scope)
+AND SubjectOrCredentialMatches(E_rev, C, EH)
+AND OperationPurposeResourceMatches(E_rev, C)
+AND EventAuthoritativeForScope(E_rev)
+AND EventGenerationNotRolledBack(E_rev)
+¶
+An authentic revocation event that does not apply to C MUST NOT automatically invalidate an
+unrelated Candidate Act.  Conversely, a relevant event MUST NOT be ignored merely because the
+Execution Handle remains cryptographically valid.¶
+12.3. Explicit Survival or Compatibility Rule
+Some state transitions can preserve authority.  For example, a credential rotation or policy
+generation change might be explicitly declared compatible for a narrowly scoped pending act.
+Compatibility must be authoritative and machine-verifiable rather than inferred dynamically by an
+untrusted requester.¶
+Survives(C, R_eval, R_now, SE) :=
+SurvivalEvidenceAuthentic(SE)
+AND SurvivalEvidenceAuthoritative(SE)
+AND ExactCandidateOrClassBound(SE, C)
+AND BasisTransitionMatches(SE, R_eval, R_now)
+AND UseConstraintsSatisfied(SE, C)
+AND FreshnessValid(SE)
+¶
+SE is optional survival evidence.  If no such rule exists, a load-bearing change from R_eval
+to R_now requires rejection or re-authorization rather than semantic guesswork.¶
+12.4. Revocation-Continuity Predicate
+The finality decision combines exact-act binding, current revocation applicability, handle
+integrity, and any explicit survival rule.¶
+RevocationContinuityValid(C, EH, R_now, SE) :=
+HandleIntegrityValid(EH)
+AND ExactActBinding(EH, C)
+AND HandleUseValid(EH, C)
+AND FreshnessValid(EH)
+AND RevocationScopeCurrent(EH, C, R_now)
+AND (
+SameRelevantRevocationBasis(EH, R_now)
+OR Survives(C, EH.revocation_basis, R_now, SE)
+)
+AND NoApplicableRevocationCommittedBeforeEffect(C, R_now)
+AND EffectuationPathAuthorized(C)
+¶
+12.5. Serialization-Order Model
+Wall-clock timestamps are not sufficient when revocation and effectuation race.  Let
+≺_S denote the authoritative serialization order used by the deployment.¶
+Let:
+CommitRev(E_rev)  = authoritative commit of revocation event E_rev
+CommitEff(C)      = protected effect commit for Candidate Act C
+If:
+CommitRev(E_rev) ≺_S CommitEff(C)
+AND Applies(E_rev, C, EH)
+then:
+C MUST be re-authorized under the resulting basis
+OR an explicit valid Survival rule MUST apply
+OR C MUST remain non-effective.
+¶
+If CommitEff(C) precedes CommitRev(E_rev) in the same authoritative serialization order, the
+effect is already final for this invariant and the new revocation governs later acts unless the
+application defines a separate compensating-action mechanism.¶
+12.6. Strict Prevention Invariant
+Effective(C)
+=>
+RevocationContinuityValid(C, EH, R_now, SE) = TRUE
+Strict prevention:
+NOT RevocationContinuityValid(C, EH, R_now, SE)
+=>
+NOT Effective(C)
+Race-specific form:
+CommitRev(E_rev) ≺_S CommitEff(C)
+AND Applies(E_rev, C, EH)
+AND NOT Survives(C, R_eval, R_now, SE)
+=>
+NOT Effective(C)
+¶
+These implications are bounded by the declared threat model, the completeness of the
+revocation state used by the sink, and the non-bypassability of the protected effectuation path.¶
+12.7. Bounded Prevention Argument
+Assume that: (1) every revocation source whose state can invalidate C is represented in the
+authoritative current basis; (2) applicable revocation events cannot be forged, suppressed, rolled
+back, or bypassed within the declared threat model; (3) the Finality Sink independently binds the
+exact observed Candidate Act to EH; (4) revocation commit and protected effect commit share an
+authoritative serialization rule; and (5) every effectuation path capable of producing the
+protected consequence enforces this invariant or an equivalent one.¶
+Suppose an applicable revocation commits before the protected effect, but the effect still
+occurs without re-authorization or valid survival evidence.  At finalization,
+NoApplicableRevocationCommittedBeforeEffect would be false, making
+RevocationContinuityValid false.  The strict prevention invariant would therefore prohibit the
+effect.  The assumed effect produces a contradiction unless at least one stated assumption was
+violated.  This is a bounded security argument, not proof that the revocation authority or policy
+itself is correct.¶
+13. Finality Predicate and Safety Invariant
+Immediately before protected commit, the Finality Sink evaluates a predicate Phi over
+the observed Candidate Act, Execution Handle, current revocation state, and any explicit
+survival or compatibility evidence.¶
+Phi(C, EH, R_now, RE) =
+ExactActBinding
+AND HandleIntegrityValid
+AND HandleUseValid
+AND FreshnessValid
+AND PrincipalNotEffectivelyRevoked
+AND CredentialNotEffectivelyRevoked
+AND GrantNotEffectivelyRevoked
+AND ResourceStateApplicable
+AND PurposeAndOperationStillAllowed
+AND TrustStateApplicable
+AND RevocationOrderingValid
+AND RevocationEvidenceValid
+AND EffectuationPathAuthorized
+¶
+The safety invariant is:¶
+Effective(C) => Phi(C, EH, R_now, RE) = TRUE
+¶
+It is insufficient that Phi was true at issuance time.  Where revocation is load-bearing,
+the sink MUST establish current applicability as part of, or atomically adjacent to, the
+protected commit.¶
+The detailed predicates for revocation applicability, survival evidence, serialization order,
+and strict prevention are specified in the formal subsections of
+<xref target="formal-model"/>.  In particular, a handle that remains cryptographically valid after
+an applicable revocation is not sufficient authority to effect the act.¶
+14. Revocation Ordering and the Race with Effectuation
+Revocation and effectuation can occur concurrently.  A secure design therefore needs an
+ordering rule rather than relying only on wall-clock timestamps.  One implementation can
+serialize both through a protected generation or transaction log; another can use
+compare-and-swap, a monotonic counter, quorum state, or an equivalent linearizable rule.¶
+Case A: revocation wins the serialization race
+Commit(R18) -------------------+
+|
+v
+Finalize(C, EH[R17])
+|
++-- reject / re-authorize /
+prove explicit survival
+Case B: protected effect commits first
+Commit(Effect C) --------------+---- then Commit(R18)
+|
++-- C is already effective;
+R18 governs later acts
+Ordering rule:
+If Commit(Revocation R18) precedes Commit(Effect C):
+C MUST satisfy R18 or remain non-effective.
+Figure 2:
+Required serialization of revocation and protected effect
+A deployment SHOULD document what constitutes the authoritative revocation commit and the
+protected effect commit.  Ambiguous ordering can otherwise produce inconsistent security
+decisions under concurrency.¶
+t0                         t1                         t2
+|                          |                          |
+| authorize C under R17    | applicable revocation   | Finality Sink
+| EH binds C + R17         | commits as R18          | asked to effect C
+|--------------------------|--------------------------|
+|
+v
+R18 MUST govern
+A cryptographically valid EH[R17] is not sufficient after an
+applicable R18 commits before protected effect.
+Figure 3:
+Stale authority between issuance and effectuation
+Finalizer                         Revocation Authority
+|                                      |
+| read R17 / generation 17             |
+| verify C under R17                    |
+|                                      |
+|                         commit R18 ---+
+|                                      |
+| enter atomic protected commit         |
+| assert generation == 17  ---- FAIL    |
+|                                      |
++---- reject / reload R18 / re-authorize
+The final assertion closes the verify-then-revoke race.
+Figure 4:
+Generation race during protected finalization
+15. Revocation-Finality Enforcement Architecture
++------------------+        +---------------------------+
+| Requester /      |        | Revocation / Policy       |
+| Agent / Workload |        | Authority                 |
++--------+---------+        +-------------+-------------+
+|                                |
+| Candidate Act C                | Rg / events / roots
+v                                v
++------------------+        +---------------------------+
+| Authorization    |------>| Protected Current-State   |
+| / Policy Check   |        | View or Status Source     |
++--------+---------+        +-------------+-------------+
+|                                |
+| EH[C,Rg]                       | R_now
+v                                v
++------------------------------------------------------+
+|                    FINALITY SINK                      |
+|  exact-act binding + current revocation + ordering  |
+|  + consume-once + non-bypassable protected commit   |
++---------------------------+--------------------------+
+|
+only if predicate TRUE
+v
++---------------+
+| External      |
+| Effect        |
++---------------+
+Figure 5:
+Revocation state remains load-bearing through protected commit
+The diagram is functional rather than topological.  The authorization service, current-state
+source, and Finality Sink MAY be co-located or distributed.  The security requirement is that
+the requester cannot bypass the final predicate and that the revocation state used at commit is
+authoritative under the deployment's ordering rule.¶
+Candidate C + EH[R_eval]
+|
+v
++---------------------------+
+| Verify EH integrity       |
+| Verify exact act          |
+| Verify freshness/use      |
++-------------+-------------+
+|
+v
++---------------------------+
+| Read authoritative R_now  |
+| under protected ordering  |
++-------------+-------------+
+|
+basis changed?
+/       \
+no         yes
+|           |
+|      +----v------------------+
+|      | applicable revocation?|
+|      +----+------------------+
+|           |
+|       yes / no
+|         /   \
+|        /     +----> continue if irrelevant
+|       v
+|   valid survival evidence?
+|       / \
+|      no  yes
+|      |    |
+|   REJECT  |
++------\----+
+v
++---------------------+
+| protected atomic    |
+| generation recheck  |
+| consume-once        |
+| commit effect       |
++---------------------+
+Figure 6:
+Detailed revocation-finality control flow
+16. State Machine
++-----------+
+| PROPOSED  |
++-----+-----+
+|
+| authorize under revocation basis Rg
+v
++------------------+
+| NON-EFFECTIVE    |
+| AUTHORIZED       |
++--------+---------+
+|
+| observe current revocation state
+v
++--------------------+
+| APPLICABLE         |
+| REVOCATION CHANGE? |
++----+----------+----+
+|          |
+yes         no
+|          |
+v          v
+REJECT / REAUTHORIZE   PROTECTED COMMIT
+/ PROVE SURVIVAL             |
+v
++----------+
+| EFFECTIVE|
++----------+
+Figure 7:
+Illustrative revocation-finality state machine
+17. Solution Overview
+17.1. Prepare
+The system creates a canonical Candidate Act.  Preparation MAY include computation, inference, user approval, policy evaluation, or workflow scheduling, but MUST NOT itself create the protected consequence.¶
+17.2. Authorize
+The Candidate Act is evaluated under the applicable authorization and revocation basis.  The resulting authorization is bound to the act and either directly to the relevant revocation generation or to a rule that requires revocation state to be re-established at finalization.¶
+17.3. Remain Non-Effective
+After authorization, the act remains pending and non-effective.  The requester MUST NOT hold an alternate mechanism that can produce the protected consequence while bypassing the final revocation check.¶
+17.4. Observe Current Revocation State
+At finalization, the sink obtains current revocation state from protected local state, an authoritative status service, an authenticated event stream, token introspection, an authenticated revocation root, or another mechanism appropriate to the deployment.¶
+17.5. Finalize
+If the act remains authorized under the current applicable revocation state, the sink atomically consumes the relevant finality authority and commits the effect.  Otherwise the act is rejected, re-authorized, or held pending according to policy.¶
+18. Illustrative Pseudocode
+The following pseudocode is non-normative and independent of token format or revocation
+transport.  It separates authorization-time binding, revocation-state ingestion, applicability
+evaluation, explicit survival handling, protected finalization, state-change invalidation,
+effectuation-path coverage, and crash recovery.¶
+18.1. Authorize and Bind the Revocation Basis
+function authorize_and_bind(candidate):
+C = canonical_security_relevant_act(candidate)
+R_eval = authoritative_revocation_snapshot(C)
+if R_eval.status == UNKNOWN:
+reject_or_apply_explicit_bounded_staleness_profile()
+decision = policy_evaluate(C, R_eval)
+if decision != ALLOW:
+reject()
+return protect_handle(
+act_digest          = H(C),
+revocation_basis    = R_eval.identity_or_generation,
+revocation_scope    = decision.revocation_scope,
+subject             = C.subject,
+credential_id       = C.credential_id_if_applicable,
+grant_id            = decision.grant_id_if_applicable,
+use_constraints     = decision.use_constraints,
+nonce               = secure_random(),
+expiry              = bounded_expiry(),
+single_use          = true)
+¶
+18.2. Authenticate and Commit a Revocation Update
+function accept_revocation_update(event):
+if !authenticate_revocation_event(event):
+reject_event("invalid authenticity")
+if !event.scope_is_authoritative_here:
+reject_event("wrong revocation authority")
+current = protected_current_generation(event.scope)
+if event.generation < current:
+reject_event("rollback attempt")
+if event.generation == current
+and !event_is_idempotent_duplicate(event):
+reject_event("conflicting same-generation event")
+protected_atomic {
+append_authoritative_revocation_event(event)
+advance_revocation_generation_if_needed(event)
+invalidate_affected_pending_cache_entries(event)
+}
+return ACCEPTED
+¶
+18.3. Build the Authoritative Current Revocation Snapshot
+function authoritative_revocation_snapshot(candidate):
+snapshot = {
+principal: current_principal_revocation(candidate.subject),
+credential: current_credential_revocation(
+candidate.credential_id_if_applicable),
+grant: current_grant_revocation(
+candidate.grant_id_if_applicable),
+resource: current_resource_revocation_state(candidate.object),
+trust: current_trust_revocation_state(candidate.subject),
+policy: current_policy_revocation_generation(candidate)
+}
+if any_required_dimension_unknown(snapshot, candidate):
+return UNKNOWN
+snapshot.identity_or_generation =
+protected_digest_or_generation(snapshot)
+return snapshot
+¶
+18.4. Evaluate Applicable Revocations
+function applicable_revocations(candidate, handle, R_now):
+applicable = []
+for event in R_now.committed_events:
+if !event_authoritative_for_scope(event):
+continue
+if !scope_matches(
+event.scope,
+handle.revocation_scope,
+candidate):
+continue
+if !subject_credential_grant_resource_matches(
+event, candidate, handle):
+continue
+if !operation_or_purpose_matches_if_scoped(
+event, candidate):
+continue
+applicable.append(event)
+return applicable
+¶
+18.5. Validate Explicit Survival Evidence
+function validate_survival(
+candidate,
+handle,
+R_now,
+survival_evidence):
+if survival_evidence == NONE:
+return FALSE
+if !verify_survival_evidence_integrity(survival_evidence):
+return FALSE
+if !survival_authority_trusted(
+survival_evidence.issuer,
+handle.revocation_scope):
+return FALSE
+if !survival_evidence_binds_exact_candidate_or_class(
+survival_evidence,
+candidate):
+return FALSE
+if !survival_evidence_matches_transition(
+survival_evidence,
+handle.revocation_basis,
+R_now.identity_or_generation):
+return FALSE
+if !survival_evidence_use_constraints_valid(
+survival_evidence,
+candidate):
+return FALSE
+if !survival_evidence_fresh(survival_evidence):
+return FALSE
+return TRUE
+¶
+18.6. Protected Finalization with Revocation Recheck
+function finalize(
+observed_candidate,
+handle,
+survival_evidence = NONE):
+begin_protected_finality_section()
+C = canonical_security_relevant_act(observed_candidate)
+if !verify_handle_integrity(handle):
+reject("invalid handle")
+if handle.expired or handle.consumed:
+reject("expired or consumed handle")
+if H(C) != handle.act_digest:
+reject("exact-act mismatch")
+R_now = authoritative_revocation_snapshot(C)
+if R_now == UNKNOWN:
+fail_closed_unless_explicit_staleness_profile_allows()
+applicable = applicable_revocations(C, handle, R_now)
+basis_same =
+(R_now.identity_or_generation == handle.revocation_basis)
+if !basis_same:
+if applicable is not empty:
+if !validate_survival(
+C, handle, R_now, survival_evidence):
+reject_or_reauthorize(
+"applicable revocation committed")
+else:
+# Basis changed, but no relevant revocation applies to C.
+if !authoritative_transition_irrelevant_to_candidate(
+handle.revocation_basis, R_now, C):
+reject_or_reauthorize(
+"basis changed without proof of irrelevance")
+observed_generation = R_now.identity_or_generation
+atomic {
+R_commit = authoritative_revocation_snapshot(C)
+assert R_commit != UNKNOWN
+assert R_commit.identity_or_generation ==
+observed_generation
+assert no_new_applicable_revocation(
+C, handle, R_commit,
+since_generation=observed_generation)
+assert effectuation_path_authorized(C)
+consume_once(handle)
+commit_protected_effect(C)
+}
+return EFFECT_COMMITTED
+¶
+18.7. Invalidate Pending Authority after a Revocation Commit
+function on_revocation_commit(event):
+affected = pending_candidates_potentially_affected_by(event)
+for pending in affected:
+mark_revalidation_required(
+pending.handle_id,
+new_generation=event.generation)
+if event_definitively_revokes(pending.candidate):
+mark_non_effective(pending.handle_id)
+publish_protected_generation(event.scope, event.generation)
+¶
+18.8. Verify Effectuation-Path Coverage
+function verify_revocation_path_coverage(
+consequence,
+effectuation_path_inventory):
+for path in paths_capable_of(consequence,
+effectuation_path_inventory):
+if path.crosses_finality_sink_with_current_revocation:
+continue
+if path.enforces_equivalent_revocation_finality:
+continue
+return CoverageFailure(
+reason="revocation-bypass path",
+witness=path)
+return COVERAGE_VALID
+¶
+18.9. Crash-Safe Recovery
+function recover(candidate_id):
+state = protected_commit_state(candidate_id)
+if state == EFFECTIVE:
+return DO_NOT_REPLAY
+if state == COMMITTING:
+result = resolve_atomic_commit(candidate_id)
+if result == EFFECT_COMMITTED:
+return DO_NOT_REPLAY
+# If no effect committed, revocation state may have changed
+# during the crash. Re-enter finalization from fresh state.
+return REVALIDATE_FROM_CURRENT_REVOCATION_STATE
+if state == PENDING:
+return REVALIDATE_FROM_CURRENT_REVOCATION_STATE
+return FAIL_CLOSED
+¶
+19. Push, Pull, and Mirrored Revocation State
+19.1. Push-Based Revocation
+Event streams and push notifications can reduce revocation latency.  The receiver must authenticate the event, preserve ordering or generation semantics, and ensure that loss or reordering does not make an older state appear current.¶
+19.2. Pull-Based Revocation
+A sink can query an authoritative status endpoint at or near finalization.  This provides current information at the cost of latency, availability dependence, and potential load.  Cached responses require an explicit staleness policy.¶
+19.3. Protected Mirrored State
+High-volume systems can mirror revocation generations into protected local state and perform hot-path comparisons without a remote round trip for every effect.  The mechanism distributing generations must itself preserve authenticity, monotonicity, and bounded delay appropriate to the threat model.¶
+20. Selective and Partial Revocation
+Revocation need not be all-or-nothing.  An authority can revoke one destination, purpose,
+tool, operation class, resource generation, or delegation edge while allowing unrelated
+acts to proceed.  For that reason a single global "revoked" boolean can be too coarse for
+complex systems.¶
+A revocation-finality implementation SHOULD bind or reconstruct sufficient scope to
+determine whether the specific Candidate Act is affected.  False equivalence between
+"principal remains active" and "this act remains authorized" must be avoided.¶
+Current revocation events:
+E1: revoke credential K7
+E2: revoke grant G9 only for resource R-B
+E3: suspend principal P4 for operation=TRANSFER
+Pending acts:
+C1: P4 / K7 / G8 / READ R-A
+C2: P4 / K9 / G9 / WRITE R-B
+C3: P4 / K9 / G3 / TRANSFER R-C
+Applicability:
+E1 -> C1
+E2 -> C2
+E3 -> C3
+Authenticity alone is not enough; revocation scope must match C.
+Figure 8:
+Selective revocation must match the pending act
+21. Multi-Hop Delegation and Agent Chains
+In distributed agent or workload chains, upstream authority can be transformed into
+downstream credentials or queued actions.  A revocation at the original authority may not
+automatically cancel all derived objects unless the derivation chain preserves a
+revocation relationship.¶
+User / Authority
+|
+v
+Workload A ----delegates----> Workload B
+|                            |
+|                            v
+|                        Tool / API
+|                            |
++------- revocation --------+
+|
+v
+Finality Sink
+¶
+A deployment MAY propagate revocation generations, grant identifiers, parent authority
+references, or equivalent derivation metadata so the final sink can determine whether an
+upstream revocation invalidates the concrete downstream act.¶
+22. Alternate Effectuation Paths
+Revocation finality fails if the protected operation can be completed through a route that
+omits the final revocation check.  Alternate resource servers, administrative APIs,
+asynchronous queues, direct database writes, recovery tools, legacy interfaces, local
+device APIs, privileged host calls, and emergency controls require explicit analysis.¶
+Every path capable of creating the protected consequence MUST either converge on the same
+Finality Sink or preserve an equivalent revocation-finality invariant.¶
+Primary path:
+C -> Finality Sink -> current revocation check -> EFFECT
+Alternate path:
+C -> admin / queue / recovery / direct API ------> EFFECT
+If the alternate path can effect C without equivalent current
+revocation enforcement, revocation prevention is not consequence-wide.
+Figure 9:
+Revocation-safe primary path with unsafe alternate path
+23. Caching and Bounded Staleness
+Cached authorization and introspection results are often necessary for availability and
+scale.  RFC 7662 explicitly requires designers to consider the security and performance
+tradeoffs of caching token-state information [RFC7662].  This document does
+not prohibit caching.¶
+A high-assurance profile SHOULD treat the maximum accepted staleness interval as a
+security parameter.  For some operations the acceptable value can be zero at the protected
+commit; for lower-consequence operations a bounded interval can be an intentional policy
+choice.  The deployment SHOULD make that choice observable and testable.¶
+24. Crash Consistency and Recovery
+A crash between observing revocation state and committing an effect can reopen the race.
+Recovery MUST NOT restore an older revocation generation, resurrect a consumed handle, or
+complete an operation under a pre-crash allow decision without re-establishing the
+required invariant.¶
+Protected journals, monotonic counters, transactional stores, idempotent commit records,
+compare-and-swap, or equivalent mechanisms can be used according to the deployment.¶
+State transitions for one Candidate Act:
+PENDING
+|
+| final checks pass
+v
+COMMITTING
+|
++---- protected consume marker
+|
++---- protected effect commit
+v
+EFFECTIVE
+Crash cases:
+before consume      -> safe to retry after revalidation
+after consume,
+before effect       -> recover transactionally; do NOT blindly replay
+after effect commit -> treat as effective; do NOT repeat C
+Figure 10:
+Crash-safe consume and effect ordering
+25. Attack Analysis
+25.1. Valid-but-Revoked Token
+An attacker presents an unexpired, authentic token after the relevant grant has been revoked.  A finality-aware sink rejects the pending act because current revocation state is load-bearing even though the token remains cryptographically valid.¶
+25.2. Stale Introspection Result
+A resource cached an earlier active=true result.  After revocation, the cached result remains inside its cache lifetime.  Where current revocation is required, the sink rejects or refreshes state rather than equating cache freshness with current applicability.¶
+25.3. Revocation Event Suppression
+An attacker drops a push notification.  A secure design does not depend on the absence of a message as proof of non-revocation unless the event channel itself provides an authenticated, gap-detecting continuity property or another current-state mechanism exists.¶
+25.4. Revocation Event Reordering
+An attacker or network delivers generation R19 before R18, or replays R17 after R19.  Monotonic protected generation semantics prevent the older state from becoming current again.¶
+25.5. Revocation/Effectuation Race
+Revocation and effectuation occur concurrently.  The system resolves the race using the protected ordering rule rather than wall-clock guesswork.¶
+25.6. Delegation Laundering
+Authority is delegated to a downstream actor before revocation, and the downstream actor attempts to treat the derived permit as independent of its parent grant.  A preserved derivation/revocation relationship prevents the revocation from being lost across the hop.¶
+25.7. Alternate-Sink Bypass
+A revoked operation is denied by the primary API but attempted through an administrative or legacy path.  Non-bypassability requires the alternate path to enforce an equivalent current revocation rule.¶
+25.8. Revocation-State Rollback
+An attacker restores a snapshot in which R17 was current after the authority advanced to R18.  Protected monotonic state or an authoritative current-state root causes the rollback to fail.¶
+26. Relationship to OAuth Revocation and Introspection
+OAuth 2.0 Token Revocation [RFC7009] defines an endpoint through which a
+client can request invalidation of a token and, where applicable, related authorization.
+OAuth 2.0 Token Introspection [RFC7662] defines how a protected resource can
+ask an authorization server about the current active state and metadata of a token.¶
+Those mechanisms are directly relevant and can supply inputs to this architecture.  This
+document does not redefine their wire formats or semantics.  The additional question is
+architectural: after token status is known, what prevents a previously instantiated or
+delegated Candidate Act from becoming effective through a later boundary that no longer
+consults the applicable revocation state?¶
+In deployments where the OAuth Resource Server is itself the complete, non-bypassable
+consequence boundary and performs sufficiently current status checks, the Resource Server
+can satisfy the Finality Sink role and no additional component is required.  The model is
+intended to identify when that property does or does not hold.¶
+27. Relationship to Sender-Constrained Tokens
+Sender-constraining mechanisms such as mutual-TLS-bound access tokens and DPoP reduce the
+value of stolen bearer tokens [RFC8705] [RFC9449].  They are
+complementary to revocation finality.  A correctly sender-constrained token can still be
+revoked while held by its legitimate sender; therefore proof of possession and current
+applicability answer different questions.¶
+28. Relationship to RATS and Attestation
+The RATS architecture [RFC9334] separates Evidence, Attestation Results,
+appraisal policy, and Relying Party decisions.  EAT [RFC9711] provides a
+token format for attestation claims and requires freshness mechanisms appropriate to its
+use.  Revocation can affect endorsements, reference values, keys, software acceptability,
+or the authority that interprets attestation state.¶
+This document does not modify RATS.  It asks how a change in trust acceptability becomes
+load-bearing when a consequential operation is pending after an earlier successful
+appraisal.  A fresh attestation result and a current revocation check can be combined as
+inputs to the finality predicate.¶
+29. Relationship to WIMSE
+WIMSE addresses workload identity, credentials, and security context across multi-service
+environments.  Revocation finality is relevant where a workload credential or delegated
+security context has already caused a downstream Candidate Act to be instantiated before
+the originating workload or delegation is revoked.¶
+This document does not propose to change workload identifiers or credential formats.  It
+asks whether revocation relationships and current-state semantics need to survive the
+multi-hop path to the consequence boundary.¶
+30. Complementary Industrial Alignment
+Industry systems already provide important dynamic-access and trust mechanisms.  Microsoft
+Entra Continuous Access Evaluation [MS-CAE] supports rejection of otherwise
+unexpired tokens after critical events.  Amazon Verified Permissions and Cedar
+[AWS-VERIFIED-PERMISSIONS] provide fine-grained externalized authorization-
+policy evaluation.  Google Cloud IAM [GOOGLE-IAM-DENY] supports centrally
+managed deny policy controls.  NVIDIA attestation [NVIDIA-ATTEST] and Arm
+CCA [ARM-CCA] provide complementary protected-compute and attestation
+mechanisms that can supply trust inputs or host protected state.¶
+These examples are cited because they demonstrate practical industry interest in dynamic
+authorization, policy change, continuous evaluation, and protected trust.  This document
+does not assert that any named product is insecure, incomplete, vulnerable, non-conforming,
+or required to implement this architecture.  A named platform can already satisfy some or
+all of the described properties in a particular deployment.¶
+The proposed contribution is a vendor-neutral question and invariant that can be tested
+across systems: once a revocation is authoritative, can any still-pending protected act
+become externally effective solely on the strength of the older authorization?¶
+31. Deployment Patterns
+31.1. Resource Server as Finality Sink
+Where the Resource Server directly controls the protected effect and cannot be bypassed, it can perform the final revocation check itself.¶
+31.2. Gateway or Service-Mesh Enforcement
+A gateway, proxy, or service-mesh component can host finality enforcement when all protected effectuation paths pass through it and it sees sufficient act context.¶
+31.3. DPU, SmartNIC, or Protected I/O Boundary
+Higher-assurance infrastructure can mirror revocation generations into a DPU, SmartNIC, or other protected I/O boundary when the threat model does not trust the general-purpose host.¶
+31.4. Device or Operating-System Boundary
+An operating system, secure service, or device-side mediator can enforce revocation immediately before a protected device action, disclosure, or external communication.¶
+31.5. Asynchronous Queue and Worker
+For queued work, revocation MUST be re-evaluated at dequeue/final commit if the queue delay can outlive the revocation assumptions made at enqueue time.¶
+32. Performance and Availability
+A design that performs a remote authorization-server round trip before every low-latency
+effect can be impractical.  The architecture therefore separates the invariant from a
+particular implementation.  Protected local generations, authenticated status roots,
+event streams with gap detection, short-lived cached state, and hardware-local comparisons
+can move most work off the hot path.¶
+Implementations SHOULD publish the effective revocation-latency bound relevant to the
+protected operation, including event propagation, cache lifetime, replication lag,
+protected-state update, and finality-check latency.  A benchmark that reports only local
+cryptographic verification without propagation delay does not characterize end-to-end
+revocation responsiveness.¶
+33. Required Classes of Test Vectors
+A concrete profile or implementation SHOULD test at least the following cases:¶
+authorization and effect under the same revocation generation: succeed;¶
+principal revoked before finalization: reject;¶
+grant narrowed so the exact act is no longer permitted: reject;¶
+unrelated revocation that does not apply to the act: succeed if policy says so;¶
+stale but correctly signed permit after revocation: reject;¶
+replayed old revocation state: reject;¶
+lost or reordered revocation event: fail according to the defined continuity rule;¶
+revocation and effect racing concurrently: produce the defined serialized result;¶
+crash after status check but before effect: recover without reviving stale authority;¶
+alternate effectuation path: demonstrate equivalent enforcement or identify the gap.¶
+34. Questions to the IETF Community
+Criticism, corrections, counterexamples, operational experience, prior-art pointers, and
+evidence that an existing IETF mechanism already provides an equivalent invariant are
+explicitly invited.  Negative answers and recommendations to narrow the work are useful
+outcomes.¶
+Do existing OAuth revocation, introspection, transaction-token, or continuous-access patterns already guarantee that a revocation committed before a protected effect prevents that effect, including asynchronous or multi-hop cases?¶
+When a Resource Server accepts a request and hands work to a queue, database, payment rail, device API, or downstream workload, where should revocation stop being relevant and where should it remain load-bearing?¶
+Is a protected monotonic revocation generation useful as a common abstraction across token, workload, attestation, and application-policy systems, or is that abstraction too broad?¶
+Should revocation state be carried in the authorization object, re-established at the sink, or support both models?¶
+What ordering primitive is appropriate for the race between revocation and effectuation without requiring a globally synchronized clock?¶
+How should bounded staleness be represented so that deployments can distinguish an intentional availability tradeoff from a high-assurance current-state guarantee?¶
+In WIMSE-style multi-service chains, what minimum derivation information is needed so an upstream grant revocation can invalidate a downstream pending act without creating excessive coupling?¶
+For RATS-based systems, are existing endorsement/reference-value freshness and appraisal mechanisms sufficient to express trust-state revocation through the final consequential action?¶
+Which alternate effectuation paths are most likely to defeat revocation in real systems even when token-level revocation itself works correctly?¶
+Does this architecture duplicate an existing industrial or standards mechanism in full?  If so, reviewers are specifically invited to identify the mechanism and the exact boundary at which it provides the same invariant.¶
+Should this work remain Informational, become a BCP/problem statement, define an interoperable status/generation profile, or be folded into existing OAuth/WIMSE/RATS work?¶
+Which current IETF venue is the best place for further discussion: OAuth, WIMSE, RATS, DISPATCH, SAAG, or another group?¶
+35. Potential IETF Discussion Venues and Scope Boundaries
+35.1. OAuth
+OAuth is a particularly relevant technical venue because its active charter covers
+delegation, token revocation, token introspection, and increasingly complex authorization
+for automated agents.  The present document does not presume that OAuth should adopt the
+work; review is sought on whether the finality question is already solved by an OAuth
+pattern, should be expressed as OAuth guidance, or lies beyond the Resource Server model.¶
+35.2. WIMSE
+WIMSE is relevant where revocation must remain meaningful across workload-to-workload credentials, delegated identity, and multi-service chains.  The work should not duplicate WIMSE credential or identity formats.¶
+35.3. RATS
+RATS is relevant where revocation concerns attestation trust, endorsement/reference-value state, verifier results, or the relation between appraisal and later consequence.  The document does not propose to replace RATS appraisal architecture.¶
+35.4. DISPATCH
+DISPATCH is an active standing venue for feedback and routing of proposed new work spanning ART, SEC, and non-transport WIT topics.  Because the finality invariant cuts across authorization, workload identity, and security architecture, DISPATCH may be useful if no single existing WG owns the problem.¶
+35.5. SAAG
+SAAG is an active Security Area open forum suitable for broad architectural criticism and security discussion.  SAAG is not a Working Group and does not adopt or publish documents.¶
+35.6. No Presumed Home
+The document does not claim that any named group should adopt this work.  The preferred sequence is technical criticism, overlap analysis, discussion in the most relevant specialist groups, and dispatch/routing if a separate interoperable work item remains justified.¶
+36. Relationship to Other Execution-Finality Internet-Drafts
+This document is a focused member of a broader execution-finality discussion.  The general
+architecture is described in [DAS-CORE-EF].  Hardware-rooted deployment is
+discussed in [DAS-HW-EF].  Agentic tool dispatch is discussed in
+[DAS-AGENT-EF].  Attestation-bound finality is discussed in
+[DAS-RATS-EF].  Purpose-bound release is discussed in
+[DAS-PURPOSE-EF].  Device/AI interoperability is discussed in
+[DAS-INTEROP-EF].  State and policy continuity is discussed in the
+companion [DAS-STATE-CONTINUITY] document.¶
+The present draft intentionally isolates revocation rather than repeating all of those
+domains.  Its contribution is the ordering and enforcement rule for authority that changes
+after issuance but before protected effectuation.¶
+37. Public Implementations and Companion Engineering Material
+Public repositories associated with the execution-finality work provide runnable or
+explanatory material for exact-act binding, single-use finality, agent interoperability,
+purpose-finality validation, and protected infrastructure deployment.  Relevant resources
+include [GITHUB-CORE-EF], [GITHUB-GPU-EF],
+[GITHUB-HARDENED-INTEROP], [GITHUB-PURPOSE-EF], and
+[GITHUB-INTEROP-EF].¶
+These repositories are companion engineering material.  Their inclusion does not assert
+that every repository already implements every revocation-finality requirement in this
+document.  A dedicated conformance harness for the present profile would need to test the
+race, propagation, rollback, and multi-hop cases listed above.¶
+38. Security Considerations
+The security of revocation finality depends on both current-state integrity and
+consequence-path completeness.  A perfect revocation service is ineffective if the
+protected action can bypass the sink; a perfect sink is ineffective if an attacker can
+reset the revocation generation it relies on.¶
+38.1. Compromised Requester
+The requester is not trusted to report its own current revocation status.  The sink MUST obtain load-bearing revocation state from a protected or authoritative source appropriate to the threat model.¶
+38.2. Compromised Revocation Authority
+An attacker controlling the ultimate revocation authority can lie about current status.  Higher-assurance deployments MAY use multiple authorities, threshold control, transparency, independent policy appraisal, or separation of duties.  The base architecture does not claim to survive compromise of every root of authority.¶
+38.3. Rollback Protection
+Revocation generations and authenticated status roots SHOULD resist snapshot restoration, wraparound, reset, downgrade, and cross-domain reuse.  Authentic old state MUST NOT automatically become current after rollback.¶
+38.4. Atomicity
+Where revocation can change concurrently, the last revocation check and protected commit require atomicity, generation locking, compare-and-swap, transaction serialization, or an equivalent invariant.  A check followed by an unprotected delay reintroduces TOCTOU.¶
+38.5. Status-Source Authentication
+Revocation events, introspection results, generations, and status roots MUST be authenticated according to the deployment.  A network attacker MUST NOT be able to synthesize either false revocation or false non-revocation.¶
+38.6. Scope Confusion
+Revocation identifiers and generations MUST be scoped to the authority, tenant, resource domain, or trust domain to which they apply.  A generation value from one domain MUST NOT be accepted as current state for another merely because the numeric value matches.¶
+38.7. Partitions and Split-Brain
+Network partitions can create multiple apparently current revocation views.  Deployments MUST define whether protected effects fail closed, use quorum/consensus, accept bounded staleness, or follow another explicit rule.  An attacker MUST NOT be allowed to choose whichever stale partition yields authorization unless that is intentionally permitted.¶
+38.8. Non-Bypassability
+Every technical path capable of producing the protected consequence MUST preserve the revocation-finality invariant.  Debug paths, recovery APIs, direct storage or device access, privileged host interfaces, and asynchronous workers require explicit review.¶
+38.9. Revocation-Status Privacy
+Revocation queries can reveal identity, employment status, account risk, service relationships, device trust, or operational timing.  Implementations SHOULD minimize disclosure and SHOULD prefer scoped status answers, keyed commitments, privacy-preserving status structures, or local protected state where appropriate.¶
+38.10. Revocation as a Denial-of-Service Surface
+An attacker can attempt to forge, flood, or withhold revocation signals.  Authentication and authorization of revocation events are required, and deployments SHOULD distinguish an authenticated revocation from simple status unavailability.  Fail-closed semantics protect authorization but can reduce availability.¶
+38.11. Stale Introspection and Authorization Caches
+A cached active result, policy allow decision, or status response can outlive the revocation event that invalidates it.  Implementations MUST define the maximum accepted staleness for each protected operation class.  A cache entry whose freshness or generation cannot be established MUST NOT be treated as equivalent to authoritative current state in a profile that claims prevention.¶
+38.12. Revocation Event Loss and Reordering
+Push-based systems MUST account for lost, duplicated, delayed, and reordered revocation events.  Sequence numbers, generations, authenticated checkpoints, gap detection, replay-safe subscriptions, or equivalent mechanisms SHOULD be used so that missing an event cannot silently make an older state appear current.¶
+38.13. Derived-Act Orphaning
+Revoking an upstream credential does not necessarily revoke a transaction, queue entry, delegated capability, or device command that was already derived from it.  Where such derived acts remain revocable, the derivation MUST preserve enough relationship to current authority for the Finality Sink to determine whether the pending act survives the revocation.¶
+38.14. Replay After Revocation
+A previously valid handle, introspection response, status proof, or survival statement MUST NOT be reusable after an applicable revocation generation has advanced unless the deployment explicitly proves that it remains applicable.  Consume-once state and generation binding SHOULD be protected against rollback together.¶
+38.15. Audit Evidence Is Not Prevention
+Logging that a revoked act executed can support detection, forensics, or accountability but does not provide the prevention property defined by this document.  A deployment claiming prevention MUST make revocation load-bearing before or atomically with protected commit rather than relying only on post-effect audit.¶
+39. Privacy Considerations
+Revocation state can expose sensitive relationships and operational facts.  A global
+revocation identifier can become a correlator across services.  Implementations SHOULD
+minimize persistent identifiers, avoid exposing raw policy context when a scoped status
+assertion is enough, and separate operational telemetry from authorization state where
+feasible.¶
+Push-based revocation systems can also reveal user or workload activity to subscribers.
+Subscription scope, event minimization, retention, and authorization should therefore be
+treated as privacy-sensitive design choices.¶
+40. Criticism, Corrections, and Review Invited
+This document is intentionally presented for adversarial technical review.  Reviewers are
+invited to identify incorrect assumptions, existing mechanisms that already provide the
+same property, deployment cases where the proposed boundary is unnecessary, unmodeled
+bypass paths, interoperability problems, privacy costs, latency costs, or terminology that
+conflicts with established IETF usage.¶
+In particular, the author welcomes concrete counterexamples showing that a revocation
+committed before effectuation can already be guaranteed to stop the exact pending effect
+using an existing standard without additional state binding.  Such evidence would help
+narrow, merge, or correct the proposal.¶
+41. IANA Considerations
+This document has no IANA actions.¶
+42. Conclusion
+Revocation should not be viewed only as invalidation of a token stored somewhere upstream.
+For a consequence-bearing operation, the stronger question is whether a revocation that
+becomes authoritative before protected commit is guaranteed to control the actual effect.¶
+VALID AT ISSUANCE
+!=
+AUTHORIZED AT EFFECTUATION
+Revocation committed before protected effect
+=>
+exact pending act must re-establish authority or remain non-effective.
+¶
+The model is deliberately complementary to OAuth revocation and introspection, continuous
+access evaluation, workload identity, attestation, policy engines, and confidential
+computing.  Its purpose is to make the final revocation-to-effect relationship explicit,
+testable, and suitable for protocol review.¶
+43. Normative References
+[RFC2119]
+Bradner, S., "Key words for use in RFCs to Indicate Requirement Levels", RFC 2119, BCP 14, March 1997, <https://www.rfc-editor.org/info/rfc2119>.
+[RFC8174]
+Leiba, B., "Ambiguity of Uppercase vs Lowercase in RFC 2119 Key Words", RFC 8174, BCP 14, May 2017, <https://www.rfc-editor.org/info/rfc8174>.
+44. Informative References
+[ARM-CCA]
+Arm, "Arm Confidential Compute Architecture", Web Arm Architecture, 2026, <https://www.arm.com/architecture/security-features/arm-confidential-compute-architecture>.
+[AWS-VERIFIED-PERMISSIONS]
+Amazon Web Services, "What is Amazon Verified Permissions?", Web AWS Documentation, 2026, <https://docs.aws.amazon.com/verifiedpermissions/latest/userguide/what-is-avp.html>.
+[DAS-AGENT-EF]
+Das, S., "Execution-Finality for Agentic AI Tool Dispatch", Work in Progress, Internet-Draft, draft-das-agentic-execution-finality-00, August 2026, <https://datatracker.ietf.org/doc/draft-das-agentic-execution-finality/>.
+[DAS-CORE-EF]
+Das, S., "The Missing Execution-Finality Protocol Layer of the Internet", Work in Progress, Internet-Draft, draft-das-execution-finality-protocol-layer-00, August 2026, <https://datatracker.ietf.org/doc/draft-das-execution-finality-protocol-layer/>.
+[DAS-HW-EF]
+Das, S., "Hardware-Rooted National Control to Prevent Covert Intelligence Data Export and Unauthorized Frontier and Neural AI/Autonomous Acts in Critical Infrastructure", Work in Progress, Internet-Draft, draft-das-hardware-enforced-execution-finality-00, August 2026, <https://datatracker.ietf.org/doc/draft-das-hardware-enforced-execution-finality/>.
+[DAS-INTEROP-EF]
+Das, S., "Secure and Privacy-Preserving AI Interoperability under Article 6(7) of the European Digital Markets Act: An Execution-Finality Architecture", Work in Progress, Internet-Draft, draft-das-execution-finality-ai-interoperability-04, September 2026, <https://datatracker.ietf.org/doc/draft-das-execution-finality-ai-interoperability/>.
+[DAS-PURPOSE-EF]
+Das, S., "Data-Purpose Laundering Prevention: Execution-Finality for Preventing Cross-Domain Data Reuse", Work in Progress, Internet-Draft, draft-das-purpose-execution-finality-03, September 2026, <https://datatracker.ietf.org/doc/draft-das-purpose-execution-finality/>.
+[DAS-RATS-EF]
+Das, S., "Attestation-Bound Execution Finality for GPU, AI Accelerator, DPU, SmartNIC, and Confidential-Computing Infrastructure", Work in Progress, Internet-Draft, draft-das-rats-attestation-bnd-execution-finality-04, September 2026, <https://datatracker.ietf.org/doc/draft-das-rats-attestation-bnd-execution-finality/>.
+[DAS-STATE-CONTINUITY]
+Das, S., "When Valid Authorization Becomes Stale: State and Policy Continuity at the Execution-Finality Boundary", Work in Progress, Internet-Draft, draft-das-state-policy-continuity-finality-00, September 2026, <https://datatracker.ietf.org/doc/html/draft-das-state-policy-continuity-finality-00>.
+[GITHUB-CORE-EF]
+Das, S., "Execution-Finality Architecture for Machine-Generated Acts", GitHub Repository Execution-Finality-Architechture-for-AI-Machines-, 2026, <https://github.com/sangmdas/Execution-Finality-Architechture-for-AI-Machines->.
+[GITHUB-GPU-EF]
+Das, S., "Execution Finality for GPUs, AI Accelerators, and Confidential Workloads", GitHub Repository Execution-Finality-for-GPU-AI-Accelerators-and-Confidential-Workloads, 2026, <https://github.com/sangmdas/Execution-Finality-for-GPU-AI-Accelerators-and-Confidential-Workloads>.
+[GITHUB-HARDENED-INTEROP]
+Das, S., "Hardened Challenge-Bound Execution Finality for AI Interoperability", GitHub Repository Hardened-Challenge-Bound-Execution-Finality-for-AI-Interoperability, 2026, <https://github.com/sangmdas/Hardened-Challenge-Bound-Execution-Finality-for-AI-Interoperability>.
+[GITHUB-INTEROP-EF]
+Das, S., "Secure and Privacy-Preserving AI Interoperability for Third-Party Tools", GitHub Repository Secure-and-Privacy-Preserving-AI-Interoperability-for-Third-Party-Tools, 2026, <https://github.com/sangmdas/Secure-and-Privacy-Preserving-AI-Interoperability-for-Third-Party-Tools>.
+[GITHUB-PURPOSE-EF]
+Das, S., "Purpose Execution Finality Validator to Prevent Data-Purpose Laundering in AI Systems", GitHub Repository Purpose-Execution-Finality-Validator-to-Prevent-Data-Purpose-Laundering-in-AI-Systems, 2026, <https://github.com/sangmdas/Purpose-Execution-Finality-Validator-to-Prevent-Data-Purpose-Laundering-in-AI-Systems>.
+[GOOGLE-IAM-DENY]
+Google Cloud, "Deny access to resources with IAM deny policies", Web Google Cloud Documentation, 2026, <https://cloud.google.com/iam/docs/deny-access>.
+[IETF-DISPATCH]
+IETF, "DISPATCH Working Group", IETF Working Group dispatch, 2026, <https://datatracker.ietf.org/group/dispatch/about/>.
+[IETF-OAUTH]
+IETF, "Web Authorization Protocol (OAuth) Working Group", IETF Working Group oauth, 2026, <https://datatracker.ietf.org/group/oauth/about/>.
+[IETF-RATS]
+IETF, "Remote ATtestation procedureS (RATS) Working Group", IETF Working Group rats, 2026, <https://datatracker.ietf.org/group/rats/about/>.
+[IETF-SAAG]
+IETF, "Security Area Open Meeting (SAAG)", IETF Area Group saag, 2026, <https://datatracker.ietf.org/group/saag/about/>.
+[IETF-WIMSE]
+IETF, "Workload Identity in Multi System Environments (WIMSE) Working Group", IETF Working Group wimse, 2026, <https://datatracker.ietf.org/group/wimse/about/>.
+[MS-CAE]
+Microsoft, "Build resilience by using Continuous Access Evaluation in Microsoft Entra ID", Web Microsoft Learn, 2026, <https://learn.microsoft.com/en-us/entra/architecture/resilience-with-continuous-access-evaluation>.
+[NVIDIA-ATTEST]
+NVIDIA, "NVIDIA GPU and Switch Attestation", Web NVIDIA Documentation, 2026, <https://docs.nvidia.com/attestation/attestation-client-tools-sdk/latest/gpu_and_switch_attestation.html>.
+[RFC7009]
+Lodderstedt, T., Dronia, S., and M. Scurtescu, "OAuth 2.0 Token Revocation", RFC 7009, August 2013, <https://www.rfc-editor.org/info/rfc7009>.
+[RFC7662]
+Richer, J., "OAuth 2.0 Token Introspection", RFC 7662, October 2015, <https://www.rfc-editor.org/info/rfc7662>.
+[RFC8705]
+Campbell, B., Bradley, J., Sakimura, N., and T. Lodderstedt, "OAuth 2.0 Mutual-TLS Client Authentication and Certificate-Bound Access Tokens", RFC 8705, February 2020, <https://www.rfc-editor.org/info/rfc8705>.
+[RFC9124]
+Moran, B., Tschofenig, H., Brown, D., and M. Meriac, "A Manifest Information Model for Firmware Updates in Internet of Things (IoT) Devices", RFC 9124, January 2022, <https://www.rfc-editor.org/info/rfc9124>.
+[RFC9334]
+Birkholz, H., Thaler, D., Richardson, M., Smith, N., and W. Pan, "Remote ATtestation procedureS (RATS) Architecture", RFC 9334, January 2023, <https://www.rfc-editor.org/info/rfc9334>.
+[RFC9449]
+Fett, D., Campbell, B., Bradley, J., Lodderstedt, T., Jones, M., and D. Waite, "OAuth 2.0 Demonstrating Proof of Possession (DPoP)", RFC 9449, September 2023, <https://www.rfc-editor.org/info/rfc9449>.
+[RFC9711]
+Lundblade, L., Manders, G., and D. Brown, "The Entity Attestation Token (EAT)", RFC 9711, April 2025, <https://www.rfc-editor.org/info/rfc9711>.
+Author's Address
+Sangam Das
+Independent
+Balasore
+Odisha
+India
+Phone:
++91-9861363532
+Email:
+info@sangamdas.com
+Datatracker
+draft-das-finality-bound-revocation-00
+Active Internet-Draft
+(individual)
+Info
+Contents
+Prefs
+Document
+Document type
+Active Internet-Draft
+(individual)
+This document is an Internet-Draft (I-D).
+Anyone may submit an I-D to the IETF.
+This I-D is not endorsed by the IETF and has no formal standing in the
+IETF standards process.
+Select version
+00
+Author
+Sangam Das
+Email authors
+RFC stream
+(None)
+Intended RFC status
+(None)
+Other formats
+txt
+html
+xml
+bibtex
+bibxml
+Additional resources
+An Architecture for Technical Enforcement for GDPR and the EU AI Act in Critical AI Systems
+Report- The 85.B2 Challenge: Does This Earlier Disclosed AI-Agent Architecture is Similar to Meta Muse/Sentinel?
+Report a datatracker bug
+Show sidebar by default
+Yes
+No
+Tab to show by default
+Info
+Contents
+HTMLization configuration
+HTMLize the plaintext
+Plaintextify the HTML
+Maximum font size
+Page dependencies
+Inline
+Reference
+Citation links
+Go to reference section
+Go to linked document
