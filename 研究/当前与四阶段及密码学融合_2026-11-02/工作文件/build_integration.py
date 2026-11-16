@@ -1,0 +1,398 @@
+from pathlib import Path
+from copy import deepcopy
+import json, hashlib, re
+from docx import Document
+from docx.shared import Inches, Pt, RGBColor
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
+from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.enum.table import WD_TABLE_ALIGNMENT, WD_CELL_VERTICAL_ALIGNMENT
+from docx.opc.constants import RELATIONSHIP_TYPE as RT
+
+OUT=Path('D:/毕业设计/研究/当前与四阶段及密码学融合_2026-11-02')
+WORK=OUT/'工作文件'
+blocks=[]
+def h(text,level=1):blocks.append(('h',level,text))
+def p(text):blocks.append(('p',text))
+def table(headers,rows,widths):blocks.append(('table',headers,rows,widths))
+def eq(text):blocks.append(('eq',text))
+def ref(id,title,year,url,note,doi=None):return dict(id=id,title=title,year=year,url=url,doi=doi,verification_scope=note,checked_on='2026-11-02')
+
+sources=[
+ref('R01','SUDP: Secret-Use Delegation Protocol for Agentic Systems',2026,'https://arxiv.org/html/2604.24920v4','v4摘要、权能定义、威胁模型及运行时限制相关正文；非完整证明复核','10.48550/arXiv.2604.24920'),
+ref('R02','Oblivious TLS via Multi-Party Computation',2021,'https://eprint.iacr.org/2021/318','作者原始摘要与CT-RSA出版记录；未复现工件','10.1007/978-3-030-75539-3_3'),
+ref('R03','DECO: Liberating Web Data Using Decentralized Oracles for TLS',2020,'https://research.chain.link/deco.pdf','作者原文入口及CCS元数据；本轮不声称逐项证明已读','10.1145/3372297.3417239'),
+ref('R04','Lightweight Authentication of Web Data via Garble-Then-Prove',2024,'https://www.usenix.org/conference/usenixsecurity24/presentation/xie-xiang','USENIX原始摘要与论文入口；不采用未核对的具体延迟解密实现断言'),
+ref('R05','Proxying Is Enough: Security of Proxying in TLS Oracles and AEAD Context Unforgeability',2025,'https://drops.dagstuhl.de/entities/document/10.4230/LIPIcs.AFT.2025.4','出版方摘要、作者与DOI；特定上下文不可伪造性质','10.4230/LIPIcs.AFT.2025.4'),
+ref('R06','MP-SPDZ: A Versatile Framework for Multi-Party Computation',2020,'https://mp-spdz.readthedocs.io/en/latest/readme.html','官方框架文档及出版元数据；未选择或运行具体后端','10.1145/3372297.3417872'),
+ref('R07','TLSNotary Encryption, Decryption, and MAC Computation',None,'https://tlsnotary.org/docs/protocol/mpc-tls/encryption/','官方活文档，Encryption与Decryption；未锁定源码提交'),
+ref('R08','TLSNotary Frequently Asked Questions',None,'https://tlsnotary.org/docs/faq/','官方FAQ的模式、TLS版本与信任条件；部分路线图文字有时效差异，不作性能依据'),
+ref('R09','Vega Prover Preprocessing',None,'https://microsoft.github.io/vega-prover/mc/prep.html','官方预计算与重随机化文档；不代填未经核验的论文年份或DOI'),
+]
+
+h('融合结论与证据边界')
+p('本稿将当前 auth-lifecycle 实现、用户指定目录内的四阶段设计，以及辅助对话的 CCT-AB 密码学构想合并为一份可执行的研究与设计修订稿。建议保留“面向 AI 代理的认证语义安全识别与可撤销性驱动凭据配置方法研究”为主线：A 负责风险受限补证，B 负责生命周期配置，AB 负责配置冲突反馈；共享底座承担批准、凭据、执行与恢复；CCT 作为可选的凭据执行后端研究。CS03 历史隐私分析保留为条件明确的附属审计，不直接进入 TLS 或 MPC 主安全结论。')
+p('这次合并改变的是设计解释、接口提案和研究路线，没有修改 A/B 算法、原生服务、成本函数或历史数据，也没有启动正式实验。本文是融合草案 v1.0，不自动成为已验收的 v2.17。原四阶段编号和原 v2.15—v2.16 证据保留；文档中的指令、设想和“正式设计稿”标记均不等于用户已批准的实验决策或软件实现。')
+p('材料依据包括四阶段 DOCX、v2.15 创新性验证报告与假设登记表、CS03、当前源码和结果，以及辅助对话“分支 · 调研并绘制工作流流程图”中的 CCT-AB v0.1。辅助对话定位：thread 6ae829c7-8ed4-83ee-867b-6e3f4b46df10，turn e55ac9d0-f306-4bcf-8178-f6b8fc7b74a9。对话引用占位符不作为论文证据，文末提供核实后的外部原始链接。')
+p('阅读范围：四阶段文本与表格已按文档顺序提取，补取原生公式；阶段一全文、阶段二工作流与异常、阶段三模块和信任边界、阶段四对象/接口/算法/状态/并发等相关部分进行了重点核对。阶段四 SQL 与模式附录未做逐行执行审计。文中的 Pxxxx、TxxRxxx 是提取定位符，不是 Word 页码。源码审计和结果读取不冒充本轮重新运行测试。')
+table(['证据层','实际已存在','仍不能声称'],[
+['有限算法','v2.16 有界语义、A1/B-A、B/B-B、AB开关、独立参考与证书','一般安全证明或机制创新成立'],
+['原生校准','Keycloak 26.8.1、Casdoor 4.25.0；受控认证与资源策略测量','完整PJ/NT业务、浏览器授权码路径或查询驱动A/AB已验收'],
+['四阶段设计','37项需求、SC/EX/FX/AT、M01—M12、14对象、C01—C08','完整产品代码、43表运行库或148项测试已通过'],
+['密码学构想','CCT v0.1与CS03历史论证','MPC后端已实现、安全证明完成或性能更优'],
+],[.85,2.8,2.95])
+p('当前目录没有 Git 仓库元数据；git status 返回 not a git repository。不得编造提交号。本轮另存源码及结果文件哈希清单。v2.15 假设登记表已找到；CS03 所引 run_models.py 等历史附件在已搜索文件与ZIP目录中未找到，仍按“原报告记载、未独立复现”处理。指定四阶段目录只含四个DOCX，未含其所列 schemas/sql/traceability 独立源附件；正文附录可读，但不能当作已取得的规范源包。')
+
+h('设计冲突及本次统一规则')
+p('本节为融合稿的解释优先规则。它不覆盖历史原稿：若进入开发，应以新增变更记录将这些决策落实到同版接口和测试。事实以当前可定位代码和数据为准；研究成本与比较条件沿用已验证基线；尚未验证的四阶段增强继续登记为待办。')
+decisions=[
+('D01','能力状态','SRS P0008；WF T01','把“A/B未实现”改为“有限模块已实现，完整业务底座未完成”。'),
+('D02','配置成本','DD P0358、P0390；b/search.py','沿用最小原生独立撤销单元G；按配置字典序破同成本。新批准/上下文/请求的词典序仅能另建冻结配置档。'),
+('D03','强对照','DD P0338、P0452；a/candidate.py','主B-AB仅关闭具体B反馈；保留目标、性质查询、安全筛选与缓存。固定日程及完整识别仅作次要消融。'),
+('D04','界内无解','DD §7；a/candidate.py','H耗尽且完整有限求解无策略是界内IMPOSSIBLE；搜索/计算截断是INCONCLUSIVE。'),
+('D05','空模型','DD §7.3；schema.py','空K或模型冲突进入UNKNOWN/边界栅栏；UI可显示CONFLICT，不允许空集全称真放行。'),
+('D06','未决结论','DD §10—12','ALLOW_PENDING只可表示安全尝试资格；严格目标与义务未结不能记U=1或完成保证。'),
+('D07','停止序列','DD §8；b/engine.py','现有B验的是从同一初态出发的替代停止情形；连续两个停止的组合保证需新增状态建模。'),
+('D08','算法名称','DD §8.5；b/search.py','现有候选是任务支持子集搜索与剪枝，不标作SMT/CEGIS实现。'),
+('D09','平台路径','ARCH §6；环境锁','保留Keycloak/Casdoor预实验；Django/Keycloak业务设计另作接入档，不能把两个AS等同两个业务站。'),
+('D10','配置粒度','DD §11；a/compiler.py','原子configure与微步骤、未知创建、CP恢复尚未接通；加入真实前缀后重新验收。'),
+('D11','成本截止','DD P0163、§12.4','规划全调用链共享计算额度；网络截止和决策步H分列，不能每次子求解重置总预算。'),
+('D12','符号','四阶段与v2.15','底座记G_base，独立授权方式记G_native，成本记g(C)；性能工作负载改Perf0，保留legacy W0标签。'),
+('D13','明文边界','ARCH M09；DD C05','传统后端M09在秘密TCB内；CCT后端不得沿用明文SecretUse路径并宣称单执行域失陷保密。'),
+('D14','安全与活性','CCT v0.1；v2.16','恶意方可中止的密码学安全与有限必达分开；任意中止下不承诺W_r严格完成。'),
+('D15','原生语义','DD Q1/F1；L1调查','active/client_id/sid不自证独立授权。现有校准契约只在冻结原生配置域有效，不能替代新业务Q1接口验收。'),
+]
+table(['编号','冲突','统一规则'],[[x[0],x[1],x[3]] for x in decisions],[.45,.95,5.2])
+p('D02 与 D03 尤其影响研究有效性：如果悄悄改成本或削弱基线，即使新系统运行更好，也不能再解释为原 H-B 或 H-AB 的证据。完整出处和后续状态见《融合决策与研究登记.json》。')
+
+h('阶段一的融合需求')
+p('保留 G01—G10、A01—A06、B01—B07、N01—N10、R01—R04 共37项必须需求及 S/X 原范围。CCT 不增加必须完成的产品功能，不把主课题变成密码协议、浏览器和通用规划器的同时研发。先完成最低业务闭环及有效实验，再决定密码学扩展规模。')
+p('G01/G05 的核心仍是实际账户和原生授权：同邮箱不等于同主体，两个token不等于两个撤销单元；查询者可见的active只说明其查询范围内的判断。G02/G06 增加执行后端安全档声明：传统档承认受信执行器短时明文，CCT档才研究一个执行域主动失陷下的材料保密；两个档的部署和结果分别记录。')
+p('G03/G04/G08 的批准、执行身份与撤回不能由密码学自动补齐。操作批准仍由真实用户确认；通道身份不能相信请求中的agent_id。CCT只验证已批准操作的执行约束，不能让模型的自然语言、网页内容或有效签名自行扩张业务范围。')
+p('L、R、E保留互不替代的定义。L是在本地撤回提交之后不再准入新的目标任务调用；R是在所声明原生范围/资源策略下停止材料及声明后代；E是声明执行域的后续效果停止，必须另外证明对在途效果的控制。MPC分片、销毁本地句柄、签发停止证书都不能替原生服务创造R或E能力。')
+table(['新增修订ID','要求','验证入口'],[
+['C01','显式选择传统或CCT执行安全档，禁止无声降级','后端能力配置及故意降级负例'],
+['C02','证据、输入材料、后继材料、当前资格绑定同一合法转换','错材料/旧代次/错账户回执负例'],
+['C03','任何可用认证密文释放前完成相应主动安全检查','中途退出与有效前缀攻击'],
+['C04','中止、未知与后置义务进入运行记录和完成分母','丢响应、失联及恢复轨迹'],
+['C05','公开元数据、持久状态和快照复用有明确泄漏与回滚边界','复用票据/nonce/预计算负例'],
+],[.7,3.75,2.15])
+p('新增C编号为本融合稿的修订需求，不重编号原C01—C08接口；机器登记中使用前缀 CRYPTO-C01—C05消歧。37项逐项原文、定位、模块和当前状态见《需求与实现映射.json》。所有条目的整体产品验收保持NOT_ACCEPTED，不因部分源码存在自动关闭需求。')
+
+h('阶段二的统一业务与故障工作流')
+h('已知语义与配置冲突两条入口',2)
+p('SC1继续使用原贯穿业务：用户批准AI-1读取PJ的DOC-17@rev3并向NT的NB-7提交摘要，AI-2继续监测PJ。先冻结两个任务各自的账户、资源、接收方、批准、预算和停止/保留要求。M07若已有适用契约，B直接产生共同配置和计划；无需为展示A而额外探测。每个真实操作都重核当前批准及材料资格。')
+p('SC2从B的具体不可满足约束出发。B返回世界子集、失败约束和改变可行性/成本的语义差异；A只在原已批准ProbeSpec中选择。Q1是具备原生根据的关系查询；Q2是隔离候选认证和/me及获准处置。Q2可能产生会话和新Cookie，不能当作只读分类。F1原生关系、F2实际账户、F3处置外包络分别登记，不能用一个active或一张/me截图包办。')
+p('观察被接纳后，K保守更新，预算、会话变化和义务同步改变；B基于新快照重算。若观察与所有允许状态冲突，冻结受影响结论并报告边界冲突；不能丢弃该观察强行留下一个世界。若不再有安全可完成的核验，返回范围限定的拒绝/不确定，不能转到管理员评分接口补答案。')
+h('停止保留与封闭转换的叠加',2)
+p('SC3要求停止AI-1并保留AI-2。只要求L时，正确共享代理可能已最优，保留为负控制。要求R时，必须按实际原生撤销单元选择；两路径共享根撤销会伤及AI-2时，B不得把不同token包装成独立性。已有访问令牌离线仍可用的情形继续列为R未满足，不能仅凭刷新失败宣布远端停止。')
+p('CCT的叠加点仅在M09执行认证转换：输入受保护密码或token，完成固定认证请求，验证响应，在受保护计算内解析出公开事实及后继材料。A看到事实及未知义务，B看到材料引用和经证明的适用关系；它们都不读取原始秘密。原生网站返回的业务正文也要经过固定输出裁剪，防止凭据经“业务结果”旁路泄漏。')
+p('例如/me请求使用capsule-7，响应确认账户A同时设置新Cookie capsule-8。该证据直接证明的是capsule-7的本次身份；除非审定解析契约证明新Cookie继承相同主体，否则capsule-8先保持QUARANTINED，另核对后才能绑定。响应同源并不自动等于两个材料同账户。')
+h('统一故障解释',2)
+p('批准撤回先于Claim提交：拒绝新执行。Claim先于撤回：记录在途，不假称本地撤回取消远端操作。请求已发但响应丢失：保留MAY_HAVE_EXECUTED和未知句柄义务；不能盲重发登录或刷新。迟到结果只追加历史观察，是否可用于当前执行另查批准/材料代次。两执行域部分存储或其中一方中止：保持待恢复，不把另一方的成功声明当作完整结果。')
+p('原EX01—EX18、FX01—FX06、AT01—AT08全部保留。新增CRYPTO用例是对真实业务/故障轨迹的叠加，不用它们替换旧验收；至少保留合法恢复、正常完成和静态最优正例，避免永远拒绝获得表面安全。')
+
+h('阶段三的模块落位与可信边界')
+p('沿用模块化核心和隔离工作进程，不创建十二个微服务。M10是唯一运行库提交入口；领域模块仍各自校验命令。网络调用在短事务之外。SQLite的DELETE journal等方案是原设计选择，当前实验JSONL journal不能被重新称为这一权威事务库。')
+modules=[
+('M01','账户登记','有限字段','补稳定主体、账户UI及原生范围溯源'),
+('M02','保险库','未集成','传统KEK/DEK与CCT分片存储分档；不传根密钥'),
+('M03','可信批准','有限批准语义','补独立人类入口、撤回版本及范围显示'),
+('M04','AI入口','未完成真实双代理','通道身份、资源白名单及有限业务返回'),
+('M05','A','a/candidate.py等','保持W_r安全筛选；补原生ProbeSpec桥接'),
+('M06','B','b/search.py等','保持min G；补真实配置前缀与连续停止规格'),
+('M07','证据注册','a/evidence.py等','补持久观察槽、不可变来源和CCT回执验证'),
+('M08','独立检查','checker.py及a/b检查','复用有限检查；新增每次实际准入和回执验证'),
+('M09','真实执行','experiment/providers.py','已有原生测量；PJ/NT适配和CCT后端另验'),
+('M10','运行与恢复','实验日志/有限控制','补权威事务库、Claim、escrow和CP恢复'),
+('M11','审计UI','结果文件','补面向用户的L/R/E、未知与义务展示'),
+('M12','独立评价','experiment/scoring.py等','保留独立真值及单向导出，禁止事实回流'),
+]
+table(['模块','职责','现状','本次融合落点'],[list(x) for x in modules],[.55,.85,1.55,3.65])
+p('传统后端的M09属于秘密及事实真实性TCB，拥有必要短时明文。CCT候选后端将秘密计算拆成Exec0/Exec1，受信Q由M03/M08/M10及所需材料管理共同构成；AI及网络不可信，至多一个执行域静态主动腐化。用户秘密输入、Q、服务契约及密码学实现仍须可信。两方串谋、顺序移动腐化、两域同时被宿主root读取、故障无界活性均不在首版承诺内。')
+p('两个原生认证实现、两个AI任务、两个密码执行域是三种独立性。Keycloak和Casdoor只支持认证实现多样性；同宿主两个容器不是抵御宿主管理员的两域；两个token也不是两个grant。要实证CCT的域隔离，必须说明独立主机/管理域或被明确限定的攻击面。')
+p('阶段三建议的Django 5.2.18与Keycloak 26.8.1是业务接入候选；本轮不部署它们，也不覆盖现有Keycloak/Casdoor环境锁。现有L1使用loopback HTTP及专用测试配置，不是MPC-TLS部署，不能作为CCT网络保护证据。未来TLS版本、密码套件、源码提交和发行包摘要需单独锁定。')
+
+h('阶段四的核心语义与现有算法保持')
+h('A与有限正确性',2)
+p('具体状态包含服务语义、外部账户/材料/会话、批准版本、余额和义务。K是非空可能状态集合，抽象映射必须覆盖所有真实允许状态与转换。核验同时产生观察、状态变化、副作用和义务；响应丢失、未知结果、批准撤回与允许外部变化都进入后继，而不是只过滤模型标签。')
+eq('W_0 = { s : Safe(s) ∧ Goal(s) ∧ StrictObligations(s) = ∅ }')
+eq('W_{r+1} = W_0 ∪ Pre(W_r)')
+p('Pre仅在动作获准、满足硬约束与余额、后继非空且每个允许观察对应的后继都在上一层W时成立。未达目标的每步使剩余决策步r减少。H限定决策步，不自动限定墙钟时间。stay/finish反例因此不能被无限stay绕过；这沿用v2.16的标准有界可达性规则，不另报新屏障理论。')
+p('同一观察历史只能选择同一动作，不能由隐藏真实模型帮运行者选择。UNKNOWN是边界/材料结果不明等语义状态；INCONCLUSIVE是计算未完成；IMPOSSIBLE只能针对已穷尽的有限域和给定H/批准/预算。空K永不被视为成功。CCT的abort若属于允许环境结果，则必须进入后继；无限abort环境通常不能支持严格必达。')
+h('B与多世界证书',2)
+p('保留任务、多条支持路径、P/I/G_native、停止与保留目标、批准及预算输入；同一合法候选目录对B、B-B和精确参考开放。现有B以任务支持子集搜索、单调约束剪枝和共同检查器求解。B-B生成共享代理、全部独立授权、静态终止签名分组及权限贪心中适用的合法候选，再用相同目标选择最好者。')
+p('在有限模型中，g(C)是经原生语义确认的独立撤销单元数。min g(C)保持为唯一首要配置成本；新增批准、上下文、请求和CPU分别记录。P1={a,b}、P2={b,c}、P3={a,c}继续作为三世界证书回归：任意两世界有共同计划，三者没有。证书必须包含世界、动作目录、批准、预算和约束引用；独立检查器不回调候选生成器。')
+p('“当前配置没有共同方案”只是B层结论；“所有获准观察策略都无法完成”需要A或R-J在完整有界策略空间中验证。未穷尽时保留INCONCLUSIVE。不同原生停止情形从同一配置分别可行，不自动推导连续停止后仍可行。')
+h('AB和参考的公平性',2)
+p('现有a/candidate.py的feedback是AB主配对开关；关闭后仍保留性质导向查询、任务目标、相同W_r和缓存。阶段四的固定日程/先完整识别版本降为辅助机制实验。R-J可把probe、configure、stop、cleanup联合规划，但现有原生参考仅覆盖已知契约子域，不写成完整原生联合故障规划已验证。')
+p('扩展CCT后，各方法必须获得同一执行后端、原生接口和批准；密码学消息不能被偷算成免费。不得拿CCT候选与明文且不安全基线宣称A/B算法更优。原生请求Q与两方通信字节、预处理、密码计算、存储分列，保证对原H-A/H-B成本口径可追踪。')
+
+h('封闭凭据转换协议的融合设计')
+h('研究问题与表示',2)
+p('CCT-AB研究的问题收敛为：在可信协调器和一个未腐化执行域仍存在时，能否对未修改原生服务实施获准的认证转换，使输入及派生凭据保持受保护，并把证据、实际使用的材料和当前执行资格绑定到同一次转换。它不以“首次MPC-TLS”“首次代用密码”“首次一次性授权”命名贡献。')
+p('两个候选表示共享同一语义合同。Materialized capsule直接保存认证材料的认证秘密分享；Transcript-slice capsule保存足以在受保护计算内从已认证响应恢复特定字段的引用。后一表示不能成为对任意offset/length的通用解密接口，也不能在取用时先向某执行者解密再封装。')
+table(['对象','新增字段或约束','所有权'],[
+['ProtectedMaterialRef','表示类型、材料/版本、账户状态、原生范围、派生关系、后端profile、创建attempt、保留/失效规则','M02；M10提交'],
+['SliceRef','已承诺通道密钥代次、认证记录根、记录序号、固定selector/decoder/parser版本、长度界及完整性依据','Exec0/Exec1持秘密；M02登记引用'],
+['TransitionTicket','operation与transport ordinal、输入材料代次、task/account/resource、endpoint、payload摘要、批准/绑定版本、预算保留、claim序号、截止','M08核对；M10一次消费'],
+['TransitionReceipt','ticket摘要、实际通道绑定、输入/输出材料承诺、公开观察、parser版本、结果/中止状态及未决项','受保护计算产生；M07独立验收'],
+['Evidence扩展','原始attempt、输入材料指纹、查询者、观察/接收时点、适用域与失效事件、回执依赖','M07；不可变观察槽'],
+],[1.15,4.1,1.35])
+p('材料承诺必须隐藏低熵密码，不能直接把password的普通哈希公开当绑定。协议需选用具隐藏性和绑定性的承诺或适当的认证分享；承诺随机数和域分离也要纳入状态。capsule ID、调用时序、长度、服务域名和派生图本身可能泄露关系，必须列入公开泄漏函数或进一步保护。')
+h('接口兼容与执行序列',2)
+p('C01—C04、C07—C08保持原责任。C05改为带明确tag的后端联合类型：TRUSTED_PLAINTEXT使用原受信SecretUse；CCT仅接收ProtectedTransitionRequest，不允许出现原始secret字段。C06的普通transport_verified自报标记不能用于CCT验收，必须核对回执、通道上下文、输入/输出材料及执行资格。旧接口仍可用于传统档，不能被标成CCT安全实现。')
+p('步骤1：M10读取一致快照，M08验证任务、动作、批准、预算与材料资格；固定端点/请求结构/解析器，预留后置处置额度。步骤2：M10持久化AttemptPrepare，并在短事务中Claim，消费单次执行资格、固定版本与预算，形成逻辑L停止的排序点。真实TLS握手和网络发送在事务外。')
+p('步骤3：两域核对ticket、材料代次和消息上下文，在主动安全计算中构造请求；任何可被服务接受的认证密文释放之前，完成约束该输出的必要一致性检查。只在最后发现恶意行为并拒绝证明，不能撤回已经泄漏的秘密或已经发送的认证前缀。')
+p('步骤4：对响应做完整认证，再由固定Γ解析器处理有界HTTP/字段。输出受许可的业务内容、公开事实和后继capsule；秘密字段继续保留分享状态。明确重定向、重复Set-Cookie、chunked边界、编码/解码顺序和最大长度；首版不支持的压缩/协议变体显式拒绝。握手、TLS版本/套件、密钥代次、记录序号和完整认证记录共同绑定，不能只绑定裸响应片段。')
+p('步骤5：M10在RESULT_STAGED中接纳待验证回执、密文引用及义务；M07/M08核对关系后再原子推进观察和当前资格。若只收到部分结果或一域中止，保留UNKNOWN_PENDING/恢复义务。步骤6：生成下一步策略，仍经当前批准与预算准入。两域份额保存与本地数据库提交不存在自动跨域原子性，需幂等阶段确认、重启恢复和孤立份额清理规格。')
+h('必须保留的边界',2)
+p('局部停止只禁止排序点之后的新Claim。已经Claim的操作可能在撤回后才产生或发送密文；不得声称撤回后物理网络零发送，也不能撤销已泄漏的有效认证密文。若要更强的E保证，需要额外的发送闸门/服务取消语义，并重新定义竞争边界。')
+p('CCT采用安全带中止的目标，不保证恶意一方配合完成。输入材料曾经在旧明文后端暴露时，后来分片并不能恢复其历史保密；迁移必须记录暴露范围，并按原生能力考虑轮换。持久保存TLS流量密钥用于slice会延长暴露窗口，不能附送前向安全或移动腐化安全主张。快照恢复不得复用一次性预处理、nonce、计数器或已消费票据；哈希链只能提供特定完整性线索，不自动防回滚。')
+
+h('拟证明性质与可证伪研究假设')
+p('以下性质状态均为SPEC_ONLY或NOT_PROVEN。先定义理想功能与允许泄漏，再为特定后端组合写归约。没有源码、具体协议和模拟器时，不把“由MPC安全性直接得到”作为完整证明。密码学安全参数与有限模型大小是不同参数。')
+proofs=[
+('P01','材料保密','允许泄漏相同的两组秘密输入，在至多一个静态主动腐化域视图中不可区分；Q和输入端可信。','任一执行域获得可复用密码/Cookie/AT/RT；公开泄漏区分游戏未限定。'),
+('P02','获准转换与发送前约束','每个释放的有效认证请求都对应已持久提交且输出额度未耗尽的合法Claim及固定请求/输入版本；在途另记。','把未批准请求的有效密文先释放，再靠最终证明失败补救。'),
+('P03','证据与材料关系','被接纳回执对应同一ticket、真实认证通道、实际输入和Γ允许的输出；账户继承需额外契约。','回执可配到另一capsule，或/me旧Cookie证明被挪给新Cookie。'),
+('P04','本地停止及重放防护','撤回先提交后不能产生新的合法Claim；旧版本/票据重复消费被拒绝。','复制票据、重启恢复或任务改名重新获得额度；不承诺原生exactly-once。'),
+('P05','后置闭合与中止诚实性','所有允许派生认证材料都在受保护表示或明确未知义务中；中止不伪装为完成。','凭据经业务输出/错误消息泄漏，或未知新会话被静默丢弃。'),
+]
+table(['ID','目标','可核验的定义要点','否定条件'],[list(x) for x in proofs],[.4,.9,3.3,2.0])
+p('证明顺序：先证明固定解析与认证记录到材料关系；再证明一次转换的保密/完整性与发送前检查；随后用状态不变量组合多个转换和票据消费；最后证明与A的具体到抽象映射兼容。映射至少保持状态覆盖、动作前置条件、观察相容、副作用、预算/批准、终态义务反映和可执行回译。协议层中止必须被具体模型和抽象后继共同表示。')
+p('条件性组合命题草案：若底层协议满足P01—P05，服务转换被抽象保守覆盖，Γ和M07解释可靠，M10持久消费正确，且环境结果范围满足有限必达所需的可用性条件，则被独立检查接纳的有限策略可将已有H-S保持到该执行profile。证明思路是对决策步归纳，并对每个协议微步骤建立模拟关系。当前尚未建立这些前提和归约，命题不能登记为已证明。')
+p('反例保留：隐藏的新会话未进入抽象会破坏清理保证；把一次成功内省视为永久契约会漏缓存和外部变化；若恶意域每次abort而模型只列成功，W_r会给出虚假必达；若Γ把同响应中的任意Cookie视为同主体，P03可在不破坏TLS的情况下失败。')
+crypto_hyp=[
+dict(id='HC-S',kind='CONDITIONAL_SECURITY',status='NOT_PROVEN',claim='特定后端在声明威胁模型内满足P01—P05',falsifier='一个符合前提的提取/越权/换绑/遗漏义务攻击'),
+dict(id='HC-CLOSE',kind='DEVELOPMENT_CONFORMANCE',status='NOT_TESTED',claim='固定服务配置中派生材料均保持受保护表示或显式未知义务',falsifier='任一允许转换产生未登记的可复用权能；完成率另报'),
+dict(id='HC-SLICE',kind='EXPLORATORY_PERFORMANCE',status='NOT_TESTED',claim='某些预先定义的材料长度/复用次数区间中slice降低总转换成本',falsifier='优化过的materialized表示成本相同或更低；不修改原A/B成本函数'),
+dict(id='HC-SEM',kind='INCREMENTAL_VALUE',status='NOT_TESTED',claim='CCT关系绑定较同后端但无该关系的组合减少合法模型中的错材料保证',falsifier='通用受保护状态机同成本满足全部关系；收缩为工程集成'),
+]
+p('HC-S是演绎目标；HC-CLOSE是实现一致性检查；HC-SLICE仅是探索性能假设；HC-SEM检验关系编码的增量。它们不并入H-A/H-B/H-AB的正式多重检验，也不因为通过几个攻击脚本就确立密码学不可区分性。未经单独冻结，不设“快20%”等新阈值。')
+
+h('CS03历史隐私分析的受限接入')
+p('CS03提出从线性/仿射公开视图识别历史相关泄漏，并研究受允许子空间限制的刷新。该方向可以保留，但与CCT的接口应是“审计某一被严格抽象为仿射分布的局部视图”，而不是给TLS密钥、MPC三元组或整个协议自动加一次线性掩码。')
+eq('V_b = t_b + M_b r_b,   S_b = Im(M_b)')
+eq('V_0 ≡ V_1 ⇔ S_0 = S_1 ∧ (t_1 − t_0) ∈ S_0')
+p('这里在有限域F_p上，r均匀独立，挑战和矩阵固定，V在相应仿射支持集上均匀。若两个仿射支持集不相交，总变差距离为1；若相交，则原报告给出的距离如下。它不是对自适应非线性完整TLS转录的等价结论。')
+eq('TV(V_0,V_1) = 1 − p^{dim(S_0 ∩ S_1) − max(dim S_0, dim S_1)}')
+eq('D = S_0 + S_1 + span(t_1 − t_0),   W = P_{allowed} ∩ D')
+eq('S_0 + W = D ∧ S_1 + W = D')
+p('最后一式是同一允许刷新空间能补齐两侧的可行条件。在该固定均匀仿射模型及可行条件下，CS03记载的最小刷新维数为dim D − min(dim S₀, dim S₁)。该数学表达保留为需独立复核的局部引理，不能仅靠历史小规模枚举上升为新密码原语或完整协议最优性。')
+p('接入步骤：先指定CCT中实际可见的某组承诺/线性校验消息；证明其联合分布确实满足上述模型，并把公开capsule ID、时序及关系纳入泄漏定义；再用线性分离器寻找不同秘密历史的可区分投影；若要刷新，只刷新被底层协议允许重新随机化的对象。合法投影上的区分可反驳全隐私；某投影不可区分不能证明其余转录安全。')
+p('强基线至少包含完全独立新掩码、不恢复一次性随机缓存以及已有安全预计算/重随机化机制。Vega官方文档描述可复用预处理及每次证明的重随机化[R09]；它是比较参照，不是可直接移植到任意MPC或TLS的许可。不要把“恢复后不能复用一次性材料”包装成独立新发现。')
+p('CS03原稿记载32768个有限案例、324项TV检查、48项局部分离证明和96项平衡历史证明；本轮未获得相应源码和原始结果，未复现，不把这些数值算进当前回归或密码学证据。查找范围和空结果已保存；嵌套ZIP未全面递归解包，因此只报告“已搜索范围未找到”。')
+
+h('近邻研究及可保留的差异')
+p('本轮采用有针对性的近邻核验，而非声称穷尽所有密码学文献。选择覆盖委托授权、未修改TLS对端、网页事实证明、实现框架及历史刷新；同时保留v2.15对学习、规划和账户图方法的既有创新限制。检索得到研究问题不等于查新通过。')
+table(['资料','已有核心机制','对本研究的约束'],[
+['SUDP v4 2026 [R01]','秘密代用、操作绑定及派生可复用权能；运行时保密可与硬件根组合','不能声称首次考虑派生权能；差异只能限定在具体两域计算及生命周期关系'],
+['Oblivious TLS 2021 [R02]','主动安全MPC实现TLS 1.3，对端无需改造','联合TLS本身已有；具体客户端角色、后端和组合证明仍需匹配'],
+['DECO 2020 [R03]','TLS数据来源与选择性命题证明','证明网站数据不等于执行端均不知道凭据或有权继续使用'],
+['Garble-Then-Prove 2024 [R04]','降低网页数据认证计算/通信，认证数据转承诺','不直接移植其安全目标；需检查发送前安全与秘密输出接口'],
+['Proxying Is Enough 2025 [R05]','代理式TLS oracle及AEAD上下文不可伪造性分析','须绑定具体通道与消息语境；不能概括成AES-GCM普遍不安全'],
+['TLSNotary [R07—08]','MPC-TLS与选择性披露；官方流程向Prover揭示明文','默认数据流不是两执行域都不见材料；proxy与MPC模式假设不同'],
+['MP-SPDZ 2020 [R06]','多类主动/被动、诚实/不诚实多数计算后端','框架名不是安全证明；按威胁模型选择并锁定具体协议'],
+],[1.3,2.65,2.65])
+p('这些文献同时包含国内研究者参与的代表工作，例如Garble-Then-Prove和AFT 2025的合作论文；本稿按技术关系分析，不用地区划分代替质量比较。摘要中的加速数字不移植为本系统性能预测。TLSNotary FAQ存在不同年代的路线图措辞，本稿只采用可核对的当前页面说明，不据此冻结后端能力。')
+p('最有价值的潜在贡献是一个可检查的认证转换关系与真实适配：它同时限制输入秘密、原生操作、输出凭据和可用证据的对应关系，并在未知/撤回/恢复时保持这一关系。这个候选还可能被“通用主动安全反应式计算＋可靠票据账本＋固定解析器”的简单组合覆盖。应以相同功能、安全模型、泄漏与资源配置作直接实现比较；若等效，结论应写成领域规格、适配与工程证据。')
+p('Transcript-slice只是一种待测表示优化。其存储可能随累计认证记录增加，重复取用可能重复解码/计算；短token或高复用情形，直接materialized分享可能更便宜。比较必须允许后者同样使用批处理、缓存和合规预处理，并计入密钥保留/回收成本。CS03的线性子空间结论也不能单独承担新通用密码协议的创新主张。')
+
+h('历史结果与实验协议保持')
+p('pilot02是已知契约校准负控制：288对、576次运行，合法完成120、拒绝336、UNKNOWN120；主要比较的成本比均为1.00，完成率差均为0。E和FA均为0，但未决条件仍有156项，其中132项为批准撤回后未满足停止目标，24项为未知创建材料在冻结离线策略下仍可验证。这些条件不能在合并后删除或重写为清理成功。')
+p('A/AB查询选择与B反馈在这一批数据中未激活。每实现四个操作性家族只有一个构造谱系，独立性获确认家族为0；所以不能据此做正式效应推断或认定统计等效。reference02中A1总Q为5，R-J为3，原生认证请求均为3，差别是重复代理门控调用。该工程冗余应在共同控制逻辑中修复后重测，不能作为密码学创新。')
+p('regression03记载96个自动测试方法通过，原27项回归及5184次有限查询无差异。本轮仅核查已有日志，没有新增这些运行。pilot02源码归档摘要为7cc44514a05b809f775310203b0e7b9cc6a5d5538501cdb0af7bfd38ebc71b73；它是源码快照，不是Git提交。结果解释以docs/experiments/RESULTS.md及原始文件为准。')
+table(['登记','继续保留的规则','状态'],[
+['H-S','条件正确性；一个符合前提的反例可否定；有限测试不等于证明','前置条件继续补齐'],
+['H-A','C_Q比<0.80且合法完成率差>−0.05','建议阈值；NOT_TESTED正式'],
+['H-B','C_G比<0.80且合法完成率差>−0.05','建议阈值；NOT_TESTED正式'],
+['H-AB','C_Q比<0.85且合法完成率差>−0.05','建议阈值；NOT_TESTED正式'],
+['H-M / H-D','机制实验 / 可选漂移扩展','次要 / 可选'],
+],[.9,4.2,1.5])
+p('成本包含失败、重试、配置、撤销、清理和恢复；UNKNOWN、拒绝、超时留在预先定义分母。配置家族为主要聚类单位，认证实现分层；总体单侧α=0.05、三主比较Bonferroni及配对簇bootstrap的建议保持，但独立家族不足时不启用正式判定。阈值、代码快照/提交、样本划分、统计脚本和留出配置仍须研究者在正式实验前确认。CCT不被偷加到原三项主要假设的成本或假设族。')
+p('新的实验层分开：L0验证语义/证书/回执绑定有限反例；L1验证原生查询和配置微步骤及保持条件；CCT-dev验证秘密数据流和中止行为；CCT-perf比较两种表示的端到端开销。原生请求、协调器RPC、密码学轮次/字节、预处理、存储、CPU、未决义务和完成率各自记录。无论使用哪一后端，主候选与基线取得相同服务接口、预算和故障脚本。')
+
+h('实施顺序与进入门槛')
+p('建议按依赖而不是按新版本名推进。第一优先级是把已有有限算法接到可信运行底座和真实查询路径；密码学原型作为可停止的支线。以下均为待办，不是本轮实现交付。')
+backlog=[
+('M0','规格对齐','保留D01—D15；取得或从原稿导出同版SQL/Schema源并做差异检查；保存源码快照','成本、基线、L/R/E、状态码一致；不覆盖历史'),
+('M1','最小可信闭环','M01—M04/M10/M11；批准、材料、Claim、预算escrow、CP恢复；两个真实AI业务任务','AT正常与故障正例通过；评分真值无返回路径'),
+('M2','原生A与配置前缀','Q1/F1有效来源、Q2副作用/清理、实际账户、配置微步骤与预算不足','候选和B-A/B-AB同信息；L0/原生对照无未解释差异'),
+('M3','密码后端可行性','固定一种服务和有界HTTP/TLS路径；先materialized分享；锁定主动安全协议','任一执行域不重构秘密/流量密钥；发送前检查；不支持即收缩范围'),
+('M4','关系与恢复','实现ticket/receipt/Γ及后继绑定；中止、迟到、换绑、代次与份额回收','P01—P05逐项有证明义务和实现检查；不把测试当证明'),
+('M5','表示与隐私支线','再实现slice；必要时建立CS03局部仿射映射；对照优化后materialized','同安全模型成本测量；无优势则删除表示优化主张'),
+('M6','独立预实验与冻结','足够独立家族、方差/功效、留出配置；代码与统计脚本确认','研究者确认后才允许正式H-A/H-B/H-AB实验'),
+]
+table(['门','工作包','验收门槛'],[[x[0]+' '+x[1],x[2],x[3]] for x in backlog],[1.2,3.2,2.2])
+p('原Perf0（四阶段W0）为4核/8GB、4任务、2代理、2服务、8语义、8核验、深度≤3的建议工作负载，含准入p95≤200ms、规划p95≤5s、求解硬上限30s。本轮未在该资源限制下验证，也不能让CCT新增节点/预处理隐形越过预算。CCT性能另立资源档；主算法的最坏枚举与参考开销继续如实报告。')
+p('实现取舍：先复用现有a/b/reference/checker模块；新增runtime/vault/backend时沿用当前项目而非复制全项目换版本。先完成普通受信后端的M10事务正确性，再引入两域协调。若真实主动安全TLS后端在时间和资源内不可实现，就交付明确的理想功能/反例/模拟语义研究，不把本地share拼接脚本称作密码学实现。')
+
+h('反方审查与贡献收缩条件')
+table(['审查问题','必须接受的回应或试验'],[
+['这是否只是SUDP加MPC','对照同等原生接口与反应式安全计算，展示新增关系和必要性；若等效，降为集成贡献。'],
+['为什么不用现成TLSNotary','官方数据流向Prover公开明文；需变更输出结构和安全证明，不能仅换角色名称。'],
+['两个执行域失陷是否覆盖宿主攻击','同宿主root可读两域时不覆盖；域隔离必须与威胁模型一致。'],
+['停止后还可以发请求吗','先Claim的请求可能迟到；L只约束新准入，R/E依原生/执行条件，不能扩大承诺。'],
+['一个恶意方一直拒绝怎么办','可保证安全中止，不能保证完成；不完成计U=0，拒绝不是性能收益。'],
+['slice一定更快或更省吗','不一定；测量材料长度、复用、保留和预处理全成本，保留materialized占优负控制。'],
+['没有发现模型冲突是否表示现实安全','否；不可观察漂移不可被凭空检测，可靠模型边界仍是H-S前提。'],
+['有限测试和旧计数是否足够','否；限定测试域、区分历史未复现记录与当前日志，密码学证明和统计效应另验。'],
+],[2.1,4.5])
+p('本轮可保留的产出是统一领域规格、设计冲突处理、实现追踪和候选密码学接口。A/B独立算法优势、CCT新协议安全、slice性能优越以及CS03完整转录隐私均未成立。若后续强基线或通用联合规划在可接受成本内等效，应如实收缩创新主张，保留认证语义测量、可靠适配及可检查证据的价值。')
+
+h('交付与可复核来源')
+p('本融合包提供总稿、37项需求映射、15项决策与新增密码学研究登记、接口与14项计划测试增补、来源/保留核验和静态校验脚本。原始DOCX、auth-lifecycle源码及历史结果保持不变；本轮新增的是设计工件，不含CCT可运行实现。校验结果只覆盖工件结构、引用存在和保留哈希，不证明算法或协议正确。')
+p('关键本地出处：auth-lifecycle/src/auth_lifecycle/a/candidate.py、a/bridge.py、a/compiler.py、a/joint_reference.py；b/search.py、b/baselines.py、b/reference.py、b/checker.py、b/certificates.py；experiment/providers.py、journal.py、witness.py、scoring.py；results/experiments/pilot02、reference02、regression03；docs/experiments/RESULTS.md。精确文件哈希见随附清单。')
+p('原始文档：实现四阶段目录内四份v1.0；硕士研究_v2.15_创新性验证与假设驱动研究报告.docx；CS03_密码学贡献重构与历史隐私刷新_2026-10-23.docx。输入清单给出绝对路径和SHA-256。辅助对话已保存文本，但其中“可行、创新、可证明”的语句仅作为待审构想。')
+for s in sources:
+ p(f"[{s['id']}] {s['title']}。{str(s['year']) if s['year'] else '持续更新的官方项目文档'}。{('DOI '+s['doi']+'。') if s['doi'] else ''}核验范围：{s['verification_scope']}。")
+ blocks.append(('link',s['url'],s['url']))
+p('资料核验日期为2026年11月2日。未取得或未完整阅读的证明、工件和源码版本不填成已核验；没有核实DOI的条目只给原文/官方链接。后续正式查新应继续对反应式安全计算、密钥/上下文绑定和凭据状态机做更完整覆盖。')
+
+def dump(path,value):path.write_text(json.dumps(value,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+registry={'schema':'ab-integration-design/1','status':'DRAFT_SPEC_ONLY','original_algorithms_modified':False,'formal_experiments_started':False,
+ 'crypto_requirements':[dict(id='CRYPTO-C01',text='明确后端档且禁止静默明文降级'),dict(id='CRYPTO-C02',text='同次转换中的证据材料与资格关系绑定'),dict(id='CRYPTO-C03',text='有效认证输出释放前完成主动安全检查'),dict(id='CRYPTO-C04',text='中止未知与后置义务显式计入结果'),dict(id='CRYPTO-C05',text='明确公开泄漏与持久状态复用边界')],
+ 'decisions':[dict(id=x[0],topic=x[1],source=x[2],resolution=x[3],status='INTEGRATION_DRAFT') for x in decisions],
+ 'modules':[dict(id=x[0],responsibility=x[1],evidence=x[2],work=x[3]) for x in modules],
+ 'proof_obligations':[dict(id=x[0],name=x[1],definition=x[2],falsifier=x[3],status='NOT_PROVEN') for x in proofs],
+ 'crypto_hypotheses':crypto_hyp,
+ 'milestones':[dict(id=x[0],name=x[1],work=x[2],gate=x[3],status='NOT_COMPLETED_BY_THIS_MERGE') for x in backlog],
+ 'primary_hypotheses':{'H-S':'CONDITIONAL_NOT_GENERAL_PROOF','H-A':'NOT_TESTED_FORMALLY','H-B':'NOT_TESTED_FORMALLY','H-AB':'NOT_TESTED_FORMALLY'},
+ 'missing_materials':['四阶段独立schemas/sql/traceability规范源附件未在指定目录提供','CS03所引历史运行源码及原始结果未在已检索范围找到'],
+ 'sources':sources}
+dump(OUT/'融合决策与研究登记.json',registry)
+contracts={
+ 'format':'DESIGN_FIELD_CATALOG_NOT_EXECUTABLE_SCHEMA','status':'SPEC_ONLY','implements_crypto':False,
+ 'C05':{'TRUSTED_PLAINTEXT':'Existing proposed SecretUse; trusted executor sees necessary plaintext.', 'CCT':{'message':'ProtectedTransitionRequest','required':['profile_id','operation_id','transport_ordinal','claim_id','output_slot','input_capsule_id','input_generation','account_ref','task_ref','approval_version','binding_version','endpoint_id','request_template_id','payload_commitment','parser_version','budget_reservation_ref','expiry'], 'forbidden':['secret','password','cookie_plaintext','access_token_plaintext','traffic_key_plaintext']}},
+ 'C06':{'message':'ProtectedTransitionReceipt','required':['claim_id','output_slot','ticket_commitment','channel_binding','input_material_commitment','output_capsule_commitments','parser_version','public_observation','outcome','obligations'], 'outcome':['AUTHENTICATED_RESULT','ABORT_NO_EMISSION','UNKNOWN_MAY_HAVE_EXECUTED','REJECTED_INVALID_RECEIPT'],'rules':['Coordinator consumes admission ticket once at Claim; authenticated record output slots are separately bounded.','Self-reported transport_verified is insufficient.','Successor account inheritance requires an explicit reviewed semantic rule.','Secret commitments must hide low-entropy values.']},
+ 'tests':[]}
+planned_tests=[
+('CT01','合法登录','登录产生受保护会话并绑定同次输入/输出','公开业务成功；秘密不进入AI或单域输出'),
+('CT02','合法刷新','已批准刷新返回替代材料','新代次被登记；旧资格按原生契约处理'),
+('CT03','同响应错账户','/me证明输入Cookie账户A但输出Cookie账户未证','输出隔离；不得继承A'),
+('CT04','回执换绑','将真实回执绑定另一capsule或operation','拒绝；不产生使用资格'),
+('CT05','受限active','另一个查询者收到active=false或client_id/sid相同','不推导全局撤销或独立grant'),
+('CT06','丢响应','请求已发送且可能创建新材料','UNKNOWN及未知句柄义务；U=0直到合法结清'),
+('CT07','撤回在前','撤回先于Claim提交','拒绝；没有新合法Claim'),
+('CT08','Claim在前','Claim先于撤回且请求迟到','记录在途；不宣称R/E或零物理发送'),
+('CT09','发送前中止','恶意域在输出可用密文前退出','安全中止；U=0；已耗成本计入'),
+('CT10','发送后中止','有效认证输出后中止且结果未知','保留可能执行与义务；不得回退为未发生'),
+('CT11','快照复用','恢复已消费票据或nonce/一次性预处理','在声明可信持久状态前提下拒绝复用；无可信新鲜度则范围外'),
+('CT12','明文降级','CCT请求带原始password或返回单域明文token','拒绝或测试失败；不得静默转普通后端'),
+('CT13','离线访问令牌','原生撤销已影响刷新但资源仍接受AT','R未满足；L可单列，不能假保证'),
+('CT14','双域同宿主失陷','宿主root能读取两份秘密','标记威胁模型不适用；不得报告单域保护成功'),
+]
+contracts['tests']=[dict(id=x[0],name=x[1],input_condition=x[2],expected=x[3],actual=None,execution_status='PLANNED_NOT_RUN') for x in planned_tests]
+dump(OUT/'密码学接口与计划测试增补.json',contracts)
+dump(WORK/'总稿内容.json',blocks)
+
+doc=Document()
+section=doc.sections[0]
+section.page_width=Inches(8.5);section.page_height=Inches(11)
+section.top_margin=Inches(.8);section.bottom_margin=Inches(.75)
+section.left_margin=Inches(.85);section.right_margin=Inches(.85)
+section.header_distance=Inches(.3);section.footer_distance=Inches(.3)
+for name,size,east,bold in [('Normal',11,'宋体',False),('Title',23,'黑体',True),('Subtitle',13,'宋体',False),('Heading 1',16,'黑体',True),('Heading 2',12,'黑体',True)]:
+ st=doc.styles[name];st.font.name='Times New Roman';st.font.size=Pt(size);st.font.bold=bold;st.font.italic=False;st.font.color.rgb=RGBColor(0,0,0)
+ st.element.get_or_add_rPr().get_or_add_rFonts().set(qn('w:eastAsia'),east)
+ st.paragraph_format.line_spacing=1.25;st.paragraph_format.space_after=Pt(7)
+ if name.startswith('Heading'):st.paragraph_format.space_before=Pt(13);st.paragraph_format.keep_with_next=True
+ for c in st.element.xpath('.//w:color'):
+  for key in ['themeColor','themeTint','themeShade']:
+   c.attrib.pop(qn('w:'+key),None)
+ for el in st.element.xpath('.//w:pBdr'):el.getparent().remove(el)
+header=section.header.paragraphs[0];header.text='认证语义与凭据配置  |  四阶段及密码学融合草案'
+header.style=doc.styles['Normal']
+for r in header.runs:r.font.size=Pt(8);r.font.color.rgb=RGBColor.from_string('666666')
+footer=section.footer.paragraphs[0];footer.alignment=WD_ALIGN_PARAGRAPH.RIGHT
+footer.add_run('研究设计  ·  2026年11月2日  |  ')
+field=OxmlElement('w:fldSimple');field.set(qn('w:instr'),'PAGE');footer._p.append(field)
+for r in footer.runs:r.font.size=Pt(8)
+doc.add_paragraph('认证语义与凭据配置方案融合总稿','Title')
+doc.add_paragraph('四阶段设计与密码学辅助研究','Subtitle')
+doc.add_paragraph('融合草案 v1.0   2026年11月2日')
+doc.add_paragraph('适用对象  硕士课题研究与后续开发\n依据  当前有限实现及原生校准 四阶段设计 CCT辅助对话 CS03\n状态  设计合并已完成 密码学实现与证明未完成 正式假设未判定')
+
+def mr(t):
+ r=OxmlElement('m:r');pr=OxmlElement('m:rPr');sty=OxmlElement('m:sty');sty.set(qn('m:val'),'p');pr.append(sty);r.append(pr);e=OxmlElement('m:t');e.text=t;r.append(e);return r
+def mathseq(text):
+ # Build real OMML sub/sup nodes, including nested braced exponents.
+ nodes=[];i=0;buf=''
+ while i<len(text):
+  if text[i] in '_^' and buf:
+   base=buf[-1];buf=buf[:-1]
+   if buf:nodes.append(mr(buf))
+   buf='';kind=text[i];i+=1
+   if i<len(text) and text[i]=='{':
+    start=i+1;depth=1;i+=1
+    while i<len(text) and depth:
+     if text[i]=='{':depth+=1
+     if text[i]=='}':depth-=1
+     i+=1
+    value=text[start:i-1]
+   else:value=text[i];i+=1
+   node=OxmlElement('m:sSub' if kind=='_' else 'm:sSup')
+   e=OxmlElement('m:e');e.append(mr(base));node.append(e)
+   sub=OxmlElement('m:sub' if kind=='_' else 'm:sup')
+   for n in mathseq(value):sub.append(n)
+   node.append(sub);nodes.append(node)
+  else:buf+=text[i];i+=1
+ if buf:nodes.append(mr(buf))
+ return nodes
+def hyperlink(par,label,url):
+ rel=par.part.relate_to(url,RT.HYPERLINK,is_external=True)
+ el=OxmlElement('w:hyperlink');el.set(qn('r:id'),rel)
+ r=OxmlElement('w:r');props=OxmlElement('w:rPr');c=OxmlElement('w:color');c.set(qn('w:val'),'245B78');props.append(c);r.append(props)
+ tx=OxmlElement('w:t');tx.text=label;r.append(tx);el.append(r);par._p.append(el)
+
+chapter=0
+for b in blocks:
+ if b[0]=='h':
+  if b[1]==1:chapter+=1;text=f'{chapter}  {b[2]}'
+  else:text=b[2]
+  doc.add_paragraph(text,f'Heading {b[1]}')
+ elif b[0]=='p':
+  par=doc.add_paragraph(b[1])
+  if re.match(r'^\[R\d+\]',b[1]):par.paragraph_format.keep_with_next=True
+ elif b[0]=='link':
+  par=doc.add_paragraph();par.paragraph_format.space_after=Pt(9);hyperlink(par,b[1],b[2])
+ elif b[0]=='eq':
+  par=doc.add_paragraph();par.alignment=WD_ALIGN_PARAGRAPH.CENTER;par.paragraph_format.space_after=Pt(9)
+  om=OxmlElement('m:oMath')
+  for n in mathseq(b[1]):om.append(n)
+  par._p.append(om)
+ else:
+  _,headers,rows,widths=b
+  tbl=doc.add_table(rows=1,cols=len(headers));tbl.autofit=False;tbl.alignment=WD_TABLE_ALIGNMENT.CENTER
+  for col,width in zip(tbl.columns,widths):col.width=Inches(width)
+  props=tbl._tbl.tblPr
+  borders=OxmlElement('w:tblBorders')
+  for edge in ['top','left','bottom','right','insideH','insideV']:
+   edgeel=OxmlElement('w:'+edge);edgeel.set(qn('w:val'),'single');edgeel.set(qn('w:sz'),'6');edgeel.set(qn('w:color'),'D9D9D9');borders.append(edgeel)
+  props.append(borders)
+  for row_i,values in enumerate([headers]+rows):
+   cells=tbl.rows[0].cells if row_i==0 else tbl.add_row().cells
+   for j,(cell,txt) in enumerate(zip(cells,values)):
+    cell.width=Inches(widths[j]);cell.vertical_alignment=WD_CELL_VERTICAL_ALIGNMENT.CENTER
+    pr=cell._tc.get_or_add_tcPr();mar=OxmlElement('w:tcMar')
+    for tag in ['top','left','bottom','right']:
+     el=OxmlElement('w:'+tag);el.set(qn('w:w'),'95');el.set(qn('w:type'),'dxa');mar.append(el)
+    pr.append(mar)
+    if row_i==0 or row_i%2==0:
+     sh=OxmlElement('w:shd');sh.set(qn('w:fill'),'DCE6EE' if row_i==0 else 'F5F7F9');pr.append(sh)
+    par=cell.paragraphs[0];par.paragraph_format.line_spacing=1.15;par.paragraph_format.space_after=Pt(2);par.paragraph_format.space_before=Pt(2)
+    if row_i==0:par.paragraph_format.keep_with_next=True
+    par.alignment=WD_ALIGN_PARAGRAPH.CENTER if j==0 else WD_ALIGN_PARAGRAPH.LEFT
+    r=par.add_run(txt);r.font.size=Pt(10);r.bold=row_i==0
+   trpr=tbl.rows[row_i]._tr.get_or_add_trPr();cant=OxmlElement('w:cantSplit');trpr.append(cant)
+   if row_i==0:
+    repeat=OxmlElement('w:tblHeader');trpr.append(repeat)
+  doc.add_paragraph().paragraph_format.space_after=Pt(2)
+
+doc.core_properties.title='认证语义与凭据配置方案融合总稿'
+doc.core_properties.subject='当前实现 四阶段方案 CCT与CS03密码学辅助研究'
+doc.core_properties.author='研究辅助整理'
+target=OUT/'认证语义与凭据配置_四阶段及密码学融合总稿_v1.0.docx'
+doc.save(target)
+print(json.dumps({'docx':str(target),'blocks':len(blocks),'chapters':chapter,'characters':sum(len(str(x)) for x in blocks),'sources':len(sources)},ensure_ascii=False))
