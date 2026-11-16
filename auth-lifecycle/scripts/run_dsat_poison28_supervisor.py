@@ -1107,7 +1107,13 @@ def supervise(policy):
             "supervisor_creation_time": observer.parent_creation, "host_in_job": bool(parent_job.value),
             "source_lock_digest": policy["_source_lock_sha256"], "policy_digest": policy["_policy_sha256"],
             "QPC_start": deadline.start, "QPC_frequency": deadline.frequency,
-            "input_read_bytes_before_QPC": policy["_validated_reads"]})
+            "input_read_bytes_before_QPC": policy["_validated_reads"],
+            "PRE_QPC_COST": {"explicit_io": policy["_pre_qpc_cost"],
+                "source_reads": policy["_source_read_records"],
+                "run_id": policy["_policy_sha256"],
+                "unobserved_startup": ["Python_initialization", "module_imports", "DLL_lazy_loading",
+                                       "native_loader_IO", "elapsed_time_before_QPC"],
+                "completeness_status": "SOURCE_READ_BYTES_UNPROVEN_UNTIL_APPROVED_CATALOGUE"}})
         job.create(policy["job"])
         output.append("LAUNCH_INTENT", {"executable": str(PYTHON), "argv": policy["child_argv"], "launches": 1})
         child.create(policy, output)
@@ -1186,6 +1192,41 @@ def supervise(policy):
                 "primary_error": primary, "cleanup_errors": cleanup_errors, "ETW": "NOT_ENABLED",
                 "STRICT_120S_COMPLETION_PROVED": False,
                 "unknown_fields": ["physical_disk_IO", "T20_per_phase_durable_trace", "receipt_self_close", "native_termination_lag"]}
+            receipt["accounting"] = {
+                "run_id": policy["_policy_sha256"],
+                "receipt_id": policy["_policy_sha256"] + "/FINAL_RECEIPT/" + str(output.sequence + 1),
+                "supervisor_identity_ref": ["supervisor_pid", "supervisor_creation_time"],
+                "child_identity_ref": ["child_pid", "child_creation_time"],
+                "witness_file": {"relative_path": "SUPERVISOR_WITNESS.jsonl",
+                    "ownership": "EXCLUSIVE_XB_IN_POLICY_OUTPUT_ROOT", "native_file_id": "UNKNOWN"},
+                "pre_qpc_cost_ref": output.pre_qpc_ref,
+                "explicit_io": output.io.snapshot(),
+                "raw_prefixes": output.prefix_snapshot(),
+                "witness_prefix_before_receipt": {key: output.witness_prefix[key]
+                    for key in ("sequence", "bytes", "sha256")},
+                "coverage_start": "POLICY_VALIDATOR_CREATED_BOOTSTRAP_EXCLUDED",
+                "coverage_end": {"phase": "BEFORE_FINAL_RECEIPT_SERIALIZATION", "qpc_observed_before_build": tick},
+                "last_api_snapshot_ref": "parent_overhead.api_calls",
+                "last_io_snapshot_ref": "process_io_after; sequential query timestamps apply",
+                "last_memory_snapshot_ref": "process_memory_peak; per-owner qpc applies",
+                "raw_confirmation_phase": "AFTER_FULL_FRAME_WRITE_FLUSH_FSYNC_RETURN",
+                "witness_commit_phase": "AUTHORITATIVE_PREFIX_REFERENCE_PUBLICATION",
+                "handle_close_attempted": {"job": job.close_attempted,
+                    "child": sorted(child.close_attempted), "stdio": sorted(output.close_attempted),
+                    "witness_file": output.file_close_attempted},
+                "handle_close_confirmed_ref": "owned_handle_cleanup",
+                "termination_requested_ref": "termination_requested",
+                "termination_confirmed_ref": "termination_confirmed",
+                "receipt_own_persistence": "PENDING_AT_SERIALIZATION_REQUIRES_EXTERNAL_VERIFICATION",
+                "post_receipt_operations": {"wrapped_QPC_calls_upper": 5,
+                    "CloseHandle_calls": 0, "Wait_calls": 0,
+                    "other": ["JSON_and_digest", "write", "flush", "fileno", "fsync", "FileIO_close",
+                              "return_evaluation", "interpreter_exit"]},
+                "uncovered_costs": ["pre_QPC_elapsed_and_implicit_IO", "receipt_own_write_and_confirmation",
+                    "FileIO_close_and_exit_tail", "final_parent_memory_peak", "physical_IO"],
+                "completeness_status": ["RECEIPT_COVERS_CONFIRMED_PREFIX", "RECEIPT_COVERS_OBSERVED_PHASES",
+                    "POST_RECEIPT_COST_UNOBSERVED", "FINAL_CLEANUP_UNCONFIRMED",
+                    "FULL_LIFECYCLE_COVERAGE_UNPROVEN", "EXTERNAL_TAIL_OBSERVER_REQUIRED"]}
             output.append("FINAL_RECEIPT", receipt, final=True)
         except Exception as error:
             cleanup_errors.append(error_record(error, "FINAL_RECEIPT"))
