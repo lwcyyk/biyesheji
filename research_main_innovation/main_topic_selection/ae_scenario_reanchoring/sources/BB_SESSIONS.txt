@@ -1,0 +1,138 @@
+> ## Documentation Index
+> Fetch the complete documentation index at: https://docs.browserbase.com/llms.txt
+> Use this file to discover all available pages before exploring further.
+
+# Manage a browser session
+
+> Learn how to manage session termination and inspect completed sessions
+
+While Browserbase automatically handles session termination when you disconnect, understanding how sessions end helps you debug failed runs, manage long-running sessions, optimize resource usage, and investigate timeouts or errors.
+
+## Session termination
+
+Browser sessions can end in these ways:
+
+1. **Automatic timeout**
+   Sessions have a default timeout configured at the project level, which can be customized when creating a session. For longer-running tasks, enable [keep alive](https://docs.browserbase.com/platform/browser/long-sessions/overview.md).
+
+2. **Manual termination**
+   You can end sessions explicitly by closing the browser programmatically (`browser.close()` or `driver.quit()`), using the Sessions API, or releasing keep-alive sessions when no longer needed.
+
+3. **Unhandled errors**
+   Unhandled errors in your automation code can cause your script to disconnect from the browser, ending the session prematurely. Common scenarios include network interruptions, uncaught exceptions, or exceeded resource limits.
+
+   To prevent premature termination, make sure to implement proper error handling and cleanup in your code.
+
+## Session statuses
+
+Every session has a `status`, returned by [Get a Session](https://docs.browserbase.com/reference/api/get-a-session.md) and usable as a filter in [List Sessions](https://docs.browserbase.com/reference/api/list-sessions.md). A session moves from `PENDING` to `RUNNING` and then ends in one of three final statuses: `COMPLETED`, `TIMED_OUT`, or `ERROR`. Once a session reaches a final status, it can't change again.
+
+| Status | Meaning |
+| - | - |
+| `PENDING` | Browserbase created the session and is starting its browser. |
+| `RUNNING` | The browser is running and accepts connections. |
+| `COMPLETED` | The session ended normally. |
+| `TIMED_OUT` | The session reached its timeout before it was released. |
+| `ERROR` | Browserbase couldn't start the session, or an internal failure ended it. |
+
+A session ends as `COMPLETED` when:
+
+* You release it with the Sessions API or the SDK.
+* Your client disconnects from a session without keep alive.
+* A [Function](https://docs.browserbase.com/platform/functions/overview.md) finishes using its browser.
+* You end it before it starts running.
+* A [keep alive](https://docs.browserbase.com/platform/browser/long-sessions/keep-alive.md) session reaches its timeout.
+
+A session without keep alive that reaches its timeout ends as `TIMED_OUT`. To give a session more time, set a longer [timeout](https://docs.browserbase.com/platform/browser/long-sessions/timeouts.md) when you create it.
+
+`ERROR` means the session failed on the Browserbase side. Errors in your own automation code don't produce it: if your script crashes and disconnects, the session ends as `COMPLETED`.
+
+## CDP connection idle timeout
+
+A Chrome DevTools Protocol (CDP) connection can close after 10 minutes without data moving in either direction on the WebSocket connection. CDP commands sent by your client and CDP events delivered to your client both count as data. If events continue to arrive, the connection can stay open for more than 10 minutes even when your client sends no commands.
+
+To keep a quiet connection open, send a lightweight CDP command at least every 5 minutes:
+
+```javascript Node.js theme={null}
+// Send a CDP command every 5 minutes to keep the connection open
+setInterval(
+  async () => {
+    await page.evaluate(() => undefined);
+  },
+  5 * 60 * 1000,
+);
+```
+
+```python Python theme={null}
+import asyncio
+
+
+# Send a CDP command every 5 minutes to keep the connection open
+async def heartbeat(page):
+    while True:
+        try:
+            await asyncio.sleep(5 * 60)
+            await page.evaluate("undefined")
+        except Exception:
+            break
+
+
+asyncio.create_task(heartbeat(page))
+```
+
+If the connection closes, a session with `keepAlive: true` stays available for reconnection until it reaches its session timeout or is released. Without keep alive, the session ends after the disconnect. See [long sessions](https://docs.browserbase.com/platform/browser/long-sessions/overview.md) for details.
+
+## Session timeout settings
+
+Configure timeouts at two levels:
+
+**Project level**
+Set the default timeout for all sessions in your [project settings](https://browserbase.com/settings). This acts as the fallback when no session-specific timeout is set.
+
+**Session level**
+Override the project timeout for specific sessions when [creating them](https://docs.browserbase.com/platform/browser/getting-started/create-browser-session.md#configuration-options). This gives you fine-grained control over individual session durations.
+
+## Debugging completed sessions
+
+The [Session Inspector](https://docs.browserbase.com/platform/browser/observability/observability.md) is your primary tool for analyzing completed sessions:
+
+> [card] [Session Replays](https://docs.browserbase.com/platform/browser/observability/session-replay.md)
+>
+> Record and replay browser activity to understand what happened
+
+> [card] [Network Monitor](https://docs.browserbase.com/platform/browser/observability/observability.md#network-logs)
+>
+> Inspect HTTP traffic, responses, and timing
+
+> [card] [Console & Logs](https://docs.browserbase.com/platform/browser/observability/observability.md#console-logs)
+>
+> Review JavaScript output and debug messages
+
+> [card] [Session status](https://docs.browserbase.com/platform/browser/observability/observability.md#status-bar)
+>
+> Inspect session status, duration, and configuration
+
+## Measuring usage
+
+Track and analyze your browser session usage through multiple interfaces:
+
+**Dashboard**
+Your central hub at [browserbase.com/overview](https://browserbase.com/overview) shows total browser minutes, active sessions, usage trends, and billing information.
+
+**Sessions list**
+Browse your session history at [browserbase.com/sessions](https://browserbase.com/sessions) to view duration, status, and resource consumption for individual sessions.
+
+For programmatic access to these metrics, see the [Measuring Usage Guide](https://docs.browserbase.com/optimizations/cost/measuring-usage.md).
+
+## Related guides
+
+> [card] [Session timeouts](https://docs.browserbase.com/platform/browser/long-sessions/timeouts.md)
+>
+> Set time limits for browser sessions.
+
+> [card] [Measure usage](https://docs.browserbase.com/optimizations/cost/measuring-usage.md)
+>
+> Inspect usage to understand your browser costs.
+
+
+This documentation is built and hosted on [Mintlify](https://mintlify.com), a developer documentation platform.

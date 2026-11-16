@@ -1,0 +1,54 @@
+> ## Documentation Index
+> Fetch the complete documentation index at: https://www.1password.dev/llms.txt
+> Use this file to discover all available pages before exploring further.
+
+# Security for AI
+
+AI tools and agents increasingly need credentials like API keys, tokens, and passwords to complete tasks. When you supply these secrets in plaintext, they can leak into LLM context, source control, or config files. 1Password gives you secure methods to use secrets in agentic workflows without exposing them in prompts, config files, or agent memory.
+
+> [card] [Workflow: Secure AI access](https://www.1password.dev/get-started/secure-ai-access.md)
+>
+> Learn how to get started using 1Password to secure your agentic workflows.
+
+> [card] [Let your agent sign in with 1Password](https://support.1password.com/1password-for-agents/)
+>
+> 1Password can fill your logins when your agent needs to sign in, so you don’t have to share your passwords.
+
+> [card] [Secure agent access with NVIDIA OpenShell](https://www.1password.dev/environments/nvidia-openshell.md)
+>
+> Give sandboxed coding agents scoped, time-limited access to secrets. The agent works with placeholders and never sees secret values.
+
+> [card] [Manage Environments from your MCP client](https://www.1password.dev/environments/mcp-server.md)
+>
+> Use the 1Password Environments MCP Server to create and manage Environments with secure authorization prompts, without returning secrets to the agent.
+
+> [card] [Validate your Environments setup with hooks](https://www.1password.dev/environments/agent-hook-validate.md)
+>
+> Validate locally mounted `.env` files from 1Password Environments before supported AI coding agents execute shell commands.
+
+> [card] [Use the 1Password plugin for Claude Code](https://www.1password.dev/environments/claude-plugin.md)
+>
+> Install one plugin to add the Environments agent skill and MCP server configuration to Claude Code.
+
+> [card] [Use the 1Password plugin for Cursor](https://www.1password.dev/environments/cursor-plugin.md)
+>
+> Install one plugin to add `.env` file validation, the Environments agent skill, and MCP server configuration to Cursor.
+
+> [card] [Authenticate AI command-line tools with biometrics](https://www.1password.dev/get-started/secure-ai-access.md#authenticate-ai-command-line-tools-with-biometrics)
+>
+> Use shell plugins to authenticate AI CLIs like OpenAI CLI or Claude Code with your fingerprint instead of storing API keys in shell profiles.
+
+> [card] [Secure MCP server config files](https://www.1password.dev/get-started/secure-ai-access.md#secure-mcp-server-config-files)
+>
+> Replace plaintext tokens in your `mcp.json` file with environment variables loaded from 1Password at runtime.
+
+> [card] [Build a partner 1Password for Agents integration with Browserbase](https://docs.browserbase.com/integrations/1password/agentic-autofill)
+>
+> Integrate with 1Password so agents can sign in to websites. For 1Password partners building with Browserbase.
+
+
+## Related topics
+
+- [Browserbase](https://www.1password.dev/security-for-ai/browserbase.md)
+- [Tutorial: Integrate 1Password SDKs with AI agents](https://www.1password.dev/sdks/ai-agent.md)
+- [Secure secrets for AI agents and tools](https://www.1password.dev/get-started/secure-ai-access.md)

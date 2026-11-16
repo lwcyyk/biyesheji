@@ -1,0 +1,362 @@
+> ## Documentation Index
+> Fetch the complete documentation index at: https://docs.browserbase.com/llms.txt
+> Use this file to discover all available pages before exploring further.
+
+# Contexts
+
+> Reuse cookies, authentication, and application data across browser sessions.
+
+Contexts allow you to **persist user data across multiple browser sessions**, enabling smoother automation, seamless authentication, and faster end-to-end workflows.
+
+By default, each Browserbase session starts with a fresh user data directory, so cookies and application data reset between sessions. With Contexts, you can reuse this data across sessions, making automation workflows more reliable and eliminating repeated logins. Browser cookies are stored in the [user data directory](https://chromium.googlesource.com/chromium/src/+/HEAD/docs/user_data_dir.md).
+
+**Contexts are configured by:**
+
+1. Creating a Context via the [Contexts API](https://docs.browserbase.com/reference/api/create-a-context.md)
+2. Passing the Context ID into the [Create Sessions API](https://docs.browserbase.com/reference/api/create-a-session.md)
+
+View or run the example template [here](https://www.browserbase.com/templates/context)
+
+### Why use Contexts?
+
+* **Reusing cookies & session data**: Maintain login states across multiple sessions without needing to log in repeatedly.
+* **Preserving authentication**: Store and reuse authentication tokens, reducing the need to re-enter credentials.
+* **Retaining application data**: Persist localStorage, IndexedDB, and other site-specific data written by web applications.
+* **Faster workflows**: Skip login flows and re-authentication steps, reducing the total time of your automation runs.
+
+> [accordion] What data does a Context store?
+>
+> A Context persists the contents of the Chromium user data directory, including:
+>
+> * **Cookies**: session cookies, explicitly backed up and restored between sessions
+> * **localStorage**: per-origin key-value storage
+> * **IndexedDB**: structured client-side databases
+> * **Session Storage**: tab-scoped storage
+> * **Service Workers**: site-controlled caching and offline support
+> * **Web Data**: form autofill entries and saved form data
+> * **Browser preferences**: site-level settings, permissions, and security state (e.g., HSTS)
+>
+> Contexts don't include the browser's HTTP cache (images, CSS, JS, fonts). Each session fetches page assets fresh from the network. However, sites that use Service Workers to cache assets can see improved page load times, since the Service Worker and its cache are persisted across sessions.
+
+> [!NOTE]
+>
+> Context data can include stored credentials and other sensitive browsing
+> data. Because of this, Contexts are uniquely encrypted at rest to ensure
+> security.
+
+## Create a Context
+
+To create a Context, use the Create Context API. This returns a **unique Context ID** that you can pass into new sessions to persist data.
+
+You can optionally set a `name` to label the Context. Names are unique within a project (compared case-insensitively), and leading or trailing whitespace is trimmed.
+
+> [tab] Node.js
+>
+> ```ts Node.js theme={null}
+> import { Browserbase } from "@browserbasehq/sdk";
+>
+> const bb = new Browserbase({ apiKey: process.env.BROWSERBASE_API_KEY! });
+> const context = await bb.contexts.create({
+>   name: "my-context",
+> });
+>
+> console.log("Context ID:", context.id);
+> ```
+
+> [tab] Python
+>
+> ```python Python theme={null}
+> from browserbase import Browserbase
+> import os
+>
+> bb = Browserbase(api_key=os.environ["BROWSERBASE_API_KEY"])
+> context = bb.contexts.create(name="my-context")
+>
+> print("Context ID:", context.id)
+> ```
+
+> [tab] cURL
+>
+> ```bash cURL theme={null}
+> curl -X POST https://api.browserbase.com/v1/contexts \
+>   -H "Content-Type: application/json" \
+>   -H "X-BB-API-Key: $BROWSERBASE_API_KEY" \
+>   -d '{"name": "my-context"}'
+> ```
+
+## Use a Context
+
+After creating a Context, use it in a new session to reuse cookies, authentication, and application data. This creates a returning user experience, speeding up your workflow and eliminating repeated logins.
+
+> [!NOTE]
+>
+> After closing a session with `persist: true`, wait a few seconds before reusing the Context to ensure data is synchronized.
+
+Here's an example of how to use a Context in a new session, **this example uses the Context ID from the previous example**.
+
+> [tab] Node.js
+>
+> ```ts Node.js theme={null}
+> import { Browserbase } from "@browserbasehq/sdk";
+>
+> const bb = new Browserbase({ apiKey: process.env.BROWSERBASE_API_KEY! });
+>
+> // Use the context ID from the previous example
+> const contextId = "<context-id>";
+>
+> const session = await bb.sessions.create({
+>   browserSettings: {
+>     context: {
+>       id: contextId,
+>       persist: true,
+>     },
+>   },
+> });
+>
+> console.log("Session URL: https://browserbase.com/sessions/" + session.id);
+> ```
+
+> [tab] Python
+>
+> ```python Python theme={null}
+> from browserbase import Browserbase
+> import os
+>
+> bb = Browserbase(api_key=os.environ["BROWSERBASE_API_KEY"])
+>
+> # Use the context ID from the previous example
+> context_id = "<context-id>"
+>
+> session = bb.sessions.create(
+>     browser_settings={
+>         "context": {
+>             "id": context_id,
+>             "persist": True,
+>         },
+>     }
+> )
+>
+> print("Session URL: https://browserbase.com/sessions/" + session.id)
+> ```
+
+### Set persist
+
+If you need to store new cookies, authentication tokens, or application data, you must set `persist: true` when creating a session. This ensures that any changes made during the session (such as logging in or saving site preferences) are retained for future sessions instead of being lost when the session ends. The data will be saved when the session closes.
+
+`persist: false` prevents changes from being saved to the Context. It's useful for less common use cases, such as:
+
+* **Read-only session**: If you need to access saved cookies or data without modifying them.
+* **Prevent session state changes**: Avoids overwriting stored login tokens or user data.
+
+> [!TIP]
+>
+> Need to combine cookies from separate Contexts? Follow [Merge Contexts](#merge-contexts) for a Stagehand v4 example and concurrency limits. This recipe copies cookies; it does not merge the full browser profile.
+
+## Login workflow
+
+A typical flow to persist a website login across Browserbase sessions would be as follows:
+
+1. **Create a Context** (get a `contextId`).
+2. **Start a first Browserbase session** with that `contextId` and `persist: true`.
+3. **Log in** to a website inside this first session, either manually through the [live view feature](https://docs.browserbase.com/platform/browser/observability/session-live-view.md#getting-started) or programmatically.
+4. **End this session**.
+5. **Wait a few seconds** to ensure that the Context is updated.
+6. **Start a second Browserbase session** (and future sessions) with the **same** `contextId` and visit the same website. You should now be signed in automatically without having to repeat the login process.
+
+### Login best practices
+
+Browserbase Contexts don't expire (see [Context expiration](#context-expiration)), but sites can still force a log out. Here are a few additional best practices:
+
+* **Avoid simultaneous logins**: Avoid having multiple sessions using the same Context at once. Sites may force a log out.
+* **One Context per site, per login**: Prevent an individual Context from becoming too large, which can slow down your session.
+
+## Context expiration
+
+Contexts **live indefinitely** on Browserbase's infrastructure. Once created, a Context persists until you explicitly delete it or it becomes invalidated. You can create a Context once and reuse it across sessions for weeks or months.
+
+However, there are several ways a Context can become invalid or unusable:
+
+### Client-side invalidation
+
+* **Explicit deletion**: Calling the [Delete Context API](https://docs.browserbase.com/reference/api/delete-a-context.md) permanently removes the Context
+* **Project deletion**: If the parent project is deleted, all associated Contexts are removed
+* **Account changes**: Account suspension or deletion will invalidate all Contexts
+
+### Application-level invalidation
+
+While the context itself persists, the **data stored within it** can become stale or invalid due to external factors:
+
+* **Session expiration**: Websites may expire authentication cookies after a set period (e.g., 30 days), requiring re-authentication even with a persisted Context
+* **Password changes**: If you change your password on a website, stored session cookies may be invalidated by that website
+* **Server-side logout**: Websites can invalidate sessions server-side (e.g., "log out of all devices")
+* **Token revocation**: OAuth tokens or API keys stored in cookies may be revoked by the service provider
+* **Security events**: Websites may force re-authentication after detecting suspicious activity
+
+> [!NOTE]
+>
+> To handle application-level invalidation, implement checks in your automation
+> to detect logged-out states and re-authenticate when necessary.
+
+## Merge Contexts
+
+Combine logins from two saved Contexts into a new Context using Stagehand v4. For example, if Context A contains cookies for one site and Context B contains cookies for another, you can copy both sets into Context C. The source Contexts remain unchanged.
+
+```mermaid theme={null}
+flowchart BT
+    sessionA[Completed session] -->|Saved cookies| contextA[Context A]
+    sessionB[Completed session] -->|Saved cookies| contextB[Context B]
+    contextA -->|Copy cookies| sessionC[New session]
+    contextB -->|Copy cookies| sessionC
+    sessionC -->|Saved cookies| contextC[Context C]
+```
+
+### Read cookies from the source Contexts
+
+Start one temporary reader session with Context A and another with Context B, both with `persist: false` so they do not save changes to the source Contexts. See [Use a Context](#use-a-context) for session creation.
+
+Create these sessions with the Stagehand extension installed, for example with [`browserbase.launch`](https://docs.stagehand.dev/v4/configuration/browser#using-stagehand-with-browserbase). If you use the Browserbase SDK to create them instead, [include the uploaded Stagehand extension](https://docs.stagehand.dev/v4/configuration/browser#alternative-browserbase-sdk) when creating each session. `browserbase.connect` cannot add the extension to an existing session.
+
+Connect to these running sessions with `browserbase.connect`. Use their session IDs, rather than their Context IDs:
+
+```ts Node.js Connect to the source sessions theme={null}
+import { browserbase, Stagehand } from "@browserbasehq/stagehand";
+
+const sessionA = await browserbase.connect({
+  apiKey: process.env.BROWSERBASE_API_KEY!,
+  sessionId: "<session-id-for-context-a>",
+});
+const sessionB = await browserbase
+  .connect({
+    apiKey: process.env.BROWSERBASE_API_KEY!,
+    sessionId: "<session-id-for-context-b>",
+  })
+  .catch(async (error) => {
+    await sessionA.close();
+    throw error;
+  });
+```
+
+Attach Stagehand to each browser before reading its cookies, then close the temporary reader sessions. Avoid login or other cookie-changing activity in either session while collecting them.
+
+```ts Node.js Read source cookies theme={null}
+const [cookiesA, cookiesB] = await Promise.all(
+  [sessionA, sessionB].map(async (browser) => {
+    await Stagehand.create({ browser });
+    return browser.context.cookies();
+  }),
+).finally(async () => {
+  await Promise.all([sessionA.close(), sessionB.close()]);
+});
+
+if (!cookiesA.length || !cookiesB.length) {
+  throw new Error("Check that both source Contexts contain saved cookies.");
+}
+```
+
+### Combine the cookie snapshots
+
+Build a combined list using the fields accepted by `addCookies`. A cookie's domain, path, and name identify it: the example keeps identical duplicates once and rejects conflicting values or attributes. Resolve conflicts before continuing, especially when both sites use the same login provider. Keep leading dots in domains because they can indicate different cookie scopes.
+
+```ts Node.js Merge cookies theme={null}
+const merged = new Map();
+
+for (const cookie of [...cookiesA, ...cookiesB]) {
+  const copy = {
+    name: cookie.name,
+    value: cookie.value,
+    domain: cookie.domain,
+    path: cookie.path,
+    expires: cookie.expires,
+    httpOnly: cookie.httpOnly,
+    secure: cookie.secure,
+    sameSite: cookie.sameSite,
+  };
+  const key = JSON.stringify([copy.domain.toLowerCase(), copy.path, copy.name]);
+  const existing = merged.get(key);
+  if (existing && JSON.stringify(existing) !== JSON.stringify(copy)) {
+    throw new Error("Conflicting cookies; choose one login before merging.");
+  }
+  merged.set(key, copy);
+}
+
+const cookies = [...merged.values()];
+```
+
+### Save to a fresh Context
+
+Create Context C, then start a Stagehand-enabled session using it with `persist: true`. Use one writer for this destination Context. See [Create a Context](#create-a-context) and [Use a Context](#use-a-context) for those steps.
+
+Connect to that session as `sessionC`, add the combined cookies, and close it to save them to Context C:
+
+```ts Node.js Save merged cookies theme={null}
+const sessionC = await browserbase.connect({
+  apiKey: process.env.BROWSERBASE_API_KEY!,
+  sessionId: "<session-id-for-context-c>",
+});
+try {
+  await Stagehand.create({ browser: sessionC });
+  await sessionC.context.addCookies(cookies);
+} finally {
+  await sessionC.close();
+}
+```
+
+Wait a few seconds for persistence, then open a fresh session using Context C with `persist: false` and verify that both sites recognize the expected login. If either check fails, stop and inspect the saved state before adopting Context C. Sessions that are already running do not reload these cookies automatically.
+
+> [!NOTE]
+>
+> This workflow copies unpartitioned cookies only. It does not copy localStorage, IndexedDB, or other browser profile data. Sites that require additional authentication state may still need a login.
+
+## Delete a Context
+
+When you no longer need a Context, delete it using the [Delete Context API](https://docs.browserbase.com/reference/api/delete-a-context.md). Once deleted, a Context can't be used to create new sessions.
+
+> [!NOTE]
+>
+> Deleting a Context is permanent and can't be undone.
+
+> [tab] Node.js
+>
+> ```typescript Node.js theme={null}
+> import { Browserbase } from "@browserbasehq/sdk";
+>
+> const bb = new Browserbase({ apiKey: process.env.BROWSERBASE_API_KEY! });
+>
+> const contextId = "<context-id>";
+> await bb.contexts.delete(contextId);
+>
+> console.log("Context deleted");
+> ```
+
+> [tab] Python
+>
+> ```python Python theme={null}
+> from browserbase import Browserbase
+> import os
+>
+> bb = Browserbase(api_key=os.environ["BROWSERBASE_API_KEY"])
+>
+> context_id = "<context-id>"
+> bb.contexts.delete(context_id)
+>
+> print("Context deleted")
+> ```
+
+> [tab] cURL
+>
+> ```bash cURL theme={null}
+> curl -X DELETE https://api.browserbase.com/v1/contexts/<context-id> \
+>   -H "X-BB-API-Key: $BROWSERBASE_API_KEY"
+> ```
+
+> [card] [Handling authentication](https://docs.browserbase.com/platform/identity/authentication.md)
+>
+> Once you set up Contexts, follow the authentication guide to easily log into
+> websites.
+
+> [card] [Manage browser sessions](https://docs.browserbase.com/platform/browser/getting-started/manage-browser-session.md)
+>
+> Monitor session state and release browsers when work finishes.
+
+
+This documentation is built and hosted on [Mintlify](https://mintlify.com), a developer documentation platform.

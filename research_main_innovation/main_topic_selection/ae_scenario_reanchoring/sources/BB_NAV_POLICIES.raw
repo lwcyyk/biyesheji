@@ -1,0 +1,224 @@
+> ## Documentation Index
+> Fetch the complete documentation index at: https://docs.browserbase.com/llms.txt
+> Use this file to discover all available pages before exploring further.
+
+# Navigation policies
+
+> Control which sites a session can navigate to, by category and by domain
+
+A navigation policy decides which sites a browser session may load. You create a policy once, then bind it to sessions. The policy then allows or blocks each navigation in a bound session by its domain overrides, its category rules, and its default decision.
+
+## How Browserbase decides a navigation
+
+Browserbase checks each navigation's host in this order:
+
+1. **Domain overrides.** If an override covers the host, its decision applies. An override for `example.com` also covers `www.example.com` and every other subdomain. When several overrides cover a host, the most specific one wins, so `allow` on `docs.example.com` beats `block` on `example.com`.
+2. **Categories.** Otherwise, Browserbase classifies the host into one or more [categories](#categories). Each category takes its rule from `allowedCategories` or `blockedCategories`, or `defaultDecision` if the policy has no rule for it. If Browserbase can't classify the host, or part of its classification has no Browserbase category, that part counts as unknown and takes `unknownDomainBehavior`. The strictest result wins: if the policy blocks any of the host's categories, Browserbase blocks the navigation.
+
+Because every category without a rule takes the default, a policy with `defaultDecision: "block"` only allows a host when the policy allows all of its categories. Add an `allow` override for sites you always need.
+
+If Browserbase can't reach a decision in time, for example because classification is unavailable, it blocks the navigation. Overrides don't need classification, so they keep working.
+
+## What a policy checks
+
+A policy applies to **navigations**:
+
+* page loads in the top frame, including links, form submissions, and `page.goto()`
+* iframes
+* popups and `window.open()`
+* tabs opened with a URL, such as `Target.createTarget`
+* each hop of a redirect
+
+A policy doesn't check requests a page makes itself, such as scripts, images, `fetch` and XHR calls, and WebSockets. It also doesn't check pages that don't load from the network, such as `about:blank`, `data:`, and `blob:` URLs.
+
+When the policy blocks a navigation:
+
+* **Top frame:** the page lands on `https://www.browserbase.com/navigation-blocked`. `page.goto()` doesn't throw, so check `page.url()` to detect a block.
+* **Iframe:** the frame fails to load with `net::ERR_BLOCKED_BY_CLIENT`. The rest of the page keeps loading.
+
+### Service workers and Contexts
+
+A site's service worker can answer a navigation without it ever reaching the network. In a policy-bound session that loads a [Context](https://docs.browserbase.com/platform/browser/core-features/contexts.md), pages skip their service workers, so the policy checks every navigation. Sites that depend on a service worker, such as for offline support, run without it in these sessions.
+
+## Create a policy
+
+Policies belong to the project of the API key that creates them. Fields you omit take these defaults: enabled, `defaultDecision: "block"`, `unknownDomainBehavior: "block"`, no category rules, and no overrides.
+
+> [tab] Node.js
+>
+> ```typescript Node.js theme={null}
+> import Browserbase from "@browserbasehq/sdk";
+>
+> const bb = new Browserbase({ apiKey: process.env.BROWSERBASE_API_KEY! });
+>
+> const policy = await bb.navigationPolicies.create({
+>   name: "Research agents",
+>   defaultDecision: "allow",
+>   unknownDomainBehavior: "block",
+>   blockedCategories: ["gambling", "adult", "malware", "phishing-scams"],
+>   domainOverrides: [
+>     { domain: "internal.example.com", decision: "block" },
+>     { domain: "partner.example.net", decision: "allow" },
+>   ],
+> });
+>
+> console.log(policy.id);
+> ```
+
+> [tab] Python
+>
+> ```python Python theme={null}
+> import os
+>
+> from browserbase import Browserbase
+>
+> bb = Browserbase(api_key=os.environ["BROWSERBASE_API_KEY"])
+>
+> policy = bb.navigation_policies.create(
+>     name="Research agents",
+>     default_decision="allow",
+>     unknown_domain_behavior="block",
+>     blocked_categories=[
+>         "gambling",
+>         "adult",
+>         "malware",
+>         "phishing-scams",
+>     ],
+>     domain_overrides=[
+>         {
+>             "domain": "internal.example.com",
+>             "decision": "block",
+>         },
+>         {
+>             "domain": "partner.example.net",
+>             "decision": "allow",
+>         },
+>     ],
+> )
+>
+> print(policy.id)
+> ```
+
+> [tab] cURL
+>
+> ```bash cURL theme={null}
+> curl -X POST https://api.browserbase.com/v1/navigation-policies \
+>   -H "Content-Type: application/json" \
+>   -H "x-bb-api-key: $BROWSERBASE_API_KEY" \
+>   -d '{
+>     "name": "Research agents",
+>     "defaultDecision": "allow",
+>     "unknownDomainBehavior": "block",
+>     "blockedCategories": ["gambling", "adult", "malware", "phishing-scams"],
+>     "domainOverrides": [
+>       { "domain": "internal.example.com", "decision": "block" },
+>       { "domain": "partner.example.net", "decision": "allow" }
+>     ]
+>   }'
+> ```
+
+The response is the stored policy, with its `id`. Browserbase stores domains lowercase without a trailing dot.
+
+| Field | Limits |
+| - | - |
+| `name` | 1 to 128 characters. Names don't need to be unique; a policy's `id` identifies it. |
+| `description` | Up to 1024 characters. |
+| `domainOverrides` | Up to 500. Each host may appear once. |
+| `allowedCategories`, `blockedCategories` | Slugs from the [category list](#categories), each at most once. |
+
+## Bind a policy to a session
+
+Pass the policy's ID as `browserSettings.riskPolicyId` when you create a session. The policy must belong to the session's project and be enabled; otherwise session creation fails with `400`.
+
+> [tab] Node.js
+>
+> ```typescript Node.js theme={null}
+> import Browserbase from "@browserbasehq/sdk";
+>
+> const bb = new Browserbase({ apiKey: process.env.BROWSERBASE_API_KEY! });
+>
+> const session = await bb.sessions.create({
+>   browserSettings: {
+>     riskPolicyId: "<policy-id>",
+>   },
+> });
+> ```
+
+> [tab] Python
+>
+> ```python Python theme={null}
+> import os
+>
+> from browserbase import Browserbase
+>
+> bb = Browserbase(api_key=os.environ["BROWSERBASE_API_KEY"])
+>
+> session = bb.sessions.create(
+>     browser_settings={
+>         "risk_policy_id": "<policy-id>",
+>     },
+> )
+> ```
+
+> [tab] cURL
+>
+> ```bash cURL theme={null}
+> curl -X POST https://api.browserbase.com/v1/sessions \
+>   -H "Content-Type: application/json" \
+>   -H "x-bb-api-key: $BROWSERBASE_API_KEY" \
+>   -d '{
+>     "browserSettings": {
+>       "riskPolicyId": "<policy-id>"
+>     }
+>   }'
+> ```
+
+A policy-bound session doesn't allow new browser contexts: `browser.newContext()` fails with `CDP command Target.createBrowserContext is not allowed`. In Playwright, open pages on the session's default context instead:
+
+```typescript Node.js Playwright theme={null}
+const browser = await chromium.connectOverCDP(session.connectUrl);
+const context = browser.contexts()[0];
+const page = context.pages()[0] ?? (await context.newPage());
+
+await page.goto("https://example.com");
+```
+
+## Edit, disable, or delete a policy
+
+A session keeps the policy as it was when the session started. Edits, disables, and deletes apply only to sessions that start afterwards.
+
+* **Edit** with `PATCH /v1/navigation-policies/{id}`. Omitted fields keep their values. Lists such as `domainOverrides` replace the stored list rather than appending to it.
+* **Disable** by setting `enabled` to `false`. New sessions can't bind a disabled policy. It stays editable, and you can re-enable it.
+* **Delete** with `DELETE /v1/navigation-policies/{id}`.
+
+See the [navigation policies API reference](https://docs.browserbase.com/reference/api/create-a-navigation-policy.md) for every route and field.
+
+## Categories
+
+| | | | |
+| - | - | - | - |
+| `adult` | `ai-tools` | `alcohol-tobacco` | `business` |
+| `child-abuse` | `communication` | `dating` | `drugs` |
+| `education` | `entertainment` | `finance` | `gambling` |
+| `games` | `government-military` | `hacking` | `hate` |
+| `health` | `illegal-activity` | `infrastructure` | `kids` |
+| `lifestyle` | `malware` | `newly-registered` | `news` |
+| `parked-inactive` | `phishing-scams` | `piracy` | `proxy-anonymizer` |
+| `search-portal` | `self-harm` | `shopping` | `social-media` |
+| `society-culture` | `sports` | `technology` | `terrorism-extremism` |
+| `travel` | `url-shortener` | `violence` | `weapons` |
+
+A host can belong to more than one category.
+
+## Related guides
+
+> [card] [Allowed domains](https://docs.browserbase.com/platform/browser/security/allowed-domains.md)
+>
+> Restrict a session to a fixed list of domains.
+
+> [card] [Contexts](https://docs.browserbase.com/platform/browser/core-features/contexts.md)
+>
+> Reuse cookies and site data across sessions.
+
+
+This documentation is built and hosted on [Mintlify](https://mintlify.com), a developer documentation platform.

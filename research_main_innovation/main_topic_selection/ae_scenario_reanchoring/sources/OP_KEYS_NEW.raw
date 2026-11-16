@@ -1,0 +1,114 @@
+> ## Documentation Index
+> Fetch the complete documentation index at: https://www.1password.dev/llms.txt
+> Use this file to discover all available pages before exploring further.
+
+# Store keys and tokens
+
+> What the integration key is, when you receive it, and how to store it with each user's OAuth tokens.
+
+Partner preview
+
+OAuth gives you an access token: permission to call 1Password as the person. It doesn't let you read their logins. Every item in a 1Password account is end-to-end encrypted, and 1Password's servers can't decrypt a stored item on their own.
+
+So when the person approves your consent screen, their browser also creates an **integration keyset**: a set of keys that becomes your integration's cryptographic identity inside that one account. 1Password stores the keyset encrypted and can't open it. The key that opens it is the **integration unlock key**. The person's browser generates it, never sends it to a 1Password server, and hands it to you once, on the OAuth redirect.
+
+Store the key when you receive it. 1Password won't send it again for the same connection.
+
+## What you receive
+
+| Term | What it is | Who holds it |
+| - | - | - |
+| Integration keyset | Your keys inside the person's account | 1Password, encrypted |
+| Integration unlock key | The AES-256 key that opens the keyset | You, and only you |
+| `integration_key` | The `ops_` token that carries the unlock key and names the connection it belongs to | You, and only you |
+
+The `integration_key` token is what arrives in your redirect. Pass it to the extension as `integrationKey`, exactly as you received it. This guide calls it the integration key.
+
+## Token format
+
+The value is the literal prefix `ops_` followed by base64url-encoded UTF-8 JSON:
+
+```json theme={null}
+{
+  "ver": 1,
+  "typ": "oauth_integration_key",
+  "key": "1f8b…",
+  "path": "//api.1password.com/oauth-clients/{clientUuid}/accounts/{accountUuid}/users/{userUuid}"
+}
+```
+
+| Field | Meaning |
+| - | - |
+| `ver` | Envelope version. Always `1` today. Reject anything else. |
+| `typ` | Always `oauth_integration_key`. Distinguishes it from other `ops_` tokens. |
+| `key` | The integration unlock key, hex encoded. 32 bytes, so 64 hex characters. |
+| `path` | Names the connection this key unlocks: one OAuth client, one account, one user. It also names the API host the extension talks to. |
+
+You don't need to decode the token to use it. Decoding `path` is useful for keying your storage.
+
+## When you receive a key
+
+You get an integration key only when 1Password creates a new keyset. Connecting again doesn't rotate it: if the person already has an active keyset for your integration, they keep it, and the redirect carries no `integration_key`.
+
+| Situation | `integration_key` in the fragment |
+| - | - |
+| First consent for your integration | Present |
+| Consent again, keyset still active | **Absent** |
+| Consent again after you revoked the connection | Present. A replacement is created. |
+
+Three rules follow:
+
+1. **A missing key is normal, not an error.** It means the person was already connected. Don't reject the callback because the key is absent.
+2. **Store the key before anything else that can fail.** It's the only copy that reaches you. 1Password holds ciphertext it can't decrypt, so if you lose the key, nothing can open that keyset again. The code exchange can be retried; the key can't.
+3. **Never overwrite a stored key with nothing.** When a callback arrives without a key, keep the one you stored.
+
+When a callback arrives without a key, check that the key you stored belongs to the same person and account. The token response can include `user_id`; compare it with the user in your stored key's `path`. If the person signed in with a different account this time, you don't have a key for that connection: revoke it and have them connect again.
+
+## Hold the key and tokens as one secret
+
+The integration key together with a valid token is a standing ability to use every login the person granted you. Protect them together.
+
+* **Read the fragment in the browser.** Your callback has to run client side, because a URL fragment never reaches a server on its own.
+* **Clear it from the URL as soon as you've stored it**, with `history.replaceState`, so it doesn't sit in browser history or get picked up by a later read of `location.href`.
+* **Keep it out of logs, analytics events, error reports, and query strings.**
+* **Keep it in your per-user secret store**, at least as protected as an OAuth refresh token. Never bake it into browser images, extension storage, or your agent VM's file system.
+* **Key your storage on the connection path.** A key is valid for one OAuth client, account, and user. Binding storage to the key's `path` stops a key from being used for a different account or user.
+
+## Give each browser session only what it needs
+
+Every extension call takes the access token and the integration key. There's no narrower session key.
+
+* Hand the browser session a current access token and the integration key when a task starts, and keep them in memory.
+* Keep the refresh token and client secret in your backend. The browser never needs them.
+* Refresh the access token on your backend before it expires after 15 minutes, and pass the new token to the session.
+* Run one user per browser environment. A compromised sandbox should never expose more than one person's access.
+* Drop the access token and integration key from the session when the task ends.
+
+## Refresh tokens
+
+* Each refresh returns a new access token and a new refresh token, and the old refresh token stops working. Replace it atomically.
+* Run one refresher per person so two refreshes can't race and invalidate each other.
+* A connection also expires. It lasts about 90 days at most and may end sooner if you stop refreshing. Provide a way to reconnect, and ask the person to do so when a refresh returns `invalid_grant`.
+
+## If you lose the key
+
+Revoke the connection from your backend, then have the person connect again. The new consent creates a new keyset and returns a new integration key. See [Disconnect a user](https://www.1password.dev/agentic-autofill/partners/disconnect.md).
+
+## Where everything lives
+
+| Item | Created by | Kept where | Used for |
+| - | - | - | - |
+| OAuth client secret | The 1Password console, when you register the client | Your backend | Token exchange and refresh, with HTTP Basic |
+| Code verifier and `state` | Your backend, per attempt | Your backend, until the callback | PKCE and CSRF protection |
+| Access token | 1Password, at token exchange and refresh | Your backend. In memory in the browser session during a task. | Every extension call, and revocation. Expires after 15 minutes. |
+| Refresh token | 1Password | Your backend only | New access tokens. Rotates on every use. |
+| Integration key | The person's browser, at consent | Your per-user secret store. In memory in the browser session during a task. | Every extension call |
+| Access request and entry IDs | 1Password, when you create a request | Your storage | Checking status and matching grants to entries |
+| Credential reference | 1Password, when the person approves | Your storage, with the connection it came from | Filling one granted login |
+
+
+## Related topics
+
+- [Manage SSH keys](https://www.1password.dev/ssh/manage-keys.md)
+- [Sign in to your 1Password account manually](https://www.1password.dev/cli/sign-in-manually.md)
+- [1Password Service Account security](https://www.1password.dev/service-accounts/security.md)

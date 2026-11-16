@@ -1,0 +1,219 @@
+> ## Documentation Index
+> Fetch the complete documentation index at: https://www.1password.dev/llms.txt
+> Use this file to discover all available pages before exploring further.
+
+# Get the user's approval
+
+> Send an approval link to the person's device, wait for their decision in the 1Password app, and read which logins they granted.
+
+Partner preview
+
+Creating an access request doesn't show anything to the person. They open the approval prompt in the 1Password app on their device using the link returned with the request. After they decide, you check the request's status to learn what they granted.
+
+## Deliver the approval link
+
+The app link must open on the person's device, where their 1Password app runs, rather than in your agent's browser. Show an approval button in the app or chat where the person interacts with your agent, and open the link when they select it.
+
+* **Get the link in code, never through the model.** Pass it from the create response to your app without putting it in a prompt or a model's context.
+* **Treat it as sensitive.** Today the link carries your goal, reasons, keywords, and websites as readable base64url JSON. Don't log it, and send it to the person's device only over an authenticated, encrypted channel.
+* **Check that your surface opens it.** On iOS and Android, open it with the system URL handler. In a web app, make it a link the person taps on a device that has 1Password. Some chat and messaging surfaces don't make `onepassword://` links tappable, so test yours.
+
+Use the `appLink` from the `createAccessRequest` response exactly as returned. Treat it as opaque: don't parse it, change it, or build it yourself, because its format can change.
+
+Opening the link doesn't grant access or tell you what the person decided. Check [the request's status](#wait-for-the-decision) for the outcome.
+
+## What the person sees
+
+1. The link opens the 1Password app. The person must be signed in to the account they connected. If the app is locked, they unlock it with Face ID, Touch ID, or their account password.
+2. The app shows which integration is asking, the goal, and each website and reason, with suggested logins from the person's own vault. Suggestions are ranked by website and your keywords.
+3. The person chooses which logins to grant for each entry. They can leave an entry ungranted, search for a different login, or add one you didn't ask for. Then they approve or deny the request.
+
+Only logins in the person's own vault can be granted: Personal in an Individual account, Private in a Family account. Logins in shared vaults aren't offered.
+
+The unlock prompt and the approval prompt each close after 2 minutes. If the person doesn't finish in time, the request stays `pending`: stop checking, ask the person to tell you when they've approved, check once more, and create a new request only if it's still `pending`. See [Check on a schedule](#check-on-a-schedule). Opening the link again while that request is already open has no effect.
+
+In the approval prompt, 1Password shows your integration's name and icon. The app reads them from your OAuth client registration, which is in your Business account. Approval can fail if that account is inactive. See [Go to production](https://www.1password.dev/agentic-autofill/partners/production.md#register-your-production-oauth-client).
+
+### Where the person can approve
+
+| Where | Status |
+| - | - |
+| 1Password for Mac, Windows, and Linux | Available on the Nightly release channel, on 1password.com. |
+| 1Password for iOS and Android | In development. Not available to test yet. |
+| Inside your own iOS app, through the 1Password action extension | Available in 1Password for iOS 8.12.42 or later. See [Approve in your iOS app](https://www.1password.dev/agentic-autofill/partners/ios-approval.md) and [Supported builds](https://www.1password.dev/agentic-autofill/partners/supported-builds.md). |
+| Inside your own web app, in a 1Password.com popup | In development. Build your side now against [Approve in the browser](https://www.1password.dev/agentic-autofill/partners/browser-approval.md). 1Password will tell you in your shared Slack channel when it's ready to test end to end. |
+| Inside your own Android app, through the 1Password authorization activity | Available in 1Password for Android 8.12.42 or later. See [Approve in your Android app](https://www.1password.dev/agentic-autofill/partners/android-approval.md) and [Supported builds](https://www.1password.dev/agentic-autofill/partners/supported-builds.md). |
+
+## Wait for the decision
+
+Call `api.agenticAutofill.v1.getAccessRequestStatus` with the request ID. The call returns the request's current state right away. It doesn't wait for the person to decide, so your code decides when to check again. 1Password expects every integration to follow the rules in this section. They keep the person's wait short, and they keep status checks from growing into the largest share of your integration's traffic.
+
+### Check only while the request is pending
+
+A request starts `pending` and moves once, to one of the final states below. Check the status only while the last state you saw is `pending`. Once you see a final state, store it with the request and never check that request again: a request never leaves a final state, so another check can only return the same answer.
+
+Don't check a request the person hasn't opened. Creating a request doesn't start the clock; the person opening the approval link does. Until then, there's nothing to check.
+
+### Check on a schedule
+
+Start checking when the person opens the approval link. Your approval button is what opens it, so your app knows the moment. Then follow this schedule:
+
+| Time since the person opened the link | Check |
+| - | - |
+| First 5 seconds | Don't check. Opening the link and unlocking 1Password takes at least this long. |
+| 5 to 30 seconds | Every 2 seconds. Most decisions land here, and the person waits about a second on average after approving. |
+| 30 seconds to 1 minute | Every 5 seconds |
+| 1 to 2 minutes | Every 10 seconds |
+| 2 to 3 minutes | Optional. Every 20 seconds, or stop at 2 minutes. |
+| After 3 minutes | Stop, and wait for the person. |
+
+That's about 25 checks for one request over 2 minutes, or 29 over 3, most of them in the first minute. Don't check more often to shave seconds off the wait, and don't let two parts of your system check the same request: one checker per request.
+
+The approval prompt closes after 2 minutes if the person doesn't finish, so stop at 2 minutes, or at 3 if you want to allow for unlocking and switching apps. A request that's still `pending` when you stop means the person didn't decide, not that the answer is on its way. Stopping doesn't cancel or change the request: 1Password keeps it, and it stays `pending`. Ask the person to tell you when they've approved, then check once more. If it's still `pending`, create a new request and show them the new link.
+
+### Handle rate limits
+
+1Password rate limits status checks per connection, that is, per person connected to your integration. The schedule above stays within the limit, with room for a few requests in flight for the same person. If a check returns `rateLimitExceeded`, don't retry right away: wait at least a minute, then continue on the schedule, and find the loop that checked too often. The limit counts every status check your integration makes for that person, so a tight loop in one place can block checks everywhere else.
+
+### Where to run the loop
+
+You can run the loop inside the extension's service worker, as below, or in your orchestrator with one CDP call per check. Either way, keep the CDP session attached while you poll. An extension service worker can suspend after about 30 seconds of inactivity, and an attached DevTools session keeps it running.
+
+1Password keeps the request, so you don't have to hold a browser open while the person decides. You can check the status later from a new browser session, with the same person's token and integration key.
+
+### Example
+
+Call this when the person opens the approval link. It follows the schedule, stops on any state other than `pending`, and handles a rate limit. It returns `null` if the request is still `pending` when the schedule ends, so you can ask the person to tell you when they've approved before you check again.
+
+```javascript theme={null}
+// How long to wait before the next check, by time since the person opened the link.
+// Returns null when it's time to stop.
+function nextDelayMs(elapsedMs) {
+  if (elapsedMs < 5_000) return 5_000 - elapsedMs;
+  if (elapsedMs < 30_000) return 2_000;
+  if (elapsedMs < 60_000) return 5_000;
+  if (elapsedMs < 120_000) return 10_000;
+  if (elapsedMs < 180_000) return 20_000; // Optional. Return null here to stop at 2 minutes.
+  return null;
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function waitForDecision(accessRequestUUID, linkOpenedAt = Date.now()) {
+  while (true) {
+    const delayMs = nextDelayMs(Date.now() - linkOpenedAt);
+    if (delayMs === null) return null; // Still pending when the schedule ends. Ask the person to tell you when they've approved.
+    await sleep(delayMs);
+
+    const response = await api.agenticAutofill.v1.getAccessRequestStatus({
+      accessToken,
+      integrationKey,
+      accessRequestUUID,
+    });
+    if (response.success) {
+      if (response.result.state !== "pending") return response.result; // Final. Never check this request again.
+    } else if (response.error.code === "rateLimitExceeded") {
+      await sleep(60_000); // Then continue on the schedule.
+    } else if (response.error.code !== "timeout" && response.error.code !== "networkError") {
+      throw new Error(response.error.code); // Fix the cause before you check again.
+    }
+  }
+}
+
+// When the person opens the approval link:
+const status = await waitForDecision(accessRequest.id);
+```
+
+### States
+
+| State | Final | Meaning | What to do |
+| - | - | - | - |
+| `pending` | No | Still waiting for the person's decision. | Check again on the schedule, or wait for the person. |
+| `resolved` | Yes | The person approved at least one login. | Match the grants to your entries, then fill. |
+| `denied` | Yes | The person declined. Nothing was granted. | Respect the decision and continue without those logins. Don't create the same request again right away. |
+| `failed` | Yes | 1Password couldn't process the request. Nothing was granted. | Surface the failure. Create a new request if the task still needs a login. |
+| `expired` | Yes | The person didn't decide before the request expired. Nothing was granted. | Create a new request if the task still needs the login and the person is available. |
+
+Every final state arrives as a successful response: `success` is `true`, `state` names the outcome, and `resolved` is empty for every state except `resolved`.
+
+```javascript theme={null}
+{
+  success: true,
+  result: {
+    path: "accounts/<account>/credential-broker-access-requests/<request-id>/status",
+    state: "denied", // or "failed", or "expired"
+    resolved: [],
+  },
+}
+```
+
+`expired` is new. 1Password is adding it so that a request nobody decides on doesn't stay `pending` forever. It isn't returned yet, so handle it now, and treat any state you don't recognize as final.
+
+## Read what the person granted
+
+A resolved status lists one entry per granted login. Each has the `entryId` it satisfies and a `reference` string. The reference identifies a granted login. It isn't the login itself, and you shouldn't parse it.
+
+```javascript theme={null}
+{
+  success: true,
+  result: {
+    path: "accounts/<account>/credential-broker-access-requests/<request-id>/status",
+    state: "resolved",
+    resolved: [
+      {
+        entryId: "<entry-id>",
+        reference: "accounts/<account>/capability/login/configurations/<configuration-id>",
+      },
+    ],
+  },
+}
+```
+
+The person decides what to grant, so the result may not match your entries one to one:
+
+* A requested entry may have no corresponding grant because the person granted nothing for it.
+* A granted login may have no `entryId`, because the person added a login you didn't ask for.
+* Grants may come back in a different order from your entries.
+
+Match on `entryId`, never on position or type. Two login entries produce two login references, and only the entry ID tells them apart.
+
+```typescript theme={null}
+const granted = new Map(
+  status.resolved
+    .filter((r) => r.entryId)
+    .map((r) => [r.entryId, r.reference]),
+);
+
+for (const entry of accessRequest.entries) {
+  const reference = granted.get(entry.id);
+  if (!reference) {
+    // The person granted nothing for this website. Tell the agent to skip it
+    // or ask the person another way.
+    continue;
+  }
+  // Store reference with this connection, then fill with it.
+}
+```
+
+For every state other than `resolved`, `resolved` is empty.
+
+Store each reference with the connection it came from. A reference works only with the token and integration key of the connection that created the request. To fill, pass the reference as `resourcePath`, unchanged.
+
+> [!TIP]
+>
+> If you asked for more than one login on the same website, match each grant to its entry by `entryId`, so you know which login is which. 1Password doesn't return the reason or keywords with a grant later, so store them yourself alongside each `reference`.
+
+## How long a grant lasts
+
+The person approves once per login, not once per fill. After approval, your agent can fill that login as often as the task needs, with no further prompts. A multi-page sign-in can fill the same reference on each page.
+
+* At launch, a grant stays valid for 30 days. Configurable lifetimes are planned.
+* A grant isn't tied to a chat session. If your product promises approval per session, create a new request for each session and don't reuse references from an earlier one.
+* A grant ends early if you disconnect the person. When a fill fails because access ended, create a new request.
+
+
+## Related topics
+
+- [Get a user](https://www.1password.dev/users-api/get-user.md)
+- [user](https://www.1password.dev/cli/reference/management-commands/user.md)
+- [Get the User resource type](https://www.1password.dev/api-reference/scim/get-the-user-resource-type.md)

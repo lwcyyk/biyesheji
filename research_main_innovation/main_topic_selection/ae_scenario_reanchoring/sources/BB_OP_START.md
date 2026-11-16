@@ -1,0 +1,229 @@
+> ## Documentation Index
+> Fetch the complete documentation index at: https://docs.browserbase.com/llms.txt
+> Use this file to discover all available pages before exploring further.
+
+# Use 1Password to log in with Browserbase
+
+> Securely retrieve credentials from your 1Password vault and use them to log into websites.
+
+This guide walks you through using the 1Password SDK with Stagehand and Playwright to securely authenticate on websites without hardcoding credentials.
+
+> [!NOTE]
+>
+> This guide assumes you have a 1Password account and a Browserbase account. If you don't, create a [1Password account](https://start.1password.com/) and [Browserbase account](https://www.browserbase.com/sign-up).
+
+## 1. Create your 1Password vault
+
+Create a specific vault structure for this integration.
+
+### Create the vault
+
+> [tab] 1Password App
+>
+> 1. Open the 1Password app and sign in to your account
+> 2. Click the plus **+** button in the sidebar
+> 3. Name your vault: **`Browserbase Agent`**
+> 4. Optionally add a description like "Credentials for Browserbase automation"
+> 5. Click **Create**
+
+> [tab] 1Password.com
+>
+> 1. Sign in to your account on [1Password.com](https://1password.com)
+> 2. Click **New Vault** on your Home page
+> 3. Name your vault: **`Browserbase Agent`**
+> 4. Optionally add a description like "Credentials for Browserbase automation"
+> 5. Click **Create Vault**
+
+### Add your Browserbase credentials
+
+1. In your new **`Browserbase Agent`** vault, click **New Item**
+2. Select **Login** as the item type
+3. Fill in the details:
+   * **Title**: `Browserbase`
+   * **Username**: Your Browserbase email address
+   * **Password**: Your Browserbase password
+4. Click **Save**
+
+> [!NOTE]
+>
+> Your vault structure should now be: `op://Browserbase Agent/Browserbase/username` and `op://Browserbase Agent/Browserbase/password`
+
+## 2. Create a service account
+
+Create a Service Account to allow programmatic access to your vault.
+
+> [!NOTE]
+>
+> You need admin access to your 1Password account to create a Service Account.
+
+1. Navigate to [1Password.com](https://1password.com) and sign in
+2. Go to the **Developer** tab in the sidebar
+3. Under **Service Accounts**, click **New Service Account**
+4. Name your Service Account: **`Browserbase Agent Account`**
+5. Select the vault you created in Step 1: **`Browserbase Agent`**
+6. Click **Create Account**
+7. **IMPORTANT:** Copy the Service Account token that appears
+
+> [!NOTE]
+>
+> This Service Account token is sensitive and will only be shown once. Store it securely - you'll need it for the `OP_SERVICE_ACCOUNT_TOKEN` environment variable.
+
+## 3. Install dependencies
+
+> [tab] npm
+>
+> ```bash theme={null}
+> npm install @browserbasehq/stagehand @1password/sdk 
+> ```
+
+> [tab] pnpm
+>
+> ```bash theme={null}
+> pnpm add @browserbasehq/stagehand @1password/sdk 
+> ```
+
+> [tab] yarn
+>
+> ```bash theme={null}
+> yarn add @browserbasehq/stagehand @1password/sdk 
+> ```
+
+## 4. Configure environment
+
+Create a `.env` file in your project root:
+
+```env .env theme={null}
+BROWSERBASE_API_KEY=your_browserbase_api_key
+OPENAI_API_KEY=your_openai_api_key
+OP_SERVICE_ACCOUNT_TOKEN=your_1password_service_account_token
+```
+
+## 5. Implement authentication
+
+Create an `index.ts` file with the following code:
+
+```typescript Node.js index.ts theme={null}
+import { z } from "zod";
+import { createClient } from "@1password/sdk";
+import { browserbase, Stagehand } from "@browserbasehq/stagehand";
+
+async function main() {
+  // Initialize 1Password SDK client for secure credential retrieval
+  const client = await createClient({
+    auth: process.env.OP_SERVICE_ACCOUNT_TOKEN!,
+    integrationName: "My Browserbase and 1Password Integration",
+    integrationVersion: "v1.0.0",
+  });
+
+  const browser = await browserbase.launch({
+    apiKey: process.env.BROWSERBASE_API_KEY,
+  });
+  const stagehand = await Stagehand.create({ browser });
+
+  // Retrieve credentials from 1Password vault
+  const username = await client.secrets.resolve(
+    "op://Browserbase Agent/Browserbase/username",
+  );
+  const password = await client.secrets.resolve(
+    "op://Browserbase Agent/Browserbase/password",
+  );
+
+  // Navigate to Browserbase sign-in page
+  const [page] = await browser.context.pages();
+  await page.goto("https://www.browserbase.com/sign-in", {
+    waitUntil: "domcontentloaded",
+  });
+  console.log("Navigated to Browserbase sign-in page");
+
+  // Login process
+  await stagehand.act(`Type in the username: ${username}`);
+  console.log("Typed in the username");
+
+  await stagehand.act("Click continue");
+  console.log("Clicked continue");
+
+  await stagehand.act(`Type in the password: ${password}`);
+  console.log("Typed in the password");
+
+  await stagehand.act("Click the sign in button");
+  console.log("Clicked the sign in button");
+
+  // Wait for the page to load
+  await page.waitForLoadState("domcontentloaded");
+  console.log("Page loaded");
+
+  // Extract project information from the dashboard
+  const {
+    data: { projectId },
+  } = await stagehand.extract(
+    "Extract the project ID of the Browserbase account",
+    z.object({
+      projectId: z.string(),
+    }),
+  );
+
+  const {
+    data: { totalSessions },
+  } = await stagehand.extract(
+    "Extract the total sessions for the period for the project",
+    z.object({
+      totalSessions: z.number(),
+    }),
+  );
+
+  console.log(
+    "For Project ID: ",
+    projectId,
+    " the total sessions for the last 30 days is: ",
+    totalSessions,
+  );
+
+  await stagehand.close();
+  await browser.close();
+}
+
+main();
+```
+
+## 6. Run your script
+
+Execute your script to see the 1Password integration in action:
+
+> [tab] npm
+>
+> ```bash theme={null}
+> npx tsx index.ts
+> ```
+
+> [tab] pnpm
+>
+> ```bash theme={null}
+> pnpm tsx index.ts
+> ```
+
+> [tab] yarn
+>
+> ```bash theme={null}
+> yarn tsx index.ts
+> ```
+
+## Expected output
+
+The script logs the sign-in steps, then prints the project ID and the extracted session count. The values depend on the account stored in your 1Password vault.
+
+## Cleanup
+
+The final calls close Stagehand and the browser after a successful run. If the script fails before those calls, release its session using [Manage browser sessions](https://docs.browserbase.com/platform/browser/getting-started/manage-browser-session.md). Revoke the tutorial service account token in 1Password when you no longer need it; keep credentials out of source control.
+
+## Next steps
+
+> [card] [Contexts](https://docs.browserbase.com/platform/browser/core-features/contexts.md)
+>
+> Learn more about using contexts to automate workflows across login-gated sites
+
+> [card] [Session replays](https://docs.browserbase.com/platform/browser/observability/session-replay.md)
+>
+> Learn more about using session replays to debug and optimize your workflows
+
+
+This documentation is built and hosted on [Mintlify](https://mintlify.com), a developer documentation platform.
