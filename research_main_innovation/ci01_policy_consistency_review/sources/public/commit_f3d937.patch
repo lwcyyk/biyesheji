@@ -1,0 +1,81 @@
+From f3d937df38824d59e4a71497d67e87cfb38e4df6 Mon Sep 17 00:00:00 2001
+From: Gavin Wayne <nomeguy@hotmail.com>
+Date: Tue, 6 Oct 2026 02:02:20 +0800
+Subject: [PATCH] fix: keep the login page working for sessions limited by a
+ cross-org token
+
+---
+ routers/authz_filter.go | 26 ++++++++++++++++++++------
+ routers/base.go         |  7 ++++++-
+ 2 files changed, 26 insertions(+), 7 deletions(-)
+
+diff --git a/routers/authz_filter.go b/routers/authz_filter.go
+index 4f0fd5e20381..87ee3553c4d8 100644
+--- a/routers/authz_filter.go
++++ b/routers/authz_filter.go
+@@ -518,6 +518,12 @@ func getImpersonateUser(ctx *context.Context, subOwner, subName, username string
+ }
+ 
+ func ApiFilter(ctx *context.Context) {
++	urlPath := getUrlPath(ctx)
++	// before the subject is read: it may sign out a session left by another application's token
++	if !checkDynamicClientSession(ctx, urlPath) {
++		return
++	}
++
+ 	subOwner, subName := getSubject(ctx)
+ 	// stash current user info into request context for controllers
+ 	username := ""
+@@ -540,10 +546,6 @@ func ApiFilter(ctx *context.Context) {
+ 	}
+ 
+ 	method := ctx.Request.Method
+-	urlPath := getUrlPath(ctx)
+-	if !checkDynamicClientSession(ctx, urlPath) {
+-		return
+-	}
+ 	extraInfo := getExtraInfo(ctx, urlPath)
+ 
+ 	objects := []Object{{}}
+@@ -657,8 +659,20 @@ func checkDynamicClientSession(ctx *context.Context, urlPath string) bool {
+ 		return true
+ 	}
+ 
+-	denyRequest(ctx)
+-	return false
++	// a request that carries the access token itself is the client using it: keep it within the token's limits
++	if credentialUser, _ := ctx.Input.GetData(requestCredentialUserKey).(string); credentialUser != "" {
++		denyRequest(ctx)
++		return false
++	}
++
++	// otherwise it is the browser, sending only the cookie that the token-authenticated response left behind:
++	// sign that session out and go on as anonymous, so the login page and the rest of Casdoor keep working there
++	err = clearSessionOfToken(ctx)
++	if err != nil {
++		responseError(ctx, err.Error())
++		return false
++	}
++	return true
+ }
+ 
+ func isRestrictedClientSession(ctx *context.Context) (bool, error) {
+diff --git a/routers/base.go b/routers/base.go
+index 42ed9c697f90..049bdde811f4 100644
+--- a/routers/base.go
++++ b/routers/base.go
+@@ -252,8 +252,13 @@ func clearSessionOfRevokedToken(ctx *context.Context) error {
+ 		return nil
+ 	}
+ 
++	return clearSessionOfToken(ctx)
++}
++
++// clearSessionOfToken signs out the session that AutoSigninFilter created from an access token
++func clearSessionOfToken(ctx *context.Context) error {
+ 	for _, key := range []string{"username", "SessionData", "accessToken", "scope", "aud", object.SessionSigninTokenId} {
+-		err = ctx.Input.CruSession.Delete(stdcontext.Background(), key)
++		err := ctx.Input.CruSession.Delete(stdcontext.Background(), key)
+ 		if err != nil {
+ 			return err
+ 		}

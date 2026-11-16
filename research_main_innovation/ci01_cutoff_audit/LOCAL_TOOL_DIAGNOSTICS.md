@@ -1,0 +1,7 @@
+# 本地取证工具修订记录
+
+- 联网检索连接器在打开官方RFC/SQLite页时发生传输错误。随后从相同官方HTTPS入口取得文本，来源URL与哈希保存于ADDITIONAL_SOURCES.json。既有论文用本地全文，无新增覆盖猜测。
+- 补充进程元数据的一次本地Python命令以默认GBK解码PowerShell输出时发生UnicodeDecodeError；该命令未发原生HTTP，也未写成原生实验失败。改用PowerShell显式UTF-8文件后完成，同一PID/path和源码blob校验保存在STAGE_ENVIRONMENT.json与SOURCE_GIT_BINDING.json。
+- 模型检查初稿checks01有一条直接比较既定Cookie结论的弱检查。原稿和输出保留；最终checks02移除该项，18项模型断言通过。真实Cookie结论由原始userinfo事件独立核对，计入36项证据核对。
+- raw/run01/environment.lock.json来自复用的历史环境函数，其selected_operation仍含上一阶段措辞，resource_profile只列基础Bearer路径。本轮STAGE_ENVIRONMENT.json明确纠正解释并保留原字节；Cookie扩展路径在采样前TRANSITION_MODEL.md/SAMPLING_PLAN.md及源码快照中已登记。
+- 原生两批采样均一次完成，没有崩溃后自动重跑、原生请求重试或覆盖原始结果。

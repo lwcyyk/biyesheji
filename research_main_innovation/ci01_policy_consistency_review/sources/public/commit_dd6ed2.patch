@@ -1,0 +1,729 @@
+From dd6ed283bef4cb57d2624f7e117a016b3427494b Mon Sep 17 00:00:00 2001
+From: Yang Luo <hsluoyz@gmail.com>
+Date: Sun, 27 Sep 2026 17:39:45 +0800
+Subject: [PATCH] fix: block captcha bypass, DCR token abuse, tenant SSRF and
+ balance races
+
+---
+ controllers/account.go           |  7 +---
+ controllers/auth.go              |  7 +---
+ controllers/service.go           | 10 ++++++
+ controllers/verification_util.go | 16 +++++++++
+ email/custom_http.go             |  9 +++++
+ notification/custom_http.go      | 15 +++++++--
+ object/email.go                  |  9 +++++
+ object/mfa_push.go               |  2 ++
+ object/notification.go           |  1 +
+ object/order_pay.go              | 36 ++++++++++++++------
+ object/organization.go           | 27 +++++++--------
+ object/provider_tenant.go        | 58 ++++++++++++++++++++++++++++++++
+ object/sms.go                    |  2 +-
+ object/sms_custom_http.go        |  7 +++-
+ object/transaction.go            | 31 +++++++++--------
+ object/user.go                   | 25 +++++++++++---
+ pp/gc.go                         |  6 +++-
+ routers/authz_filter.go          | 32 ++++++++++++++++++
+ util/network.go                  | 42 ++++++++++++++++++++---
+ 19 files changed, 273 insertions(+), 69 deletions(-)
+ create mode 100644 object/provider_tenant.go
+
+diff --git a/controllers/account.go b/controllers/account.go
+index 3b26df5912ad..a31ea57faed4 100644
+--- a/controllers/account.go
++++ b/controllers/account.go
+@@ -23,7 +23,6 @@ import (
+ 	"strings"
+ 
+ 	"github.com/beego/beego/v2/core/logs"
+-	"github.com/casdoor/casdoor/captcha"
+ 	"github.com/casdoor/casdoor/form"
+ 	"github.com/casdoor/casdoor/object"
+ 	"github.com/casdoor/casdoor/util"
+@@ -137,12 +136,8 @@ func (c *ApiController) Signup() {
+ 			return
+ 		}
+ 
+-		if captchaProvider.Type != "Default" {
+-			authForm.ClientSecret = captchaProvider.ClientSecret
+-		}
+-
+ 		var isHuman bool
+-		isHuman, err = captcha.VerifyCaptchaByCaptchaType(authForm.CaptchaType, authForm.CaptchaToken, captchaProvider.ClientId, authForm.ClientSecret, captchaProvider.ClientId2)
++		isHuman, err = verifyAuthFormCaptcha(captchaProvider, &authForm)
+ 		if err != nil {
+ 			c.ResponseError(err.Error())
+ 			return
+diff --git a/controllers/auth.go b/controllers/auth.go
+index 84085196d42b..ed67da72293a 100644
+--- a/controllers/auth.go
++++ b/controllers/auth.go
+@@ -30,7 +30,6 @@ import (
+ 	"time"
+ 
+ 	"github.com/beego/beego/v2/server/web"
+-	"github.com/casdoor/casdoor/captcha"
+ 	"github.com/casdoor/casdoor/conf"
+ 	"github.com/casdoor/casdoor/form"
+ 	"github.com/casdoor/casdoor/i18n"
+@@ -853,12 +852,8 @@ func (c *ApiController) Login() {
+ 					return
+ 				}
+ 
+-				if captchaProvider.Type != "Default" {
+-					authForm.ClientSecret = captchaProvider.ClientSecret
+-				}
+-
+ 				var isHuman bool
+-				isHuman, err = captcha.VerifyCaptchaByCaptchaType(authForm.CaptchaType, authForm.CaptchaToken, captchaProvider.ClientId, authForm.ClientSecret, captchaProvider.ClientId2)
++				isHuman, err = verifyAuthFormCaptcha(captchaProvider, &authForm)
+ 				if err != nil {
+ 					c.ResponseError(err.Error())
+ 					return
+diff --git a/controllers/service.go b/controllers/service.go
+index 1398068a037a..b4859fd33aff 100644
+--- a/controllers/service.go
++++ b/controllers/service.go
+@@ -63,6 +63,15 @@ func (c *ApiController) checkServiceProvider(provider *object.Provider, category
+ 	return false
+ }
+ 
++// pinProviderObjectOwner makes a provider posted by a non-global admin one of their own organization,
++// so that its hosts are checked like the saved providers of that organization
++func (c *ApiController) pinProviderObjectOwner(providerObject *object.Provider) {
++	isGlobalAdmin, user := c.isGlobalAdmin()
++	if !isGlobalAdmin && user != nil {
++		providerObject.Owner = user.Owner
++	}
++}
++
+ // SendEmail
+ // @Title SendEmail
+ // @Tag Service API
+@@ -129,6 +138,7 @@ func (c *ApiController) SendEmail() {
+ 			}
+ 			emailForm.ProviderObject.HttpHeaders = object.RestoreMaskedHttpHeaders(emailForm.ProviderObject.HttpHeaders, provider.HttpHeaders)
+ 		}
++		c.pinProviderObjectOwner(&emailForm.ProviderObject)
+ 		provider = &emailForm.ProviderObject
+ 	}
+ 
+diff --git a/controllers/verification_util.go b/controllers/verification_util.go
+index 23ee8e915d57..d5468fe66081 100644
+--- a/controllers/verification_util.go
++++ b/controllers/verification_util.go
+@@ -17,10 +17,26 @@ package controllers
+ import (
+ 	"fmt"
+ 
++	"github.com/casdoor/casdoor/captcha"
++	"github.com/casdoor/casdoor/form"
+ 	"github.com/casdoor/casdoor/object"
+ 	"github.com/casdoor/casdoor/util"
+ )
+ 
++// verifyAuthFormCaptcha verifies the captcha with the type of the application's provider, a
++// client-chosen type with a client-supplied secret would let any test secret key pass
++func verifyAuthFormCaptcha(captchaProvider *object.Provider, authForm *form.AuthForm) (bool, error) {
++	if authForm.CaptchaType != captchaProvider.Type {
++		return false, nil
++	}
++
++	clientSecret := authForm.ClientSecret
++	if captchaProvider.Type != "Default" {
++		clientSecret = captchaProvider.ClientSecret
++	}
++	return captcha.VerifyCaptchaByCaptchaType(captchaProvider.Type, authForm.CaptchaToken, captchaProvider.ClientId, clientSecret, captchaProvider.ClientId2)
++}
++
+ func (c *ApiController) checkOrgMasterVerificationCode(user *object.User, code string) (bool, error) {
+ 	organization, err := object.GetOrganizationByUser(user)
+ 	if err != nil {
+diff --git a/email/custom_http.go b/email/custom_http.go
+index 02db572af429..837ba1261ed6 100644
+--- a/email/custom_http.go
++++ b/email/custom_http.go
+@@ -31,6 +31,7 @@ type HttpEmailProvider struct {
+ 	httpHeaders map[string]string
+ 	bodyMapping map[string]string
+ 	contentType string
++	httpClient  *http.Client
+ }
+ 
+ func NewHttpEmailProvider(endpoint string, method string, httpHeaders map[string]string, bodyMapping map[string]string, contentType string) *HttpEmailProvider {
+@@ -48,6 +49,11 @@ func NewHttpEmailProvider(endpoint string, method string, httpHeaders map[string
+ 	return client
+ }
+ 
++// SetHttpClient replaces the default client, nil keeps it
++func (c *HttpEmailProvider) SetHttpClient(httpClient *http.Client) {
++	c.httpClient = httpClient
++}
++
+ func (c *HttpEmailProvider) Send(fromAddress string, fromName string, toAddress []string, subject string, content string) error {
+ 	var req *http.Request
+ 	var err error
+@@ -137,6 +143,9 @@ func (c *HttpEmailProvider) Send(fromAddress string, fromName string, toAddress
+ 	}
+ 
+ 	httpClient := proxy.DefaultHttpClient
++	if c.httpClient != nil {
++		httpClient = c.httpClient
++	}
+ 	resp, err := httpClient.Do(req)
+ 	if err != nil {
+ 		return err
+diff --git a/notification/custom_http.go b/notification/custom_http.go
+index 8b92f0577d46..81c4fb3a71bd 100644
+--- a/notification/custom_http.go
++++ b/notification/custom_http.go
+@@ -28,9 +28,10 @@ import (
+ const customHttpNotificationTimeout = 30 * time.Second
+ 
+ type HttpNotificationClient struct {
+-	endpoint  string
+-	method    string
+-	paramName string
++	endpoint   string
++	method     string
++	paramName  string
++	httpClient *http.Client
+ }
+ 
+ func NewCustomHttpProvider(endpoint string, method string, paramName string) (*HttpNotificationClient, error) {
+@@ -42,6 +43,11 @@ func NewCustomHttpProvider(endpoint string, method string, paramName string) (*H
+ 	return client, nil
+ }
+ 
++// SetHttpClient replaces the default client, nil keeps it
++func (c *HttpNotificationClient) SetHttpClient(httpClient *http.Client) {
++	c.httpClient = httpClient
++}
++
+ func (c *HttpNotificationClient) Send(ctx context.Context, subject string, content string) error {
+ 	return c.SendWithRecipient(ctx, subject, content, "")
+ }
+@@ -82,6 +88,9 @@ func (c *HttpNotificationClient) SendWithRecipient(ctx context.Context, subject
+ 	}
+ 
+ 	httpClient := getCustomHttpNotificationClient()
++	if c.httpClient != nil {
++		httpClient = c.httpClient
++	}
+ 	resp, err := httpClient.Do(req)
+ 	if err != nil {
+ 		return err
+diff --git a/object/email.go b/object/email.go
+index c1c5e1a046e1..3f9a589aa4d0 100644
+--- a/object/email.go
++++ b/object/email.go
+@@ -20,6 +20,10 @@ import "github.com/casdoor/casdoor/email"
+ 
+ // TestSmtpServer Test the SMTP server
+ func TestSmtpServer(provider *Provider) error {
++	if err := checkTenantProviderHost(provider, provider.Host); err != nil {
++		return err
++	}
++
+ 	sslMode := getSslMode(provider)
+ 	smtpEmailProvider := email.NewSmtpEmailProvider(provider.ClientId, provider.ClientSecret, provider.Host, provider.Port, provider.Type, sslMode, provider.EnableProxy)
+ 	sender, err := smtpEmailProvider.Dialer.Dial()
+@@ -32,8 +36,13 @@ func TestSmtpServer(provider *Provider) error {
+ }
+ 
+ func SendEmail(provider *Provider, title string, content string, dest []string, sender string) error {
++	if err := checkTenantProviderHost(provider, provider.Host); err != nil {
++		return err
++	}
++
+ 	sslMode := getSslMode(provider)
+ 	emailProvider := email.GetEmailProvider(provider.Type, provider.ClientId, provider.ClientSecret, provider.Host, provider.Port, sslMode, provider.Endpoint, provider.Method, provider.HttpHeaders, provider.UserMapping, provider.IssuerUrl, provider.EnableProxy)
++	restrictTenantEmailProvider(provider, emailProvider)
+ 
+ 	fromAddress := provider.ClientId2
+ 	if fromAddress == "" {
+diff --git a/object/mfa_push.go b/object/mfa_push.go
+index f1440da40cb5..8593f9aa37b1 100644
+--- a/object/mfa_push.go
++++ b/object/mfa_push.go
+@@ -134,6 +134,8 @@ func (mfa *PushMfa) sendPushNotification(title string, message string) error {
+ 	if notifier == nil {
+ 		return errors.New("notification provider is not supported")
+ 	}
++	// the receiver is the user's own MFA secret, for a Custom HTTP provider the URL requested
++	restrictNotificationClient(notifier, util.NewInternetOnlyHttpClient(30*time.Second))
+ 
+ 	// Send the push notification
+ 	// Note: The challengeId is kept server-side and not exposed in the message
+diff --git a/object/notification.go b/object/notification.go
+index 08f169a1c578..c253188e2ba2 100644
+--- a/object/notification.go
++++ b/object/notification.go
+@@ -33,6 +33,7 @@ func getNotificationClient(provider *Provider) (notify.Notifier, error) {
+ 		return nil, err
+ 	}
+ 
++	restrictNotificationClient(client, getTenantHttpClient(provider))
+ 	return client, nil
+ }
+ 
+diff --git a/object/order_pay.go b/object/order_pay.go
+index 93699cba0f8d..d6dc3d9d501a 100644
+--- a/object/order_pay.go
++++ b/object/order_pay.go
+@@ -143,6 +143,10 @@ func PlaceOrder(owner string, reqProductInfos []ProductInfo, user *User, couponC
+ 	var couponName string
+ 	var couponDiscount float64
+ 	if couponCode != "" {
++		if hasRechargeProduct(productInfos) {
++			return nil, fmt.Errorf("a coupon cannot be used for an order containing a recharge product")
++		}
++
+ 		coupon, err := ValidateCoupon(owner, couponCode, user.Name, productNames, orderPrice, orderCurrency)
+ 		if err != nil {
+ 			return nil, err
+@@ -372,15 +376,6 @@ func PayOrder(providerName, host, paymentEnv string, order *Order, lang string)
+ 		payment.State = pp.PaymentStatePaid
+ 	}
+ 
+-	affected, err := AddPayment(payment)
+-	if err != nil {
+-		return nil, nil, err
+-	}
+-
+-	if !affected {
+-		return nil, nil, fmt.Errorf("failed to add payment: %s", util.StructToJson(payment))
+-	}
+-
+ 	if provider.Type == "Balance" {
+ 		transaction := &Transaction{
+ 			Owner:       payment.Owner,
+@@ -398,7 +393,7 @@ func PayOrder(providerName, host, paymentEnv string, order *Order, lang string)
+ 			State:       string(pp.PaymentStatePaid),
+ 		}
+ 
+-		affected, err = AddInternalPaymentTransaction(transaction, lang)
++		affected, err := AddInternalPaymentTransaction(transaction, lang)
+ 		if err != nil {
+ 			return nil, nil, err
+ 		}
+@@ -442,6 +437,16 @@ func PayOrder(providerName, host, paymentEnv string, order *Order, lang string)
+ 		}
+ 	}
+ 
++	// the balance is spent before the payment is recorded as paid, so a refused spending leaves no paid payment behind
++	affected, err := AddPayment(payment)
++	if err != nil {
++		return nil, nil, err
++	}
++
++	if !affected {
++		return nil, nil, fmt.Errorf("failed to add payment: %s", util.StructToJson(payment))
++	}
++
+ 	order.Payment = payment.Name
+ 	if provider.Type == "Balance" {
+ 		order.State = "Paid"
+@@ -499,3 +504,14 @@ func CancelOrder(order *Order) (bool, error) {
+ 	order.UpdateTime = util.GetCurrentTime()
+ 	return UpdateOrder(order.GetId(), order)
+ }
++
++// hasRechargeProduct reports an order that credits the balance with the price of its recharge
++// products, a coupon would let it credit more than it is paid
++func hasRechargeProduct(productInfos []ProductInfo) bool {
++	for _, productInfo := range productInfos {
++		if productInfo.IsRecharge {
++			return true
++		}
++	}
++	return false
++}
+diff --git a/object/organization.go b/object/organization.go
+index 3da92e749ba1..d97104c28c90 100644
+--- a/object/organization.go
++++ b/object/organization.go
+@@ -753,23 +753,20 @@ func UpdateOrganizationBalance(owner string, name string, balance float64, curre
+ 	}
+ 	convertedBalance := ConvertCurrency(balance, currency, balanceCurrency)
+ 
+-	var columns []string
+-	var newBalance float64
+-	if isOrgBalance {
+-		newBalance = AddPrices(organization.OrgBalance, convertedBalance)
+-		// Check organization balance credit limit
+-		if newBalance < organization.BalanceCredit {
+-			return fmt.Errorf(i18n.Translate(lang, "general:Insufficient balance: new organization balance %v would be below credit limit %v"), newBalance, organization.BalanceCredit)
+-		}
+-		organization.OrgBalance = newBalance
+-		columns = []string{"org_balance"}
+-	} else {
++	if !isOrgBalance {
+ 		// User balance is just a sum of all users' balances, no credit limit check here
+ 		// Individual user credit limits are checked in UpdateUserBalance
+-		organization.UserBalance = AddPrices(organization.UserBalance, convertedBalance)
+-		columns = []string{"user_balance"}
++		_, err = ormer.Engine.ID(core.PK{owner, name}).Incr("user_balance", convertedBalance).Update(&Organization{})
++		return err
+ 	}
+ 
+-	_, err = ormer.Engine.ID(core.PK{owner, name}).Cols(columns...).Update(organization)
+-	return err
++	affected, err := incrBalance(ormer.Engine.ID(core.PK{owner, name}), "org_balance", convertedBalance, organization.BalanceCredit, &Organization{})
++	if err != nil {
++		return err
++	}
++	if !affected {
++		newBalance := AddPrices(organization.OrgBalance, convertedBalance)
++		return fmt.Errorf(i18n.Translate(lang, "general:Insufficient balance: new organization balance %v would be below credit limit %v"), newBalance, organization.BalanceCredit)
++	}
++	return nil
+ }
+diff --git a/object/provider_tenant.go b/object/provider_tenant.go
+new file mode 100644
+index 000000000000..69db30b3b2bb
+--- /dev/null
++++ b/object/provider_tenant.go
+@@ -0,0 +1,58 @@
++// Copyright 2026 The Casdoor Authors. All Rights Reserved.
++//
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++//      http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package object
++
++import (
++	"net/http"
++	"time"
++
++	"github.com/casdoor/casdoor/email"
++	"github.com/casdoor/casdoor/notification"
++	"github.com/casdoor/casdoor/util"
++	notify "github.com/casdoor/notify2"
++)
++
++// isTenantProvider reports a provider an organization admin manages, as opposed to the global
++// ones ("admin") and the ones of "built-in", which only global admins manage. The hosts of a
++// tenant provider must not reach the intranet, like the webhooks of the organizations.
++func isTenantProvider(provider *Provider) bool {
++	return provider.Owner != "admin" && provider.Owner != "built-in"
++}
++
++func checkTenantProviderHost(provider *Provider, host string) error {
++	if !isTenantProvider(provider) {
++		return nil
++	}
++	return util.CheckInternetHost(host)
++}
++
++func getTenantHttpClient(provider *Provider) *http.Client {
++	if !isTenantProvider(provider) {
++		return nil
++	}
++	return util.NewInternetOnlyHttpClient(30 * time.Second)
++}
++
++func restrictTenantEmailProvider(provider *Provider, emailProvider email.EmailProvider) {
++	if httpProvider, ok := emailProvider.(*email.HttpEmailProvider); ok {
++		httpProvider.SetHttpClient(getTenantHttpClient(provider))
++	}
++}
++
++func restrictNotificationClient(client notify.Notifier, httpClient *http.Client) {
++	if httpNotificationClient, ok := client.(*notification.HttpNotificationClient); ok {
++		httpNotificationClient.SetHttpClient(httpClient)
++	}
++}
+diff --git a/object/sms.go b/object/sms.go
+index eeafacf2ef77..bccc9482a15a 100644
+--- a/object/sms.go
++++ b/object/sms.go
+@@ -29,7 +29,7 @@ func getSmsClient(provider *Provider) (sender.SmsClient, error) {
+ 	if provider.Type == sender.HuaweiCloud || provider.Type == sender.AzureACS {
+ 		client, err = sender.NewSmsClient(provider.Type, provider.ClientId, provider.ClientSecret, provider.SignName, provider.TemplateCode, provider.ProviderUrl, provider.AppId)
+ 	} else if provider.Type == "Custom HTTP SMS" {
+-		client, err = newHttpSmsClient(provider.Endpoint, provider.Method, provider.Title, provider.TemplateCode, provider.HttpHeaders, provider.UserMapping, provider.IssuerUrl, provider.EnableProxy)
++		client, err = newHttpSmsClient(provider.Endpoint, provider.Method, provider.Title, provider.TemplateCode, provider.HttpHeaders, provider.UserMapping, provider.IssuerUrl, provider.EnableProxy, getTenantHttpClient(provider))
+ 	} else if provider.Type == "Alibaba Cloud PNVS SMS" {
+ 		client, err = newPnvsSmsClient(provider.ClientId, provider.ClientSecret, provider.SignName, provider.TemplateCode, provider.RegionId)
+ 	} else if provider.Type == sender.Twilio {
+diff --git a/object/sms_custom_http.go b/object/sms_custom_http.go
+index a1c5aed7f189..f422155abc23 100644
+--- a/object/sms_custom_http.go
++++ b/object/sms_custom_http.go
+@@ -34,9 +34,10 @@ type HttpSmsClient struct {
+ 	bodyMapping map[string]string
+ 	contentType string
+ 	enableProxy bool
++	httpClient  *http.Client
+ }
+ 
+-func newHttpSmsClient(endpoint, method, paramName, template string, httpHeaders map[string]string, bodyMapping map[string]string, contentType string, enableProxy bool) (*HttpSmsClient, error) {
++func newHttpSmsClient(endpoint, method, paramName, template string, httpHeaders map[string]string, bodyMapping map[string]string, contentType string, enableProxy bool, httpClient *http.Client) (*HttpSmsClient, error) {
+ 	if template == "" {
+ 		template = "%s"
+ 	}
+@@ -52,6 +53,7 @@ func newHttpSmsClient(endpoint, method, paramName, template string, httpHeaders
+ 		bodyMapping: bodyMapping,
+ 		contentType: contentType,
+ 		enableProxy: enableProxy,
++		httpClient:  httpClient,
+ 	}
+ 	return client, nil
+ }
+@@ -137,6 +139,9 @@ func (c *HttpSmsClient) SendMessage(param map[string]string, targetPhoneNumber .
+ 	if c.enableProxy {
+ 		httpClient = proxy.ProxyHttpClient
+ 	}
++	if c.httpClient != nil {
++		httpClient = c.httpClient
++	}
+ 	resp, err := httpClient.Do(req)
+ 	if err != nil {
+ 		return err
+diff --git a/object/transaction.go b/object/transaction.go
+index c0f890aac5d2..83354dc5b104 100644
+--- a/object/transaction.go
++++ b/object/transaction.go
+@@ -163,18 +163,12 @@ func AddTransaction(transaction *Transaction, lang string, dryRun bool) (bool, s
+ 		return true, "", nil
+ 	}
+ 
+-	affected, err := ormer.Engine.Insert(transaction)
++	affected, err := insertTransactionWithBalance(transaction, lang)
+ 	if err != nil {
+-		return false, "", err
++		return false, transactionId, err
+ 	}
+ 
+-	if affected != 0 {
+-		if err := updateBalanceForTransaction(transaction, transaction.Amount, lang); err != nil {
+-			return false, transactionId, err
+-		}
+-	}
+-
+-	return affected != 0, transactionId, nil
++	return affected, transactionId, nil
+ }
+ 
+ func AddInternalPaymentTransaction(transaction *Transaction, lang string) (bool, error) {
+@@ -187,18 +181,23 @@ func AddInternalPaymentTransaction(transaction *Transaction, lang string) (bool,
+ 		return false, err
+ 	}
+ 
++	return insertTransactionWithBalance(transaction, lang)
++}
++
++// insertTransactionWithBalance removes the inserted transaction again when the balance refuses its
++// amount, e.g. a concurrent payment has spent the balance after the validation passed
++func insertTransactionWithBalance(transaction *Transaction, lang string) (bool, error) {
+ 	affected, err := ormer.Engine.Insert(transaction)
+-	if err != nil {
++	if err != nil || affected == 0 {
+ 		return false, err
+ 	}
+ 
+-	if affected != 0 {
+-		if err := updateBalanceForTransaction(transaction, transaction.Amount, lang); err != nil {
+-			return false, err
+-		}
++	err = updateBalanceForTransaction(transaction, transaction.Amount, lang)
++	if err != nil {
++		_, _ = ormer.Engine.ID(core.PK{transaction.Owner, transaction.Name}).Delete(&Transaction{})
++		return false, err
+ 	}
+-
+-	return affected != 0, nil
++	return true, nil
+ }
+ 
+ func AddExternalPaymentTransaction(transaction *Transaction, lang string) (bool, error) {
+diff --git a/object/user.go b/object/user.go
+index 438dc727a6c6..d58903fe85de 100644
+--- a/object/user.go
++++ b/object/user.go
+@@ -33,6 +33,7 @@ import (
+ 	"github.com/go-webauthn/webauthn/webauthn"
+ 	"github.com/xorm-io/builder"
+ 	"github.com/xorm-io/core"
++	"github.com/xorm-io/xorm"
+ )
+ 
+ const (
+@@ -1781,12 +1782,26 @@ func UpdateUserBalance(owner string, name string, balance float64, currency stri
+ 		}
+ 	}
+ 
+-	// Validate new balance against credit limit
+-	if newBalance < balanceCredit {
++	affected, err := incrBalance(ormer.Engine.ID(core.PK{owner, name}), "balance", convertedBalance, balanceCredit, &User{UpdatedTime: util.GetCurrentTime()})
++	if err != nil {
++		return err
++	}
++	if !affected {
+ 		return fmt.Errorf(i18n.Translate(lang, "general:Insufficient balance: new balance %v would be below credit limit %v"), newBalance, balanceCredit)
+ 	}
++	return nil
++}
++
++// incrBalance adds amount to the column in one statement, a spending is only applied while the
++// column stays at or above the credit, so concurrent payments cannot both spend the same balance
++func incrBalance(session *xorm.Session, column string, amount float64, credit float64, bean interface{}) (bool, error) {
++	if amount == 0 {
++		return true, nil
++	}
++	if amount < 0 {
++		session = session.Where(fmt.Sprintf("%s + ? >= ?", column), amount, credit)
++	}
+ 
+-	user.Balance = newBalance
+-	_, err = UpdateUser(user.GetId(), user, []string{"balance"}, true)
+-	return err
++	affected, err := session.Incr(column, amount).Update(bean)
++	return affected != 0, err
+ }
+diff --git a/pp/gc.go b/pp/gc.go
+index cffb821888d6..c1037b267677 100644
+--- a/pp/gc.go
++++ b/pp/gc.go
+@@ -213,7 +213,8 @@ func (pp *GcPaymentProvider) Pay(r *PayReq) (*PayResp, error) {
+ 		return nil, err
+ 	}
+ 	payResp := &PayResp{
+-		PayUrl: payRespInfo.PayUrl,
++		PayUrl:  payRespInfo.PayUrl,
++		OrderId: r.PaymentName,
+ 	}
+ 	return payResp, nil
+ }
+@@ -269,6 +270,9 @@ func (pp *GcPaymentProvider) Notify(body []byte, orderId string) (*NotifyResult,
+ 	if notifyRespInfo.OrderState != "1" {
+ 		return nil, fmt.Errorf("error order state: %s", notifyRespInfo.OrderState)
+ 	}
++	if orderId == "" || notifyRespInfo.OrderNo != orderId {
++		return nil, fmt.Errorf("the GC notification is for order: %s, not for order: %s", notifyRespInfo.OrderNo, orderId)
++	}
+ 	notifyResult := &NotifyResult{
+ 		ProductName:        productName,
+ 		ProductDisplayName: productDisplayName,
+diff --git a/routers/authz_filter.go b/routers/authz_filter.go
+index db41b50e77ba..6eebd3a40e3c 100644
+--- a/routers/authz_filter.go
++++ b/routers/authz_filter.go
+@@ -512,6 +512,9 @@ func ApiFilter(ctx *context.Context) {
+ 
+ 	method := ctx.Request.Method
+ 	urlPath := getUrlPath(ctx)
++	if !checkDynamicClientSession(ctx, urlPath) {
++		return
++	}
+ 	extraInfo := getExtraInfo(ctx, urlPath)
+ 
+ 	objects := []Object{{}}
+@@ -591,6 +594,35 @@ func ApiFilter(ctx *context.Context) {
+ 	}
+ }
+ 
++// dynamicClientApis are the only APIs a session signed in with the access token of a dynamically
++// registered client may call: anyone can register such a client and get users to authorize it
++var dynamicClientApis = []string{
++	"/api/userinfo",
++	"/api/user",
++	"/api/mcp",
++	"/api/login/oauth",
++}
++
++// checkDynamicClientSession keys on the "aud" that AutoSigninFilter stores in the session, so the
++// session cookie returned with a token-authenticated response is limited the same as the token
++func checkDynamicClientSession(ctx *context.Context, urlPath string) bool {
++	aud, ok := ctx.Input.Session("aud").(string)
++	if !ok || aud == "" || util.InSlice(dynamicClientApis, urlPath) || strings.HasPrefix(urlPath, "/api/server/") {
++		return true
++	}
++
++	application, err := object.GetApplicationByClientId(aud)
++	if err != nil {
++		responseError(ctx, err.Error())
++		return false
++	}
++	if application != nil && application.IsDynamicClient() {
++		denyRequest(ctx)
++		return false
++	}
++	return true
++}
++
+ func writePermissionLog(objOwner, subOwner, subName, method, urlPath string, allowed bool) {
+ 	providers, err := object.GetProvidersByCategory(objOwner, "Log")
+ 	if err != nil {
+diff --git a/util/network.go b/util/network.go
+index 67be5bc652f7..31aab28d4398 100644
+--- a/util/network.go
++++ b/util/network.go
+@@ -18,6 +18,7 @@ import (
+ 	"fmt"
+ 	"net"
+ 	"net/http"
++	"net/url"
+ 	"os"
+ 	"strings"
+ 	"syscall"
+@@ -65,14 +66,45 @@ func IsHostIntranet(ip string) bool {
+ // link-local (e.g. cloud metadata) and unspecified addresses. The check runs on the resolved
+ // IP of every connection, so DNS rebinding and redirects to such addresses are refused too.
+ func NewInternetOnlyHttpClient(timeout time.Duration) *http.Client {
+-	isRefused := func(address string) bool {
+-		return IsHostIntranet(address) || isUnspecifiedIp(address) || isSharedAddressSpaceIp(address)
+-	}
+-
+ 	return &http.Client{
+ 		Timeout:   timeout,
+-		Transport: newRestrictedHttpTransport(timeout, isRefused, "only Internet addresses can be requested"),
++		Transport: newRestrictedHttpTransport(timeout, isNonInternetAddress, "only Internet addresses can be requested"),
++	}
++}
++
++func isNonInternetAddress(address string) bool {
++	return IsHostIntranet(address) || isUnspecifiedIp(address) || isSharedAddressSpaceIp(address)
++}
++
++// CheckInternetHost refuses a host (a hostname, "host:port" or URL) that resolves to an address
++// NewInternetOnlyHttpClient would refuse, for the clients that cannot dial through it, e.g. SMTP.
++// A bare path such as "/v3/mail/send" names no host and passes.
++func CheckInternetHost(host string) error {
++	if strings.Contains(host, "://") {
++		urlObj, err := url.Parse(host)
++		if err != nil {
++			return err
++		}
++		host = urlObj.Hostname()
++	} else if hostname, _, err := net.SplitHostPort(host); err == nil {
++		host = hostname
++	}
++
++	host = strings.Trim(host, "[]")
++	if host == "" || strings.HasPrefix(host, "/") {
++		return nil
++	}
++
++	ips, err := net.LookupIP(host)
++	if err != nil {
++		return err
++	}
++	for _, ip := range ips {
++		if isNonInternetAddress(ip.String()) {
++			return fmt.Errorf("the host: %s is not allowed, only Internet addresses can be requested", host)
++		}
+ 	}
++	return nil
+ }
+ 
+ func NewNonLocalHttpTransport(timeout time.Duration) *http.Transport {

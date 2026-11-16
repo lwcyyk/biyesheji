@@ -1,0 +1,618 @@
+[PDF_PAGE 1]
+    Extending Eventually Consistent Cloud Databases
+                             for Enforcing Numeric Invariants
+
+
+
+                   Valter Balegas, Diogo Serra, Sérgio Duarte                                   Marc Shapiro, Mahsa Najafzadeh
+              Carla Ferreira, Rodrigo Rodrigues, Nuno Preguiça                                                INRIA / LIP6
+                 NOVA LINCS/FCT/Universidade Nova de Lisboa
+
+
+   Abstract—Geo-replicated databases often operate under the                    correct operation [17]. Real world examples where enforcing
+principle of eventual consistency to offer high-availability with               invariants is essential are advertisement services, virtual wal-
+low latency on a simple key/value store abstraction. Recently,                  lets or to maintain stocks. However, enforcing this condition
+some have adopted commutative data types to provide seamless                    using  counters  implemented  on  eventually  consistent  cloud
+reconciliation for special purpose data types, such as counters.                database is impossible. This is because counter updates can
+Despite this, the inability to enforce numeric invariants across all            occur concurrently, making it impossible to detect if the limit
+replicas still remains a key shortcoming of relying on the limited              is exceeded before the operation concludes.
+guarantees of eventual consistency storage.
+    We  present  a  new  replicated  data  type,  called  bounded                   Maintaining  this  type  of  invariants  would  be  trivial  in
+counter, which adds support for numeric invariants to eventually                systems that offer strong consistency guarantees, namely those
+consistent geo-replicated databases. We describe how this can be                that  serialize  all  updates,  and  therefore  preclude  that  two
+implemented on top of existing cloud stores without modifying                   operations execute without seeing the effects of one another
+them, using Riak as an example. Our approach adapts ideas                       [10], [27], [17]. The problem with these systems is that they
+fromescrowtransactionstodeviseasolutionthatisdecentralized,                     require coordination among replicas, leading to an increased
+fault-tolerant and fast. Our evaluation shows much lower latency                latency. In particular, in a geo-replicated scenario, this latency
+and  better  scalability  than  the  traditional  approach  of  using           may amount to hundreds of milliseconds, which sufﬁces to
+strong consistency to enforce numeric invariants, thus alleviating              impact application usability [23].
+the tension between consistency and availability.
+                         I.    INTRODUCTION                                         In this paper we show that it is possible to achieve the
+                                                                                best of both worlds, i.e., that fast geo-replicated operations on
+    Scalable cloud databases with a key/value store interface                   counters can coexist with strong invariants. To this end, we
+have emerged as the platform of choice for providing online                     propose a novel abstract data type called a Bounded Counter.
+services that operate on a global scale, such as Facebook [15],                 This replicated object, like conventional CRDTs [24], allows
+Amazon [11], or Yahoo! [9]. In this context, a common tech-                     for operations to execute locally, automatically merges concur-
+niqueforimprovingtheuserexperienceisgeo-replication[11],                        rent updates, and, in contrast to previous CRDTs, also enforces
+[9],  [27],  i.e.,  maintaining  copies  of  application  data  and             numeric invariants while avoiding coordination in most cases.
+logic in multiple data centers scattered across the globe. This                 Implementing Bounded Counter in a fast and portable way
+decreases the latency for handling user requests by routing                     required overcoming a series of challenges, which form the
+them to nearby data centers, but at the expense of resorting to                 main technical contributions of this work.
+weaker data consistency guarantees, in order to avoid a costly                      First, we propose an extension to the main idea behind
+coordination across replicas for executing operations.                          escrow transactions [21], which is to partition the difference
+    When executing under such weaker consistency models,                        between the current value of a counter and the limit to be
+applications have to deal with concurrent operations executing                  enforced among existing replicas. These parts are distributed
+without being aware of each other, which implies that a merge                   among replicas, who can locally execute operations that do
+strategy  is  required  for  reconciling  concurrent  updates.  A               not  exceed  their  allocated  part.  Unlike  previous  solutions
+common approach is to rely on a last writer wins strategy                       that include some central authority and are often based on
+[19], [20], [15], but this is not appropriate in all situations. A              synchronous interactions between nodes [21], [5], [22], [25],
+prominent example is the proper handling of counters, which                     our approach is completely decentralized and asynchronous,
+are  a  useful  abstraction  for  implementing  features  such  as              with each replica relying only on a local and possibly stale
+like buttons, votes and ad and page views, and all sorts of                     view  of  the  information  and  on  peer-to-peer  asynchronous
+resource counting. For counters, using last writer wins leads to                interactions. This design makes it easy to deploy our system,
+lost updates, breaking the intended semantics. To address this                  since we do not need to add a new master server (or replica
+limitation, cloud databases, such as Cassandra [1], DynamoDB                    group) that controls the allocation of operations on the counter.
+and Riak[6], have extended their interfaces with support for                    Furthermore, this avoids situations where the temporary un-
+correctcounters,implementedusingspeciﬁcmergealgorithms.                         reachability  of  the  data  center  where  the  master  server  is
+    Even though these approaches provide a principled han-                      located can prevent operations from making progress.
+dling of concurrent updates to counter objects, they fall short                     Second, and building on the fact that we did not have to
+on supporting the enforcement of crucial invariants or database                 add any new master servers to enforce invariants, we show
+integrity constraints, which are often required for maintaining                 how  it  is  possible  to  layer  our  design  on  top  of  existing
+[PDF_PAGE 2]
+eventually consistent storage systems, while making very few                      %  Regular  data  operations
+assumptions  about  the  underlying  system.  In  particular,  we                 get(key):  object  |  fail
+                                                                                  put(key,  object):  ok  |  fail
+only  assume  that  the  underlying  storage  system  executes
+operations in a serializable way in each replica (not necessarily                 %  Bounded  Counters  operations
+by  the  same  order  across  replicas)  and  that  it  provides  a               create(key,  type,  bound):  ok  |  error
+reconciliationmechanismformergingconcurrentupdates.This                           read(key):  integer  |  error
+                                                                                  inc(key,  delta,  flag):  ok  |  fail  |  retry
+makes our solution generic and portable, but raises the bar                       dec(key,  delta,  flag):  ok  |  fail  |  retry
+for  achieving  a  performance  that  is  comparable  to  directly                Fig. 1.    System API.
+accessingtheunderlyingstorage.Furthermore,weproposetwo
+alternative designs, where the ﬁrst one is implemented using                      B.  System API
+only a client-side library, whereas the second one includes a
+server side component deployed in a distributed hash table,                           Our  middleware  system  is  built  on  top  of  a  weakly-
+which provides better scalability by minimizing the number of                     consistent key-value database. Figure 1 summarizes the pro-
+operations executed in the underlying storage system.                             gramming interface of our system, with the usual get and put
+    The evaluation of our prototypes running on top of Riak                       operations for accessing regular data, and additional operations
+shows that: 1) when compared to using weak consistency, our                       for creating a new Bounded Counter, reading its current state,
+approach with the cache and a write batching mechanism has                        and incrementing or decrementing its value. As any other data,
+higher throughput with a very small increase in latency, while                    InvCounters are identiﬁed in all operations by an opaque key.
+guaranteeing that invariants are not broken; 2) when compared                         The create operation creates a new bounded counter. The
+to using strong consistency, our approach can enforce invari-                     type argument speciﬁes if it is anupper- or a lower- Bounded
+ants without paying the latency price for replica coordination,                   Counter, and the bound argument provides the global invariant
+which is considerable for all but the local clients; 3) the client                limit to be maintained – e.g.,create(“X”, upper, 1000) creates
+based design performs well under low contention, but does                         a Bounded Counter that maintains the invariant that the value
+not scale when contention on the same counter is large; 4) the                    must be smaller or equal to 1000. The counter is initialized
+server based design scales well with the number of clients                        to the value of the bound.
+executing operations, providing even higher throughput than                           The read operation returns the current value of the given
+weak consistency.                                                                 counter. The returned value is computed based on local in-
+    The remainder of the paper is organized as follows. Sec-                      formation and it may not be globally accurate. To update a
+tion II overviews our solution and its requirements; Section III                  counter, the application submits inc or dec operations. These
+introduces the Bounded Counter CRDT; Section IV presents                          operations include a ﬂag to decide on whether the execution is
+our  two  designs  that  extend  Riak  with  numeric  invariant                   strictly local or whether global execution is attempted. In both
+preservation; Section V evaluates our prototypes; Section VI                      cases,theoperationattemptstorunlocallyﬁrst.Whenthelocal
+discusses  extensions  to  the  proposed  design;  Section  VII                   information cannot guarantee that the value remains within
+discusses related work; and Section VIII concludes the paper.                     bounds, in the case of a strictly local operation, the API returns
+                                                                                  an error and a hint regarding whether global execution is likely
+                                                                                  to succeed; otherwise, in the case of a global operation, the
+                                                                                  system tries to contact remote replicas to safely execute to
+                      II.    SYSTEM OVERVIEW                                      operation and only returns an error if this coordination with
+A.  Assumptions                                                                   remote replicas cannot ensure the preservation of the invariant
+                                                                                  (namely when the counter has reached its limit).
+    We target a typical geo-replicated scenario, with copies of
+application data and logic maintained in multiple data centers                    C. Consistency Guarantees
+(DC) scattered across the globe. End clients contact the closest                      We  build  our  middleware  on  top  of  an  eventually  con-
+DC  for  executing  application  operations  in  the  application                 sistent  database,  extending  the  underlying  guarantees  with
+server running in that DC. The execution of this application                      invariant preservation for counters. In particular, the eventual
+logic leads to issuing a sequence of operations on the database                   consistency model means that the outcome of each operation
+system where application data resides.                                            reﬂects  the  effects  of  only  a  subset  of  the  operations  that
+    We  consider  that  system  processes  (or  nodes)  are  con-                 all clients have previously invoked – these are the operations
+nected by an asynchronous network (i.e., subject to arbitrary                     that have already been executed by the replica that the client
+delays,  including  partitions).  We  assume  a  ﬁnite  set Π =                   has contacted. However, for each operation that successfully
+p0,p1,...,pn−1  of  processes  who  may  fail  by  crashing.  A                   returns at a client, there is a point in time after which its effect
+crashed process may remain crashed forever, or may recover                        becomes visible to every operation that is invoked after that
+with its persistent memory intact. A non-crashed process is                       time, i.e., operations are eventually executed by all replicas.
+said to be correct.                                                                   In terms of the invariant preservation guarantee, this means
+    For  simplicity,  our  presentation  considers  a  single  data               that the bounds on the counter value are never violated, neither
+object replicated in all processes of Π, with ri  representing                    locally nor globally. By locally, this means that the bounds
+the replica of the object at process  pi. The model trivially                     must be obeyed in each replica at all times, i.e., the subset of
+generalizes to the case where multiple data objects exist – in                    operations seen by the replica must obey:
+such a case, for each object o, we need to consider only the                       lower bound≤ initial value +∑inc−∑dec≤ upper bound.
+set Πo of the processes that replicate o.                                          By globally, this means that, at any instant in the execution of
+[PDF_PAGE 3]
+the system, when considering the union of all the operations                       payload integer[n][n] R, integer[n] U, integer min
+executed by each replica, the same bounds must hold.                                    initial [[0,0,...,0], ..., [0,0,...,0]], [0,0,...,0], K
+    Note that the notion of causality is orthogonal to our design                  query value () : integer v
+and  guarantees,  in  the  sense  that  if  the  underlying  storage                    v=min+ ∑
+                                                                                                     i∈IdsR[i][i]− ∑i∈IdsU[i]
+system offers causal consistency, then we also provide numeric                     query localRights () : integer v
+invariant-preserving causal consistency.                                                id=repId()                            %Id of the local replica
+                                                                                        v=R[id][id]+ ∑
+D. Enforcing Numeric Invariants                                                                           i̸=idR[i][id]− ∑i̸=idR[id][i]−U[id]
+    To enforce numeric invariants, our design borrows ideas                        update increment (integer n)
+from the escrow transactional model [21]. The key idea of                               id=repId()
+this model is to consider that the difference between the value                         R[id][id]=R[id][id]+n
+of a counter and its bound can be seen as a set of rights to                       update decrement (integer n)
+execute operations. For example, in a counter, n, with initial                          pre-condition localRights()≥n
+value n=40 and invariant n≥10, there are 30 (40−10) rights                              id=repId()
+to execute decrement operations. Executing dec(5) consumes                              U[id]=U[id]+n
+5 of these rights. Executing inc(5) creates 5 rights. In this                      update transfer (integer n, replicaId to): boolean b
+model, these rights are split among the replicas of the counter                         pre-condition b=(localRights()≥n)
+– e.g. if there are 3 replicas, each replica can be assigned 10                         from=repId()
+rights. If the rights needed to execute some operation exist                            R[from][to]:=R[from][to]+n
+in the local replica, the operation can safely execute locally,                    update merge (S)
+knowing that the global invariant will not be broken – in the                           R[i][j]=max(R[i][j],S.R[i][j]),∀i, j∈Ids
+previous example, if the decrements of each replica are less                            U[i]=max(U[i],S.U[i]),∀i∈Ids
+or equal to 10, it follows that the total number of decrements
+does not exceed 30, and therefore the invariant is preserved.                   Fig. 2.   Bounded Counter for maintaining the invariant larger or equal to K.
+If not enough rights exist, then either the operation fails or                  in peer-to-peer interactions, where a replica r1 propagates its
+additional rights must be obtained from other replicas.                         state to another replica r2, which merges its local and received
+    Our  approach  encompasses  two  components  that  work                     state, by executing the merge function.
+together to achieve the goal of our system: a novel data struc-                      State-based CRDTs build on the deﬁnition of a join semi-
+ture, the Bounded Counter CRDT, to maintain the necessary                       lattice(orjustsemi-lattice),whichisapartialorder≤equipped
+information for locally verifying whether it is safe to execute                 with a least upper bound (LUB)⊔ for all pairs: m= x⊔y
+an operation or not; and a middleware layer to manipulate                       is a Least Upper Bound of{x,y} under≤ iff x≤ m∧y≤
+instances of this data structure stored in the underlying cloud                 m∧∀m′,x≤m′∧y≤m′⇒m≤m′.
+database. The ﬁrst component is detailed in Section III, while
+alternativedesignstothesecondpartaredetailedinSectionIV.                             It has been proven that a sufﬁcient condition for guaran-
+                                                                                teeing the convergence of the replicas of state-based CRDTs
+        III.    DESIGN OF BOUNDED COUNTER CRDT                                  is  that  the  object  conforms  the  properties  of  a  monotonic
+    This section presents the design of Bounded Counter, a                      semi-lattice object [24], in which: (i) The set S of possible
+CRDT that can be used to enforce numeric invariants without                     states forms a semi-lattice ordered by≤; (ii) The result of
+requiring coordination for most operation executions. Instead,                  merging state s with remote state s′ is the result of computing
+coordination is normally executed outside of the normal ex-                     the LUB of the two states in the semi-lattice of states, i.e.,
+ecution  ﬂow  of  an  operation  and  amortized  over  multiple                 merge(s,s′) = s⊔s′;  (iii)  The  state  is  monotonically  non-
+operations.                                                                     decreasing across updates, i.e., for any update u, s≤u(s).
+
+A.  CRDT Basics                                                                 B.  Bounded Counter CRDT
+                                                                                     We now detail the Bounded Counter, a CRDT for main-
+    Conﬂict-free replicated data types (CRDTs) [24] are a class                 taining the invariant larger or equal to K. The pseudocode for
+of distributed data types that allow replicas to be modiﬁed                     Bounded Counter is presented in Figure 2.
+without  coordination,  while  guaranteeing  that  replicas  con-                    BoundedCounterstate:TheBoundedCounter mustmain-
+verge to the same correct value after all updates are propagated                tain the necessary information to verify whether it is safe to
+and executed in all replicas.                                                   locally execute operations or not. This information consists in
+    Two types of CRDTs have been deﬁned:operation-based                         the rights each replica holds (as in the escrow transactional
+CRDTs,  where  modiﬁcations  are  propagated  as  operations                    model [21]).
+(or patches) and executed on every replica; and state-based                          To maintain this information, for a system with n replicas,
+CRDTs,  where  modiﬁcations  are  propagated  as  states,  and                  we use two data structures. The ﬁrst,R is a matrix of n lines
+merged with the state of every replica.                                         by n columns with: R[i][i] recording the increments executed
+    In this work, we have adopted the state-based model, as we                  at ri, which deﬁne an equal number of rights initially assigned
+have built our work on top of a key-value store that synchro-                   to  ri;  R[i][j]  recording  the  rights  transferred  from  ri  to  rj.
+nizes replicas by propagating the state of the database objects.                The second, U is a vector of n lines with U[i] recording the
+In this model, one operation submitted in one site executes                     successful decrements executed at ri, which consume an equal
+in the local replica. Updates are propagated among replicas                     number of rights.
+[PDF_PAGE 4]
+                                                                                      Correctness:  For  showing  the  correctness  of  Bounded
+                                                                                  Counter, it is necessary to show that all replicas of Bounded
+                                                                                  Counter  eventually  converge  to  the  same  state,  i.e.,  that
+                                                                                  Bounded Counter is a correct CRDT, and that the execution
+                                                                                  of concurrent operations will not break the invariant. We now
+Fig. 3.   Example of the state of Bounded Counter for maintaining the invariant   sketch an argument for why these properties are satisﬁed.
+larger or equal to 10.                                                                For showing that replicas eventually converge to the same
+                                                                                  state,  it  is  necessary  to  prove  that  the  speciﬁcation  is  a
+    For  simplicity,  our  speciﬁcation  assumes  every  replica                  monotonic semi-lattice object. As the elements of R andU are
+maintains a complete copy of these data structures, but we                        monotonically  increasing  (since  operations  never  decrement
+later discuss how to avoid this in practice.                                      the value of these variables), the semi-lattice properties are
+    Operations: When a counter is created, we assume that                         immediatelysatisﬁed–twostates,s0,s1,arerelatedbyapartial
+the initial value of the counter is equal to the minimum value                    order relation, s0≤s1, whenever all values of R and U in s1
+allowed by the invariant, K. Thus, no rights are assigned to                      are greater or equal to the corresponding values in s0  (i.e.,
+any replica and both R and U are initialized with all entries                     ∀i, j,s0.R[i][j]≤s1.R[i][j]∧s0.U[i]≤s1.U[i]). Furthermore, the
+being equal to 0. To overcome the limiting assumption of the                      merge of two state is the LUB, as the function just takes the
+initialvaluebeingK,wecanimmediatelyexecuteanincrement                             maximum
+operation in the freshly created Bounded Counter. Figure 3                            To guarantee that the invariant is not broken, it is necessary
+shows  an  example  of  the  state  of  a  Bounded  Counter  for                  to  guarantee  that  a  replica  does  not  execute  an  operation
+maintaining the invariant larger or equal to 10, with initial                     (decrement or transfer) without holding enough rights to do
+value 40. This initial value led to the creation of 30 rights                     it. As operations execute sequentially and verify if the local
+assigned to r0 – this value is recorded in R[0][0].                               replica holds enough rights before execution, it is necessary to
+    An increment executed at ri updates the number of incre-                      prove that if a replica believe it has N rights, it owns at least N
+ments for ri by updating the value of R[i][i]. In the example                     rights. The construction of the algorithms guarantees that line
+of Figure 3, the value of R[1][1] is 1, which is the result of                    i of R and U is only updated by operations executed at replica
+incrementing the counter by 1 in r1.                                              ri. Thus, replica ri necessarily has the most recent value for
+    A decrement executed at ri updates the number of decre-                       line i of both R andU. As rights of replica ri are consumed by
+ments  for  ri  by  updating  the value  of U[i].  This operation                 decrement operations,recordedinU[i],andtransferoperations,
+can only execute if ri  holds enough rights before executing                      recorded in R[i][j], it follows immediately that replica ri knows
+the  operation.  The  decrement  operation  fails  if  not  enough                of all rights it has consumed. Thus, when computing the local
+local rights exist. In the example of Figure 3, the values of                     rights, the value computed locally is always conservative (as
+U reﬂect the execution of 5, 4 and 2 decrements in  r0, r1 and                    replica ri may not know yet of some transfer to ri executed by
+r2, respectively.                                                                 some other replica). This guarantees that the invariant is not
+                                                                                  broken when operations execute locally in a single replica.
+    Therightsthelocalreplicari holds,returnedbyfunctionlo-                            We   wrote   the   speciﬁcation   of  Bounded   Counter   in
+calRights,arecomputedby:(a)addingtheincrementsexecuted                            TLA [16] and successfully veriﬁed that the invariant holds
+in the local replica, R[i][i]; (b) adding the rights transferred                  for all the cases that the tool generated.
+from other replicas to ri, R[j][i],∀j̸= i; (c) subtracting the                        Extensions: It is possible to deﬁne a Bounded Counter
+rights transferred from ri to other replicas, R[i][j],∀j̸=i; and                  that enforces an invariant of the form smaller or equal to K by
+(d)  subtracting  the  decrements  executed  in  ri, U[i].  In  the               using a similar approach, where rights represent the possibility
+example of Figure 3, replica r0 holds 5 rights (obtained from                     of executing increment operations instead of decrement opera-
+30+(0+0)−(10+10)−5), allowing to locally decrement the                            tions. The speciﬁcation would be similar to the one presented
+counter by up to 5.                                                               in Figure 2, with the necessary adaptations to the different
+    The operation to retrieve the current value of the counter                    meaning of the rights.
+consists of: (a) adding the minimum value, K; (b) adding the                          A Bounded Counter that can maintain an invariant of the
+sum of increment operations executed at any replica, R[i][i],∀i;                  form larger or equal to K0 and smaller or equal to K1 can
+and  (c)  subtracting  the  sum  of  the  decrement  operations                   be  created  by  combining  the  information  of  two  Bounded
+executed at anyreplica,U[i],∀i. Inthe example of Figure3, the                     Counters, one for each invariant, and updating both on each
+current value is 30 (obtained from 10+(30+1)−(5+4+2)).                            operation.
+    The operation transfer executed at replica ri transfers rights
+fromri tosomeotherreplicarj,byupdatingthevaluerecorded                                Optimizations:  The  state  of  Bounded  Counter,  as  pre-
+in R[i][j]. This operation can only execute if enough local right                 sented, has complexity O(n2). In practice, the impact of this
+exist. In the example of Figure 3, transfers of 10 rights from                    is  expected  to  be  small  as  the  number  of  data  centers  in
+r0 to each of r1 and r2 are recorded in the values of R[0][1]                     common deployments is typically small and each data center
+and R[0][2]                                                                       will typically hold a single logical replica.
+    The merge operation is executed during peer-to-peer syn-                          In the cases when this is not true, we can leverage the fol-
+chronization, when a replica receives the state of a remote                       lowing observations to lower the space complexity of Bounded
+replica. The local state is updated by just taking, for each                      Counters up to O(n). For computing the local rights, replica
+entry of both data structures, the maximum of the local and                       ri only uses the line i and column i of R and line i of u. For
+the received value.                                                               computing the local value of the counter, replica i additionally
+[PDF_PAGE 5]
+usesentriesR[i][i],∀iandtheremainingentriesofU.Thisleads
+to a space complexity of 4.n for storage, which compares with
+2.n as the minimal complexity of a state-based counter [8].
+    In this case, when synchronizing, a replica only needs to
+send the information both replicas store. Thus, a replica ri
+would send to rj only R[i][i],∀i, R[i][j] and U1, lowering the
+space complexity for messages to 2.n.
+    When this optimization is not in place, and every replica                    Fig. 4.    Client-based middleware for deploying Bounded Counters.
+maintains the complete data structure, we can still lower the
+communication costs by propagating the information epidem-
+ically. This means that it is not necessary for every replica to
+communicate directly with every other replica. In particular,
+we can allow for the communication to be reactive instead
+of proactive: a replica ri only needs to communicate directly
+with rj  when it transfers rights to rj  (e.g., upon request in
+order to execute an operation) so that rj knows about the new
+rights. Note that the lack of communication does not affect the
+correctness regarding the invariant violation, as each replica
+always has a conservative view on its available rights.                          Fig. 5.    Server-based middleware for deploying Bounded Counters.
+
+IV.    MIDDLEWARE FOR ENFOCING NUMERIC INVARIANTS                                if a concurrent write has been executed. These key are not
+    We  now  present  two  middleware  designs  for  extending                   geo-replicated (each DC has its local view of the data) and
+Riak  database  with  numeric  invariants,  using  the  Bounded                  they cannot store a Riak data type object.
+Counter. The proposed designs can be applied to any database                     B.  Alternative 1: Client-based Middleware
+that  provides  the  following  two  properties,  essential  for
+Bounded Counter to work properly. First, each replica needs                           Our ﬁrst design, depicted in Figure 4, is based on a client-
+to execute operations referring to each counter in a serializable                side middleware. Supporting operations on Bounded Counters
+way, i.e., as if they had been executed in sequence. This does                   is fairly simple, given the functionality provided by Riak.
+not, however, preclude concurrency: operations for different                          The state of a Bounded Counter is stored as an opaque
+counters are not constrained by this requirement, and even                       object in the Riak database, which is marked as strongly con-
+within the same counter there are protocols that allow for some                  sistent. Rights for executing operations in a Bounded Counter
+concurrency while maintaining the illusion of a serializable                     are associated with each DC, i.e., each DC is considered as
+execution. This serialization is necessary to guarantee that two                 a single replica for a Bounded Counter. An increment (resp.
+concurrent operations do not use the same rights. Second, the                    decrement) executes in the client library by ﬁrst reading the
+replication model must ensure no lost updates, i.e., updates                     currentvalueofthecounter(executingaget operationinRiak),
+executed  concurrently  in  different  replicas  must  be  merged                then executing the increment (resp. decrement) operation in
+using the CRDT merge function. This is necessary for the                         the Bounded Counter and writing the new value of the counter
+CRDT to work properly.                                                           backintothedatabase.IftheoperationintheBoundedCounter
+    Before presenting the middleware designs, we present an                      fails, the client can try to obtain additional rights by requesting
+overview of the functionalities of Riak that are relevant for the                the execution of a transfer operation from another DC. If the
+deployment of Bounded Counters.                                                  operation in the CRDT succeeds but the conditional write fails,
+                                                                                 the operation must be re-executed until it succeeds.
+A.  Overview of Riak 2.0                                                              Given  that  Bounded  Counters  are  marked  as  strongly
+    Riak 2.0 is a key/value database inspired in Dynamo [11].                    consistent,  updates  are  serialized  in  each  DC  through  the
+It support geo-replication in its Enterprise Edition, where each                 conditional  writing  mechanism.  Concurrent  updates  to  the
+DC maintains a full replica of the database. Riak provides an                    same Bounded Counter can only appear due to geo-replication.
+API supporting a read (get) and write (put) interface, where                     If this is the case, then concurrent versions can be merged by
+a write associates a new value with a key, and a read returns                    the client library when reading the counter.
+the value(s) associated with the key.                                                 For propagating the updated values across DC, we were not
+    By  default,  writes  on  a  key  can  proceed  concurrently,                able to reuse the geo-replication mechanism from Riak, since
+with the system maintaining the multiple concurrent versions                     it does not support multi-data center replication for objects
+and exposing them to clients in subsequent read operations.                      that use strong consistency. As such, we had to implement
+Additionally, Riak includes native support for storing CRDTs,                    a custom synchronization mechanism for Bounded Counters.
+dubbed Riak data types, where concurrent writes are automat-                     This custom synchronization forwards modiﬁed counters to
+ically merged.                                                                   other DCs periodically. A DC receiving a remote version of a
+    Riak keys can be marked as strongly consistent. For these                    counter, merges the received version with the local version.
+keys, Riak uses a conditional writing mode where a write fails                   C. Alternative 2: Server-based Middleware
+
+  1Replicas ri and rj also share R[j][i], but as this value is only updated at        The client-based middleware has an important limitation,
+rj, it is not necessary to send it.                                              as pointed out by the evaluation in Section V: the conditional
+[PDF_PAGE 6]
+writing mechanism for serializing operation execution works                      resultisimmediatelyreturnedandtheoperationbecomespend-
+well  under  low  load,  but  leads  to  an  increased  number  of               ing. When the previous write to the Riak database completes,
+failed writes when the load increases. To address this issue,                    the local version of the Bounded Counter, which absorbed
+we propose a server-based middleware design that serializes                      the  modiﬁcations  of  all  pending  operations,  is  written  in
+all operations executed in each DC for each counter.                             the Riak database. If this second conditional write succeeds,
+    The server-based middleware is built using a DHT com-                        all pending operations complete by returning success to the
+munication substrate (riak_core [13] in our prototype) running                   clients. Otherwise, clients are notiﬁed of the failure.
+side by side with each node of the Riak database. The key                        D. Transferring Rights
+feature that is employed is the ability to lookup the DHT node
+that is responsible for a given key. This primitive is used to                       For executing an operation that may violate an invariant, a
+route all requests for a given key to the same node, which                       replica needs to own enough rights. Given that it is impossible
+serializes their execution. For operations on regular objects,                   to anticipate the rights needed at each replica, it is necessary
+the client library calls Riak directly (without contacting DHT                   to redistribute rights among replicas.
+nodes).                                                                              In our middleware designs, replicas proactively exchange
+    When an application wants to execute an operation in a                       rights  in  the  background.  A  replica  that  has  fewer  rights
+counter, the operation is sent to the DHT node responsible for                   than a given threshold periodically asks additional rights from
+that counter. The DHT node executes the operation by reading                     replicas that have more rights (as reﬂected in the local replica
+the counter from Riak, executing the operation and writing                       of the Bounded Counter). The number of rights requested is
+back the new value. Bounded Counters are marked as strongly                      half of the difference between the rights of the remote and
+consistent, with writes being executed using conditional write.                  the local replicas. A replica receiving an asynchronous transfer
+In the normal case, when there are no reconﬁgurations, the                       request never accepts to transfer more than half of the available
+conditional write will succeed, since a single DHT node is                       rights. This strategy provisions replicas with rights without
+responsible for any given key and executes all operations for                    impairing the latency during operation execution.
+each counter in sequence.                                                            Nonetheless, it may happen that an operation does not suc-
+    In contrast, when a new nodes enters the DHT or some                         ceedbecauseithasinsufﬁcientlocalrightsduringexecution.In
+node  fails,  the  DHT  is  automatically  reconﬁgured  and  it                  thissituation,theprogrammercanchoosetogettherightsfrom
+becomes  possible  that  two  nodes  concurrently  process  two                  a remote replica or abort the operation. Programmatically the
+operations for the same key. In this case, only the ﬁrst write                   decision is made through the ﬂag parameter in the decrement
+will succeed, since the following concurrent writes will fail                    and increment operations, as presented in Figure 1.
+due to the conditional write mechanism. This guarantees the                          To  execute  a  transfer,  replica  ri  checks  the  local  state
+correctness of the system, by serializing all updates.                           to choose the best candidate replica to request rights from
+    Since Riak does not geo-replicate keys marked as strongly                    (e.g., the remote replica holding more rights), rj, and sends a
+consistent, our middleware had to include a mechanism for                        transfer request and a ﬂag saying whether it is a synchronous
+propagating updates to Bounded Counters to other DCs. To                         or an asynchronous request. Upon receiving the request, the
+this end, each DHT node periodically propagates its updated                      remote replica rj  checks if it can satisfy the request and if
+entries to the corresponding DHT nodes in other DCs. With                        so it executes a local transfer operation to move the rights
+this approach, each value that is sent can include the effects                   from rj to ri. If the request was asynchronous the replication
+of a sequence of operations, thus reducing the communication                     mechanism will asynchronously propagate the update to the
+overhead. As in the previous version, when a Bounded Counter                     requester, otherwise rj stores the transfer locally and replies
+is  received  in  a  DC  from  another  DC,  it  is  merged  with                to ri immediately with the the new state of the counter.
+the local replica using the CRDT merge function. For other                           Replying to every transfer request may lead to a request
+objects,  we  rely  on  normal  built-in  Riak  multi-data  center               being  satisﬁed  more  than  once,  either  because  a  request
+replication.                                                                     message was lost and replayed or because the requester sent
+    Optimizations: Our prototype includes a number of opti-                      the request more than once (possibly to multiple replicas). To
+mization to improve its efﬁciency. The ﬁrst optimization is to                   avoid this situation, ri sends in the request to rj the number of
+cache Bounded Counters at the middleware layer. This allows                      rights transferred from rj to ri (R[j][i]). The receiver ignores
+us  to  reduce  the  number  of  Riak  operations  necessary  for                a request if it has already transferred more rights.
+processing each update on a Bounded Counter from two to                              A  property  of  the  way  transfer  is  implemented  is  that
+one – only the write is necessary.                                               it does not require any strong synchronization between the
+    Under high contention in a Bounded Counter, the design                       replica  asking  for  rights  and  the  one  providing  the  rights.
+described so far is not very efﬁcient, since an operation must                   Thus, the request for a transfer and synchronization of the
+complete  before  the  next  operation  starts  being  processed.                information about transferred values can be done completely
+In particular, since processing an update requires writing the                   asynchronously, which simpliﬁes the system design.
+modiﬁedBounded Counter back to the Riak database, which
+involves contacting remote nodes, each operation can take a                      E.  Fault-tolerance
+few milliseconds to complete. To improve throughput, while
+a remote write to Riak is taking place, the operations that                          Wenowanalyzehowourmiddlewaredesignsprovidefault-
+are received are executed in the local copy of the Bounded                       tolerance  building  on  the  fault-tolerance  of  the  underlying
+Counter. If the counter cannot be incremented or decremented,                    cloud  database.  We  start  by  noting  that  for  the  Bounded
+the result is immediately returned to the client. Otherwise, no                  Counters, each DC acts as a Bounded Counter replica.
+[PDF_PAGE 7]
+    A DC is assumed to have sufﬁcient internal redundancy to                                            RTT (ms)      US-E      US-W      EU
+                                                                                                        US-East         -              80             96
+never lose its state. In Riak, the level of fault-tolerance in each                                     US-West        83           -               163
+DCcanbecontrolledbychangingthesizeofthequorumsused                                                      EU                 93           161           -
+to store data. Thus, an update to an Bounded Counter executed                     TABLE I.        RTT LATENCY BETWEEN DATA CENTERS IN AMAZON EC2.
+in a DC is never lost unless the DC fails forever.
+    A  failure  in  a  node  in  the  DC  may  cause  the  DHT
+used in our server-based middleware to reconﬁgure. As we
+explained before, this does not affect correctness as we rely on
+conditional writes to guarantee that operations of each counter
+are serialized in each DC.
+    During a network partition, rights can be used in both sides
+of the partition – the only restriction is that it is impossible to
+transfer rights between any two partitioned DCs. If an entire
+DC becomes unavailable, the rights owned by the unreachable
+DCbecometemporarilyunavailable.IfaDCfailspermanently,
+as the Bounded Counter records the rights owned by every
+replica, it is possible to recover the rights that were owned by
+the failed DC.
+                                                                                  Fig. 6.    Throughput vs. latency with a single counter.
+                           V.    EVALUATION
+    We implemented both middleware designs for extending                          Riak 2.0 Community Edition (CE), with support for strong
+Riak  with  numeric  invariants  and  evaluated  experimentally                   consistency. Both version share the same code, except for the
+the prototypes. This evaluation tries to address the following                    support for strong consistency and geo-replication, which is
+main questions. (i) How much overhead is introduced by our                        only available in the enterprise edition.
+designs? (ii) What is the performance penalty when the bounds
+are close to being exceeded? (iii) How does the performance                            In Strong, data is stored in the US-East DC, which is the
+vary with the level of contention for the same counter?                           location that minimizes the latency for remote clients. In the
+    In our designs, operations on Bounded Counters are han-                       remaining  conﬁgurations,  data  is  fully  geo-replicated  in  all
+dled  by  our  middleware.  All  other  operations  are  directly                 DCs, with clients accessing the replicas in the local DC. Riak
+executed in the Riak database. For this reason, our evaluation                    operations use a quorum of 3 replicas for writes and 1 replica
+focus on the performance of Bounded Counters, using micro-                        for reads.
+benchmarks to test different properties of the system.                            C. Single Counter
+
+A.  Conﬁgurations                                                                      The objective of this experiment is to evaluate the perfor-
+    In the experiments, we compare the client-based middle-                       mance of the middleware designs in contention scenarios. In
+ware,  BCclt,  and  sever-based  middleware,  BCsrv,  with  the                   this case, we use a single counter initialized to a value that is
+following conﬁgurations.                                                          large enough to never break the invariant (109). Clients execute
+    Weakly  Consistent  Counters  (Weak).  This  conﬁguration                     20% of increments and 80% of decrements in a closed loop
+uses Riak’s native counters operating under weak consistency.                     with a think time of 100 ms. Each experiment runs for two
+Before issuing a decrement, a client reads the current counter                    minutes after the initialization of the database. The load is
+value and issue a decrement only if the value is positive.                        controlled by tuning the number of clients running in each
+                                                                                  experiment – clients are always evenly distributed among the
+    Strongly Consistent Counters (Strong). This conﬁguration                      the client machines.
+uses Riak’s native strong consistency, with the Riak database                              a) Throughput vs. latency: Figure 6 presents the varia-
+running in a single DC, which receives requests from clients in                   tionofthethroughputvs.latencyvaluesasmoreoperationsare
+the local and remote DCs. As Riak strong consistency cannot                       injected in the system. For the throughput values we consider
+be used with Riak data types, the value of the counter is stored                  only the operations that have succeeded, while for the latency
+as an opaque object for Riak. A counter is updated by reading                     we consider the average of all (succeeded or failed) operations.
+its value, updating its state if the value is positive, and writing               (This only affects the results for Strong.)
+back the new state (using a conditional write).                                        The results of BCclt and Strong present a similar trend,
+B.  Experimental Setup                                                            which  is  that  the  throughput  quickly  starts  degrading  with
+    Our  experiments  comprised  3  Amazon  EC2  DCs  dis-                        the  increase  in  the  load.  By  analyzing  the  results  of  the
+tributed across the globe. The latency between each DC is                         operations, we found out that this is explained by the fact that
+shown in Table I. In each DC, we use three m1.large machines                      thepercentageofoperationsthatfailincreaseveryquicklywith
+with 7.5GB of memory for running the database servers and                         the number of clients. This is because concurrent updates fail
+server-based  middleware  and  three  m1.large  machines  for                     due to the conditional write mechanism – e.g., forStrong, 50%
+running the clients.                                                              of operations fail with 100 clients and 90% with 200 clients.
+                                                                                  The3×higherthroughputinBCclt isexplainedbythefactthat
+    For Weak, we used Riak 2.0 Enterprise Edition (EE), with                      clients execute operations in their local DC, while in Strong all
+support for geo-replication. For other conﬁgurations we used                      operations are sent to a single DC. The higher average latency
+[PDF_PAGE 8]
+  Fig. 7.   Median latency with a single counter,       Fig. 8.    Latency of each operation over time
+  per region of clients (the line is the value for      for BCsrv.                                            Fig. 9.    Decrements executed in excess, vio-
+  the 99th percentile).                                                                                       lating invariant.
+
+
+in Strong is explained by the latency of operations from remote
+clients. This explains why we chose to report the latency of
+all  operations,  including  failed  ones:  since  most  of  remote
+operations fail, considering only operations that succeed would
+lead to latency values close to those of BCclt.
+    The throughput of Weak is much larger and it does not
+degrade  with  the  increase  of  the  load  –  when  it  reaches
+its  maximum  throughput,  increasing  the  load  just  leads  to
+an increase in latency. Our server-based middleware, BCsrv,
+has an even higher throughput with slightly higher latency.
+The higher latency is expected, as the middleware introduces
+communication overhead. The higher throughput is due to the
+batching  mechanism  introduces  in  BCsrv,  which  batches  a
+sequence of updates into a single Riak write, thus leading to                     Fig. 10.    Throughput vs. latency with multiple counters.
+a constant rate of Riak operations. To prove this hypothesis,
+we have run the same experiment, turning off the batching and
+writing every update in Riak - results are presented as BCsrv-                        These peaks can occur at any time during the experiment,
+nobatch. In this case, we can observe that the throughput is                      but are more frequent when the resources are low and replicas
+much lower than Weak, but unlike BCclt, the throughput does                       exchange rights more often – close to the end of the experi-
+not degrade with the load - the reason for this is that the                       ment. After all rights are consumed, the latency remains low
+middleware serializes updates and Riak still sees a constant                      because a replica does not ask for rights from replicas that
+rate  of  writes.  The  same  approach  for  batching  multiple                   are expected to have no rights (according to the local copy of
+operations into a single Riak write could be used with other                      the Bounded Counter). Thus, when all rights are consumed,
+conﬁgurations, such asWeak, to improve their scalability.                         operations fail locally.
+        b) Latency  under  low  load:   Figure  7  presents  the                           d) Invariant Preservation:  To evaluate the severity of
+median  latency  experienced  by  clients  in  different  regions                 the risk of invariant violation, we computed how may decre-
+when load is low (with 15 threads in each client machine).                        ments in excess were executed with success in the different
+As expected, the results show that for Strong, remote clients                     solutions. The counter is initialized with the value of 6,000
+experience high latency for operation execution, while local                      and a variable number of clients execute decrement operations
+clients are fast. The latency for all the other conﬁgurations is                  withathinktime100ms. Figure9showsthattheinvariantwas
+very low, with BCsrv introducing a slight overhead (of about 2                    only broken in Weak, as expected. The ﬁgure shows that an
+ms), due to additional communication steps for processing the                     increase in the number of clients directly impacts the severity
+request. If Bounded Counters were added to the Riak database,                     of the invariant violation. This is because in Weak the client
+this overhead could be eliminated.                                                reads a counter, checks if its value is greater than the limit
+        c) Effects of exhausting rights:  In this experiment we                   and decrements it. Since this is not an atomic operation, the
+evaluate the behavior of our middleware when the value of the                     value of the counter can be different between the read and the
+counter approaches the limit. To this end, we run the exper-                      update,andthatdifferenceisdirectlyaffectedbythenumberof
+iment with BCsrv and 5 clients executing 100% decrements,                         concurrent updates, which leads to more invariant violations.
+initializing the counter with the value 6000 and running an
+experiment until the rights are all consumed.                                     D. Multiple Counters
+    Figure 8 shows that most operations take low latency, with
+a few peaks of high latency whenever a replica needs to obtain                        To evaluate how the system behaves in the common case
+additional rights. The number of peaks is small because most                      where clients access to multiple counters, we ran the same ex-
+of the time the proactive mechanism for exchanging rights is                      perimentofSectionV-Cwith100counters.Foreachoperation,
+able to provision a replica with enough rights before all rights                  a client selects the counter to update randomly with uniform
+are used.                                                                         distribution.  Increasing  the  number  of  counters  reduces  the
+[PDF_PAGE 9]
+contention in each key and contributes to balance the load                       B.  Supporting Other Invariants
+among nodes.                                                                         Someapplicationsmightrequirethataacounterisinvolved
+    The results presented in Figure 10 show that both BCclt                      in more than one numeric invariant, and also that some invari-
+and Strong now scale to a larger throughput (when compared                       ants refer to multiple counters – e.g., we may want to have
+with  the  results  with  a  single  key).  The  reason  for  this  is           x≥0∧y≥0∧x+y≥K.Toaddressthis,theinvariantx+y≥K
+that  by  increasing  the  number  of  counters,  the  number  of                can be maintained by a Bounded Counter that represents the
+concurrent  writes  to  the  same  key  is  lower,  leading  to  a               value of x+y. In this case, when updating the value of x
+smaller number of failed operations. This in turn increases                      (resp. y), it is necessary to update both the Bounded Counter
+with the load, as expected. Additionally, when the maximum                       for x (resp. y) and for x+y, with the operation succeeding
+throughput is reached, the latency degrades but the throughput                   if both execute with success. For maintaining such invariants,
+remains almost constant. The higher average latency in Strong                    this needs to be done atomically but not in isolation. In other
+is  explained  by  the  fact  that  remote  operations  have  high               words, either both Bounded Counters are updated or none,
+latency, as shown before.                                                        however, it is safe for an application to observe a state where
+    The Weak conﬁguration scales up to a much larger value                       only one of the Bounded Counters has been updated.
+(9K decrements/s compared with 3K decrements/s for a single                          Without  considering  failures,  this  allows  for  a  simple
+counter). As each Riak node includes multiple virtual nodes,                     implementationwhere,ifoneBoundedCounter operationfails,
+when using multiple counters the load is balanced among them                     the operation in the other Bounded Counter is compensated
+- enabling multi-core capabilities to process multiple requests                  [12]  by  executing  the  inverse  operation.  When  considering
+in parallel (whereas with a single node, a single virtual node                   failures, it is necessary to include some transactional mech-
+is used, resulting in requests being processed sequentially).                    anism  for  guaranteeing  that  either  both  updates  execute  or
+    The results show that BCsrv has a low latency close to                       none – recently, eventually consistent cloud databases started
+Weak’s as long the number of writes can be handled by Riak’s                     to support such features [19], [20].
+strong consistency mode in a timely manner. In contrast with                         A number of other invariants, such as referential integrity
+the experiment with a single counter, Riak’s capacity is shared                  and key constraints, can be encoded as numeric invariants,
+among all the keys, each contributing with writes to Riak.                       as discussed by Barbará-Milla and Garcia-Molina [5]. Those
+Therefore, as the load increases, writing batches to Riak will                   approaches could be adapted for using Bounded Counters.
+take longer to complete and contribute to accumulate latency
+sooner  than  in  the  single  key  case.  Nevertheless,  batching                                      VII.    RELATED WORK
+still allows multiple client requests to be processed per each
+Riak operation, leading to a better throughput. The maximum                          Manyclouddatabasessupportinggeo-replicationhavebeen
+throughput even surpasses the results for the Weak conﬁgu-                       developed in recent years. Several of them [11], [19], [20],
+ration. The results for BCsrv-nobatch, where each individual                     [2], [15], [7], [26] offer variants of eventual/weak consistency
+update is written using one Riak operation, can be seen as the                   where operations return immediately once executed in a single
+worst case of our middleware, in which the batching had no                       data  center.  Such  approach  is  favored  for  the  low  latency
+effect. Still, since all BCsrv operations are local to a given DC                it can achieve when it selects a data center close the end-
+and access only a quorum of Riak nodes, one can expect that                      user (among several scattered across the world). Each variant
+increasing the local cluster’s capacity should have a positive                   addresses particular requirements, such as: reading a causally
+effect both on latency and throughput.                                           consistent  view  of  the  database  [19],  [2];  writing  a  set  of
+                                                                                 updates atomically[20]; or, supporting application-speciﬁc or
+                          VI.    DISCUSSION                                      type-speciﬁcreconciliationwithnolostupdates[11],[19],[27],
+                                                                                 [26], [7]. Our work focuses on the complementary requirement
+                                                                                 of having counters that enforce a global numeric invariant.
+    In this section we discuss how to extend our approach, to                        For  some  applications  eventual  consistency  needs  to  be
+support other could databases and additional invariants.                         complemented or replaced with strong consistency to ensure
+A.  Supporting Other Cloud Databases                                             correctness. Spanner [10] provides strong consistency for the
+                                                                                 whole  database,  at  the  cost  of  high  coordination  overhead
+    Although our middleware designs run on top of the Riak                       for all updates. Transaction chains [29] is an alternative that
+database,  it  would  be  immediate  to  implement  a  similar                   offers transaction serializability with latency proportional to
+prototype running on top of any database that provides condi-                    the latency to the ﬁrst replica accessed.
+tional writes, such as DynamoDB [11]. Given that we had to                           Often, only speciﬁc operations require strong consistency.
+implement the geo-replication in the middleware, we do not                       Walter  [27]  and  RedBlue  consistency  in  Gemini  [17]  can
+even require native support for geo-replication.                                 mix  eventual  and  strong  consistency  (snapshot  isolation  in
+    Alternatively, if the database provides a way to serialize                   Walter) to allow eventually consistent operations to be fast.
+all operations to a given key, it would be easy to adapt the                     PNUTS [9], DynamoDB [26] and Riak [7] also combine weak
+current design. We note that this could be done in two different                 consistency with per-object strong consistency, by relying on
+ways: either the cloud database already supports these strong                    conditional writes that fail if concurrent ones existed. Megas-
+semantics, in which case there is no need to add any further                     tore [4] offers strong consistency inside a partition and weak
+logic, or the DHT has a way to ensure that messages routed to                    consistency across partitions. In contrast, our work extends
+a given key are delivered in sequence, in which case the DHT                     eventual consistency with numeric invariants. This allows, for
+can keep track of the latest operation issued to the database.                   the speciﬁc case of applications that require numeric invariants
+[PDF_PAGE 10]
+to be preserved, their correctness to be met while still allowing                          [4]B     AKER, J., BOND, C., CORBETT, J. C., FURMAN, J. J., KHORLIN, A.,
+most operations to execute in a single replica.                                                  LARSON, J., LEON, J.-M., LI, Y., LLOYD, A., AND YUSHPRAKH, V.
+                                                                                                 Megastore: Providing scalable, highly available storage for interactive
+    Bailis et al. [3] examine which operations in database sys-                                  services. In Proc. CIDR 2011 (2011).
+tems require coordination for meeting invariants. We provide                               [5]B     ARBARÁ-MILLÁ, D., AND GARCIA-MOLINA, H.  The demarcation
+a low cost solution for operations that may break numeric                                        protocol:Atechniqueformaintainingconstraintsindistributeddatabase
+invariants,  which  require  coordination  under  their  analysis.                               systems. The VLDB Journal 3 (July 1994).
+This is possible because we secure the necessary rights prior                              [6]B     ASHO UsingDataTypes. http://docs.basho.com/riak/2.0.0/dev/using/data-
+to executing the operations, and this way move coordination                                      types/. Accessed Dec/2014.
+outside the critical path of operation execution.                                          [7]B     ASHO. Riak. http://basho.com/riak/. Accessed Dec/2014.
+    Escrow transactions [21], initially proposed for increasing                            [8]B      URCKHARDT, S., GOTSMAN, A., YANG, H.,  AND ZAWIRSKI, M.
+concurrency  of  transactions  in  single  databases,  have  also                                Replicated data types: Speciﬁcation, veriﬁcation, optimality.  InProc.
+been  used  for  supporting  disconnected  operation  in  mobile                                 POPL ’14 (2014).
+computing  environments  either  relying  on  centralized  [22],                           [9]C      OOPER,  B.  F.,  RAMAKRISHNAN,  R.,  SRIVASTAVA,  U.,  SILBER-
+                                                                                                 STEIN, A., BOHANNON, P., JACOBSEN, H.-A., PUZ, N., WEAVER,
+[28] or peer-to-peer [25] protocols for escrow distribution. The                                 D., AND YERNENI, R.  Pnuts: Yahoo!’s hosted data serving platform.
+demarcation protocol [5] enforces invariants across multiple                                     Proc. VLDB Endow. 1 (Aug. 2008).
+objects, located in different nodes. The underlying protocols                             [10]C        ORBETT,  J.  C.,  DEAN,  J.,  EPSTEIN,  M.,  FIKES,  A.,  FROST,
+are similar to escrow-based ones, with peer-to-peer interaction.                                 C.,  FURMAN,  J.  J.,  GHEMAWAT,  S.,  GUBAREV,  A.,  HEISER,  C.,
+MDCC [14] has recently proposed a variant of this protocol                                       HOCHSCHILD, P., HSIEH, W., KANTHAK, S., KOGAN, E., LI, H.,
+for enforcing data invariants in quorum systems.                                                 LLOYD,  A.,  MELNIK,  S.,  MWAURA,  D.,  NAGLE,  D.,  QUINLAN,
+                                                                                                 S.,  RAO,  R.,  ROLIG,  L.,  SAITO,  Y.,  SZYMANIAK,  M.,  TAYLOR,
+    Our work combines convergent data-types [24] with ideas                                      C., WANG, R.,  AND WOODFORD, D.   Spanner:  Google’s  globally-
+from these systems to provide a decentralized approach with                                      distributed database. In Proc. OSDI’12 (2012).
+replicated  data  that  offers  both  automatic  convergence  and                         [11]D        ECANDIA, G., HASTORUN, D., JAMPANI, M., KAKULAPATI, G.,
+invariant-preservation with no central authority. Additionally,                                  LAKSHMAN, A., PILCHIN, A., SIVASUBRAMANIAN, S., VOSSHALL,
+we describe, implement and evaluate how such solution can be                                     P., AND VOGELS, W.  Dynamo: Amazon’s highly available key-value
+                                                                                                 store. In Proc. SOSP ’07 (2007).
+integrated into existing eventually consistent cloud databases.                           [12]G        ARCIA-MOLINA, H., AND SALEM, K.  Sagas. In Proc. SIGMOD’87
+    Warranties [18] provide time-limited assertions over the                                     (1987).
+state of the database and have been used for improving latency                            [13]K        LOPHAUS, R.   Riak core: Building distributed applications without
+of read operations in cloud databases. The goal of warranties is                                 shared state. In CUFP ’10 (2010).
+to support linearizability efﬁciently, whereas ours is to permit                          [14]K        RASKA,  T.,  PANG,  G.,  FRANKLIN,  M.  J.,  MADDEN,  S.,   AND
+concurrent updates while enforcing invariants.                                                   FEKETE, A. Mdcc: Multi-data center consistency. In Proc. EuroSys’13
+                                                                                                 (2013).
+                           VIII.    CONCLUSION                                            [15]L        AKSHMAN,A., ANDMALIK,P. Cassandra:Adecentralizedstructured
+    This paper proposed two middleware designs for extend-                                       storage system. SIGOPS Oper. Syst. Rev. 44, 2 (Apr. 2010), 35–40.
+ing eventually consistent cloud databases with the ability to                             [16]L        AMPORT, L.  The temporal logic of actions.  ACM Trans. Program.
+                                                                                                 Lang. Syst. 16, 3 (May 1994), 872–923.
+enforce numeric invariants. Our designs allow most operations                             [17]L        I, C., PORTO, D., CLEMENT, A., GEHRKE, J., PREGUIÇA, N., AND
+to  complete  within  a  single  DC  by  moving  the  necessary                                  RODRIGUES,  R.     Making  geo-replicated  systems  fast  as  possible,
+coordination outside of the critical path of operation execution,                                consistent when necessary. In Proc. OSDI’12 (2012).
+thus  combining  the  beneﬁts  of  eventual  consistency  –  low                          [18]L        IU, J., MAGRINO, T., ARDEN, O., GEORGE, M. D., AND MYERS,
+latency, high availability – with those of strong consistency –                                  A. C. Warranties for faster strong consistency. In Proc. nsdi’14 (2014).
+enforcing global invariants. The evaluation of our prototypes                             [19]L        LOYD, W., FREEDMAN, M. J., KAMINSKY, M.,  AND ANDERSEN,
+shows that our client-based middleware does not scale when                                       D. G.  Don’t settle for eventual: Scalable causal consistency for wide-
+contention is high, but our server-based middleware, featuring                                   area storage with cops. In Proc. SOSP ’11 (2011).
+a cache and a write batching mechanism, scales even better                                [20]L        LOYD, W., FREEDMAN, M. J., KAMINSKY, M.,  AND ANDERSEN,
+than  the  Riak’s  native  weak  consistency  mechanism  where                                   D. G.  Stronger semantics for low-latency geo-replicated storage.  In
+invariants can be compromised.                                                                   Proc. nsdi’13 (2013).
+                                                                                          [21]O’N        EIL, P. E. The escrow transactional method. ACM Trans. Database
+                          ACKNOWLEDGMENTS                                                        Syst. 11, 4 (Dec. 1986), 405–430.
+    This research is supported in part by EU FP7 SyncFree                                 [22]P        REGUIÇA, N., MARTINS, J. L., CUNHA, M.,  AND DOMINGOS, H.
+                                                                                                 Reservations for conﬂict avoidance in a mobile database system.   In
+project  (609551),  FCT/MCT  SFRH/BD/87540/2012,  PTDC/                                          Proc. MobiSys ’03 (2003).
+EEI-SCR/ 1837/ 2012 and PEst-OE/ EEI/ UI0527/ 2014. The                                   [23]S        CHURMAN, E., AND BRUTLAG, J.  Performance related changes and
+research of Rodrigo Rodrigues is supported by the European                                       their user impact. Presented at velocity web performance and operations
+Research Council under an ERC Starting Grant.                                                    conference, 2009.
+                                                                                          [24]S        HAPIRO, M., PREGUIÇA, N., BAQUERO, C.,  AND ZAWIRSKI, M.
+                                REFERENCES                                                       Conﬂict-free replicated data types. In  Proc. SSS ’11 (2011).
+ [1]Cassandra counters. http://wiki.apache.org/cassandra/Counters.                        [25]S        HRIRA, L., TIAN, H., AND TERRY, D. Exo-leasing: Escrow synchro-
+ [2]A      LMEIDA, S., LEITÃO, J.  A.,  AND RODRIGUES, L.   Chainreaction:                       nization for mobile clients of commodity storage servers.   In Proc.
+       A causal+ consistent datastore based on chain replication.   In Proc.                     Middleware ’08 (2008).
+       EuroSys ’13 (2013).                                                                [26]S        IVASUBRAMANIAN, S.   Amazon dynamodb: A seamlessly scalable
+ [3]B     AILIS, P., FEKETE, A., FRANKLIN, M. J., GHODSI, A., HELLER-                            non-relational database service. In Proc. SIGMOD ’12 (2012).
+       STEIN, J.M., ANDSTOICA, I. Coordination-avoidingdatabasesystems.                   [27]S        OVRAN, Y., POWER, R., AGUILERA, M. K., AND LI, J. Transactional
+       CoRR abs/1402.2237 (2014).                                                                storage for geo-replicated systems. In Proc. SOSP ’11 (2011).
+[PDF_PAGE 11]
+[28]W        ALBORN, G. D., AND CHRYSANTHIS, P. K.  Supporting semantics-
+       based transaction processing in mobile database applications. In Proc.
+       SRDS ’95 (1995).
+[29]Z        HANG, Y., POWER, R., ZHOU, S., SOVRAN, Y., AGUILERA, M. K.,
+       AND LI, J.    Transaction  chains:  Achieving  serializability  with  low
+       latency in geo-distributed storage systems. In Proc. SOSP ’13 (2013).
