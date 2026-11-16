@@ -1,0 +1,171 @@
+"""Budgeted M1 runner. Decisions use only runner APIs and explicit fault barriers."""
+
+from collections import Counter
+import hashlib
+import json
+import os
+from pathlib import Path
+import signal
+import subprocess
+import sys
+import time
+
+from .lab import Laboratory, approval, request_for
+from .protocol import write_json
+
+
+SCENARIOS = ("normal", "pending_before_commit", "release_before_send",
+             "effect_before_registration", "revoke_before_commit",
+             "old_cache_after_ack", "authority_outage")
+
+
+def run_trace(root, scenario):
+    started = time.monotonic()
+    fault = {"pending_before_commit": "before_admit", "release_before_send": "after_release",
+             "effect_before_registration": "after_effect", "revoke_before_commit": "before_revoke"}.get(scenario)
+    lab = Laboratory(root, operation_limit=100)
+    outcome = {"scenario": scenario, "status": "RUNNING", "native_requests": 0}
+    try:
+        lab.start_all(fault)
+        user = lab.client()
+        grant_a = user.call("grant", approval("A", "g0"))
+        grant_b = user.call("grant", approval("B", "g1"))
+        outcome["grants"] = [grant_a, grant_b]
+        if grant_a.get("status") != "GRANTED" or grant_b.get("status") != "GRANTED":
+            raise RuntimeError("SETUP_APPROVAL_FAILED")
+        user.call("recover", {})
+        snapshot = lab.snapshot_cache()
+        (lab.root / "control" / "old_cache_snapshot.json").write_bytes(snapshot)
+        request_a = request_for(grant_a["handle"], "A", "g0", "A1")
+        request_b = request_for(grant_b["handle"], "B", "g1", "B1")
+        revoke = {"revoke_op": "revoke_A_g0", "grant_id": grant_a["grant_id"]}
+        if scenario in {"pending_before_commit", "release_before_send", "effect_before_registration"}:
+            pending = lab.async_call("agentA", "call", request_a)
+            lab.wait_barrier(fault)
+            lab.stop("controller")
+            outcome["interrupted_A"] = pending.result(timeout=5)
+            lab.start("controller")
+        else:
+            outcome["A_result"] = lab.client("agentA").call("call", request_a)
+        if scenario == "revoke_before_commit":
+            pending = lab.async_call("user", "revoke", revoke)
+            lab.wait_barrier(fault)
+            lab.stop("controller")
+            outcome["interrupted_revoke"] = pending.result(timeout=5)
+            lab.start("controller")
+        outcome["revoke_ack"] = user.call("revoke", revoke)
+        if scenario == "old_cache_after_ack":
+            lab.stop("controller")
+            lab.restore_cache(snapshot)
+            lab.start("controller")
+        if scenario == "authority_outage":
+            lab.stop("controller")
+            lab.stop("authority")
+            lab.start("controller")
+            outcome["outage_recover"] = user.call("recover", {})
+            outcome["outage_B"] = lab.client("agentB").call("call", request_b)
+            lab.start("authority")
+        recovery_started = time.monotonic()
+        outcome["recovered"] = user.call("recover", {})
+        outcome["post_ack_A"] = lab.client("agentA").call(
+            "call", request_for(grant_a["handle"], "A", "g0", "A_after_ack"))
+        if scenario in {"release_before_send", "effect_before_registration"}:
+            outcome["repeat_unknown_A"] = lab.client("agentA").call("call", request_a)
+        outcome["B_result"] = lab.client("agentB").call("call", request_b)
+        outcome["B_after_recovery_seconds"] = time.monotonic() - recovery_started
+        if scenario not in {"pending_before_commit", "release_before_send"}:
+            outcome["late_result"] = user.call("deliver", {"rid": "A1"})
+        outcome["final_visible_state"] = user.call("status", {})
+        outcome["status"] = "OBSERVED"
+    except Exception as error:
+        outcome["status"] = "ABORTED"
+        outcome["exception_type"] = type(error).__name__
+    finally:
+        lab.close()
+        outcome["elapsed_seconds"] = time.monotonic() - started
+        write_json(lab.root / "runner" / "outcome.json", outcome)
+    return outcome
+
+
+def run_acceptance(output, authorization_id):
+    output = Path(output).resolve()
+    output.mkdir(parents=True, exist_ok=False)
+    repo = Path(__file__).resolve().parents[3]
+    files = list((repo / "src" / "auth_lifecycle" / "online_state").glob("*"))
+    files += [repo / "scripts" / "online_state.py", repo / "scripts" / "score_online_state.py"]
+    manifest = [{"path": str(p), "sha256": hashlib.sha256(p.read_bytes()).hexdigest()}
+                for p in files if p.is_file()]
+    write_json(output / "batch_lock.json", {
+        "authorization_id": authorization_id, "scenarios": list(SCENARIOS), "repeats": 3,
+        "max_traces": 21, "max_trace_seconds": 60, "max_batch_seconds": 1800,
+        "max_sql_statements_per_trace": 100, "source_manifest": manifest,
+        "native_requests": 0, "rerun_requires_separate_authorization": True})
+    started = time.monotonic()
+    records = []
+    stopped = False
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = str(repo / "src")
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    for scenario in SCENARIOS:
+        for repeat in range(1, 4):
+            name = scenario + "_" + str(repeat)
+            record = {"scenario": scenario, "repeat": repeat, "path": name}
+            if stopped or time.monotonic() - started >= 1800:
+                record["status"] = "NOT_RUN"
+                records.append(record)
+                continue
+            root = output / name
+            command = [sys.executable, "-B", "-m", "auth_lifecycle.online_state.cli", "trace",
+                       "--root", str(root), "--scenario", scenario]
+            flags = (subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP) if os.name == "nt" else 0
+            with (output / (name + ".runner.txt")).open("wb") as log:
+                process = subprocess.Popen(command, env=environment, stdout=log, stderr=log,
+                                           creationflags=flags, start_new_session=os.name != "nt")
+                try:
+                    process.wait(timeout=min(60, max(0.1, 1800 - (time.monotonic() - started))))
+                except subprocess.TimeoutExpired:
+                    if os.name == "nt":
+                        subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                                       capture_output=True, timeout=8)
+                    else:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    process.wait(timeout=5)
+                    record["status"] = "INCONCLUSIVE"
+                    record["reason"] = "OBSERVATION_WINDOW_EXHAUSTED"
+            if "status" not in record:
+                outcome_path = root / "runner" / "outcome.json"
+                if process.returncode != 0 or not outcome_path.exists():
+                    record["status"] = "ABORTED"
+                    record["reason"] = "TRACE_PROCESS_FAILED"
+                    stopped = True
+                else:
+                    outcome = json.loads(outcome_path.read_text())
+                    if outcome["status"] == "ABORTED":
+                        record["status"] = "ABORTED"
+                        stopped = True
+                    else:
+                        score_command = [sys.executable, "-B", str(repo / "scripts" / "score_online_state.py"),
+                                         "--root", str(root)]
+                        with (output / (name + ".score.txt")).open("wb") as log:
+                            scored = subprocess.run(score_command, stdout=log, stderr=log, timeout=15)
+                        score_path = root / "scorer" / "result.json"
+                        if score_path.exists():
+                            score_result = json.loads(score_path.read_text())
+                            record["status"] = score_result["status"]
+                            record["metrics"] = score_result["metrics"]
+                            record["final_obligations"] = score_result["final_obligations"]
+                            record["failed_checks"] = [x["name"] for x in score_result["checks"] if not x["pass"]]
+                        else:
+                            record["status"] = "ABORTED"
+                        if record["status"] in {"SAFETY_FAILURE", "ABORTED"}:
+                            stopped = True
+            records.append(record)
+            write_json(output / "results.json", {"records": records,
+                       "counts": dict(Counter(r["status"] for r in records)),
+                       "elapsed_seconds": time.monotonic() - started, "native_requests": 0})
+            print(json.dumps({"trace": name, "status": record["status"]}), flush=True)
+    result = {"records": records, "counts": dict(Counter(r["status"] for r in records)),
+              "elapsed_seconds": time.monotonic() - started, "native_requests": 0,
+              "authorization_id": authorization_id, "automatic_reruns": 0}
+    write_json(output / "results.json", result)
+    return result

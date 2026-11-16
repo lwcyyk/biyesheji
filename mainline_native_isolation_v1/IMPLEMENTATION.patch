@@ -1,0 +1,1044 @@
+--- /dev/null
++++ b/scripts/m6_environment_acl.py
+@@ -0,0 +1,63 @@
++"""Review/apply the exact legacy lab ACL prerequisite, with separate approval.
++
++Default is a read-only plan. --apply-authorization-id is meaningful only after
++the researcher explicitly authorizes changing this existing directory's ACL.
++"""
++import argparse
++import ctypes as C
++from ctypes import wintypes as W
++import json
++from pathlib import Path
++
++from auth_lifecycle.online_state.isolation_acceptance import current_sid
++from auth_lifecycle.online_state.windows_isolation import inspect_file_acl, set_acl
++
++
++TARGET = Path(r"D:\毕业设计\auth-lifecycle\.runtime\l1")
++
++
++def plan():
++    sid = current_sid()
++    return {"target": str(TARGET), "current_root_sddl": inspect_file_acl(TARGET),
++            "proposed_root_sddl": f"D:P(A;OICI;RC;;;OW)(A;OICI;FA;;;{sid})(A;OICI;FA;;;SY)",
++            "change": "root DACL and its inherited ACE propagation only; contents unchanged",
++            "retained_trusted_access": [sid, "S-1-5-18"],
++            "reason": "legacy management credential and native DB inherit BUILTIN Users read access",
++            "authorization_required": "M6 restricts existing objects to inspection; explicit additional ACL authorization required"}
++
++
++def main():
++    p = argparse.ArgumentParser(); p.add_argument("--out", required=True)
++    p.add_argument("--apply-authorization-id")
++    a = p.parse_args(); out = Path(a.out).resolve()
++    out.mkdir(parents=True, exist_ok=True)
++    record = plan()
++    (out / "LEGACY_ACL_CHANGE_PLAN.json").write_text(json.dumps(record, indent=2))
++    if a.apply_authorization_id:
++        rows = [{"path": str(x), "sddl": inspect_file_acl(x)} for x in [TARGET, *TARGET.rglob("*")]]
++        backup = out / "LEGACY_ACL_BEFORE.json"
++        if backup.exists(): raise ValueError("ACL_BACKUP_ALREADY_EXISTS")
++        backup.write_text(json.dumps({"authorization_id": a.apply_authorization_id, "objects": rows}, indent=2))
++        # SetNamedSecurityInfo propagates inherited ACEs to existing children;
++        # SetFileSecurity alone does not supply that propagation contract.
++        api=C.WinDLL("advapi32",use_last_error=True);kernel=C.WinDLL("kernel32",use_last_error=True)
++        api.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes=[W.LPCWSTR,W.DWORD,C.POINTER(C.c_void_p),C.c_void_p]
++        api.GetSecurityDescriptorDacl.argtypes=[C.c_void_p,C.POINTER(W.BOOL),C.POINTER(C.c_void_p),C.POINTER(W.BOOL)]
++        api.SetNamedSecurityInfoW.argtypes=[W.LPWSTR,C.c_int,W.DWORD,C.c_void_p,C.c_void_p,C.c_void_p,C.c_void_p]
++        api.SetNamedSecurityInfoW.restype=W.DWORD;kernel.LocalFree.argtypes=[C.c_void_p]
++        sd=C.c_void_p();acl=C.c_void_p();present=W.BOOL();defaulted=W.BOOL()
++        if not api.ConvertStringSecurityDescriptorToSecurityDescriptorW(record["proposed_root_sddl"],1,C.byref(sd),None):
++            raise OSError(C.get_last_error(),"ACL_DESCRIPTOR")
++        try:
++            if not api.GetSecurityDescriptorDacl(sd,C.byref(present),C.byref(acl),C.byref(defaulted)):
++                raise OSError(C.get_last_error(),"ACL_EXTRACT")
++            code=api.SetNamedSecurityInfoW(str(TARGET),1,4|0x80000000,None,None,acl,None)
++            if code:raise OSError(code,"ACL_PROPAGATION")
++        finally:kernel.LocalFree(sd)
++        (out / "LEGACY_ACL_AFTER.json").write_text(json.dumps({"authorization_id": a.apply_authorization_id,
++            "objects": [{"path": str(x), "sddl": inspect_file_acl(x)} for x in [TARGET, *TARGET.rglob("*")]]}, indent=2))
++        record["applied"] = True
++    print(json.dumps(record))
++
++
++if __name__ == "__main__": main()
+--- /dev/null
++++ b/scripts/native_isolation.py
+@@ -0,0 +1,13 @@
++"""M6 one-shot entry: synthetic preflight or separately enabled native batch."""
++import argparse
++import json
++from auth_lifecycle.online_state.native_isolation import run_preflight,run_native
++
++
++if __name__=='__main__':
++    p=argparse.ArgumentParser();p.add_argument('--out',required=True);p.add_argument('--authorization-id',required=True)
++    p.add_argument('--preflight',action='store_true');p.add_argument('--allow-native',action='store_true')
++    p.add_argument('--preflight-evidence')
++    a=p.parse_args()
++    r=run_preflight(a.out,a.authorization_id) if a.preflight else run_native(a.out,a.authorization_id,a.preflight_evidence,a.allow_native)
++    print(json.dumps({k:v for k,v in r.items() if k!='source'}))
+--- /dev/null
++++ b/scripts/score_native_isolation.py
+@@ -0,0 +1,196 @@
++"""Independent M6 rules: read-only authority and scorer-only audit decryption."""
++import argparse
++import base64
++from collections import Counter
++import hashlib
++import importlib.util
++import json
++from pathlib import Path
++import sqlite3
++import sys
++
++from cryptography.hazmat.primitives.ciphers.aead import AESGCM
++
++sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"src"))
++from auth_lifecycle.online_state.native_http import private_http_records, budget_path
++
++
++def load(path):return json.loads(Path(path).read_text())
++def canonical(value):return json.dumps(value,sort_keys=True,separators=(",",":"),ensure_ascii=True).encode()
++
++
++def score(root, synthetic=False):
++    root=Path(root);trusted=root/"trusted";out=load(trusted/"runner/outcome.json")
++    checks=[];accesses=[]
++    def check(name,condition,category="security"):
++        checks.append({"name":name,"pass":bool(condition),"category":category})
++    def res(value):return value.get("result",{})
++    def denied(value):return value.get("reached") is True and res(value).get("status")=="REJECTED"
++    def success(value):return value.get("reached") is True and res(value).get("status")=="RESULT_AVAILABLE"
++    if out["status"]!="OBSERVED":
++        result={"status":out["status"],"checks":[],"scenario":out["scenario"],"reason":out.get("safe_reason")}
++        (root/"scorer_private/result.json").write_text(json.dumps(result));return result
++    profile=load(trusted/"secure/native_profile.json");batch=Path(profile["batch"])
++    policy=load(batch/"BUDGET_AND_AUTHORIZATION.json");lock=load(root/"ENVIRONMENT_LOCK.json")
++    setup=load(root/"SETUP_CONTROLS.json")["identities"]
++    db=trusted/"authority/authority.db";key=trusted/"secure/authority.key"
++    accesses += [{"path":str(db),"mode":"sqlite_read_only"},{"path":str(key),"mode":"scorer_authority_decryption"},
++                 {"path":str(batch/"scorer_secret/http-audit-private.pem"),"mode":"scorer_private_audit_decryption"}]
++    with sqlite3.connect('file:'+str(db)+'?mode=ro',uri=True) as c:
++        version,raw=c.execute('SELECT version,ciphertext FROM authority_state WHERE id=1').fetchone()
++        events=[{"version":v,"operation":op,**json.loads(p)} for v,op,p in c.execute('SELECT version,operation,projection FROM authority_events ORDER BY version')]
++    state=json.loads(AESGCM(key.read_bytes()).decrypt(raw[:12],raw[12:],b'auth-lifecycle/online-state/schema-1'))
++    private=private_http_records(batch)
++    own=[r for r in private if r['actor']==profile['actor']['name']]
++    check('audit_private_decryption_positive',len(own)>0,'availability')
++    check('audit_one_way_configuration',policy['audit_mode']=='sealed_to_scorer' and not (batch/'secure/http.key').exists())
++    check('native_mode_matches_batch',synthetic==(policy.get('execution_domain')=='SYNTHETIC_ZERO_NATIVE_PREFLIGHT'))
++    for n in ('A','B','R_probe'):
++        token=setup[n]['token'];role='R' if n=='R_probe' else n
++        check(role+'_actual_primary_token',token['token_type']==1 and token['elevated']==0 and token['user']==lock['owner_sid']
++              and token['integrity']==('S-1-16-8192' if role=='R' else 'S-1-16-4096')
++              and lock['restricting_sids'][role] in {r['sid'] for r in token['restricting_sids']} and bool(token.get('default_dacl')))
++        check(role+'_own_workspace_control',setup[n]['own_read_write'],'availability')
++    check('object_dacls_frozen',all(p.get('object_sddl') for p in lock['processes']))
++    service_metadata=[load(p) for p in (trusted/'control').glob('*_isolation.json')]
++    check('all_service_boots_use_R_token',len(service_metadata)>=3 and all(
++        m['token']['integrity']=='S-1-16-8192' and m['token']['token_type']==1 and m['token'].get('default_dacl')
++        and lock['restricting_sids']['R'] in {s['sid'] for s in m['token']['restricting_sids']} for m in service_metadata))
++    permitted_environment={'SYSTEMROOT','TEMP','TMP','PYTHONUTF8','PYTHONDONTWRITEBYTECODE','PYTHONPATH'}
++    check('service_environment_allowlist',all({k.upper() for k in m['environment']}<=permitted_environment for m in service_metadata))
++    p=out['permission_precheck']
++    # The synthetic preflight may expose a legacy ACL gap; it records that gap
++    # separately and cannot authorize a real batch until the gate passes.
++    check('existing_and_new_private_targets_exist',all(p['targets_exist'].values()),'evidence')
++    check('credential_permission_gate',p['gate_pass'],'environment')
++    check('R_read_positive',all(rows and rows[0].get('allowed') for rows in p['R_positive'].values()),'availability')
++    check('A_issue_and_B_issue',success(out['A_issue']) and success(out['B_issue']),'availability')
++    check('B_final_resource_positive',success(out['B_after']),'availability')
++    check('old_A_local_release_denied',out['ack']['status']=='LOCAL_REVOKE_COMMITTED' and denied(out['A_after_ack']))
++    check('commit_sequence',[e['version'] for e in events]==list(range(1,version+1)))
++    revoked=set();releases={};safe=True
++    for e in events:
++        r=e['result']
++        if e['operation']=='revoke' and r['status']=='LOCAL_REVOKE_COMMITTED':revoked.add(r['grant_id'])
++        if e['operation']=='release' and r.get('send'):
++            req=next(x for x in e['state']['requests'] if x['rid']==r['rid'])
++            safe &= req['origin']['grant_id'] not in revoked and req['release_version']==e['version']
++            releases[req['attempt_id']]=req
++    check('no_release_after_revoke_commit',safe)
++    for grant in state['grants'].values():
++        reqs=[r for r in state['requests'].values() if r['origin']['grant_id']==grant['grant_id']]
++        check('budget_'+grant['task'],sum(r['attempt_id'] is not None for r in reqs)==grant['spent'] and
++              sum(r['phase']=='QUEUED' for r in reqs)==grant['reserved'] and grant['spent']+grant['reserved']<=grant['limit'])
++        check('source_'+grant['task'],all(all(r['origin'][k]==grant[k] for k in r['origin']) and
++              hashlib.sha256(canonical({'caller':r['origin']['caller'],'request':r['request']})).hexdigest()==r['digest'] for r in reqs))
++    with sqlite3.connect('file:'+str(budget_path(batch,policy))+'?mode=ro',uri=True) as c:
++        sends=[dict(zip(('seq','operation','attempt_id','rid','digest'),row)) for row in c.execute(
++            "SELECT seq,operation,attempt_id,rid,request_digest FROM requests WHERE category='method' AND actor=? AND operation IN ('issue','refresh')",(profile['actor']['name'],))]
++    check('each_send_has_original_durable_release',all(s['attempt_id'] in releases and s['rid']==releases[s['attempt_id']]['rid'] and s['digest']==releases[s['attempt_id']]['digest'] for s in sends))
++    check('no_creation_auto_retry',all(n==1 for n in Counter(s['attempt_id'] for s in sends).values()))
++    inbox=trusted/'provider/native_inbox.jsonl';journal=trusted/'provider/identifier_receipts.jsonl'
++    if out['scenario']=='M6-01':
++        check('actual_parse_error_is_safe_rejection',denied(out['parse_error']))
++        for task in ('A','B'):
++            status=res(out[task+'_status'])
++            check(task+'_status_scope',status.get('status')=='RECOVERED' and all(g['caller']=='agent'+task for g in status['approvals'])
++                  and all(r['origin']['caller']=='agent'+task for r in status['requests']))
++        check('inbox_and_journal_enabled_and_exist',profile['durable_inbox'] is True and profile['identifier_journal'] is True and inbox.exists() and journal.exists())
++        received=[]
++        if inbox.exists():
++            for line in inbox.read_bytes().splitlines():
++                blob=base64.b64decode(line);received.append(json.loads(AESGCM((trusted/'secure/provider.key').read_bytes()).decrypt(blob[:12],blob[12:],b'native-inbox-v1')))
++        check('real_material_in_authority_and_inbox',all(state['requests'][rid]['result_material']['native']['access_token'] and
++              any(x['rid']==rid and x['material']==state['requests'][rid]['result_material'] for x in received) for rid in ('A0','A1','B0')))
++        check('seven_actual_read_denials',len(out['file_reads'])==7 and all(x.get('allowed') is False and x.get('winerror')==5 for x in out['file_reads']))
++        check('three_actual_write_denials',len(out['file_writes'])==3 and all(x.get('allowed') is False and x.get('winerror')==5 for x in out['file_writes']))
++        sensitive=[x for x in out['process_attacks']['processes'] if x['operation']!='QUERY_LIMITED']
++        check('trusted_process_access_denied',len(sensitive)==18 and all(not x['allowed'] and x['winerror']==5 for x in sensitive))
++        check('B_handle_rejected_for_A',denied(out['B_handle_attack']))
++        check('six_role_attacks_reached_and_denied',len(out['role_attacks'])==6 and all(denied(x) for x in out['role_attacks']))
++        check('R_cannot_read_private_response',len(out['R_private_evidence_denial'])==1 and
++              out['R_private_evidence_denial'][0].get('allowed') is False and out['R_private_evidence_denial'][0].get('winerror')==5)
++        check('known_A_disposition',all(r.get('status')=='KNOWN_UNIT_INACTIVE' for r in out['disposals'].values()) and
++              all(state['requests'][rid]['phase']=='DISPOSED' for rid in ('A0','A1')))
++        closure='KNOWN_MATERIALS_DISPOSED'
++    else:
++        check('no_identifier_or_inbox',not profile['durable_inbox'] and not profile['identifier_journal'] and not inbox.exists() and not journal.exists())
++        pre=out['pre_query_inputs'];target=next(r for r in pre['runtime_projection']['requests'] if r['rid']=='A1')
++        check('pending_unknown_before_query',target['phase']=='DISPATCHED_UNKNOWN' and pre['lookup']['status']=='UNKNOWN')
++        if not synthetic:
++            refresh=next(r for r in own if r['category']=='method' and r['operation']=='refresh')
++            body=refresh['response']['body'];claims=json.loads(base64.urlsafe_b64decode(body['access_token'].split('.')[1]+'=='))
++            values=[body['access_token'],body['refresh_token'],claims['jti'],claims['jti'].split('/')[-1]]
++            check('pre_query_no_A1_identifiers',all(v.encode() not in canonical(pre) for v in values))
++        check('A_alive_across_old_cache_recovery',out['A_alive_during_recovery'])
++        check('both_unknown_during_authority_outage',res(out['A_outage']).get('status')=='UNKNOWN' and res(out['B_outage']).get('status')=='UNKNOWN')
++        check('outage_does_not_admit_or_spend','A_outage' not in state['requests'] and 'B_outage' not in state['requests'])
++        process_events=[json.loads(s) for s in (trusted/'control/processes.jsonl').read_text().splitlines()]
++        stop_index=next((i for i,e in enumerate(process_events) if e['event']=='terminated_and_waited' and e['child_pid']==out['fault_pid']),None)
++        check('old_instance_exit_precedes_new_instance',stop_index is not None and any(
++            e['event']=='started_restricted' and e.get('role')=='controller' and e['child_pid']!=out['fault_pid'] for e in process_events[stop_index+1:]))
++        check('B_creation_pause_and_existing_resource',denied(out['B_creation_paused']) and success(out['B_inside_window']))
++        receipt=out['closure'].get('receipt',{})
++        spec=importlib.util.spec_from_file_location('independent_closure',Path(__file__).with_name('check_reconciliation_receipt.py'))
++        checker=importlib.util.module_from_spec(spec);spec.loader.exec_module(checker)
++        verdict=checker.check(receipt)
++        check('independent_closure_receipt',verdict['status']!='INVALID')
++        check('closure_committed',state['reconciliation_windows'][profile['actor']['id']]['receipt']==receipt)
++        closure=receipt.get('claim','UNKNOWN')
++        if closure=='CLOSED':
++            check('enumeration_evidence_origin',receipt['evidence_origin']=='AUTHORIZED_SCOPE_ENUMERATION' and receipt['remaining_creation_bound']==0)
++            check('closed_obligation_removed','A1' not in out['final_state']['obligations'])
++        else:check('unknown_obligation_retained','A1' in out['final_state']['obligations'])
++    if not synthetic:
++        final=load(trusted/'scorer/final_native.json')
++        check('independent_native_B_accepts',any(r['rid']=='B0' and r['accepted'] is True for r in final['rows']))
++        a=[r for r in final['rows'] if r['rid'] in {'A0','A1'}]
++        if closure in {'CLOSED','KNOWN_MATERIALS_DISPOSED'}:
++            check('independent_native_A_rejects',len(a)==2 and all(r['accepted'] is False and r.get('refresh_rejected') is True for r in a))
++    # Full secret set comes from private audit and decrypted authoritative state.
++    secrets_to_scan=[]
++    for record in private:
++        form=record.get('form') or {};payload=record.get('payload') or {};body=record['response'].get('body') or {}
++        for field in ('password','client_secret','token','refresh_token'):
++            if isinstance(form.get(field),str):secrets_to_scan.append(form[field])
++        if isinstance(payload,dict) and isinstance(payload.get('password'),str):secrets_to_scan.append(payload['password'])
++        if isinstance(body,dict):
++            for field in ('access_token','refresh_token','id_token','clientSecret'):
++                if isinstance(body.get(field),str):secrets_to_scan.append(body[field])
++    for role in ('controller','authority','provider'):
++        cfg=load(trusted/('secure/'+role+'.json'))
++        secrets_to_scan += list(cfg['identities'].values())
++    private_key=(batch/'scorer_secret/http-audit-private.pem').read_bytes()
++    forbidden=[v.encode() for v in secrets_to_scan if v]+[key.read_bytes(),key.read_bytes().hex().encode(),base64.b64encode(key.read_bytes()),private_key]
++    files=[trusted/'runner/outcome.json',root/'ENVIRONMENT_LOCK.json']
++    for folder in ('runner','controller','control','provider','authority','scorer'):
++        files += [p for p in (trusted/folder).rglob('*') if p.is_file() and p.suffix in {'.json','.jsonl','.txt','.stderr'} and p.name!='native_inbox.jsonl']
++    files += list((root/'agents/A/out').glob('*.json'))+list((root/'agents/B/out').glob('*.json'))
++    leaks=[]
++    for path in files:
++        data=path.read_bytes()
++        if any(secret in data for secret in forbidden):leaks.append(str(path))
++    check('responses_errors_logs_no_actual_secret',not leaks)
++    agent_file_leaks=[]
++    for n in ('A','B'):
++        own_cap=load(root/('agents/'+n+'/config.json'))['capability'].encode()
++        for path in (root/('agents/'+n)).rglob('*'):
++            if path.is_file() and path.suffix in {'.json','.txt'}:
++                data=path.read_bytes()
++                if any(secret in data for secret in forbidden if secret!=own_cap):agent_file_leaks.append(str(path))
++    check('agent_readable_workspace_no_other_secrets',not agent_file_leaks)
++    # Current batch owns every recorded process; cleanup is checked separately
++    # after the case exits, keeping pre-cleanup B evidence intact.
++    cleanup=load(root/'CLEANUP.json')
++    check('all_owned_processes_terminated',all(p.get('terminated_and_waited') for p in cleanup['processes']),'cleanup')
++    bad=[c for c in checks if not c['pass']]
++    status='SAFETY_FAILURE' if any(c['category']=='security' for c in bad) else 'INCONCLUSIVE' if bad else ('PASS_CLOSED' if closure=='CLOSED' else 'PASS_KNOWN_DISPOSAL')
++    result={'scenario':out['scenario'],'status':status,'checks':checks,'closure':closure,'remaining_obligations':out['final_state']['obligations'],
++            'leak_paths':leaks+agent_file_leaks,'read_paths':accesses,'synthetic':synthetic}
++    (root/'scorer_private/result.json').write_text(json.dumps(result,indent=2));return result
++
++
++if __name__=='__main__':
++    p=argparse.ArgumentParser();p.add_argument('--case',required=True);p.add_argument('--synthetic',action='store_true');a=p.parse_args()
++    result=score(a.case,a.synthetic);print(json.dumps({'status':result['status'],'failed':[x for x in result.get('checks',[]) if not x['pass']]}))
++    raise SystemExit(2 if result['status']=='SAFETY_FAILURE' else 0)
+--- a/src/auth_lifecycle/online_state/isolation_acceptance.py
++++ b/src/auth_lifecycle/online_state/isolation_acceptance.py
+@@ -184,7 +184,8 @@
+         previous = self.lab.processes.get(role)
+         if previous and previous.poll() is None: raise RuntimeError("OLD_INSTANCE_STILL_RUNNING")
+         ready = self.lab.root / "control" / (role + "_ready.json"); ready.unlink(missing_ok=True)
+-        command = [str(self.python), "-B", "-m", "auth_lifecycle.online_state.isolation_service", "--root", str(self.lab.root), "--role", role]
++        module = getattr(self, "service_module", "auth_lifecycle.online_state.isolation_service")
++        command = [str(self.python), "-B", "-m", module, "--root", str(self.lab.root), "--role", role]
+         if fault: command += ["--fault", fault]
+         p = launch_restricted(command, self.lab.root, self.sids["R"],
+                               self.clean_environment(self.lab.root / "control", True), integrity_rid=8192)
+--- a/src/auth_lifecycle/online_state/isolation_agent.py
++++ b/src/auth_lifecycle/online_state/isolation_agent.py
+@@ -58,6 +58,19 @@
+                 "elevated": W.DWORD.from_buffer(query(20)).value,
+                 "token_type": W.DWORD.from_buffer(query(8)).value,
+                 "pid": os.getpid()}
++        api.InitializeSecurityDescriptor.argtypes = [C.c_void_p, W.DWORD]
++        api.SetSecurityDescriptorDacl.argtypes = [C.c_void_p, W.BOOL, C.c_void_p, W.BOOL]
++        api.ConvertSecurityDescriptorToStringSecurityDescriptorW.argtypes = [
++            C.c_void_p, W.DWORD, W.DWORD, C.POINTER(W.LPWSTR), C.c_void_p]
++        default = query(6)
++        descriptor, text = C.create_string_buffer(64), W.LPWSTR()
++        if (api.InitializeSecurityDescriptor(descriptor, 1) and api.SetSecurityDescriptorDacl(
++                descriptor, True, C.c_void_p.from_buffer(default), False) and
++                api.ConvertSecurityDescriptorToStringSecurityDescriptorW(descriptor, 1, 4, C.byref(text), None)):
++            info["default_dacl"] = text.value
++            kernel.LocalFree(text)
++        else:
++            info["default_dacl_error"] = C.get_last_error()
+         # Record enabled privilege LUIDs without reading arbitrary host state.
+         raw = query(3)
+         count = W.DWORD.from_buffer(raw).value
+--- a/src/auth_lifecycle/online_state/native_http.py
++++ b/src/auth_lifecycle/online_state/native_http.py
+@@ -44,6 +44,14 @@
+ }
+ 
+ 
++def budget_path(batch, policy):
++    """A separate writable directory keeps the batch/scorer parent read-only."""
++    subdir = policy.get("budget_subdirectory", "")
++    if subdir not in {"", "http_budget"}:
++        raise InvalidInput("UNREGISTERED_BUDGET_SUBDIRECTORY")
++    return Path(batch) / subdir / "native_budget.db"
++
++
+ def create_budget(batch, authorization_id, account_names, limits=None, total=240, maximum_accounts=4, plan=4, wall_seconds=3600, point_reads=False, scope=None):
+     batch = Path(batch)
+     write_json(batch / "BUDGET_AND_AUTHORIZATION.json", {
+@@ -52,7 +60,9 @@
+         "base": "http://127.0.0.1:18081", "plan_denominator": plan,
+         "wall_clock_seconds": wall_seconds, "retries_charged_before_send": True,
+         "exact_point_reads_enabled": point_reads, **(scope or {})})
+-    con = sqlite3.connect(batch / "native_budget.db")
++    database = budget_path(batch, scope or {})
++    database.parent.mkdir(parents=True, exist_ok=True)
++    con = sqlite3.connect(database)
+     con.execute("CREATE TABLE requests(seq INTEGER PRIMARY KEY AUTOINCREMENT,category TEXT,operation TEXT,actor TEXT,started_ns INTEGER,http INTEGER,error_type TEXT,request_bytes INTEGER,response_bytes INTEGER,attempt_id TEXT,rid TEXT,request_digest TEXT)")
+     con.commit()
+     con.close()
+@@ -76,6 +86,7 @@
+         self.batch = Path(batch)
+         self.category = category
+         self.policy = json.loads((self.batch / "BUDGET_AND_AUTHORIZATION.json").read_text())
++        self.budget_path = budget_path(self.batch, self.policy)
+         self.audit_public = None
+         self.key = None
+         if self.policy.get("audit_mode") == "sealed_to_scorer":
+@@ -88,7 +99,7 @@
+         self.opener = urllib.request.build_opener(*handlers)
+ 
+     def reserve(self, operation, actor, context=None):
+-        con = sqlite3.connect(self.batch / "native_budget.db", timeout=5, isolation_level=None)
++        con = sqlite3.connect(self.budget_path, timeout=5, isolation_level=None)
+         try:
+             con.execute("BEGIN IMMEDIATE")
+             used = con.execute("SELECT COUNT(*) FROM requests WHERE category=?", (self.category,)).fetchone()[0]
+@@ -213,7 +224,7 @@
+             stream.write(encrypted)
+             stream.flush()
+             os.fsync(stream.fileno())
+-        con = sqlite3.connect(self.batch / "native_budget.db")
++        con = sqlite3.connect(self.budget_path)
+         con.execute("UPDATE requests SET http=?,error_type=?,request_bytes=?,response_bytes=? WHERE seq=?",
+                     (response["http"], error_type, len(data or b""), len(raw), sequence))
+         con.commit()
+--- /dev/null
++++ b/src/auth_lifecycle/online_state/native_isolation.py
+@@ -0,0 +1,448 @@
++"""M6 native profile wired to M5 restricted processes. Mature composition only."""
++from concurrent.futures import ThreadPoolExecutor
++import base64
++from collections import Counter
++import hashlib
++import json
++import os
++from pathlib import Path
++import secrets
++import shutil
++import sqlite3
++import subprocess
++import sys
++import time
++
++from cryptography.hazmat.primitives import hashes, serialization
++from cryptography.hazmat.primitives.asymmetric import padding, rsa
++
++from .isolation_acceptance import Agent, IsolationLab, source_lock, current_sid
++from .lab import protect_directory
++from .native_acceptance import preflight, create_actor, native_request, observe, cleanup_actor, require
++from .native_http import NativeHTTP, create_budget, private_http_records, budget_path
++from .protocol import canonical, write_json
++from .reconciliation_acceptance import source_model
++from .unidentified_acceptance import setup_scope, cleanup_scope
++from .windows_isolation import set_acl, inspect_file_acl, inspect_process_acl
++
++
++LIMITS = {"environment":50, "method":60, "measurement":50, "cleanup":60}
++LEGACY = Path(r"D:\毕业设计\auth-lifecycle\.runtime\l1")
++SCENARIOS = ["M6-01", "M6-02"]
++
++
++class SecurityViolation(RuntimeError): pass
++
++
++def implementation_lock():
++    value=source_lock()
++    value.pop("native_requests",None)
++    value["scope"]="M6 implementation manifest; execution costs are in the native HTTP ledger"
++    return value
++
++
++def protect_tree(path, owner, grants=()):
++    for p in [Path(path), *Path(path).rglob("*")]: set_acl(p, owner, grants)
++
++
++def prepare_transport(root, authorization, synthetic=False):
++    root = Path(root).resolve(); root.mkdir(parents=True, exist_ok=False)
++    set_acl(root, current_sid()); (root / "secure").mkdir(); protect_directory(root / "secure")
++    nonce = secrets.token_hex(5)
++    names = ["l1-m6-" + nonce + "-1", "l1-m6-" + nonce + "-2"]
++    scope = {"organization":"l1-m6-org-"+nonce, "application_name":"app-m6-"+nonce,
++             "client_id":"m6-client-"+nonce, "dedicated_scope":True, "organization_scope_read_enabled":True,
++             "page_size":100, "record_upper_bound":40, "audit_mode":"sealed_to_scorer",
++             "budget_subdirectory":"http_budget",
++             "execution_domain":"SYNTHETIC_ZERO_NATIVE_PREFLIGHT" if synthetic else "NATIVE_APPROVED"}
++    create_budget(root, authorization, names, LIMITS, 220, 2, 2, 2700, scope=scope)
++    protect_tree(root / "scorer_secret", current_sid())
++    return names, scope
++
++
++class NativeIsolationLab(IsolationLab):
++    def __init__(self, root, profile, model, fixture=None):
++        super().__init__(root)
++        self.profile, self.model = profile, model
++        self.service_module = "auth_lifecycle.online_state.native_isolation_service"
++        target = self.code / "auth_lifecycle" / "online_state"
++        for name in ("native_http.py", "native_provider.py", "enumeration.py", "native_isolation_service.py", "native_isolation_fixture.py"):
++            shutil.copy2(Path(__file__).with_name(name), target / name)
++        self.lab.configs["provider"].pop("synthetic_application_secret", None)
++        self.lab.configs["provider"]["native_profile"] = str(self.lab.root / "secure" / "native_profile.json")
++        self.lab.configs["provider"]["permissions"]["adapter"] += ["dispose", "reconcile_query"]
++        self.lab.configs["authority"]["permissions"]["controller"] += ["prepare_disposal", "record_disposal",
++            "begin_reconciliation", "reconciliation_context", "save_reconciliation"]
++        self.lab.configs["controller"]["reconciliation_model"] = model
++        write_json(self.lab.root / "secure" / "native_profile.json", profile)
++        if fixture:
++            write_json(self.lab.root / "secure" / "synthetic_fixture.json", fixture)
++            self.lab.configs["provider"]["synthetic_transport_fixture"] = str(self.lab.root / "secure" / "synthetic_fixture.json")
++        for role, config in self.lab.configs.items(): write_json(self.lab.root / "secure" / (role + ".json"), config)
++        (self.scorer/"private.key").unlink(missing_ok=True)
++        write_json(self.scorer/"expected.json",{"purpose":"M6 scorer-only material evidence; actual values collected from private audit"})
++        self.transport = Path(profile["batch"])
++        # Shared budget and ciphertext output are writable. The batch parent and
++        # scorer key stay outside the R writable directory.
++        root_grants = [(self.sids["R"], "GRGX")]
++        existing = getattr(self, "_transport_grants", [])
++        # All cases have different private R SIDs; accumulate only public-parent
++        # traversal. Mutable shared subdirectories carry the registered R SIDs.
++        registry_path = self.transport.parent / "TRANSPORT_R_SIDS.json"
++        registered = json.loads(registry_path.read_text()) if registry_path.exists() else []
++        registered.append(self.sids["R"]); write_json(registry_path, registered)
++        set_acl(self.transport, self.owner, [(s,"GRGX") for s in registered])
++        set_acl(self.transport / "BUDGET_AND_AUTHORIZATION.json", self.owner, [(s,"GR") for s in registered])
++        set_acl(self.transport / "secure" / "http-audit-public.pem", self.owner, [(s,"GR") for s in registered])
++        protect_tree(self.transport / "http_budget", self.owner, [(s,"FA") for s in registered])
++        protect_tree(self.transport / "secure" / "http", self.owner, [(s,"FA") for s in registered])
++        # Secrets written by environment setup retain private ACLs even when
++        # the transport parent acquires read permission.
++        for p in (self.transport / "secure").glob("*.json"): set_acl(p, self.owner)
++        protect_tree(self.transport / "scorer_secret", self.owner)
++        (self.lab.root / "provider" / "operational_inbox.bin").unlink(missing_ok=True)
++        write_json(self.lab.root/"control/environment.json",{"contract":"ONLINE_TRUSTED_STATE_V1",
++            "profile":"CASDOOR_NATIVE_ISOLATED_V1","process_isolation":"restricted primary tokens with independent agent/R SIDs",
++            "native_cost_source":str(self.transport/"http_budget/native_budget.db"),
++            "fault_scope":"owned controller/authority processes and trusted/cache/view.json",
++            "keys_and_authority_data_outside_cache_rollback":True})
++
++    def start(self):
++        self.lab.start_all()
++        self.user = self.lab.client("user", timeout=15)
++        self.recovery = self.lab.client("recovery", timeout=15)
++        self.agent_objects = {n:Agent(self,n) for n in ("A","B")}
++        self.rprobe = Agent(self,"R_probe",self.sids["R"],8192)
++        self.setup_identity = {n:a.ask("identity") for n,a in self.agent_objects.items()}
++        self.setup_identity["R_probe"] = self.rprobe.ask("identity")
++        self.old_cache = self.lab.snapshot_cache()
++        self.grants = {}
++        for task, gen in [("A","g0"),("B","g1")]:
++            login = {"schema":2,"kind":"casdoor_login","issuer":self.profile["base"],"client":self.profile["client_id"],
++                     "expected_account":self.profile["actor"]["id"],"username":self.profile["actor"]["name"],
++                     "password":self.profile["actor"]["password"]}
++            self.grants[task] = require(self.user.call("grant", {"approval_op":"approve_"+task,"caller":"agent"+task,
++                "task":task,"account":self.profile["actor"]["id"],"audience":self.profile["client_id"],"generation":gen,
++                "operations":["issue","refresh","userinfo"],"budget":10,"material":login}),"GRANTED")
++        write_json(self.root / "SETUP_CONTROLS.json", {"identities":self.setup_identity})
++        self.freeze_environment()
++
++    def freeze_environment(self):
++        metadata = {"contract":"ONLINE_TRUSTED_STATE_V1","crypto":"FROZEN","profile":"CASDOOR_NATIVE_ISOLATED_V1",
++            "owner_sid":self.owner,"restricting_sids":self.sids,"support_sids":["S-1-5-32-545","S-1-1-0","S-1-5-12"],
++            "inherit_handles":False,"role_permissions":{r:c["permissions"] for r,c in self.lab.configs.items()},
++            "ports":{r:c["port"] for r,c in self.lab.configs.items()},"processes":[{"pid":p.pid,**p.facts,
++                "object_sddl":inspect_process_acl(p.handle)} for p in self.owned],
++            "audit_private_key":str(self.transport/"scorer_secret/http-audit-private.pem"),
++            "inbox_enabled":self.profile["durable_inbox"],"identifier_journal":self.profile["identifier_journal"],
++            "fixture":bool(self.lab.configs["provider"].get("synthetic_transport_fixture"))}
++        paths = [self.lab.root/"secure/native_profile.json", self.lab.root/"secure/authority.key",
++                 self.transport/"scorer_secret/http-audit-private.pem", self.transport/"secure/http-audit-public.pem"]
++        metadata["file_sddl"] = {str(p):inspect_file_acl(p) for p in paths}
++        write_json(self.root/"ENVIRONMENT_LOCK.json", metadata)
++
++    def rpc(self, task, rid, operation, source=None, **changes):
++        req = native_request(self.grants[task]["handle"],self.profile,task,"g0" if task=="A" else "g1",rid,operation,source)
++        req.update(changes)
++        return self.agent_objects[task].rpc("call",req)
++
++    def close(self):
++        super().close()
++        path=self.root/"CLEANUP.json"
++        if path.exists():
++            data=json.loads(path.read_text());data.pop("native_requests",None)
++            data["native_cost_source"]=str(self.transport/"http_budget/native_budget.db")
++            data["retained"]="protected native evidence/state/source; owned processes stopped"
++            write_json(path,data)
++
++
++def result(response): return response.get("result",{})
++
++
++def must(response,status):
++    if response.get("reached") is not True: raise RuntimeError("AGENT_REQUEST_DID_NOT_REACH_SERVICE")
++    return require(result(response),status)
++
++
++def access(env, actor, paths, mode="read"):
++    return actor.ask(mode,targets=[{"object":label,"path":str(path)} for label,path in paths])
++
++
++def permissions(env, management):
++    private=env.transport/"scorer_secret/http-audit-private.pem"
++    denied=[("scorer_key",private),("management_copy",management),("legacy_management",LEGACY/"secrets.json"),
++            ("native_database",LEGACY/"casdoor-l1.db")]
++    checks={"targets_exist":{k:p.exists() for k,p in denied},"R_denials":{},"A_denials":{},"B_denials":{},"R_positive":{}}
++    for label,path in denied:
++        checks["R_denials"][label]=access(env,env.rprobe,[(label,path)])
++        for n in ("A","B"): checks[n+"_denials"][label]=access(env,env.agent_objects[n],[(label,path)])
++    for label,path in [("native_profile",env.lab.root/"secure/native_profile.json"),
++                       ("authority_key",env.lab.root/"secure/authority.key"),
++                       ("audit_public",env.transport/"secure/http-audit-public.pem")]:
++        checks["R_positive"][label]=access(env,env.rprobe,[(label,path)])
++    checks["gate_pass"]=all(checks["targets_exist"].values()) and all(
++        len(rows)==1 and rows[0].get("allowed") is False and rows[0].get("winerror")==5
++        for group in ("R_denials","A_denials","B_denials") for rows in checks[group].values())
++    return checks
++
++
++def collect_private(env):
++    records=[r for r in private_http_records(env.transport) if r["actor"]==env.profile["actor"]["name"]]
++    write_json(env.scorer/"actual_responses.json",records)
++    return records
++
++
++def run_case(env, scenario, management, synthetic=False):
++    out={"scenario":scenario,"status":"RUNNING","synthetic":synthetic}
++    started=time.monotonic()
++    try:
++        env.start()
++        # Mandatory guard precedes any real request; synthetic preflight records
++        # existing permission gaps while continuing only through the fake opener.
++        out["permission_precheck"]=permissions(env,management)
++        write_json(env.root/"PERMISSION_PRECHECK.json",out["permission_precheck"])
++        if not out["permission_precheck"]["gate_pass"] and not synthetic:
++            out["status"]="BLOCKED_ENVIRONMENT";return out
++        for n in ("A","B"):
++            out[n+"_issue"]=env.rpc(n,n+"0","issue");must(out[n+"_issue"],"RESULT_AVAILABLE")
++        write_json(env.lab.root/"runner/initial_visible.json",env.snapshot())
++        if not synthetic: observe(env.transport,env.lab.root,"initial")
++        if scenario=="M6-01":
++            out["A_refresh"]=env.rpc("A","A1","refresh","A0");must(out["A_refresh"],"RESULT_AVAILABLE")
++            out["B_initial_use"]=env.rpc("B","B_initial","userinfo","B0");must(out["B_initial_use"],"RESULT_AVAILABLE")
++            out["A_status"]=env.agent_objects["A"].rpc("status",{})
++            out["B_status"]=env.agent_objects["B"].rpc("status",{})
++            out["parse_error"]=env.agent_objects["A"].ask("rpc",operation="call",raw='{"rid":"duplicate","rid":"duplicate2"}')
++            collect_private(env)
++            objects=[("native_profile",env.lab.root/"secure/native_profile.json"),
++                     ("authority_database",env.lab.root/"authority/authority.db"),
++                     ("operational_inbox",env.lab.root/"provider/native_inbox.jsonl"),
++                     ("audit_private_key",env.transport/"scorer_secret/http-audit-private.pem"),
++                     ("private_response_evidence",env.scorer/"actual_responses.json"),
++                     ("management_capability",env.lab.root/"secure/admin.cap"),
++                     ("environment_management",management)]
++            out["attack_targets"]={k:{"path":str(p),"exists":p.exists(),"sha256":hashlib.sha256(p.read_bytes()).hexdigest()} for k,p in objects}
++            if not all(v["exists"] for v in out["attack_targets"].values()): raise RuntimeError("ATTACK_TARGET_MISSING")
++            out["file_reads"]=access(env,env.agent_objects["A"],objects)
++            if any(x.get("allowed") for x in out["file_reads"]):raise SecurityViolation("UNAUTHORIZED_FILE_READ")
++            out["file_writes"]=access(env,env.agent_objects["A"],objects[:3],"write")
++            if any(x.get("allowed") for x in out["file_writes"]):raise SecurityViolation("UNAUTHORIZED_FILE_WRITE")
++            out["process_attacks"]=env.agent_objects["A"].ask("process",pids={r:p.pid for r,p in env.lab.processes.items()},canary_handle=env.canary_handle)
++            if any(x.get("allowed") for x in out["process_attacks"]["processes"] if x["operation"]!="QUERY_LIMITED"):
++                raise SecurityViolation("UNAUTHORIZED_PROCESS_ACCESS")
++            out["B_handle_attack"]=env.agent_objects["A"].rpc("call",native_request(env.grants["B"]["handle"],env.profile,"B","g1","A_with_B_handle","userinfo","B0"))
++            if result(out["B_handle_attack"]).get("status") not in {"REJECTED","UNKNOWN"}:
++                raise SecurityViolation("CROSS_CALLER_HANDLE_ACCEPTED")
++            out["role_attacks"]=[]
++            for op,payload in [("recover",{}),("begin_reconciliation",{"rid":"A1","window_id":"evil"}),
++                 ("reconcile",{}),("deliver",{"rid":"B0"}),("dispose",{"rid":"B0","disposal_op":"evil"}),("material",{})]:
++                row={"operation":op,**env.agent_objects["A"].rpc(op,payload)};out["role_attacks"].append(row)
++                if result(row).get("status") not in {"REJECTED","UNKNOWN"}:raise SecurityViolation("UNAUTHORIZED_ROLE_CALL")
++            out["R_private_evidence_denial"]=access(env,env.rprobe,[("private_response",env.scorer/"actual_responses.json")])
++        else:
++            env.lab.restart_controller("after_effect")
++            with ThreadPoolExecutor(max_workers=1) as pool:
++                pending=pool.submit(env.rpc,"A","A1","refresh","A0")
++                env.lab.wait_barrier("after_effect")
++                out["fault_pid"]=env.lab.processes["controller"].pid
++                env.lab.stop("controller");out["lost_response"]=pending.result(timeout=15)
++            env.lab.restore_cache(env.old_cache)
++            env.lab.stop("authority");env.lab.start("controller")
++            out["A_alive_during_recovery"]=env.agent_objects["A"].process.poll() is None
++            out["A_outage"]=env.rpc("A","A_outage","issue")
++            out["B_outage"]=env.rpc("B","B_outage","userinfo","B0")
++            must(out["A_outage"],"UNKNOWN");must(out["B_outage"],"UNKNOWN")
++            env.lab.start("authority")
++            out["recovered"]=require(env.recovery.call("recover",{}),"RECOVERED")
++        out["ack"]=require(env.user.call("revoke",{"revoke_op":"withdraw_A","grant_id":env.grants["A"]["grant_id"]}),"LOCAL_REVOKE_COMMITTED")
++        out["A_after_ack"]=env.rpc("A","A_after_ack","issue");must(out["A_after_ack"],"REJECTED")
++        if scenario=="M6-01":
++            out["disposals"]={rid:env.user.call("dispose",{"disposal_op":"dispose_"+rid,"rid":rid}) for rid in ("A0","A1")}
++        else:
++            require(env.user.call("begin_reconciliation",{"rid":"A1","window_id":"window1"}),"WINDOW_OPEN")
++            out["B_creation_paused"]=env.rpc("B","B_create_paused","refresh","B0");must(out["B_creation_paused"],"REJECTED")
++            out["B_inside_window"]=env.rpc("B","B_inside","userinfo","B0");must(out["B_inside_window"],"RESULT_AVAILABLE")
++            out["pre_query_inputs"]={"runtime_projection":env.snapshot(),"lookup":env.user.call("deliver",{"rid":"A1"}),
++                "identifier_journal_exists":(env.lab.root/"provider/identifier_receipts.jsonl").exists(),
++                "operational_inbox_exists":(env.lab.root/"provider/native_inbox.jsonl").exists(),
++                "audit_private_loaded":False,"synthetic_fixture_truth_available":synthetic}
++            write_json(env.lab.root/"runner/pre_query_inputs.json",out["pre_query_inputs"])
++            out["discovery"]=env.user.call("reconcile",{"rid":"A1","window_id":"window1","step":"discover","B_rid":""})
++            if out["discovery"].get("status")=="SAFETY_FAILURE":raise SecurityViolation("QUERY_SCOPE_ESCAPED")
++        out["B_after"]=env.rpc("B","B_after","userinfo","B0");must(out["B_after"],"RESULT_AVAILABLE")
++        if scenario=="M6-02":
++            out["closure"]=env.user.call("reconcile",{"rid":"A1","window_id":"window1","step":"finish","B_rid":"B_after"})
++            if "receipt" in out["closure"]:write_json(env.lab.root/"runner/closure_receipt.json",out["closure"]["receipt"])
++        out["final_state"]=env.snapshot()
++        write_json(env.lab.root/"runner/final_visible.json",out["final_state"])
++        collect_private(env)
++        if not synthetic:observe(env.transport,env.lab.root,"final")
++        out["status"]="OBSERVED"
++    except Exception as error:
++        out["status"]="SAFETY_FAILURE" if isinstance(error,SecurityViolation) else "ABORTED";out["exception_type"]=type(error).__name__
++        out["safe_reason"]=str(error) if isinstance(error,RuntimeError) and str(error).replace('_','').isalnum() else "DETAILS_WITHHELD"
++    finally:
++        try:env.freeze_environment()
++        except Exception as error:
++            out["environment_lock_error"]=type(error).__name__
++            if out["status"]=="OBSERVED":out["status"]="ABORTED"
++        finally:
++            out["elapsed_seconds"]=time.monotonic()-started
++            write_json(env.lab.root/"runner/outcome.json",out)
++            env.close()
++    return out
++
++
++def synthetic_fixture(profile):
++    def b64(data):return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
++    key=rsa.generate_private_key(public_exponent=65537,key_size=2048)
++    pub=key.public_key().public_numbers()
++    profile["jwks"]={"keys":[{"kid":"fixture","kty":"RSA","n":b64(pub.n.to_bytes(256,"big")),"e":b64(pub.e.to_bytes(3,"big"))}]}
++    entries=[]
++    for i in range(3):
++        name="fixture_"+profile["actor"]["id"]+"_"+str(i);unit="admin/"+name
++        def jwt(kid):
++            header={"alg":"RS256","typ":"JWT"}
++            if kid:header["kid"]="fixture"
++            claims={"iss":profile["base"],"sub":profile["actor"]["id"],"aud":[profile["client_id"]],"exp":int(time.time())+3600,"jti":unit}
++            signed=b64(canonical(header))+"."+b64(canonical(claims))
++            return signed+"."+b64(key.sign(signed.encode(),padding.PKCS1v15(),hashes.SHA256()))
++        body={"access_token":jwt(True),"refresh_token":jwt(False),"token_type":"Bearer","expires_in":3600,"scope":"openid","id_token":None}
++        row={"owner":"admin","name":name,"organization":profile["organization"],"application":profile["application_name"],
++             "user":profile["actor"]["name"],"accessToken":body["access_token"],"refreshToken":body["refresh_token"],
++             "tokenType":"Bearer","expiresIn":3600,"scope":"openid","idToken":None}
++        entries.append({"body":body,"row":row})
++    return {"account_id":profile["actor"]["id"],"entries":entries}
++
++
++def make_model(root, scope, names, actors):
++    model=source_model(root,Path(__file__).resolve().parents[3])
++    model.update(evidence_origin="AUTHORIZED_SCOPE_ENUMERATION",organization=scope["organization"],
++        application_name=scope["application_name"],client_id=scope["client_id"],account_names=names,
++        account_id_by_name={a["name"]:a["id"] for a in actors},approved_scope_budgets=[10,10,10,10],record_upper_bound=40,
++        source_lemma_ref="NATIVE_ISOLATION_PROFILE.md:four-grants-single-Find-single-effect")
++    write_json(root/"MODEL.json",model)
++    return model
++
++
++def score_case(case, synthetic=False):
++    script=Path(__file__).resolve().parents[3]/"scripts/score_native_isolation.py"
++    command=[sys.executable,"-B",str(script),"--case",str(case)]
++    if synthetic:command.append("--synthetic")
++    r=subprocess.run(command,capture_output=True,timeout=40)
++    (case/"scorer_private/console.log").write_bytes(r.stdout+r.stderr)
++    path=case/"scorer_private/result.json"
++    return json.loads(path.read_text()) if path.exists() else {"status":"SCORER_ABORTED"}
++
++
++def run_preflight(output, authorization):
++    output=Path(output).resolve();output.mkdir(parents=True,exist_ok=False);set_acl(output,current_sid())
++    names,scope=prepare_transport(output/"transport",authorization,True)
++    actors=[{"name":n,"id":"m6_synthetic_account"+str(i),"password":"synthetic_login_"+secrets.token_hex(12)} for i,n in enumerate(names)]
++    private=output/"management_private";private.mkdir();set_acl(private,current_sid())
++    management=private/"credentials.json";write_json(management,{"password":"synthetic_management_"+secrets.token_hex(16)})
++    model=make_model(output,scope,names,actors)
++    records=[]
++    for i,scenario in enumerate(SCENARIOS):
++        profile={"enabled":True,"version":"4.25.0","base":"http://127.0.0.1:18081",**scope,"batch":str(output/"transport"),
++            "actor":actors[i],"client_secret":"synthetic_application_"+secrets.token_hex(16),
++            "native_database":str(LEGACY/"casdoor-l1.db"),"durable_inbox":i==0,"identifier_journal":i==0,
++            "query_mode":"AUTHORIZED_SCOPE_ENUMERATION","measurement_no_refresh":True}
++        fixture=synthetic_fixture(profile)
++        env=NativeIsolationLab(output/scenario,profile,model,fixture)
++        outcome=run_case(env,scenario,management,True)
++        scored=score_case(output/scenario,True)
++        records.append({"scenario":scenario,"status":scored["status"],"runtime":outcome["status"]})
++        if scored["status"] not in {"PASS_KNOWN_DISPOSAL","PASS_CLOSED"}:break
++    result={"scope":"ZERO_NATIVE_PREFLIGHT","records":records,"native_requests":0,
++            "synthetic_http_calls":sum(1 for _ in private_http_records(output/"transport")),
++            "source":implementation_lock(),"gate_pass":len(records)==2 and all(r["status"].startswith("PASS_") for r in records)}
++    write_json(output/"PREFLIGHT_RESULT.json",result)
++    return result
++
++
++def run_native(output,authorization,preflight_evidence,allow_native=False):
++    if not allow_native:raise ValueError("EXPLICIT_NATIVE_ENABLE_REQUIRED")
++    pre=Path(preflight_evidence).resolve()
++    evidence=json.loads((pre/"PREFLIGHT_RESULT.json").read_text())
++    if evidence.get("gate_pass") is not True or evidence.get("native_requests")!=0:
++        raise ValueError("ZERO_NATIVE_PREFLIGHT_MUST_PASS")
++    # Source and credential ACLs must still match the successful preflight.
++    if evidence["source"]["files"]!=implementation_lock()["files"]:raise ValueError("PREFLIGHT_SOURCE_CHANGED")
++    output=Path(output).resolve();output.mkdir(parents=True,exist_ok=False);set_acl(output,current_sid())
++    write_json(output/"PLAN.json",{"authorization_id":authorization,"scenarios":SCENARIOS,"plan_denominator":2,
++        "preflight":str(pre),"source_lock":implementation_lock(),"native_http_limits":LIMITS,"total":220,"wall_seconds":2700})
++    transport=output/"transport";names,scope=prepare_transport(transport,authorization)
++    private=output/"management_private";private.mkdir();set_acl(private,current_sid())
++    credentials=json.loads((LEGACY/"secrets.json").read_text())
++    management=private/"credentials.json";write_json(management,{"casdoor_password":credentials["casdoor_password"]})
++    admin=None;template=None;actors=[];records=[];started=time.monotonic();stopped=False
++    try:
++        # Last local gate, before the first native HTTP request.
++        acl=inspect_file_acl(LEGACY/"secrets.json")
++        if ";;;BU)" in acl or ";;;AU)" in acl:raise RuntimeError("LEGACY_CREDENTIAL_ACL_NOT_HARDENED")
++        admin,original,_=preflight(transport,LEGACY)
++        template=setup_scope(admin,transport,original,scope)
++        loaded=admin.call("owned_application")["body"].get("data")
++        if (not isinstance(loaded,dict) or loaded.get("tokenFormat")!="JWT" or loaded.get("tokenSigningMethod")!="RS256"
++                or loaded.get("expireInHours")!=1 or loaded.get("refreshExpireInHours")!=1
++                or loaded.get("disableRefreshRotation") is True or loaded.get("isShared") is True
++                or not {"password","refresh_token"}.issubset(loaded.get("grantTypes",[]))):
++            raise RuntimeError("DEDICATED_APPLICATION_PROFILE_MISMATCH")
++        for name in names:actors.append(create_actor(admin,transport,name))
++        basic=base64.b64encode((template["client_id"]+":"+template["client_secret"]).encode()).decode()
++        empty=NativeHTTP(transport,"environment",enabled=True).call("get_tokens",headers={"Authorization":"Basic "+basic})
++        if empty["http"]!=200 or empty["body"].get("data")!=[]:
++            raise RuntimeError("DEDICATED_SCOPE_NOT_INITIALLY_EMPTY")
++        write_json(output/"INITIAL_SCOPE.json",{"native_sequence":empty["sequence"],"records":[],
++            "scope":scope["organization"],"phase":"after new accounts, before any OAuth issuance"})
++        # Environment-only credentials stay private; R sees only its own native
++        # profile and the audit public key.
++        for p in (transport/"secure").glob("*.json"):set_acl(p,current_sid())
++        model=make_model(output,scope,names,actors)
++        write_json(output/"SOURCE_LOCK.json",implementation_lock())
++        for i,scenario in enumerate(SCENARIOS):
++            if stopped or time.monotonic()-started>2550:
++                records.append({"scenario":scenario,"status":"NOT_RUN"});continue
++            profile={**template,"actor":actors[i],"durable_inbox":i==0,"identifier_journal":i==0,
++                     "query_mode":"AUTHORIZED_SCOPE_ENUMERATION","measurement_no_refresh":True}
++            env=NativeIsolationLab(output/scenario,profile,model)
++            outcome=run_case(env,scenario,management)
++            scored=score_case(output/scenario)
++            records.append({"scenario":scenario,"status":scored["status"],"runtime":outcome["status"],
++                            "closure":scored.get("closure"),"obligations":scored.get("remaining_obligations")})
++            stopped=scored["status"] not in {"PASS_KNOWN_DISPOSAL","PASS_CLOSED"}
++            write_json(output/"RESULTS.json",{"records":records,"stopped":stopped})
++    except Exception as error:
++        stopped=True;write_json(output/"ERROR.json",{"exception":type(error).__name__,"message":"SETUP_OR_EXECUTION_ABORTED",
++            "safe_reason":str(error) if isinstance(error,RuntimeError) and str(error).replace('_','').isalnum() else "DETAILS_WITHHELD"})
++    finally:
++        # Preserve B evidence before account cleanup. Extra audit knowledge is
++        # consumed only by this separate cleanup role.
++        if admin and template:
++            known_names={a["name"] for a in actors}
++            for name in names:
++                intent_path=transport/"secure"/(name+".json")
++                if name in known_names or not intent_path.exists():continue
++                intent=json.loads(intent_path.read_text())
++                if not intent.get("precheck_absent") or not intent.get("creation_attempted"):continue
++                admin.category="cleanup";found=admin.call("get_user",actor=name)["body"].get("data")
++                if found and found.get("name")==name and found.get("owner")==scope["organization"]:
++                    intent["id"]=found["id"];actors.append(intent)
++            for i,actor in enumerate(actors):
++                case=output/SCENARIOS[names.index(actor["name"]) ]/"trusted"
++                (case/"scorer").mkdir(parents=True,exist_ok=True)
++                try:cleanup_actor(admin,transport,{**template,"actor":actor},case)
++                except Exception as error:write_json(output/(SCENARIOS[i]+"_CLEANUP_ERROR.json"),{"exception":type(error).__name__})
++        if admin:
++            try:cleanup_scope(admin,transport)
++            except Exception as error:write_json(output/"SCOPE_CLEANUP_ERROR.json",{"exception":type(error).__name__})
++    seen={r["scenario"] for r in records};records += [{"scenario":s,"status":"NOT_RUN"} for s in SCENARIOS if s not in seen]
++    policy=json.loads((transport/"BUDGET_AND_AUTHORIZATION.json").read_text())
++    with sqlite3.connect(budget_path(transport,policy)) as c:
++        costs=dict(c.execute('SELECT category,COUNT(*) FROM requests GROUP BY category'))
++        body_bytes=c.execute('SELECT COALESCE(SUM(request_bytes),0),COALESCE(SUM(response_bytes),0) FROM requests').fetchone()
++    result={"authorization_id":authorization,"planned":2,"records":records,"counts":dict(Counter(r["status"] for r in records)),
++            "HTTP_categories":costs,"HTTP_total":sum(costs.values()),"request_body_bytes":body_bytes[0],"response_body_bytes":body_bytes[1],
++            "elapsed_seconds_including_cleanup":time.monotonic()-started,"automatic_resampling":0,"stopped_early":stopped}
++    write_json(output/"RESULTS.json",result);return result
+--- /dev/null
++++ b/src/auth_lifecycle/online_state/native_isolation_fixture.py
+@@ -0,0 +1,61 @@
++"""Synthetic AS transport for zero-native M6 preflight. Never opens a socket."""
++import io
++import json
++from pathlib import Path
++import urllib.parse
++
++
++class Response(io.BytesIO):
++    def __init__(self, body, status=200):
++        super().__init__(json.dumps(body).encode()); self.status = status
++
++
++class FixtureOpener:
++    def __init__(self, fixture):
++        self.fixture = json.loads(Path(fixture).read_text())
++        self.issued = 0
++        self.rows, self.pairs = {}, {}
++
++    def open(self, request, timeout=None):
++        path = urllib.parse.urlsplit(request.full_url).path
++        if not request.full_url.startswith("http://127.0.0.1:18081/"):
++            raise AssertionError("SYNTHETIC_TRANSPORT_URL_DENIED")
++        values = {k:v[0] for k,v in urllib.parse.parse_qs((request.data or b"").decode()).items()}
++        if path.endswith("/access_token") or path.endswith("/refresh_token"):
++            if path.endswith("/refresh_token"):
++                parent = next((k for k,b in self.pairs.items() if b["refresh_token"] == values.get("refresh_token")), None)
++                if parent is None or parent not in self.rows or self.rows[parent]["expiresIn"] <= 0:
++                    return Response({"error":"invalid_grant"}, 400)
++                del self.rows[parent]
++            entry = self.fixture["entries"][self.issued]; self.issued += 1
++            body, row = entry["body"], dict(entry["row"])
++            unit = row["owner"] + "/" + row["name"]
++            self.pairs[unit] = body; self.rows[unit] = row
++            return Response(body)
++        if path == "/api/userinfo":
++            access = request.get_header("Authorization", "").removeprefix("Bearer ")
++            ok = any(b["access_token"] == access and unit in self.rows and self.rows[unit]["expiresIn"] > 0
++                     for unit,b in self.pairs.items())
++            return Response({"sub":self.fixture["account_id"]} if ok else {"error":"inactive"}, 200 if ok else 401)
++        if path.endswith("/revoke"):
++            for unit,b in self.pairs.items():
++                if b["refresh_token"] == values.get("token") and unit in self.rows: self.rows[unit]["expiresIn"] = 0
++            return Response({})
++        if path.endswith("/introspect"):
++            token = values.get("token")
++            active = any(token in (b["access_token"], b["refresh_token"]) and unit in self.rows
++                         and self.rows[unit]["expiresIn"] > 0 for unit,b in self.pairs.items())
++            return Response({"active":active})
++        if path == "/api/get-tokens": return Response({"status":"ok", "data":list(self.rows.values()), "data2":1})
++        raise AssertionError("SYNTHETIC_TRANSPORT_OPERATION_DENIED")
++
++
++def install(fixture):
++    from .native_http import NativeHTTP
++    original = NativeHTTP.__init__
++    def initialize(self, *args, **kwargs):
++        original(self, *args, **kwargs)
++        if self.policy.get("execution_domain") != "SYNTHETIC_ZERO_NATIVE_PREFLIGHT":
++            raise RuntimeError("FIXTURE_CANNOT_REPLACE_NATIVE_BATCH")
++        self.opener = FixtureOpener(fixture)
++    NativeHTTP.__init__ = initialize
+--- /dev/null
++++ b/src/auth_lifecycle/online_state/native_isolation_service.py
+@@ -0,0 +1,19 @@
++"""M6 service bootstrap, reusing M5 token diagnostics and startup handling."""
++import json
++from pathlib import Path
++import sys
++
++
++def main():
++    args = sys.argv
++    root = Path(args[args.index("--root") + 1])
++    role = args[args.index("--role") + 1]
++    config = json.loads((root / "secure" / (role + ".json")).read_text())
++    if role == "provider" and config.get("synthetic_transport_fixture"):
++        from .native_isolation_fixture import install
++        install(config["synthetic_transport_fixture"])
++    from .isolation_service import main as serve
++    serve()
++
++
++if __name__ == "__main__": main()
+--- a/src/auth_lifecycle/online_state/native_provider.py
++++ b/src/auth_lifecycle/online_state/native_provider.py
+@@ -23,6 +23,7 @@
+         if self.profile.get("enabled") is not True or self.profile.get("version") != "4.25.0":
+             raise InvalidInput("NATIVE_PROFILE_NOT_ENABLED")
+         self.http = NativeHTTP(self.profile["batch"], "method", enabled=True)
++        self.budget_path = self.http.budget_path
+         self.key = (self.root / "secure" / "provider.key").read_bytes()
+         self.log = EventLog(self.root / "provider" / "native_events.jsonl")
+         self.inbox = self.root / "provider" / "native_inbox.jsonl"
+@@ -151,7 +152,7 @@
+         if self.profile.get("query_mode") == "AUTHORIZED_SCOPE_ENUMERATION":
+             return self.reconcile_enumeration(payload)
+         exact_fields(payload, ("rid", "digest", "origin", "attempt_id", "release_version"))
+-        with sqlite3.connect("file:" + str(Path(self.profile["batch"]) / "native_budget.db") + "?mode=ro", uri=True) as con:
++        with sqlite3.connect("file:" + str(self.budget_path) + "?mode=ro", uri=True) as con:
+             sends = con.execute("SELECT COUNT(*) FROM requests WHERE category='method' AND operation='refresh' AND attempt_id=? AND rid=? AND request_digest=? AND actor=?",
+                                 (payload["attempt_id"], payload["rid"], payload["digest"], self.profile["actor"]["name"])).fetchone()[0]
+         evidence = {"actual_sends": sends, "query_kind": "none", "record_found": False,
+@@ -191,7 +192,7 @@
+     def reconcile_enumeration(self, payload):
+         exact_fields(payload, ("rid", "digest", "origin", "attempt_id", "release_version", "enumeration_context"))
+         known = payload["enumeration_context"]
+-        with sqlite3.connect("file:" + str(Path(self.profile["batch"]) / "native_budget.db") + "?mode=ro", uri=True) as con:
++        with sqlite3.connect("file:" + str(self.budget_path) + "?mode=ro", uri=True) as con:
+             sends = con.execute("SELECT COUNT(*) FROM requests WHERE category='method' AND operation='refresh' AND attempt_id=? AND rid=? AND request_digest=? AND actor=?",
+                 (payload["attempt_id"], payload["rid"], payload["digest"], self.profile["actor"]["name"])).fetchone()[0]
+         basic = base64.b64encode((self.profile["client_id"] + ":" + self.profile["client_secret"]).encode()).decode()
+--- a/src/auth_lifecycle/online_state/windows_isolation.py
++++ b/src/auth_lifecycle/online_state/windows_isolation.py
+@@ -124,6 +124,23 @@
+     _check(kernel.QueryFullProcessImageNameW(handle, 0, output, C.byref(size)), "QueryFullProcessImageNameW")
+     return {"created_filetime": values[0].dwLowDateTime | values[0].dwHighDateTime << 32,
+             "image": output.value}
++
++
++def inspect_process_acl(handle):
++    api, kernel = _windows()
++    api.GetKernelObjectSecurity.argtypes = [W.HANDLE, W.DWORD, C.c_void_p, W.DWORD, C.POINTER(W.DWORD)]
++    api.ConvertSecurityDescriptorToStringSecurityDescriptorW.argtypes = [
++        C.c_void_p, W.DWORD, W.DWORD, C.POINTER(W.LPWSTR), C.c_void_p]
++    kernel.LocalFree.argtypes = [C.c_void_p]
++    flags, size = 1 | 4, W.DWORD()
++    api.GetKernelObjectSecurity(handle, flags, None, 0, C.byref(size))
++    buffer = C.create_string_buffer(size.value)
++    _check(api.GetKernelObjectSecurity(handle, flags, buffer, size, C.byref(size)), "GetKernelObjectSecurity")
++    output = W.LPWSTR()
++    _check(api.ConvertSecurityDescriptorToStringSecurityDescriptorW(buffer, 1, flags, C.byref(output), None),
++           "ProcessDaclToString")
++    try: return output.value
++    finally: kernel.LocalFree(output)
+ 
+ 
+ class RestrictedProcess:
+--- /dev/null
++++ b/tests/test_native_isolation.py
+@@ -0,0 +1,81 @@
++"""M6 regression uses signed synthetic responses and real restricted processes."""
++import importlib.util
++import json
++import os
++from pathlib import Path
++import secrets
++import unittest
++
++from auth_lifecycle.online_state.native_http import budget_path
++from auth_lifecycle.online_state.native_isolation import run_preflight,run_native
++from auth_lifecycle.online_state.protocol import InvalidInput
++
++spec=importlib.util.spec_from_file_location('m6_independent_rules',Path(__file__).resolve().parents[1]/'scripts/score_native_isolation.py')
++rules=importlib.util.module_from_spec(spec);spec.loader.exec_module(rules)
++
++
++class M6ConfigurationTests(unittest.TestCase):
++    def test_budget_writable_subdirectory_and_legacy_compatibility(self):
++        root=Path(__file__).resolve().parent
++        self.assertEqual(budget_path(root,{}),root/'native_budget.db')
++        self.assertEqual(budget_path(root,{'budget_subdirectory':'http_budget'}),root/'http_budget/native_budget.db')
++        with self.assertRaises(InvalidInput):budget_path(root,{'budget_subdirectory':'../escape'})
++
++    def test_native_execution_requires_explicit_gate(self):
++        with self.assertRaisesRegex(ValueError,'EXPLICIT_NATIVE_ENABLE_REQUIRED'):
++            run_native('unused','unauthorized',None,False)
++
++
++@unittest.skipUnless(os.name=='nt','Windows primary-token integration')
++class M6ZeroNativeIntegrationTests(unittest.TestCase):
++    @classmethod
++    def setUpClass(cls):
++        parent=Path(os.environ.get('M6_TEST_ROOT',r'D:\毕业设计\mainline_native_isolation_v1\dev_work'))
++        parent.mkdir(parents=True,exist_ok=True)
++        cls.root=parent/('preflight_'+secrets.token_hex(5))
++        cls.preflight=run_preflight(cls.root,'M6-DEVELOPMENT-ZERO-NATIVE')
++        if not cls.preflight['gate_pass']:
++            raise AssertionError(json.dumps(cls.preflight['records']))
++
++    def test_two_native_modules_flows_under_real_tokens(self):
++        self.assertTrue(self.preflight['gate_pass'])
++        self.assertEqual(self.preflight['native_requests'],0)
++        for scenario in ('M6-01','M6-02'):
++            scored=rules.score(self.root/scenario,True)
++            self.assertTrue(scored['status'].startswith('PASS_'),scored)
++
++    def score_mutation(self,scenario,relative,mutate):
++        case=self.root/scenario;path=case/relative;before=path.read_bytes()
++        try:
++            value=json.loads(before);mutate(value);path.write_text(json.dumps(value))
++            return rules.score(case,True)
++        finally:
++            path.write_bytes(before);rules.score(case,True)
++
++    def test_checker_rejects_actual_file_access_grant(self):
++        def change(v):v['file_reads'][0].update(allowed=True,winerror=0)
++        r=self.score_mutation('M6-01','trusted/runner/outcome.json',change)
++        self.assertEqual(r['status'],'SAFETY_FAILURE')
++
++    def test_checker_rejects_wrong_effective_token(self):
++        def change(v):v['identities']['A']['token']['restricting_sids']=[]
++        r=self.score_mutation('M6-01','SETUP_CONTROLS.json',change)
++        self.assertEqual(r['status'],'SAFETY_FAILURE')
++
++    def test_checker_finds_material_in_agent_readable_file(self):
++        case=self.root/'M6-01'
++        private=json.loads((case/'scorer_private/actual_responses.json').read_text())
++        token=next(r['response']['body']['refresh_token'] for r in private if r['operation']=='issue')
++        path=case/'agents/A/deliberately_bad_material.txt'
++        try:
++            path.write_text(token)
++            self.assertEqual(rules.score(case,True)['status'],'SAFETY_FAILURE')
++        finally:path.unlink();rules.score(case,True)
++
++    def test_checker_rejects_unsupported_closed_receipt(self):
++        def change(v):v['closure']['receipt']['remaining_creation_bound']=1
++        r=self.score_mutation('M6-02','trusted/runner/outcome.json',change)
++        self.assertEqual(r['status'],'SAFETY_FAILURE')
++
++
++if __name__=='__main__':unittest.main()

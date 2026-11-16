@@ -1,0 +1,1979 @@
+--- /dev/null
++++ src/auth_lifecycle/online_state/dsat_types.py
+@@ -0,0 +1,399 @@
++"""Strict, secret-free offline DSAT data. No runtime/provider imports or I/O.
++
++This module does not authenticate a service. FrozenTrust is a separate, explicit
++synthetic-fixture trust boundary, never a source_confirmed flag in a payload.
++"""
++from dataclasses import dataclass
++import hashlib
++import json
++import re
++
++
++class InputError(ValueError):
++    def __init__(self, code="INVALID_INPUT"):
++        self.code = code
++        super().__init__(code)
++
++
++@dataclass(frozen=True)
++class Limits:
++    attempts: int = 256
++    witnesses: int = 256
++    edges: int = 16384
++    records: int = 4096
++    integer_bits: int = 128
++    input_bytes: int = 1048576
++
++
++DEFAULT_LIMITS = Limits()
++
++
++def canonical(value):
++    try:
++        return json.dumps(value, sort_keys=True, separators=(",", ":"),
++                          ensure_ascii=True, allow_nan=False).encode("utf-8")
++    except (ValueError, TypeError, OverflowError, RecursionError):
++        raise InputError() from None
++
++
++def digest(component, value):
++    return hashlib.sha256(canonical({"schema": "dsat-proof-binding/1",
++                                    "component": component, "payload": value})).hexdigest()
++
++
++def math_digest(value):
++    return hashlib.sha256(canonical({"schema": "dsat-math-input/1", "input": value})).hexdigest()
++
++
++def packet_digest(value):
++    body = {k: v for k, v in value.items() if k != "packet_digest"}
++    return hashlib.sha256(canonical({"schema": "dsat-packet/1", "packet": body})).hexdigest()
++
++
++def fields(value, expected):
++    if type(value) is not dict or set(value) != set(expected):
++        raise InputError()
++    return value
++
++
++def ident(value):
++    if type(value) is not str or not re.fullmatch(r"[A-Za-z0-9_.:/-]{1,160}", value):
++        raise InputError()
++    return value
++
++
++def integer(value, limits=DEFAULT_LIMITS, nonnegative=True):
++    if type(value) is not int or (nonnegative and value < 0):
++        raise InputError()
++    if value.bit_length() > limits.integer_bits:
++        raise InputError("UNKNOWN_RESOURCE_LIMIT")
++    return value
++
++
++def boolean(value):
++    if type(value) is not bool:
++        raise InputError()
++    return value
++
++
++def items(value, limit):
++    if type(value) is not list:
++        raise InputError()
++    if len(value) > limit:
++        raise InputError("UNKNOWN_RESOURCE_LIMIT")
++    return value
++
++
++def ids(value, limit=4096):
++    result = tuple(ident(x) for x in items(value, limit))
++    if len(set(result)) != len(result):
++        raise InputError()
++    return result
++
++
++def sha(value):
++    if type(value) is not str or not re.fullmatch(r"[0-9a-f]{64}", value):
++        raise InputError()
++    return value
++
++
++ORIGIN_FIELDS = ("grant_id", "caller", "task", "account", "audience", "generation")
++
++
++def origin(value):
++    fields(value, ORIGIN_FIELDS)
++    return {k: ident(value[k]) for k in ORIGIN_FIELDS}
++
++
++@dataclass(frozen=True)
++class GrantSnapshot:
++    origin: dict
++    active: bool
++    operations: tuple
++    limit: int
++    reserved: int
++    spent: int
++
++    @classmethod
++    def parse(cls, value, limits):
++        fields(value, ("origin", "active", "operations", "limit", "reserved", "spent"))
++        result = cls(origin(value["origin"]), boolean(value["active"]), ids(value["operations"]),
++                     integer(value["limit"], limits), integer(value["reserved"], limits),
++                     integer(value["spent"], limits))
++        if result.reserved + result.spent > result.limit:
++            raise InputError()
++        return result
++
++
++@dataclass(frozen=True)
++class RequestSnapshot:
++    rid: str
++    attempt_id: str | None
++    release_version: int | None
++    request_digest: str
++    origin: dict
++    operation: str
++    source_rid: str | None
++    phase: str
++
++    @classmethod
++    def parse(cls, value, limits):
++        fields(value, ("rid", "attempt_id", "release_version", "request_digest", "origin",
++                       "operation", "source_rid", "phase", "original_request"))
++        o = origin(value["origin"])
++        body = value["original_request"]
++        fields(body, ("rid", "handle", "task", "account", "audience", "generation", "operation", "payload"))
++        for key in set(body) - {"payload"}:
++            if not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", ident(body[key])):
++                raise InputError()
++        operation = ident(value["operation"])
++        if operation not in {"issue", "refresh", "userinfo"}:
++            raise InputError()
++        fields(body["payload"], () if operation == "issue" else ("source_rid",))
++        source = None if operation == "issue" else ident(body["payload"]["source_rid"])
++        if (body["rid"] != value["rid"] or body["operation"] != operation
++                or source != value["source_rid"]
++                or any(body[k] != o[k] for k in ("task", "account", "audience", "generation"))):
++            raise InputError()
++        expected = hashlib.sha256(canonical({"caller": o["caller"], "request": body})).hexdigest()
++        if sha(value["request_digest"]) != expected:
++            raise InputError("REJECT_UNAUTHORIZED")
++        phase = ident(value["phase"])
++        if phase not in {"QUEUED", "CANCELLED", "DISPATCHED_UNKNOWN", "RESULT_AVAILABLE", "QUARANTINED", "DISPOSED"}:
++            raise InputError()
++        aid = None if value["attempt_id"] is None else ident(value["attempt_id"])
++        ver = None if value["release_version"] is None else integer(value["release_version"], limits)
++        if (phase in {"QUEUED", "CANCELLED"}) != (aid is None and ver is None):
++            raise InputError()
++        if phase not in {"QUEUED", "CANCELLED"} and (aid is None or ver is None):
++            raise InputError()
++        return cls(ident(value["rid"]), aid, ver, expected, o, operation, source, phase)
++
++
++@dataclass(frozen=True)
++class AuthoritySnapshot:
++    instance_ref: str
++    version: int
++    now: int
++    creation_paused: bool
++    grants: tuple
++    requests: tuple
++
++    @classmethod
++    def parse(cls, value, limits):
++        fields(value, ("instance_ref", "version", "now", "creation_paused", "grants", "requests"))
++        gs = tuple(GrantSnapshot.parse(x, limits) for x in items(value["grants"], limits.records))
++        rs = tuple(RequestSnapshot.parse(x, limits) for x in items(value["requests"], limits.records))
++        for keys in ([g.origin["grant_id"] for g in gs], [r.rid for r in rs], [r.attempt_id for r in rs if r.attempt_id is not None]):
++            if len(keys) != len(set(keys)):
++                raise InputError()
++        return cls(ident(value["instance_ref"]), integer(value["version"], limits),
++                   integer(value["now"], limits), boolean(value["creation_paused"]), gs, rs)
++
++
++@dataclass(frozen=True)
++class CreationAttempt:
++    id: str
++    rid: str
++    capacity_contract_ref: str
++    audit_required: bool
++
++    @classmethod
++    def parse(cls, value):
++        fields(value, ("id", "rid", "capacity_contract_ref", "audit_required"))
++        return cls(ident(value["id"]), ident(value["rid"]), ident(value["capacity_contract_ref"]),
++                   boolean(value["audit_required"]))
++
++
++@dataclass(frozen=True)
++class CapacityContract:
++    id: str
++    attempt_ref: str
++    capacity: int | None
++    source_ref: str
++
++    @classmethod
++    def parse(cls, value, limits):
++        fields(value, ("id", "attempt_ref", "capacity", "source_ref"))
++        c = None if value["capacity"] is None else integer(value["capacity"], limits)
++        return cls(ident(value["id"]), ident(value["attempt_ref"]), c, ident(value["source_ref"]))
++
++
++@dataclass(frozen=True)
++class EvidenceScope:
++    account: str
++    audience: str
++    paths: tuple
++    permit_ref: str
++    valid_from: int
++    valid_until: int
++
++    @classmethod
++    def parse(cls, value, limits):
++        fields(value, ("account", "audience", "paths", "permit_ref", "valid_from", "valid_until"))
++        result = cls(ident(value["account"]), ident(value["audience"]), ids(value["paths"]),
++                     ident(value["permit_ref"]), integer(value["valid_from"], limits),
++                     integer(value["valid_until"], limits))
++        if result.valid_from > result.valid_until:
++            raise InputError()
++        return result
++
++
++@dataclass(frozen=True)
++class CreationWitness:
++    unit_id: str
++    native_ref: str
++    birth_ref: str | None
++    service_ref: str
++    database_ref: str
++    source_candidates: tuple
++    request_binding: dict | None
++    deleted: bool
++
++    @classmethod
++    def parse(cls, value):
++        fields(value, ("unit_id", "native_ref", "birth_ref", "service_ref", "database_ref",
++                       "source_candidates", "request_binding", "deleted"))
++        b = value["request_binding"]
++        if b is not None:
++            fields(b, ("rid", "request_digest", "origin", "attempt_id", "release_version"))
++            ident(b["rid"]); sha(b["request_digest"]); origin(b["origin"])
++            ident(b["attempt_id"]); integer(b["release_version"])
++        return cls(ident(value["unit_id"]), ident(value["native_ref"]),
++                   None if value["birth_ref"] is None else ident(value["birth_ref"]),
++                   ident(value["service_ref"]), ident(value["database_ref"]),
++                   ids(value["source_candidates"]), b, boolean(value["deleted"]))
++
++    @property
++    def birth_key(self):
++        return (self.service_ref, self.database_ref, self.native_ref, self.birth_ref)
++
++
++@dataclass(frozen=True)
++class OriginRelation:
++    unit_id: str
++    attempts: tuple
++
++
++@dataclass(frozen=True)
++class MaterialObservation:
++    unit_id: str
++    status_kind: str
++    performed: bool
++    http: int | None
++    active: bool | None
++    accepted: bool | None
++    paths: tuple
++    frame_ref: str | None
++
++    @classmethod
++    def parse(cls, value, limits):
++        fields(value, ("unit_id", "status_kind", "performed", "http", "active", "accepted", "paths", "frame_ref"))
++        for k in ("active", "accepted"):
++            if value[k] is not None:
++                boolean(value[k])
++        http = None if value["http"] is None else integer(value["http"], limits)
++        if http is not None and not 100 <= http <= 599:
++            raise InputError()
++        kind = ident(value["status_kind"])
++        if kind not in {"AT_USERINFO", "AT_INTROSPECTION", "RT_INTROSPECTION", "NAMED_STATE", "SUSTAINED_INACTIVITY"}:
++            raise InputError()
++        return cls(ident(value["unit_id"]), kind, boolean(value["performed"]), http,
++                   value["active"], value["accepted"], ids(value["paths"]),
++                   None if value["frame_ref"] is None else ident(value["frame_ref"]))
++
++
++@dataclass(frozen=True)
++class EvidenceEnvelope:
++    id: str
++    kind: str
++    source_ref: str
++    source_version: str
++    observed_at: int
++    received_at: int
++    scope: EvidenceScope
++    payload: CreationWitness | MaterialObservation
++
++    @classmethod
++    def parse(cls, value, limits):
++        fields(value, ("id", "kind", "source_ref", "source_version", "observed_at", "received_at", "scope", "payload"))
++        kind = value["kind"]
++        if kind not in {"CREATION", "MATERIAL"}:
++            raise InputError()
++        payload = CreationWitness.parse(value["payload"]) if kind == "CREATION" else MaterialObservation.parse(value["payload"], limits)
++        return cls(ident(value["id"]), kind, ident(value["source_ref"]), ident(value["source_version"]),
++                   integer(value["observed_at"], limits), integer(value["received_at"], limits),
++                   EvidenceScope.parse(value["scope"], limits), payload)
++
++
++@dataclass(frozen=True)
++class OutstandingObligation:
++    id: str
++    kind: str
++    refs: tuple
++    strict: bool
++
++    @classmethod
++    def parse(cls, value):
++        fields(value, ("id", "kind", "refs", "strict"))
++        return cls(ident(value["id"]), ident(value["kind"]), ids(value["refs"]), boolean(value["strict"]))
++
++
++@dataclass(frozen=True)
++class CostRecord:
++    id: str
++    category: str
++    amount: int
++    unit: str
++    historical: bool
++
++    @classmethod
++    def parse(cls, value, limits):
++        fields(value, ("id", "category", "amount", "unit", "historical"))
++        return cls(ident(value["id"]), ident(value["category"]), integer(value["amount"], limits),
++                   ident(value["unit"]), boolean(value["historical"]))
++
++
++@dataclass(frozen=True)
++class FrozenTrust:
++    """Caller-supplied frozen manifest, kept outside the untrusted evidence bundle."""
++    snapshot_digest: str
++    contract_digest: str
++    obligations_digest: str
++    costs_digest: str
++    envelope_digests: dict
++    producers: tuple
++    permits: tuple
++
++    @classmethod
++    def parse(cls, value):
++        fields(value, ("mode", "snapshot_digest", "contract_digest", "obligations_digest", "costs_digest",
++                       "envelope_digests", "producers", "permits"))
++        if value["mode"] != "SYNTHETIC_CONTRACT" or type(value["envelope_digests"]) is not dict:
++            raise InputError("REJECT_UNAUTHORIZED")
++        return cls(sha(value["snapshot_digest"]), sha(value["contract_digest"]),
++                   sha(value["obligations_digest"]), sha(value["costs_digest"]),
++                   {ident(k): sha(v) for k, v in value["envelope_digests"].items()},
++                   ids(value["producers"]), ids(value["permits"]))
++
++
++def normalize_math(value, limits=DEFAULT_LIMITS):
++    if len(canonical(value)) > limits.input_bytes:
++        raise InputError("UNKNOWN_RESOURCE_LIMIT")
++    fields(value, ("I", "T", "c", "U", "E", "D_P"))
++    I = ids(value["I"], limits.attempts)
++    U = ids(value["U"], limits.witnesses)
++    T = ids(value["T"], limits.attempts)
++    D = ids(value["D_P"], limits.witnesses)
++    if not set(T) <= set(I) or not set(D) <= set(U) or type(value["c"]) is not dict or set(value["c"]) != set(I):
++        raise InputError()
++    c = {i: integer(value["c"][i], limits) for i in I}
++    edges = []
++    for edge in items(value["E"], limits.edges):
++        if type(edge) is not list or len(edge) != 2 or edge[0] not in U or edge[1] not in I:
++            raise InputError()
++        edges.append((ident(edge[0]), ident(edge[1])))
++    if len(set(edges)) != len(edges):
++        raise InputError()
++    return {"I": sorted(I), "T": sorted(T), "c": {i: c[i] for i in sorted(I)},
++            "U": sorted(U), "E": [list(e) for e in sorted(edges)], "D_P": sorted(D)}
+--- /dev/null
++++ src/auth_lifecycle/online_state/dsat_projection.py
+@@ -0,0 +1,281 @@
++"""S1 offline projection for explicitly frozen SYNTHETIC_CONTRACT bundles.
++
++No network, file access, runtime AuthorityStore/Provider or state mutation.
++The caller owns the separately frozen manifest. Hash agreement binds fixture
++bytes; it is not authentication of Casdoor or approval for native closure.
++"""
++from dataclasses import asdict
++
++from .dsat_types import (
++    AuthoritySnapshot, CapacityContract, CostRecord, CreationAttempt,
++    CreationWitness, EvidenceEnvelope, FrozenTrust, InputError, Limits,
++    DEFAULT_LIMITS, MaterialObservation, OriginRelation, OutstandingObligation,
++    boolean, canonical, digest, fields, ident, ids, integer, items, normalize_math,
++)
++
++
++def _failure(code):
++    return {"schema": "readonly-lifecycle-projection/1", "mode": "SYNTHETIC_CONTRACT",
++            "status": code, "issues": [{"code": code}], "math_input": None,
++            "math_ready": False, "obligations_proposed": None,
++            "obligation_action": "KEEP_EXISTING", "native_admission": "SOURCE_OR_REFINEMENT_GAP",
++            "global_complete": False}
++
++
++def project_evidence(bundle, trusted_manifest, limits=DEFAULT_LIMITS):
++    """Return a proposal only. No existing obligation is discharged here."""
++    try:
++        return _project(bundle, trusted_manifest, limits)
++    except InputError as error:
++        return _failure(error.code)
++    except (KeyError, TypeError, ValueError, RecursionError):
++        return _failure("INVALID_INPUT")
++
++
++def _project(bundle, trusted_manifest, limits):
++    if len(canonical(bundle)) > limits.input_bytes:
++        raise InputError("UNKNOWN_RESOURCE_LIMIT")
++    fields(bundle, ("mode", "authority", "attempts", "capacity_contracts", "envelopes", "history",
++                    "contract", "scope", "obligations", "costs"))
++    if bundle["mode"] != "SYNTHETIC_CONTRACT":
++        raise InputError("REJECT_UNAUTHORIZED")
++    trust = trusted_manifest if isinstance(trusted_manifest, FrozenTrust) else FrozenTrust.parse(trusted_manifest)
++    contract_binding = {k: bundle[k] for k in ("contract", "scope", "attempts", "capacity_contracts")}
++    for actual, expected in (
++        (digest("snapshot", bundle["authority"]), trust.snapshot_digest),
++        (digest("projection_contract", contract_binding), trust.contract_digest),
++        (digest("O_before", bundle["obligations"]), trust.obligations_digest),
++        (digest("cost_ledger", bundle["costs"]), trust.costs_digest),
++    ):
++        if actual != expected:
++            raise InputError("REJECT_UNAUTHORIZED")
++    authority = AuthoritySnapshot.parse(bundle["authority"], limits)
++    attempts = tuple(CreationAttempt.parse(x) for x in items(bundle["attempts"], limits.attempts))
++    capacities = tuple(CapacityContract.parse(x, limits) for x in items(bundle["capacity_contracts"], limits.attempts))
++    obligations = tuple(OutstandingObligation.parse(x) for x in items(bundle["obligations"], limits.records))
++    costs = tuple(CostRecord.parse(x, limits) for x in items(bundle["costs"], limits.records))
++    for keys in ([x.id for x in attempts], [x.rid for x in attempts], [x.id for x in capacities],
++                 [x.attempt_ref for x in capacities], [x.id for x in obligations], [x.id for x in costs]):
++        if len(keys) != len(set(keys)):
++            raise InputError()
++    contract = fields(bundle["contract"], ("source_version", "source_complete", "capacity_complete",
++                     "frontier_complete", "external_writers_excluded", "derivations_covered", "inactivity_frames"))
++    ident(contract["source_version"])
++    for key in ("source_complete", "capacity_complete", "frontier_complete", "external_writers_excluded", "derivations_covered"):
++        boolean(contract[key])
++    frames = ids(contract["inactivity_frames"])
++    scope = fields(bundle["scope"], ("account", "audience", "paths", "target_attempts", "open_frontiers"))
++    ident(scope["account"]); ident(scope["audience"])
++    paths = ids(scope["paths"])
++    targets = ids(scope["target_attempts"], limits.attempts)
++    frontiers = set(ids(scope["open_frontiers"]))
++    requests = {r.rid: r for r in authority.requests}
++    grants = {g.origin["grant_id"]: g for g in authority.grants}
++    amap = {a.id: a for a in attempts}
++    by_rid = {a.rid: a for a in attempts}
++    cmap = {c.id: c for c in capacities}
++    if not set(targets) <= set(amap):
++        raise InputError()
++    issues = []
++
++    def issue(code, ref=None):
++        row = {"code": code}
++        if ref is not None:
++            row["ref"] = ref
++        if row not in issues:
++            issues.append(row)
++
++    proposed = {o.id: asdict(o) for o in obligations}
++
++    def add_obligation(oid, kind, refs):
++        if oid not in proposed:
++            proposed[oid] = {"id": oid, "kind": kind, "refs": list(refs), "strict": True}
++
++    for key in ("source_complete", "capacity_complete", "external_writers_excluded", "derivations_covered"):
++        if not contract[key]:
++            issue("INSUFFICIENT_COVERAGE", key)
++    if not contract["frontier_complete"]:
++        frontiers.add("frontier:contract")
++    if not paths:
++        issue("INSUFFICIENT_COVERAGE", "paths")
++    cvalues = {}
++    structure_ready = True
++    for attempt in attempts:
++        req = requests.get(attempt.rid)
++        cap = cmap.get(attempt.capacity_contract_ref)
++        if (req is None or req.operation not in {"issue", "refresh"} or req.attempt_id is None
++                or req.release_version is None or req.release_version > authority.version):
++            issue("INSUFFICIENT_COVERAGE", attempt.id)
++            structure_ready = False
++        if cap is None or cap.attempt_ref != attempt.id or cap.capacity is None:
++            issue("INSUFFICIENT_COVERAGE", "capacity:" + attempt.id)
++            structure_ready = False
++        else:
++            cvalues[attempt.id] = cap.capacity
++        if attempt.audit_required:
++            add_obligation("await_terminal:" + attempt.id, "await_terminal", [attempt.id])
++    for req in authority.requests:
++        grant = grants.get(req.origin["grant_id"])
++        if grant is None or grant.origin != req.origin:
++            issue("EVIDENCE_CONFLICT", req.rid)
++        if req.phase == "QUEUED" and (grant is None or not grant.active or req.operation not in grant.operations):
++            issue("REJECT_UNAUTHORIZED", req.rid)
++        if req.operation in {"refresh", "userinfo"}:
++            source = requests.get(req.source_rid)
++            if source is None or source.origin != req.origin:
++                issue("REJECT_UNAUTHORIZED", req.rid)
++        if req.attempt_id is not None and req.operation in {"issue", "refresh"}:
++            a = by_rid.get(req.rid)
++            if a is None:
++                issue("INSUFFICIENT_COVERAGE", req.rid)
++                structure_ready = False
++            if req.phase == "DISPATCHED_UNKNOWN":
++                key = a.id if a else req.attempt_id
++                add_obligation("settle:" + key, "settle", [key])
++        elif req.attempt_id is not None and req.operation == "userinfo" and req.phase == "DISPATCHED_UNKNOWN":
++            add_obligation("exec:" + req.rid, "exec", [req.rid])
++    for grant in authority.grants:
++        if (grant.active and {"issue", "refresh"}.intersection(grant.operations)
++                and grant.limit > grant.spent + grant.reserved and not authority.creation_paused):
++            frontiers.add("frontier:" + grant.origin["grant_id"])
++    if frontiers:
++        issue("OPEN_FRONTIER")
++        for ref in frontiers:
++            add_obligation(ref, "frontier", [ref])
++    raw_records = items(bundle["history"], limits.records) + items(bundle["envelopes"], limits.records)
++    if len(raw_records) > limits.records:
++        raise InputError("UNKNOWN_RESOURCE_LIMIT")
++    valid_records = []
++    seen_ids = {}
++    for raw in raw_records:
++        env = EvidenceEnvelope.parse(raw, limits)
++        encoded_digest = digest("envelope", raw)
++        if (trust.envelope_digests.get(env.id) != encoded_digest or env.source_ref not in trust.producers
++                or env.scope.permit_ref not in trust.permits
++                or env.scope.account != scope["account"] or env.scope.audience != scope["audience"]):
++            issue("REJECT_UNAUTHORIZED", env.id)
++            continue
++        if env.id in seen_ids:
++            if seen_ids[env.id] != encoded_digest:
++                issue("EVIDENCE_CONFLICT", env.id)
++            continue
++        seen_ids[env.id] = encoded_digest
++        if not env.scope.valid_from <= env.observed_at <= env.scope.valid_until:
++            issue("STALE_EVIDENCE", env.id)
++            continue
++        if env.observed_at > env.received_at or env.received_at > authority.now:
++            issue("STALE_EVIDENCE", env.id)
++        if env.source_version != contract["source_version"]:
++            issue("STALE_EVIDENCE", env.id)
++        valid_records.append(env)
++    groups = {}
++    unit_keys = {}
++    unknown_aliases = []
++    quarantined = []
++    for env in valid_records:
++        if env.kind != "CREATION":
++            continue
++        w = env.payload
++        if w.birth_ref is None:
++            unknown_aliases.append({"unit_id": w.unit_id, "evidence_ref": env.id})
++            issue("INSUFFICIENT_COVERAGE", "birth:" + w.unit_id)
++            continue
++        if w.unit_id in unit_keys and unit_keys[w.unit_id] != w.birth_key:
++            issue("EVIDENCE_CONFLICT", w.unit_id)
++            continue
++        unit_keys[w.unit_id] = w.birth_key
++        candidates = set(w.source_candidates) if w.source_candidates else set(amap)
++        if not candidates <= set(amap):
++            issue("INSUFFICIENT_COVERAGE", "origin:" + w.unit_id)
++            structure_ready = False
++            continue
++        if w.request_binding is not None:
++            binding = w.request_binding
++            req = requests.get(binding["rid"])
++            a = by_rid.get(binding["rid"])
++            if (req is None or a is None or req.request_digest != binding["request_digest"]
++                    or req.attempt_id != binding["attempt_id"] or req.release_version != binding["release_version"]
++                    or req.origin != binding["origin"]):
++                issue("EVIDENCE_CONFLICT", env.id)
++                continue
++            if a.id not in candidates:
++                issue("EVIDENCE_CONFLICT", env.id)
++            candidates &= {a.id}
++            grant = grants.get(req.origin["grant_id"])
++            if grant is not None and not grant.active:
++                quarantined.append({"unit_id": w.unit_id, "grant_id": grant.origin["grant_id"], "evidence_ref": env.id})
++        if w.birth_key not in groups:
++            groups[w.birth_key] = {"aliases": set(), "sources": candidates, "refs": set(), "deleted": False}
++        group = groups[w.birth_key]
++        group["aliases"].add(w.unit_id)
++        group["sources"] &= candidates
++        group["refs"].add(env.id)
++        group["deleted"] |= w.deleted
++        if not group["sources"]:
++            issue("EVIDENCE_CONFLICT", w.unit_id)
++    if len(groups) > limits.witnesses:
++        raise InputError("UNKNOWN_RESOURCE_LIMIT")
++    units = []
++    alias_to_unit = {}
++    for key, group in groups.items():
++        uid = min(group["aliases"])
++        for alias in group["aliases"]:
++            alias_to_unit[alias] = uid
++        units.append({"unit_id": uid, "birth_key": list(key), "aliases": sorted(group["aliases"]),
++                      "source_candidates": sorted(group["sources"]), "evidence_refs": sorted(group["refs"]),
++                      "historically_deleted": group["deleted"], "state": "CONFIRMED_CREATION"})
++    D = set()
++    point_observations = []
++    for env in valid_records:
++        if env.kind != "MATERIAL":
++            continue
++        obs = env.payload
++        uid = alias_to_unit.get(obs.unit_id)
++        active = obs.active if obs.performed and obs.http == 200 else None
++        accepted = obs.accepted if (obs.performed and obs.http in {200, 400, 401, 403}
++                                    and (obs.accepted is not True or obs.http == 200)) else None
++        point_observations.append({"unit_id": obs.unit_id, "status_kind": obs.status_kind,
++                                   "performed": obs.performed, "http": obs.http,
++                                   "active": active, "accepted": accepted,
++                                   "reported_active": obs.active, "reported_accepted": obs.accepted,
++                                   "evidence_ref": env.id})
++        if ((obs.active is not None and active is None)
++                or (obs.accepted is not None and accepted is None)):
++            issue("INSUFFICIENT_COVERAGE", env.id)
++        current = env.scope.valid_until >= authority.now and env.source_version == contract["source_version"]
++        if not current:
++            issue("STALE_EVIDENCE", env.id)
++        if (uid is not None and obs.status_kind == "SUSTAINED_INACTIVITY" and obs.performed
++                and obs.http == 200 and obs.active is False and obs.frame_ref in frames
++                and set(paths) <= set(obs.paths) and set(paths) <= set(env.scope.paths) and current):
++            D.add(uid)
++    E = [[u["unit_id"], i] for u in units for i in u["source_candidates"]]
++    if len(E) > limits.edges:
++        raise InputError("UNKNOWN_RESOURCE_LIMIT")
++    for unit in units:
++        if set(unit["source_candidates"]).intersection(targets) and unit["unit_id"] not in D:
++            add_obligation("close:" + unit["unit_id"], "close", [unit["unit_id"]])
++    blocked = any(x["code"] in {"REJECT_UNAUTHORIZED", "EVIDENCE_CONFLICT"} for x in issues)
++    math_input = None
++    if structure_ready and not blocked:
++        math_input = normalize_math({"I": list(amap), "T": list(targets), "c": cvalues,
++                                     "U": [u["unit_id"] for u in units], "E": E, "D_P": list(D)}, limits)
++    priority = ("EVIDENCE_CONFLICT", "REJECT_UNAUTHORIZED", "STALE_EVIDENCE", "OPEN_FRONTIER", "INSUFFICIENT_COVERAGE")
++    codes = {i["code"] for i in issues}
++    status = next((c for c in priority if c in codes), "UNKNOWN_PENDING")
++    scope_ready = not issues and all(contract[k] for k in ("source_complete", "capacity_complete", "frontier_complete",
++                                                          "external_writers_excluded", "derivations_covered"))
++    return {"schema": "readonly-lifecycle-projection/1", "mode": "SYNTHETIC_CONTRACT",
++            "status": status, "issues": issues, "math_input": math_input, "math_ready": math_input is not None,
++            "partial_math": {"I": sorted(amap), "T": sorted(targets), "c_known": cvalues,
++                             "capacity_unknown": sorted(set(amap) - set(cvalues)),
++                             "U": sorted(u["unit_id"] for u in units), "E": sorted(E), "D_P": sorted(D)},
++            "units": sorted(units, key=lambda u: u["unit_id"]), "unknown_aliases": unknown_aliases,
++            "point_observations": point_observations, "quarantined": quarantined,
++            "open_frontiers": sorted(frontiers), "source_scope_preconditions_declared": scope_ready,
++            "creation_states": {a.id: "POSSIBLE_CREATION" for a in attempts},
++            "origin_relations": [asdict(OriginRelation(u["unit_id"], tuple(u["source_candidates"]))) for u in units],
++            "obligations_proposed": [proposed[k] for k in sorted(proposed)], "obligation_action": "PROPOSAL_ONLY_KEEP_EXISTING",
++            "costs_retained": [asdict(c) for c in costs], "native_admission": "SOURCE_OR_REFINEMENT_GAP",
++            "global_complete": False, "scope": dict(scope), "authority_version": authority.version,
++            "work_counts": {"input_records": len(raw_records), "unique_evidence_ids": len(seen_ids), "births": len(units), "edges": len(E)}}
+--- /dev/null
++++ src/auth_lifecycle/online_state/dsat_flow.py
+@@ -0,0 +1,131 @@
++"""Offline network construction and proof binding, with an explicit backend gate.
++
++No mature optimizer is installed in the approved environment. solve() therefore
++does NOT implement an improvised optimizer: it returns BACKEND_UNAVAILABLE.
++Hand-supplied proof vectors can be bound and independently checked separately.
++"""
++import importlib.util
++from time import perf_counter_ns
++
++from .dsat_types import (
++    DEFAULT_LIMITS, InputError, canonical, digest, fields, integer, math_digest,
++    normalize_math, packet_digest,
++)
++
++
++def backend_status():
++    return {"required": "mature integer min-cost-flow backend",
++            "candidate": "NetworkX", "locally_detected": importlib.util.find_spec("networkx") is not None,
++            "configured": False, "status": "BACKEND_UNAVAILABLE",
++            "reason": "NO_APPROVED_FROZEN_MATURE_BACKEND", "network_install_performed": False}
++
++
++def build_network(math_input, mode, limits=DEFAULT_LIMITS):
++    value = normalize_math(math_input, limits)
++    if mode not in {"m", "d"}:
++        raise InputError()
++    h = len(value["U"])
++    target = set(value["T"])
++    inactive = set(value["D_P"])
++    nodes = ["s", "t"] + ["U:" + u for u in value["U"]] + ["I:" + i for i in value["I"]]
++    arcs = []
++
++    def add(tail, head, capacity, cost):
++        arcs.append({"id": "a" + str(len(arcs)), "tail": tail, "head": head,
++                     "capacity": capacity, "cost": cost})
++
++    for u in value["U"]:
++        add("s", "U:" + u, 1, 0)
++    for u, i in value["E"]:
++        cost = int(i in target and (mode == "m" or u in inactive))
++        add("U:" + u, "I:" + i, 1, cost)
++    for i in value["I"]:
++        add("I:" + i, "t", min(value["c"][i], h), 0)
++    return {"mode": mode, "math_input": value, "math_input_digest": math_digest(value),
++            "nodes": nodes, "arcs": arcs, "demand": {n: (-h if n == "s" else h if n == "t" else 0) for n in nodes},
++            "required_flow": h, "C_T": sum(value["c"][i] for i in value["T"])}
++
++
++def solve(math_input, limits=DEFAULT_LIMITS):
++    """The missing-library branch is deliberate and never returns a solved flow."""
++    started = perf_counter_ns()
++    try:
++        mnet = build_network(math_input, "m", limits)
++        dnet = build_network(math_input, "d", limits)
++    except InputError as error:
++        return {"status": error.code, "obligation_action": "KEEP_EXISTING", "solved": False}
++    return {"status": "BACKEND_UNAVAILABLE", "solved": False, "backend": backend_status(),
++            "math_input_digest": mnet["math_input_digest"], "C_T": mnet["C_T"],
++            "network_nodes": len(mnet["nodes"]), "network_arcs": len(mnet["arcs"]),
++            "network_build_ns": perf_counter_ns() - started, "C_flow_ns": None,
++            "m_T": None, "d_T": None, "R_T": None, "H_T": None,
++            "m_network": mnet, "d_network": dnet,
++            "obligation_action": "KEEP_EXISTING", "native_admission": "SOURCE_OR_REFINEMENT_GAP"}
++
++
++def make_bindings(bundle, projection):
++    """Redacted synthetic context only; no evidence payload, handle or token is exported."""
++    if bundle.get("mode") != "SYNTHETIC_CONTRACT" or projection.get("math_input") is None:
++        raise InputError()
++    scope = projection["scope"]
++    return {
++        "evidence_bundle": sorted(digest("envelope", e) for e in bundle["history"] + bundle["envelopes"]),
++        "contract": dict(bundle["contract"]),
++        "scope": {"target_attempts": list(projection["math_input"]["T"]), "paths": list(scope["paths"]),
++                  "open_frontiers": list(projection["open_frontiers"]),
++                  "coverage_complete": projection["source_scope_preconditions_declared"], "material_scope_only": True},
++        "dependency": {"authority_version": projection["authority_version"],
++                       "source_version": bundle["contract"]["source_version"],
++                       "evidence_version": 1, "now": bundle["authority"]["now"],
++                       "valid_until": bundle["authority"]["now"]},
++        "cost_ledger": list(projection["costs_retained"]),
++        "O_before": list(projection["obligations_proposed"]),
++    }
++
++
++_BINDINGS = {"evidence_bundle": "evidence_bundle_digest", "contract": "contract_digest",
++             "scope": "scope_digest", "dependency": "dependency_digest",
++             "cost_ledger": "cost_ledger_digest", "O_before": "O_before_digest"}
++
++
++def _base_packet(math_input, bindings):
++    value = normalize_math(math_input)
++    fields(bindings, _BINDINGS)
++    # Copy via JSON-equivalent serialization to prevent caller mutation of a bound packet.
++    import json
++    bindings = json.loads(canonical(bindings))
++    return {"schema": "dsat-proof/1", "mode": "SYNTHETIC_CONTRACT", "math_input": value,
++            "bindings": bindings, "digests": {"math_input_digest": math_digest(value),
++                **{field: digest(key, bindings[key]) for key, field in _BINDINGS.items()}}}
++
++
++def assemble_optimum_packet(math_input, bindings, m_certificate, d_certificate):
++    """Serialize supplied vectors; this function neither solves nor verifies them."""
++    packet = _base_packet(math_input, bindings)
++    value = packet["math_input"]
++    total = sum(value["c"][i] for i in value["T"])
++    m = integer(m_certificate["cost"])
++    d = integer(d_certificate["cost"])
++    context = packet["bindings"]
++    contract, scope, dep = context["contract"], context["scope"], context["dependency"]
++    source_ready = (scope["coverage_complete"] and bool(scope["paths"]) and not scope["open_frontiers"]
++                    and all(contract[k] for k in ("source_complete", "capacity_complete", "frontier_complete",
++                                                  "external_writers_excluded", "derivations_covered"))
++                    and dep["now"] <= dep["valid_until"] and dep["source_version"] == contract["source_version"])
++    packet["proof"] = {"kind": "OPTIMUM", "m": m_certificate, "d": d_certificate}
++    packet["claims"] = {"C_T": total, "m_T": m, "d_T": d, "R_T": total - m, "H_T": total - d,
++                        "conditional_material_closed": bool(total == d and source_ready),
++                        "native_admission": "SOURCE_OR_REFINEMENT_GAP", "global_complete": False,
++                        "remaining_obligations": [o["id"] for o in context["O_before"]]}
++    packet["packet_digest"] = packet_digest(packet)
++    return packet
++
++
++def assemble_infeasible_packet(math_input, bindings, flow, cut, value):
++    packet = _base_packet(math_input, bindings)
++    packet["proof"] = {"kind": "INFEASIBLE", "flow": flow, "cut": cut, "value": value}
++    packet["claims"] = {"result": "EVIDENCE_CONFLICT", "conditional_material_closed": False,
++                        "native_admission": "SOURCE_OR_REFINEMENT_GAP", "global_complete": False,
++                        "remaining_obligations": [o["id"] for o in packet["bindings"]["O_before"]]}
++    packet["packet_digest"] = packet_digest(packet)
++    return packet
+--- /dev/null
++++ scripts/check_dsat_certificate.py
+@@ -0,0 +1,368 @@
++"""Independent DSAT mathematical checker. Standard library; no optimizer import.
++
++Only an explicit CLI invocation reads/writes files. check_certificate is pure.
++Valid hashes bind bytes; source authenticity and native closure remain outside
++this synthetic-only checker.
++"""
++import argparse
++import hashlib
++import json
++from pathlib import Path
++import re
++
++
++class Rejected(ValueError):
++    def __init__(self, code="INVALID_CERTIFICATE"):
++        self.code = code
++        super().__init__(code)
++
++
++DEFAULT = {"attempts": 256, "witnesses": 256, "edges": 16384,
++           "records": 4096, "integer_bits": 128, "input_bytes": 4194304}
++
++
++def _encoded(value):
++    try:
++        return json.dumps(value, sort_keys=True, separators=(",", ":"),
++                          ensure_ascii=True, allow_nan=False).encode("utf-8")
++    except (ValueError, TypeError, OverflowError, RecursionError):
++        raise Rejected() from None
++
++
++def _hash(component, value):
++    return hashlib.sha256(_encoded({"schema": "dsat-proof-binding/1",
++                                  "component": component, "payload": value})).hexdigest()
++
++
++def _keys(value, keys):
++    if type(value) is not dict or set(value) != set(keys):
++        raise Rejected()
++
++
++def _id(value):
++    if type(value) is not str or not re.fullmatch(r"[A-Za-z0-9_.:/-]{1,160}", value):
++        raise Rejected()
++    return value
++
++
++def _int(value, bits, nonnegative=True):
++    if type(value) is not int or (nonnegative and value < 0):
++        raise Rejected()
++    if value.bit_length() > bits:
++        raise Rejected("UNKNOWN_RESOURCE_LIMIT")
++    return value
++
++
++def _bool(value):
++    if type(value) is not bool:
++        raise Rejected()
++    return value
++
++
++def _list(value, count):
++    if type(value) is not list:
++        raise Rejected()
++    if len(value) > count:
++        raise Rejected("UNKNOWN_RESOURCE_LIMIT")
++    return value
++
++
++def _ids(value, count):
++    result = [_id(v) for v in _list(value, count)]
++    if len(result) != len(set(result)):
++        raise Rejected()
++    return result
++
++
++def _sha(value):
++    if type(value) is not str or re.fullmatch(r"[0-9a-f]{64}", value) is None:
++        raise Rejected()
++    return value
++
++
++def _math(value, lim):
++    _keys(value, ("I", "T", "c", "U", "E", "D_P"))
++    I = _ids(value["I"], lim["attempts"])
++    U = _ids(value["U"], lim["witnesses"])
++    T = _ids(value["T"], lim["attempts"])
++    D = _ids(value["D_P"], lim["witnesses"])
++    if not set(T) <= set(I) or not set(D) <= set(U):
++        raise Rejected()
++    if type(value["c"]) is not dict or set(value["c"]) != set(I):
++        raise Rejected()
++    capacities = {i: _int(value["c"][i], lim["integer_bits"]) for i in I}
++    edges = []
++    for row in _list(value["E"], lim["edges"]):
++        if type(row) is not list or len(row) != 2:
++            raise Rejected()
++        u, i = _id(row[0]), _id(row[1])
++        if u not in U or i not in I:
++            raise Rejected()
++        edges.append((u, i))
++    if len(edges) != len(set(edges)):
++        raise Rejected()
++    return {"I": sorted(I), "T": sorted(T), "c": {i: capacities[i] for i in sorted(I)},
++            "U": sorted(U), "E": [list(e) for e in sorted(edges)], "D_P": sorted(D)}
++
++
++def _network(value, mode):
++    # Deliberately independent of the engineering network builder.
++    h = len(value["U"])
++    nodes = {"s", "t"} | {"U:" + u for u in value["U"]} | {"I:" + i for i in value["I"]}
++    arcs = []
++    for u in value["U"]:
++        arcs.append(("s", "U:" + u, 1, 0))
++    for u, i in value["E"]:
++        weight = 1 if i in value["T"] and (mode == "m" or u in value["D_P"]) else 0
++        arcs.append(("U:" + u, "I:" + i, 1, weight))
++    for i in value["I"]:
++        arcs.append(("I:" + i, "t", min(value["c"][i], h), 0))
++    return nodes, arcs
++
++
++def _flow(rows, value, nodes, arcs, lim):
++    supplied = {}
++    legal = {(a, b) for a, b, _, _ in arcs}
++    for row in _list(rows, len(arcs)):
++        if type(row) is not list or len(row) != 3 or type(row[0]) is not str or type(row[1]) is not str:
++            raise Rejected()
++        pair = (row[0], row[1])
++        if pair not in legal or pair in supplied:
++            raise Rejected()
++        supplied[pair] = _int(row[2], lim["integer_bits"])
++    balance = {n: 0 for n in nodes}
++    cost = 0
++    for a, b, cap, weight in arcs:
++        x = supplied.get((a, b), 0)
++        if x > cap:
++            raise Rejected()
++        balance[a] -= x
++        balance[b] += x
++        cost += weight * x
++    if any(balance[n] != (-value if n == "s" else value if n == "t" else 0) for n in nodes):
++        raise Rejected()
++    return supplied, cost
++
++
++def _optimal(cert, value, mode, lim):
++    _keys(cert, ("flow", "potentials", "cost"))
++    nodes, arcs = _network(value, mode)
++    x, cost = _flow(cert["flow"], len(value["U"]), nodes, arcs, lim)
++    if _int(cert["cost"], lim["integer_bits"]) != cost:
++        raise Rejected()
++    potentials = cert["potentials"]
++    if type(potentials) is not dict or set(potentials) != nodes:
++        raise Rejected()
++    pi = {n: _int(potentials[n], lim["integer_bits"], nonnegative=False) for n in nodes}
++    residual_count = 0
++    for a, b, cap, weight in arcs:
++        flow = x.get((a, b), 0)
++        if flow < cap:
++            residual_count += 1
++            if weight + pi[a] - pi[b] < 0:
++                raise Rejected()
++        if flow > 0:
++            residual_count += 1
++            if -weight + pi[b] - pi[a] < 0:
++                raise Rejected()
++    return cost, residual_count
++
++
++def _bindings(value, math_input, lim):
++    names = {"evidence_bundle": "evidence_bundle_digest", "contract": "contract_digest",
++             "scope": "scope_digest", "dependency": "dependency_digest",
++             "cost_ledger": "cost_ledger_digest", "O_before": "O_before_digest"}
++    _keys(value, names)
++    for item in _list(value["evidence_bundle"], lim["records"]):
++        _sha(item)
++    c = value["contract"]
++    _keys(c, ("source_version", "source_complete", "capacity_complete", "frontier_complete",
++              "external_writers_excluded", "derivations_covered", "inactivity_frames"))
++    _id(c["source_version"])
++    checks = ("source_complete", "capacity_complete", "frontier_complete", "external_writers_excluded", "derivations_covered")
++    for k in checks:
++        _bool(c[k])
++    _ids(c["inactivity_frames"], lim["records"])
++    scope = value["scope"]
++    _keys(scope, ("target_attempts", "paths", "open_frontiers", "coverage_complete", "material_scope_only"))
++    if sorted(_ids(scope["target_attempts"], lim["attempts"])) != math_input["T"]:
++        raise Rejected()
++    paths = _ids(scope["paths"], lim["records"])
++    fronts = _ids(scope["open_frontiers"], lim["records"])
++    _bool(scope["coverage_complete"])
++    if _bool(scope["material_scope_only"]) is not True:
++        raise Rejected()
++    dep = value["dependency"]
++    _keys(dep, ("authority_version", "source_version", "evidence_version", "now", "valid_until"))
++    for k in ("authority_version", "evidence_version", "now", "valid_until"):
++        _int(dep[k], lim["integer_bits"])
++    _id(dep["source_version"])
++    obs = set()
++    for o in _list(value["O_before"], lim["records"]):
++        _keys(o, ("id", "kind", "refs", "strict"))
++        oid = _id(o["id"])
++        if oid in obs:
++            raise Rejected()
++        obs.add(oid); _id(o["kind"]); _ids(o["refs"], lim["records"]); _bool(o["strict"])
++    cost_ids = set()
++    for cost in _list(value["cost_ledger"], lim["records"]):
++        _keys(cost, ("id", "category", "amount", "unit", "historical"))
++        cid = _id(cost["id"])
++        if cid in cost_ids:
++            raise Rejected()
++        cost_ids.add(cid); _id(cost["category"]); _id(cost["unit"])
++        _int(cost["amount"], lim["integer_bits"]); _bool(cost["historical"])
++    ready = (all(c[k] for k in checks) and scope["coverage_complete"] and bool(paths) and not fronts
++             and dep["now"] <= dep["valid_until"] and dep["source_version"] == c["source_version"])
++    return names, obs, ready
++
++
++def check_certificate(packet, expected_math_digest=None, expected_scope_digest=None, limits=None, expected_digests=None):
++    """Check mathematics and synthetic binding; never grant native closure."""
++    try:
++        lim = dict(DEFAULT)
++        if limits is not None:
++            if type(limits) is not dict or not set(limits) <= set(lim):
++                raise Rejected()
++            for key, val in limits.items():
++                if type(val) is not int or val < 0:
++                    raise Rejected()
++                lim[key] = val
++        return _check(packet, expected_math_digest, expected_scope_digest, lim, expected_digests)
++    except Rejected as error:
++        return {"status": error.code, "mathematics_accepted": False,
++                "native_admission": "SOURCE_OR_REFINEMENT_GAP", "obligation_action": "KEEP_EXISTING"}
++    except (KeyError, ValueError, TypeError, RecursionError, OverflowError):
++        return {"status": "INVALID_CERTIFICATE", "mathematics_accepted": False,
++                "native_admission": "SOURCE_OR_REFINEMENT_GAP", "obligation_action": "KEEP_EXISTING"}
++
++
++def _check(packet, expected_math, expected_scope, lim, expected_digests):
++    if len(_encoded(packet)) > lim["input_bytes"]:
++        raise Rejected("UNKNOWN_RESOURCE_LIMIT")
++    _keys(packet, ("schema", "mode", "math_input", "bindings", "digests", "proof", "claims", "packet_digest"))
++    if packet["schema"] != "dsat-proof/1" or packet["mode"] != "SYNTHETIC_CONTRACT":
++        raise Rejected()
++    expected_packet = hashlib.sha256(_encoded({"schema": "dsat-packet/1", "packet": {
++        k: v for k, v in packet.items() if k != "packet_digest"}})).hexdigest()
++    if _sha(packet["packet_digest"]) != expected_packet:
++        raise Rejected()
++    value = _math(packet["math_input"], lim)
++    math_hash = hashlib.sha256(_encoded({"schema": "dsat-math-input/1", "input": value})).hexdigest()
++    names, O_ids, ready = _bindings(packet["bindings"], value, lim)
++    ds = packet["digests"]
++    _keys(ds, ["math_input_digest"] + list(names.values()))
++    if _sha(ds["math_input_digest"]) != math_hash:
++        raise Rejected()
++    if expected_math is not None and _sha(expected_math) != math_hash:
++        raise Rejected()
++    for component, field in names.items():
++        if _sha(ds[field]) != _hash(component, packet["bindings"][component]):
++            raise Rejected()
++    if expected_scope is not None and _sha(expected_scope) != ds["scope_digest"]:
++        raise Rejected()
++    if expected_digests is not None:
++        if type(expected_digests) is not dict or not set(expected_digests) <= set(ds):
++            raise Rejected()
++        for field, pinned in expected_digests.items():
++            if _sha(pinned) != ds[field]:
++                raise Rejected()
++    proof, claims = packet["proof"], packet["claims"]
++    if type(proof) is not dict or type(claims) is not dict:
++        raise Rejected()
++    if (claims.get("native_admission") != "SOURCE_OR_REFINEMENT_GAP"
++            or claims.get("global_complete") is not False):
++        raise Rejected()
++    remaining = set(_ids(claims.get("remaining_obligations"), lim["records"]))
++    if not O_ids <= remaining:
++        raise Rejected()
++    if proof.get("kind") == "INFEASIBLE":
++        _keys(proof, ("kind", "flow", "cut", "value"))
++        _keys(claims, ("result", "conditional_material_closed", "native_admission", "global_complete", "remaining_obligations"))
++        nodes, arcs = _network(value, "m")
++        v = _int(proof["value"], lim["integer_bits"])
++        if v >= len(value["U"]):
++            raise Rejected()
++        _flow(proof["flow"], v, nodes, arcs, lim)
++        cut_rows = _list(proof["cut"], len(nodes))
++        if any(type(n) is not str or n not in nodes for n in cut_rows) or len(set(cut_rows)) != len(cut_rows):
++            raise Rejected()
++        cut = set(cut_rows)
++        if "s" not in cut or "t" in cut:
++            raise Rejected()
++        capacity = sum(cap for a, b, cap, _ in arcs if a in cut and b not in cut)
++        if capacity != v or claims["result"] != "EVIDENCE_CONFLICT" or claims["conditional_material_closed"] is not False:
++            raise Rejected()
++        return {"status": "VALID_MATH_INFEASIBILITY", "result": "EVIDENCE_CONFLICT",
++                "mathematics_accepted": True, "F_nonempty": False, "flow_value": v,
++                "required_flow": len(value["U"]), "cut_capacity": capacity, "R_T": None, "H_T": None,
++                "conditional_material_closed": False, "native_admission": "SOURCE_OR_REFINEMENT_GAP",
++                "global_complete": False, "remaining_obligations": sorted(remaining), "solver_called": False}
++    _keys(proof, ("kind", "m", "d"))
++    if proof["kind"] != "OPTIMUM":
++        raise Rejected()
++    _keys(claims, ("C_T", "m_T", "d_T", "R_T", "H_T", "conditional_material_closed",
++                   "native_admission", "global_complete", "remaining_obligations"))
++    m, residual_m = _optimal(proof["m"], value, "m", lim)
++    d, residual_d = _optimal(proof["d"], value, "d", lim)
++    total = sum(value["c"][i] for i in value["T"])
++    expected = {"C_T": total, "m_T": m, "d_T": d, "R_T": total - m, "H_T": total - d}
++    if not 0 <= expected["R_T"] <= expected["H_T"]:
++        raise Rejected()
++    for key, val in expected.items():
++        if _int(claims[key], lim["integer_bits"] + 16) != val:
++            raise Rejected()
++    closed = bool(expected["H_T"] == 0 and ready)
++    if _bool(claims["conditional_material_closed"]) != closed:
++        raise Rejected()
++    return {"status": "VALID_MATH_OPTIMUM", "mathematics_accepted": True, "F_nonempty": True,
++            **expected, "conditional_material_closed": closed,
++            "native_admission": "SOURCE_OR_REFINEMENT_GAP", "global_complete": False,
++            "remaining_obligations": sorted(remaining), "math_input_digest": math_hash,
++            "residual_arcs_checked": residual_m + residual_d, "solver_called": False,
++            "source_authentication_performed": False}
++
++
++def _strict_load(raw):
++    def pairs(rows):
++        result = {}
++        for key, value in rows:
++            if key in result:
++                raise Rejected()
++            result[key] = value
++        return result
++
++    def constant(_):
++        raise Rejected()
++
++    return json.loads(raw, object_pairs_hook=pairs, parse_constant=constant)
++
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("proof")
++    parser.add_argument("--out")
++    parser.add_argument("--expected-math-digest")
++    parser.add_argument("--expected-scope-digest")
++    parser.add_argument("--expected-dependency-digest")
++    args = parser.parse_args()
++    try:
++        path = Path(args.proof)
++        if path.stat().st_size > DEFAULT["input_bytes"]:
++            raise Rejected("UNKNOWN_RESOURCE_LIMIT")
++        result = check_certificate(_strict_load(path.read_text(encoding="utf-8")),
++                                   args.expected_math_digest, args.expected_scope_digest,
++                                   expected_digests=({"dependency_digest": args.expected_dependency_digest}
++                                       if args.expected_dependency_digest else None))
++    except (OSError, UnicodeError, ValueError) as error:
++        result = {"status": error.code if isinstance(error, Rejected) else "INVALID_CERTIFICATE",
++                  "mathematics_accepted": False, "obligation_action": "KEEP_EXISTING"}
++    rendered = json.dumps(result, sort_keys=True, indent=2) + "\n"
++    if args.out:
++        Path(args.out).write_text(rendered, encoding="utf-8")
++    print(rendered, end="")
++    return 0 if result.get("mathematics_accepted") else 1
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+--- /dev/null
++++ scripts/run_dsat_offline_tests.py
+@@ -0,0 +1,158 @@
++"""Run ONLY the two R06-authorized offline modules and retain immutable records."""
++import argparse
++import ast
++import hashlib
++import importlib
++import json
++from pathlib import Path
++import re
++import sys
++from time import perf_counter_ns
++import traceback
++import unittest
++
++
++ROOT = Path(__file__).resolve().parents[1]
++TEST_MODULES = ("test_dsat_projection", "test_dsat_certificate")
++AUDIT_PATHS = (
++    "src/auth_lifecycle/__init__.py", "src/auth_lifecycle/online_state/__init__.py",
++    "src/auth_lifecycle/online_state/dsat_types.py",
++    "src/auth_lifecycle/online_state/dsat_projection.py",
++    "src/auth_lifecycle/online_state/dsat_flow.py",
++    "scripts/check_dsat_certificate.py", "tests/dsat_test_support.py",
++    "tests/test_dsat_projection.py", "tests/test_dsat_certificate.py",
++)
++ALLOWED_IMPORTS = {"argparse", "ast", "copy", "dataclasses", "hashlib", "importlib", "json", "pathlib",
++                   "re", "socket", "time", "tracemalloc", "unittest", "dsat_test_support", "dsat_types",
++                   "auth_lifecycle"}
++
++
++def preflight():
++    audit = []
++    for name in AUDIT_PATHS:
++        p = ROOT / name
++        raw = p.read_bytes()
++        tree = ast.parse(raw.decode("utf-8-sig"))
++        imported = []
++        for node in ast.walk(tree):
++            if isinstance(node, ast.Import):
++                imported.extend(a.name for a in node.names)
++            elif isinstance(node, ast.ImportFrom):
++                imported.append(node.module or "")
++        for module in imported:
++            if module.split(".")[0] not in ALLOWED_IMPORTS:
++                raise RuntimeError("UNAPPROVED_IMPORT")
++            if any(bad in module.split(".") for bad in ("storage", "services", "native_provider", "native_http")):
++                raise RuntimeError("RUNTIME_IMPORT_BLOCKED")
++        audit.append({"path": name, "sha256": hashlib.sha256(raw).hexdigest(), "imports": imported})
++    for p in sorted((ROOT / "tests" / "fixtures" / "dsat").glob("*.json")):
++        audit.append({"path": str(p.relative_to(ROOT)), "sha256": hashlib.sha256(p.read_bytes()).hexdigest()})
++    return audit
++
++
++class Tee:
++    def __init__(self, file):
++        self.file = file
++
++    def write(self, text):
++        self.file.write(text)
++        sys.stdout.write(text)
++
++    def flush(self):
++        self.file.flush()
++        sys.stdout.flush()
++
++
++class RecordedResult(unittest.TextTestResult):
++    def __init__(self, *args, **kwargs):
++        super().__init__(*args, **kwargs)
++        self.records = {}
++
++    def startTest(self, test):
++        self.records[test.id()] = {"test": test.id(), "status": "RUNNING", "started_ns": perf_counter_ns()}
++        super().startTest(test)
++
++    def addSuccess(self, test):
++        self.records[test.id()]["status"] = "PASS"
++        super().addSuccess(test)
++
++    def addFailure(self, test, err):
++        self.records[test.id()].update(status="FAIL", traceback=self._exc_info_to_string(err, test))
++        super().addFailure(test, err)
++
++    def addError(self, test, err):
++        self.records[test.id()].update(status="ERROR", traceback=self._exc_info_to_string(err, test))
++        super().addError(test, err)
++
++    def addSkip(self, test, reason):
++        self.records[test.id()].update(status="SKIP", reason=reason)
++        super().addSkip(test, reason)
++
++    def addSubTest(self, test, subtest, err):
++        if err is not None:
++            self.records[test.id()].update(status="FAIL", traceback=self._exc_info_to_string(err, test))
++        super().addSubTest(test, subtest, err)
++
++    def stopTest(self, test):
++        rec = self.records[test.id()]
++        rec["elapsed_ns"] = perf_counter_ns() - rec.pop("started_ns")
++        super().stopTest(test)
++
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("--records-root", required=True)
++    parser.add_argument("--run-id", required=True)
++    args = parser.parse_args()
++    parent = Path(args.records_root).resolve()
++    allowed = (ROOT.parent / "research_g2_dsat_implementation").resolve()
++    if not parent.is_relative_to(allowed) or not re.fullmatch(r"run_[0-9]{3}", args.run_id):
++        raise SystemExit("RECORD_PATH_OUT_OF_SCOPE")
++    directory = parent / "runs" / args.run_id
++    directory.mkdir(parents=True, exist_ok=False)
++    command = [sys.executable, str(Path(__file__).resolve()), *sys.argv[1:]]
++    started = perf_counter_ns()
++    record = {"schema": "dsat-offline-run/1", "command": command, "cwd": str(Path.cwd()),
++              "python": sys.version, "test_modules": list(TEST_MODULES), "native_calls": 0,
++              "source_mode": "SYNTHETIC_CONTRACT", "optimizer_executed": False}
++    with (directory / "stdout.log").open("w", encoding="utf-8") as logfile:
++        try:
++            record["preflight"] = preflight()
++            sys.path.insert(0, str(ROOT / "src"))
++            sys.path.insert(0, str(ROOT / "tests"))
++            modules = [importlib.import_module(name) for name in TEST_MODULES]
++            for module, name in zip(modules, TEST_MODULES):
++                if Path(module.__file__).resolve() != (ROOT / "tests" / (name + ".py")).resolve():
++                    raise RuntimeError("TEST_MODULE_PATH_MISMATCH")
++            suite = unittest.TestSuite(unittest.defaultTestLoader.loadTestsFromModule(module) for module in modules)
++            result = unittest.TextTestRunner(stream=Tee(logfile), verbosity=2, resultclass=RecordedResult).run(suite)
++            records = list(result.records.values())
++            counts = {status: sum(r["status"] == status for r in records) for status in ("PASS", "FAIL", "ERROR", "SKIP")}
++            record.update(test_count=result.testsRun, counts=counts, tests=records,
++                          successful=result.wasSuccessful(), backend="BACKEND_UNAVAILABLE",
++                          scope="pure S1/network construction and independent checking of supplied vectors; no optimizer solve")
++            support = importlib.import_module("dsat_test_support")
++            (directory / "CASE_RESULTS.json").write_text(json.dumps(support.CASE_RESULTS, indent=2) + "\n", encoding="utf-8")
++            proofs = directory / "proofs"
++            proofs.mkdir()
++            proof_files = []
++            for name, packet in sorted(support.CORE_PACKETS.items()):
++                p = proofs / (name + ".json")
++                p.write_text(json.dumps(packet, indent=2) + "\n", encoding="utf-8")
++                proof_files.append({"path": str(p), "sha256": hashlib.sha256(p.read_bytes()).hexdigest(), "bytes": p.stat().st_size})
++            record["proof_files"] = proof_files
++            code = 0 if result.wasSuccessful() else 1
++        except Exception:
++            trace = traceback.format_exc()
++            Tee(logfile).write(trace)
++            record.update(successful=False, preflight_or_import_error=trace,
++                          test_count=0, counts={"PASS": 0, "FAIL": 0, "ERROR": 1, "SKIP": 0})
++            code = 2
++    record["C_total_offline_ns"] = perf_counter_ns() - started
++    (directory / "RUN_RESULT.json").write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
++    print(json.dumps({"run": str(directory), "counts": record["counts"], "successful": record["successful"]}))
++    return code
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+--- /dev/null
++++ tests/dsat_test_support.py
+@@ -0,0 +1,55 @@
++"""Synthetic-only fixtures and independently loaded pure checker for R06 tests."""
++import copy
++import hashlib
++import importlib.util
++import json
++from pathlib import Path
++
++from auth_lifecycle.online_state.dsat_types import canonical, digest, math_digest, packet_digest
++from auth_lifecycle.online_state.dsat_flow import make_bindings, assemble_optimum_packet, assemble_infeasible_packet
++
++
++ROOT = Path(__file__).resolve().parents[1]
++FIXTURES = Path(__file__).parent / "fixtures" / "dsat"
++spec = importlib.util.spec_from_file_location("dsat_independent_checker", ROOT / "scripts" / "check_dsat_certificate.py")
++CHECKER = importlib.util.module_from_spec(spec)
++spec.loader.exec_module(CHECKER)
++CASE_RESULTS = {}
++CORE_PACKETS = {}
++
++
++def load_case(case_id):
++    return json.loads((FIXTURES / (case_id + ".json")).read_text(encoding="utf-8"))
++
++
++def rebind_fixture(bundle):
++    """Explicit synthetic test authority, never called by the projection on payloads."""
++    return {"mode": "SYNTHETIC_CONTRACT", "snapshot_digest": digest("snapshot", bundle["authority"]),
++            "contract_digest": digest("projection_contract", {k: bundle[k] for k in
++                  ("contract", "scope", "attempts", "capacity_contracts")}),
++            "obligations_digest": digest("O_before", bundle["obligations"]),
++            "costs_digest": digest("cost_ledger", bundle["costs"]),
++            "envelope_digests": {e["id"]: digest("envelope", e) for e in bundle["history"] + bundle["envelopes"]},
++            "producers": ["syn:collector"], "permits": ["syn:permit"]}
++
++
++def proof_for(case, projection, target="A"):
++    supplied = case["manual_proofs"][target]
++    math_input = copy.deepcopy(projection["math_input"])
++    math_input["T"] = supplied["T"]
++    bindings = make_bindings(case["bundle"], projection)
++    bindings["scope"]["target_attempts"] = list(supplied["T"])
++    if supplied["kind"] == "INFEASIBLE":
++        return assemble_infeasible_packet(math_input, bindings, supplied["flow"], supplied["cut"], supplied["value"])
++    return assemble_optimum_packet(math_input, bindings, supplied["m"], supplied["d"])
++
++
++def rehash_packet(packet):
++    """Test attack helper: update hashes so semantic checks, not only hashes, run."""
++    packet["digests"]["math_input_digest"] = math_digest(packet["math_input"])
++    for component, field in {"evidence_bundle": "evidence_bundle_digest", "contract": "contract_digest",
++                             "scope": "scope_digest", "dependency": "dependency_digest",
++                             "cost_ledger": "cost_ledger_digest", "O_before": "O_before_digest"}.items():
++        packet["digests"][field] = digest(component, packet["bindings"][component])
++    packet["packet_digest"] = packet_digest(packet)
++    return packet
+--- /dev/null
++++ tests/test_dsat_projection.py
+@@ -0,0 +1,254 @@
++"""Only pure synthetic S1/network tests; no runtime/native imports."""
++import ast
++import copy
++import json
++from pathlib import Path
++import socket
++from time import perf_counter_ns
++import tracemalloc
++import unittest
++from unittest.mock import patch
++
++from auth_lifecycle.online_state.dsat_projection import project_evidence
++from auth_lifecycle.online_state.dsat_types import (
++    AuthoritySnapshot, EvidenceEnvelope, Limits, canonical, normalize_math, InputError,
++)
++from auth_lifecycle.online_state.dsat_flow import build_network, solve
++from dsat_test_support import load_case, rebind_fixture, CASE_RESULTS, ROOT
++
++
++class ProjectionCases(unittest.TestCase):
++    pass
++
++
++def _case_test(case_id):
++    def run(self):
++        load_start = perf_counter_ns()
++        case = load_case(case_id)
++        input_read_ns = perf_counter_ns() - load_start
++        bundle, manifest, expected = case["bundle"], case["trusted_manifest"], case["expected"]
++        before = canonical(bundle)
++        parse_start = perf_counter_ns()
++        AuthoritySnapshot.parse(bundle["authority"], Limits())
++        for e in bundle["history"] + bundle["envelopes"]:
++            EvidenceEnvelope.parse(e, Limits())
++        parse_ns = perf_counter_ns() - parse_start
++        tracemalloc.start()
++        start = perf_counter_ns()
++        result = project_evidence(bundle, manifest)
++        compile_ns = perf_counter_ns() - start
++        _, peak = tracemalloc.get_traced_memory()
++        tracemalloc.stop()
++        graph_ns = None
++        graph_arcs = None
++        if result["math_input"] is not None:
++            start = perf_counter_ns()
++            net_m = build_network(result["math_input"], "m")
++            build_network(result["math_input"], "d")
++            graph_ns = perf_counter_ns() - start
++            graph_arcs = len(net_m["arcs"])
++        CASE_RESULTS[case_id] = {"case_id": case_id, "projection_status": result["status"],
++            "math_ready": result["math_ready"], "native_admission": result["native_admission"],
++            "C_input_read_ns": input_read_ns, "standalone_typed_parse_ns": parse_ns,
++            "C_compile_ns": compile_ns, "C_network_build_ns": graph_ns, "C_flow_ns": None,
++            "flow_backend": "BACKEND_UNAVAILABLE", "input_bytes": len(before),
++            "projection_bytes": len(canonical(result)), "compile_traced_peak_bytes": peak,
++            "work_counts": result.get("work_counts"), "network_arcs": graph_arcs,
++            "global_complete": result["global_complete"], "actual_native_cost": "NOT_MEASURED",
++            "assertions_completed": False}
++        self.assertEqual(result["status"], expected["status"])
++        self.assertEqual(result["math_ready"], expected["math_ready"])
++        self.assertEqual(len(result["units"]), expected["unit_count"])
++        self.assertEqual(result["partial_math"]["D_P"], expected["D"])
++        self.assertEqual(result["native_admission"], "SOURCE_OR_REFINEMENT_GAP")
++        self.assertIs(result["global_complete"], False)
++        old = {o["id"] for o in bundle["obligations"]}
++        proposed = {o["id"] for o in result["obligations_proposed"]}
++        self.assertTrue(old <= proposed)
++        if "audit" in expected:
++            self.assertIn(expected["audit"], proposed)
++        if "quarantined" in expected:
++            self.assertIn(expected["quarantined"], [x["unit_id"] for x in result["quarantined"]])
++        self.assertEqual(canonical(bundle), before)
++        CASE_RESULTS[case_id]["assertions_completed"] = True
++    return run
++
++
++for _id in [f"A{i:02d}" for i in range(1, 25)]:
++    setattr(ProjectionCases, "test_" + _id, _case_test(_id))
++
++
++class ProjectionAdversarialTests(unittest.TestCase):
++    def test_no_external_io_in_projection(self):
++        case = load_case("A06")
++        with patch("builtins.open", side_effect=AssertionError("file access")), \
++             patch.object(Path, "open", side_effect=AssertionError("path access")), \
++             patch.object(socket, "socket", side_effect=AssertionError("network access")):
++            result = project_evidence(case["bundle"], case["trusted_manifest"])
++        self.assertTrue(result["math_ready"])
++
++    def test_projection_imports_are_pure(self):
++        for name in ("dsat_projection.py", "dsat_types.py"):
++            tree = ast.parse((ROOT / "src" / "auth_lifecycle" / "online_state" / name).read_text(encoding="utf-8"))
++            imported = []
++            for node in ast.walk(tree):
++                if isinstance(node, ast.Import):
++                    imported.extend(a.name for a in node.names)
++                elif isinstance(node, ast.ImportFrom):
++                    imported.append(node.module)
++            self.assertTrue(set(imported) <= {"dataclasses", "hashlib", "json", "re", "dsat_types"})
++
++    def test_missing_capacity_is_not_zero_or_one(self):
++        case = load_case("A06")
++        case["bundle"]["capacity_contracts"][0]["capacity"] = None
++        result = project_evidence(case["bundle"], rebind_fixture(case["bundle"]))
++        self.assertFalse(result["math_ready"])
++        self.assertIn("i_p", result["partial_math"]["capacity_unknown"])
++        self.assertTrue(result["obligations_proposed"])
++
++    def test_untrusted_snapshot_cannot_reassign_origin(self):
++        case = load_case("A06")
++        case["bundle"]["authority"]["requests"][2]["origin"]["grant_id"] = "gV"
++        r = project_evidence(case["bundle"], case["trusted_manifest"])
++        self.assertEqual(r["status"], "REJECT_UNAUTHORIZED")
++        self.assertIsNone(r["obligations_proposed"])
++        self.assertEqual(r["obligation_action"], "KEEP_EXISTING")
++
++    def test_true_flag_does_not_authenticate_payload(self):
++        case = load_case("A06")
++        case["bundle"]["source_confirmed"] = True
++        r = project_evidence(case["bundle"], case["trusted_manifest"])
++        self.assertEqual(r["status"], "INVALID_INPUT")
++        self.assertFalse(r["global_complete"])
++
++    def test_secret_fields_are_rejected_without_echo(self):
++        case = load_case("A06")
++        case["bundle"]["authority"]["password"] = "SYNTHETIC_SECRET_MUST_NOT_ESCAPE"
++        r = project_evidence(case["bundle"], rebind_fixture(case["bundle"]))
++        self.assertIn(r["status"], {"INVALID_INPUT", "REJECT_UNAUTHORIZED"})
++        self.assertNotIn("SYNTHETIC_SECRET", json.dumps(r))
++
++    def test_unknown_birth_stays_alias_uncertain(self):
++        case = load_case("A06")
++        case["bundle"]["envelopes"][1]["payload"]["birth_ref"] = None
++        r = project_evidence(case["bundle"], rebind_fixture(case["bundle"]))
++        self.assertEqual(len(r["units"]), 4)
++        self.assertEqual(len(r["unknown_aliases"]), 1)
++        self.assertFalse(r["source_scope_preconditions_declared"])
++
++    def test_conflicting_exact_sources_are_retained(self):
++        case = load_case("A02")
++        e = copy.deepcopy(case["bundle"]["envelopes"][1])
++        e["id"] = "syn:conflict"
++        req = case["bundle"]["authority"]["requests"][3]
++        e["payload"]["source_candidates"] = ["i2"]
++        e["payload"]["request_binding"] = {k: req[k] for k in
++            ("rid", "request_digest", "origin", "attempt_id", "release_version")}
++        case["bundle"]["envelopes"].append(e)
++        r = project_evidence(case["bundle"], rebind_fixture(case["bundle"]))
++        self.assertEqual(r["status"], "EVIDENCE_CONFLICT")
++        self.assertFalse(r["math_ready"])
++        self.assertTrue(r["obligations_proposed"])
++
++    def test_unknown_source_not_silently_removed(self):
++        case = load_case("A06")
++        case["bundle"]["envelopes"][1]["payload"]["source_candidates"].append("external_unknown")
++        r = project_evidence(case["bundle"], rebind_fixture(case["bundle"]))
++        self.assertFalse(r["math_ready"])
++        self.assertEqual(r["status"], "INSUFFICIENT_COVERAGE")
++
++    def test_history_survives_current_deletion(self):
++        case = load_case("A15")
++        r = project_evidence(case["bundle"], case["trusted_manifest"])
++        c1 = next(u for u in r["units"] if u["unit_id"] == "c1")
++        self.assertTrue(c1["historically_deleted"])
++        self.assertIn(["c1", "i1"], r["math_input"]["E"])
++
++    def test_zero_local_http_reservation_not_used_as_capacity_zero(self):
++        # No H/actual_sends field is promoted to total capacity by this interface.
++        case = load_case("A03")
++        r = project_evidence(case["bundle"], case["trusted_manifest"])
++        self.assertEqual(r["math_input"]["c"]["i1"], 1)
++        self.assertNotIn("m_T", r)
++
++    def test_readonly_unknown_B_adds_execution_not_creation(self):
++        case = load_case("A09")
++        case["bundle"]["authority"]["requests"][-1]["phase"] = "DISPATCHED_UNKNOWN"
++        r = project_evidence(case["bundle"], rebind_fixture(case["bundle"]))
++        self.assertEqual(len(r["units"]), 2)
++        self.assertIn("exec:rB1", [o["id"] for o in r["obligations_proposed"]])
++        self.assertIn("settle:i1", [o["id"] for o in r["obligations_proposed"]])
++
++    def test_resource_limit_preserves_existing_obligations(self):
++        case = load_case("A06")
++        r = project_evidence(case["bundle"], case["trusted_manifest"], Limits(records=1))
++        self.assertEqual(r["status"], "UNKNOWN_RESOURCE_LIMIT")
++        self.assertEqual(r["obligation_action"], "KEEP_EXISTING")
++
++    def test_bool_and_float_capacities_rejected(self):
++        for bad in (True, 1.0, -1):
++            with self.subTest(bad=bad):
++                case = load_case("A06")
++                case["bundle"]["capacity_contracts"][0]["capacity"] = bad
++                r = project_evidence(case["bundle"], rebind_fixture(case["bundle"]))
++                self.assertEqual(r["status"], "INVALID_INPUT")
++
++    def test_bad_legacy_request_digest_rejected(self):
++        case = load_case("A06")
++        case["bundle"]["authority"]["requests"][0]["request_digest"] = "0" * 64
++        r = project_evidence(case["bundle"], rebind_fixture(case["bundle"]))
++        self.assertEqual(r["status"], "REJECT_UNAUTHORIZED")
++
++    def test_http_failure_does_not_become_inactive_observation(self):
++        case = load_case("A16")
++        point = next(e for e in case["bundle"]["envelopes"] if e["kind"] == "MATERIAL")
++        point["payload"]["http"] = 500
++        r = project_evidence(case["bundle"], rebind_fixture(case["bundle"]))
++        self.assertEqual(r["status"], "INSUFFICIENT_COVERAGE")
++        self.assertIsNone(r["point_observations"][0]["active"])
++        self.assertIs(r["point_observations"][0]["reported_active"], False)
++        self.assertEqual(r["math_input"]["D_P"], [])
++
++    def test_unperformed_query_does_not_become_inactive(self):
++        case = load_case("A16")
++        point = next(e for e in case["bundle"]["envelopes"] if e["kind"] == "MATERIAL")
++        point["payload"]["performed"] = False
++        r = project_evidence(case["bundle"], rebind_fixture(case["bundle"]))
++        self.assertEqual(r["status"], "INSUFFICIENT_COVERAGE")
++        self.assertIsNone(r["point_observations"][0]["active"])
++        self.assertEqual(r["math_input"]["D_P"], [])
++
++    def test_duplicate_e_and_bad_endpoints_rejected(self):
++        case = load_case("A06")
++        m = project_evidence(case["bundle"], case["trusted_manifest"])["math_input"]
++        for edge in (m["E"][0], ["missing", "i1"]):
++            bad = copy.deepcopy(m); bad["E"].append(edge)
++            with self.assertRaises(InputError):
++                normalize_math(bad)
++
++    def test_original_capacity_retained_when_network_clips(self):
++        m = {"I": ["s"], "T": ["s"], "c": {"s": 2 ** 80}, "U": [], "E": [], "D_P": []}
++        net = build_network(m, "m")
++        self.assertEqual(net["C_T"], 2 ** 80)
++        self.assertEqual(net["arcs"][0]["capacity"], 0)
++        self.assertIn("I:s", net["nodes"])
++
++    def test_network_demands_modes_and_namespaces(self):
++        case = load_case("A06")
++        m = project_evidence(case["bundle"], case["trusted_manifest"])["math_input"]
++        net = build_network(m, "m")
++        self.assertEqual(net["demand"]["s"], -5)
++        self.assertEqual(net["demand"]["t"], 5)
++        self.assertEqual(net["required_flow"], 5)
++        self.assertEqual(len(net["nodes"]), 12)
++        self.assertEqual(len(net["arcs"]), 21)
++        self.assertTrue(all(a["cost"] in {0, 1} for a in net["arcs"]))
++
++    def test_backend_missing_is_not_a_zero_flow_solution(self):
++        case = load_case("A06")
++        m = project_evidence(case["bundle"], case["trusted_manifest"])["math_input"]
++        r = solve(m)
++        self.assertEqual(r["status"], "BACKEND_UNAVAILABLE")
++        self.assertIsNone(r["m_T"])
++        self.assertIsNone(r["H_T"])
++        self.assertFalse(r["solved"])
+--- /dev/null
++++ tests/test_dsat_certificate.py
+@@ -0,0 +1,309 @@
++"""Bounded synthetic mathematical proof tests, independent of any optimizer."""
++import ast
++import copy
++import hashlib
++from pathlib import Path
++from time import perf_counter_ns
++import unittest
++from unittest.mock import patch
++
++from auth_lifecycle.online_state.dsat_projection import project_evidence
++from auth_lifecycle.online_state.dsat_types import canonical
++from auth_lifecycle.online_state.dsat_flow import (
++    assemble_optimum_packet, assemble_infeasible_packet, make_bindings,
++)
++from dsat_test_support import (
++    CHECKER, ROOT, load_case, rebind_fixture, proof_for, rehash_packet,
++    CASE_RESULTS, CORE_PACKETS,
++)
++
++
++def _project(case):
++    return project_evidence(case["bundle"], case["trusted_manifest"])
++
++
++def _core_packet(case_id="A06", target="A"):
++    case = load_case(case_id)
++    return proof_for(case, _project(case), target)
++
++
++class CoreProofTests(unittest.TestCase):
++    def run_core(self, case_id):
++        case = load_case(case_id)
++        projected = _project(case)
++        outcomes = {}
++        assembly_ns = verify_ns = total_bytes = 0
++        for target in case["manual_proofs"]:
++            started = perf_counter_ns()
++            packet = proof_for(case, projected, target)
++            assembly_ns += perf_counter_ns() - started
++            started = perf_counter_ns()
++            checked = CHECKER.check_certificate(packet, expected_math_digest=packet["digests"]["math_input_digest"],
++                                                expected_scope_digest=packet["digests"]["scope_digest"])
++            verify_ns += perf_counter_ns() - started
++            total_bytes += len(canonical(packet))
++            CORE_PACKETS[case_id + "_" + target] = packet
++            self.assertTrue(checked["mathematics_accepted"], checked)
++            self.assertFalse(checked["solver_called"])
++            self.assertEqual(checked["native_admission"], "SOURCE_OR_REFINEMENT_GAP")
++            self.assertFalse(checked["global_complete"])
++            if case_id == "A19":
++                self.assertEqual(checked["result"], "EVIDENCE_CONFLICT")
++                self.assertEqual(checked["cut_capacity"], 3)
++                self.assertIsNone(checked["H_T"])
++                self.assertTrue(checked["remaining_obligations"])
++            else:
++                self.assertEqual((checked["R_T"], checked["H_T"]), (0, 0))
++                self.assertTrue(checked["conditional_material_closed"])
++            if case_id == "A24":
++                self.assertIn("await_terminal:i1", checked["remaining_obligations"])
++            outcomes[target] = checked
++        CASE_RESULTS.setdefault(case_id, {"case_id": case_id}).update(
++            manual_certificate_results=outcomes, C_proof_assembly_ns=assembly_ns,
++            C_verify_ns=verify_ns, certificate_bytes=total_bytes,
++            proof_source="R05_HAND_SPECIFIED_VECTORS_NOT_OPTIMIZER_OUTPUT")
++
++    def test_A01(self):
++        self.run_core("A01")
++
++    def test_A06(self):
++        self.run_core("A06")
++
++    def test_A19(self):
++        self.run_core("A19")
++
++    def test_A24(self):
++        self.run_core("A24")
++
++
++class CertificateVariants(unittest.TestCase):
++    def test_missing_one_D_has_positive_H_in_both_targets(self):
++        case = load_case("A06")
++        case["bundle"]["envelopes"] = [e for e in case["bundle"]["envelopes"] if e["id"] != "syn:d:v1"]
++        case["trusted_manifest"] = rebind_fixture(case["bundle"])
++        projected = _project(case)
++        cert = copy.deepcopy(case["manual_proofs"]["A"])
++        cert["d"]["cost"] = 2
++        cert["d"]["potentials"] = {"s": -1, "t": 0, "U:b": -1, "U:p": -1,
++            "U:v1": 0, "U:v2": -1, "U:v3": -1, "I:i1": 0, "I:i2": 0,
++            "I:i_p": 0, "I:i_b": -1, "I:j": -1}
++        case["manual_proofs"]["A"] = cert
++        packet = proof_for(case, projected, "A")
++        checked = CHECKER.check_certificate(packet)
++        self.assertTrue(checked["mathematics_accepted"], checked)
++        self.assertEqual((checked["R_T"], checked["H_T"]), (0, 1))
++        self.assertFalse(checked["conditional_material_closed"])
++        CORE_PACKETS["VAR_MISSING_D_A"] = packet
++        # For V, route the missing-D witness to j. All used d-costs are zero.
++        flow = [["s", "U:b", 1], ["s", "U:p", 1], ["s", "U:v1", 1], ["s", "U:v2", 1], ["s", "U:v3", 1],
++                ["U:b", "I:i_b", 1], ["U:p", "I:i_p", 1], ["U:v1", "I:j", 1],
++                ["U:v2", "I:i1", 1], ["U:v3", "I:i2", 1], ["I:i1", "t", 1], ["I:i2", "t", 1],
++                ["I:i_b", "t", 1], ["I:i_p", "t", 1], ["I:j", "t", 1]]
++        cert = copy.deepcopy(case["manual_proofs"]["V"])
++        cert["m"]["flow"] = flow
++        cert["d"] = {"flow": flow, "potentials": {k: 0 for k in cert["m"]["potentials"]}, "cost": 0}
++        case["manual_proofs"]["V"] = cert
++        packet = proof_for(case, projected, "V")
++        checked = CHECKER.check_certificate(packet)
++        self.assertTrue(checked["mathematics_accepted"], checked)
++        self.assertEqual((checked["R_T"], checked["H_T"]), (0, 1))
++        self.assertFalse(checked["conditional_material_closed"])
++        CORE_PACKETS["VAR_MISSING_D_V"] = packet
++
++    def test_fourth_source_breaks_saturation(self):
++        case = load_case("A06"); b = case["bundle"]
++        origin = dict(b["authority"]["grants"][2]["origin"], grant_id="gZ", task="extra", generation="Z0")
++        b["authority"]["grants"].append({"origin": origin, "active": False, "operations": ["issue"], "limit": 1, "reserved": 0, "spent": 1})
++        req = copy.deepcopy(b["authority"]["requests"][-1])
++        req.update(rid="rZ", attempt_id="aZ", release_version=24, origin=origin)
++        req["original_request"].update(rid="rZ", handle="syn_handle_gZ", task="extra", generation="Z0")
++        req["request_digest"] = hashlib.sha256(canonical({"caller": origin["caller"], "request": req["original_request"]})).hexdigest()
++        b["authority"]["requests"].append(req)
++        b["attempts"].append({"id": "z", "rid": "rZ", "capacity_contract_ref": "syn:cap:z", "audit_required": False})
++        b["capacity_contracts"].append({"id": "syn:cap:z", "attempt_ref": "z", "capacity": 1, "source_ref": "syn:single_call_source"})
++        for e in b["envelopes"]:
++            if e["kind"] == "CREATION" and e["payload"]["unit_id"].startswith("v"):
++                e["payload"]["source_candidates"].append("z")
++        case["trusted_manifest"] = rebind_fixture(b); projected = _project(case)
++        common = [["s", "U:b", 1], ["s", "U:p", 1], ["s", "U:v1", 1], ["s", "U:v2", 1], ["s", "U:v3", 1],
++                  ["U:b", "I:i_b", 1], ["U:p", "I:i_p", 1], ["U:v1", "I:i1", 1], ["U:v3", "I:z", 1],
++                  ["I:i1", "t", 1], ["I:i_b", "t", 1], ["I:i_p", "t", 1], ["I:z", "t", 1]]
++        for target, middle, end, cost in [("A", "I:j", "I:j", 2), ("V", "I:i2", "I:i2", 0)]:
++            cert = copy.deepcopy(case["manual_proofs"][target])
++            flow = common + [["U:v2", middle, 1], [end, "t", 1]]
++            pi = dict(cert["m"]["potentials"], **{"I:z": 0})
++            cert["m"] = {"flow": flow, "potentials": pi, "cost": cost}
++            cert["d"] = copy.deepcopy(cert["m"])
++            case["manual_proofs"][target] = cert
++            packet = proof_for(case, projected, target)
++            checked = CHECKER.check_certificate(packet)
++            self.assertTrue(checked["mathematics_accepted"], checked)
++            self.assertEqual((checked["R_T"], checked["H_T"]), (1, 1))
++            self.assertFalse(checked["conditional_material_closed"])
++            CORE_PACKETS["VAR_FOURTH_SOURCE_" + target] = packet
++
++    def test_open_grant_frontier_blocks_conditional_close_even_H_zero(self):
++        for kind in ("grant", "derivative"):
++            with self.subTest(kind=kind):
++                case = load_case("A06")
++                if kind == "grant":
++                    case["bundle"]["authority"]["creation_paused"] = False
++                    case["bundle"]["authority"]["grants"][2].update(active=True, limit=3)
++                else:
++                    case["bundle"]["contract"].update(frontier_complete=False, derivations_covered=False)
++                    case["bundle"]["scope"]["open_frontiers"] = ["frontier:external"]
++                case["trusted_manifest"] = rebind_fixture(case["bundle"])
++                p = proof_for(case, _project(case), "A")
++                r = CHECKER.check_certificate(p)
++                self.assertTrue(r["mathematics_accepted"], r)
++                self.assertEqual(r["H_T"], 0)
++                self.assertFalse(r["conditional_material_closed"])
++                self.assertFalse(r["global_complete"])
++
++    def test_empty_witnesses_original_large_capacity_not_zero(self):
++        case = load_case("A06"); bindings = make_bindings(case["bundle"], _project(case))
++        m = {"I": ["s"], "T": ["s"], "c": {"s": 2 ** 80}, "U": [], "E": [], "D_P": []}
++        bindings["scope"]["target_attempts"] = ["s"]
++        cert = {"flow": [], "potentials": {"s": 0, "t": 0, "I:s": 0}, "cost": 0}
++        r = CHECKER.check_certificate(assemble_optimum_packet(m, bindings, cert, cert))
++        self.assertTrue(r["mathematics_accepted"], r)
++        self.assertEqual(r["H_T"], 2 ** 80)
++        self.assertFalse(r["conditional_material_closed"])
++
++    def test_empty_target_is_only_empty_scope(self):
++        p = _core_packet(); m = p["math_input"]; m["T"] = []
++        p["bindings"]["scope"]["target_attempts"] = []
++        flow = p["proof"]["m"]["flow"]
++        cert = {"flow": flow, "potentials": {k: 0 for k in p["proof"]["m"]["potentials"]}, "cost": 0}
++        q = assemble_optimum_packet(m, p["bindings"], cert, cert)
++        r = CHECKER.check_certificate(q)
++        self.assertTrue(r["mathematics_accepted"], r)
++        self.assertEqual(r["C_T"], 0)
++        self.assertFalse(r["global_complete"])
++        self.assertEqual(r["native_admission"], "SOURCE_OR_REFINEMENT_GAP")
++
++
++class TamperTests(unittest.TestCase):
++    def reject(self, packet):
++        r = CHECKER.check_certificate(packet)
++        self.assertEqual(r["status"], "INVALID_CERTIFICATE", r)
++        self.assertFalse(r["mathematics_accepted"])
++        self.assertEqual(r["obligation_action"], "KEEP_EXISTING")
++
++    def test_packet_hash_tampering(self):
++        p = _core_packet(); p["claims"]["H_T"] = 1
++        self.reject(p)
++
++    def test_input_binding_tampering(self):
++        p = _core_packet(); p["math_input"]["c"]["i1"] = 2
++        self.reject(p)
++
++    def test_rehashed_false_numeric_claim(self):
++        p = _core_packet(); p["claims"]["R_T"] = 1
++        self.reject(rehash_packet(p))
++
++    def test_zero_flow_cannot_satisfy_nonzero_demand(self):
++        p = _core_packet(); p["proof"]["m"]["flow"] = []
++        self.reject(rehash_packet(p))
++
++    def test_flow_capacity_tampering(self):
++        p = _core_packet(); p["proof"]["d"]["flow"][0][2] = 2
++        self.reject(rehash_packet(p))
++
++    def test_illegal_flow_arc(self):
++        p = _core_packet(); p["proof"]["d"]["flow"][0][0] = "I:nonexistent"
++        self.reject(rehash_packet(p))
++
++    def test_reverse_residual_violation(self):
++        p = _core_packet(); p["proof"]["m"]["potentials"]["I:i1"] = 0
++        self.reject(rehash_packet(p))
++
++    def test_forward_residual_violation(self):
++        p = _core_packet(); p["proof"]["m"]["potentials"].update({"s": -1, "U:v1": -1})
++        self.reject(rehash_packet(p))
++
++    def test_missing_potential_node(self):
++        p = _core_packet(); del p["proof"]["m"]["potentials"]["U:v3"]
++        self.reject(rehash_packet(p))
++
++    def test_flow_and_potential_bool_float_rejected(self):
++        for field, val in [("flow", True), ("flow", 1.0), ("potential", False), ("cost", 3.0)]:
++            with self.subTest(field=field, val=val):
++                p = _core_packet()
++                if field == "flow":p["proof"]["m"]["flow"][0][2] = val
++                elif field == "potential":p["proof"]["m"]["potentials"]["s"] = val
++                else:p["proof"]["m"]["cost"] = val
++                self.reject(rehash_packet(p))
++
++    def test_duplicate_and_invalid_E(self):
++        for edge in (["v1", "i1"], ["v1", "missing"]):
++            p = _core_packet(); p["math_input"]["E"].append(edge)
++            self.reject(rehash_packet(p))
++
++    def test_bad_integer_capacity(self):
++        for value in (True, 1.0, -1):
++            p = _core_packet(); p["math_input"]["c"]["i1"] = value
++            self.reject(rehash_packet(p))
++
++    def test_cut_tampering(self):
++        p = _core_packet("A19"); p["proof"]["cut"].remove("I:i1")
++        self.reject(rehash_packet(p))
++
++    def test_infeasible_flow_value_tampering(self):
++        p = _core_packet("A19"); p["proof"]["value"] = 4
++        self.reject(rehash_packet(p))
++
++    def test_cut_requires_s_and_excludes_t(self):
++        for change in ("remove_s", "include_t"):
++            p = _core_packet("A19")
++            if change == "remove_s":p["proof"]["cut"].remove("s")
++            else:p["proof"]["cut"].append("t")
++            self.reject(rehash_packet(p))
++
++    def test_cannot_clear_obligations_or_promote_native(self):
++        for field, val in [("remaining_obligations", []), ("global_complete", True), ("native_admission", "CLOSED")]:
++            p = _core_packet("A24"); p["claims"][field] = val
++            self.reject(rehash_packet(p))
++
++    def test_scope_target_must_match_bound_T(self):
++        p = _core_packet(); p["bindings"]["scope"]["target_attempts"] = ["j"]
++        self.reject(rehash_packet(p))
++
++    def test_external_pins_reject_self_rehashed_version_or_contract(self):
++        for component, field in [("dependency", "dependency_digest"), ("contract", "contract_digest")]:
++            p = _core_packet(); pinned = p["digests"][field]
++            p["bindings"][component]["source_version"] = "changed_version"
++            p["claims"]["conditional_material_closed"] = False
++            rehash_packet(p)
++            r = CHECKER.check_certificate(p, expected_digests={field: pinned})
++            self.assertEqual(r["status"], "INVALID_CERTIFICATE")
++
++    def test_resource_limits_are_unknown_not_infeasibility(self):
++        p = _core_packet()
++        for lim in ({"input_bytes": 1}, {"edges": 1}, {"witnesses": 1}):
++            r = CHECKER.check_certificate(p, limits=lim)
++            self.assertEqual(r["status"], "UNKNOWN_RESOURCE_LIMIT")
++            self.assertFalse(r["mathematics_accepted"])
++        p["math_input"]["c"]["i1"] = 2 ** 129
++        r = CHECKER.check_certificate(rehash_packet(p))
++        self.assertEqual(r["status"], "UNKNOWN_RESOURCE_LIMIT")
++
++    def test_duplicate_JSON_keys_rejected(self):
++        with self.assertRaises(CHECKER.Rejected):
++            CHECKER._strict_load('{"a":1,"a":2}')
++
++    def test_independent_checker_has_no_solver_or_runtime_import(self):
++        tree = ast.parse((ROOT / "scripts" / "check_dsat_certificate.py").read_text(encoding="utf-8"))
++        names = []
++        for node in ast.walk(tree):
++            if isinstance(node, ast.Import):names.extend(a.name for a in node.names)
++            elif isinstance(node, ast.ImportFrom):names.append(node.module)
++        self.assertTrue(set(names) <= {"argparse", "hashlib", "json", "pathlib", "re"})
++        p = _core_packet()
++        with patch("builtins.open", side_effect=AssertionError("I/O")), \
++             patch.object(Path, "open", side_effect=AssertionError("I/O")):
++            r = CHECKER.check_certificate(p)
++        self.assertTrue(r["mathematics_accepted"])
++
++    def test_optimizer_execution_not_run_without_dependency(self):
++        self.skipTest("No installed approved mature flow backend; manual proof checking is exercised separately")

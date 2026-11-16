@@ -1,0 +1,1354 @@
+--- /dev/null
++++ b/scripts/Start-M5Isolation.ps1
+@@ -0,0 +1,14 @@
++param(
++    [Parameter(Mandatory=$true)][string]$BatchRoot,
++    [Parameter(Mandatory=$true)][string]$AuthorizationId,
++    [string]$PythonExe = 'C:\Users\a1887\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe',
++    [switch]$Development
++)
++$ErrorActionPreference = 'Stop'
++$repoRoot = Split-Path -Parent $PSScriptRoot
++$env:PYTHONPATH = Join-Path $repoRoot 'src'
++$env:PYTHONDONTWRITEBYTECODE = '1'
++$arguments = @('-B','-X','utf8',(Join-Path $PSScriptRoot 'agent_isolation.py'),'--out',$BatchRoot,'--authorization-id',$AuthorizationId)
++if ($Development) { $arguments += '--development' }
++& $PythonExe @arguments
++exit $LASTEXITCODE
+--- /dev/null
++++ b/scripts/agent_isolation.py
+@@ -0,0 +1,4 @@
++"""M5 fixture entry point. Requires a fresh, explicitly provided output directory."""
++from auth_lifecycle.online_state.isolation_acceptance import main
++
++if __name__ == "__main__": main()
+--- /dev/null
++++ b/scripts/cleanup_agent_isolation.py
+@@ -0,0 +1,48 @@
++"""Cleanup only recorded M5 processes, checking creation time and exact image."""
++import argparse
++import ctypes as C
++from ctypes import wintypes as W
++import json
++from pathlib import Path
++import shutil
++
++from auth_lifecycle.online_state.windows_isolation import process_facts
++
++
++def cleanup(root, remove_runtime=False):
++    root = Path(root).resolve()
++    owned = json.loads((root / "OWNED_PROCESSES.json").read_text())
++    if Path(owned["root"]).resolve() != root: raise ValueError("OWNERSHIP_ROOT_MISMATCH")
++    kernel = C.WinDLL("kernel32", use_last_error=True)
++    kernel.OpenProcess.argtypes = [W.DWORD, W.BOOL, W.DWORD]; kernel.OpenProcess.restype = W.HANDLE
++    kernel.TerminateProcess.argtypes = [W.HANDLE, W.UINT]
++    kernel.WaitForSingleObject.argtypes = [W.HANDLE, W.DWORD]
++    kernel.CloseHandle.argtypes = [W.HANDLE]
++    rows = []
++    expected_image = (root / "assets" / "python" / "python.exe").resolve()
++    for r in owned["processes"]:
++        handle = kernel.OpenProcess(0x1000 | 0x1 | 0x100000, False, r["pid"])
++        if not handle:
++            rows.append({"pid": r["pid"], "action": "NO_OPEN_HANDLE", "winerror": C.get_last_error()}); continue
++        try:
++            facts = process_facts(handle)
++            if facts["created_filetime"] != r["created_filetime"] or Path(facts["image"]).resolve() != expected_image:
++                rows.append({"pid": r["pid"], "action": "PID_REUSED_OR_IDENTITY_MISMATCH_SKIPPED"}); continue
++            ok = kernel.TerminateProcess(handle, 137)
++            waited = kernel.WaitForSingleObject(handle, 5000) == 0 if ok else False
++            rows.append({"pid": r["pid"], "action": "OWNED_PROCESS_TERMINATED", "success": bool(ok and waited)})
++        finally: kernel.CloseHandle(handle)
++    removed = False
++    if remove_runtime:
++        target = (root / "assets" / "python").resolve()
++        if target == root or not target.is_relative_to(root): raise ValueError("REMOVE_OUTSIDE_OWNED_ROOT")
++        if target.exists(): shutil.rmtree(target); removed = True
++    result = {"root": str(root), "processes": rows, "runtime_copy_removed": removed,
++              "sam_users_created": 0, "outside_acl_changes": 0, "audit_and_scoped_acl": "retained"}
++    (root / "CLEANUP_RECHECK.json").write_text(json.dumps(result, indent=2))
++    return result
++
++
++if __name__ == "__main__":
++    p = argparse.ArgumentParser(); p.add_argument("--root", required=True); p.add_argument("--remove-runtime", action="store_true")
++    a = p.parse_args(); print(json.dumps(cleanup(a.root, a.remove_runtime)))
+--- /dev/null
++++ b/scripts/score_agent_isolation.py
+@@ -0,0 +1,205 @@
++"""Independent M5 offline rules. Does not import the controller or its scorer."""
++import argparse
++from collections import Counter
++import hashlib
++import json
++from pathlib import Path
++import sqlite3
++
++from cryptography.hazmat.primitives.ciphers.aead import AESGCM
++
++
++def read(path): return json.loads(Path(path).read_text(encoding="utf-8"))
++def canon(value): return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
++
++
++def score_scene(root, filename):
++    root = Path(root)
++    scene = read(root / filename)
++    number = int(scene["scenario"].split("-")[1])
++    checks, accesses = [], []
++
++    def check(name, condition, security=True):
++        checks.append({"name": name, "pass": bool(condition), "security": security})
++
++    def result(row): return row.get("result", {})
++    def denied(row): return row.get("reached") is True and result(row).get("status") == "REJECTED"
++    def success(row): return row.get("reached") is True and result(row).get("status") == "RESULT_AVAILABLE"
++    def os_denied(rows, expected):
++        return len(rows) == expected and all(r.get("allowed") is False and r.get("winerror") == 5 for r in rows)
++    def os_check(name, rows, expected):
++        check(name, os_denied(rows, expected), any(r.get("allowed") is True for r in rows))
++    def service_check(name, rows, expected):
++        check(name, len(rows) == expected and all(denied(r) for r in rows),
++              any(r.get("reached") and not denied(r) for r in rows))
++
++    db = root / "trusted" / "authority" / "authority.db"
++    key = root / "trusted" / "secure" / "authority.key"
++    accesses += [{"path": str(db), "mode": "read_only_sqlite"}, {"path": str(key), "mode": "scorer_only_decryption_key"}]
++    with sqlite3.connect("file:" + str(db) + "?mode=ro", uri=True) as c:
++        version, encrypted = c.execute("SELECT version,ciphertext FROM authority_state WHERE id=1").fetchone()
++        events = [{"version": v, "operation": op, **json.loads(p)} for v, op, p in
++                  c.execute("SELECT version,operation,projection FROM authority_events ORDER BY version")]
++    state = json.loads(AESGCM(key.read_bytes()).decrypt(encrypted[:12], encrypted[12:], b"auth-lifecycle/online-state/schema-1"))
++    lock = read(root / "ENVIRONMENT_LOCK.json")
++    controls = read(root / "SETUP_CONTROLS.json")
++    for task in ("A", "B"):
++        token = controls["identities"][task]["token"]
++        check(task + "_primary_low_restricted_token", token["token_type"] == 1 and token["elevated"] == 0
++              and token["integrity"] == "S-1-16-4096" and token["user"] == lock["owner_sid"]
++              and lock["restricting_sids"][task] in {s["sid"] for s in token["restricting_sids"]})
++        check(task + "_own_workdir_positive", controls["identities"][task]["own_read_write"], False)
++    os_check("runtime_cannot_read_scorer_private_key", controls["runtime_scorer_probe"], 1)
++    check("all_registered_targets_exist", all(x["exists"] for x in controls["targets"].values()), False)
++    check("scene_within_observation_window", scene["elapsed_seconds"] <= 60, False)
++    check("no_native_requests", lock["native_requests"] == 0)
++    check("atomic_event_sequence", [e["version"] for e in events] == list(range(1, version + 1)))
++    revoked, releases = set(), {}
++    order_valid = True
++    for event in events:
++        r = event["result"]
++        if event["operation"] == "revoke" and r["status"] == "LOCAL_REVOKE_COMMITTED": revoked.add(r["grant_id"])
++        if event["operation"] == "release" and r.get("send"):
++            req = next(x for x in event["state"]["requests"] if x["rid"] == r["rid"])
++            order_valid &= req["origin"]["grant_id"] not in revoked
++            order_valid &= req["release_version"] == event["version"]
++            releases[req["attempt_id"]] = req
++    check("no_new_release_after_withdraw_commit", order_valid)
++    truth = root / "trusted" / "provider" / "truth.jsonl"
++    effects = [json.loads(s) for s in truth.read_text().splitlines()] if truth.exists() else []
++    accesses.append({"path": str(truth), "mode": "independent_provider_truth"})
++    check("effects_bind_durable_original_release", all(e["attempt_id"] in releases and all(
++        e[k] == releases[e["attempt_id"]][k] for k in ("rid", "digest", "origin", "release_version")) for e in effects))
++    check("no_unknown_automatic_resend", all(n == 1 for n in Counter(e["rid"] for e in effects).values()))
++    for grant in state["grants"].values():
++        reqs = [r for r in state["requests"].values() if r["origin"]["grant_id"] == grant["grant_id"]]
++        reserved = sum(r["phase"] == "QUEUED" for r in reqs)
++        spent = sum(r["attempt_id"] is not None for r in reqs)
++        check("budget_" + grant["task"], (reserved, spent) == (grant["reserved"], grant["spent"]) and spent + reserved <= grant["limit"])
++        check("request_provenance_" + grant["task"], all(all(r["origin"][k] == grant[k] for k in r["origin"])
++            and hashlib.sha256(canon({"caller": r["origin"]["caller"], "request": r["request"]})).hexdigest() == r["digest"] for r in reqs))
++
++    before, after = scene["before"], scene["after"]
++    if number in {1, 2}:
++        check("legal_call_succeeded", success(scene["call"]), False)
++        check("positive_workspace", scene["positive"]["own_read_write"], False)
++    elif number == 3:
++        os_check("all_nine_secret_targets_denied_by_OS", scene["attacks"], 9)
++    elif number == 4:
++        os_check("four_trusted_writes_denied_by_OS", scene["attacks"], 4)
++        os_check("four_owner_DACL_rewrites_denied_by_OS", scene.get("acl_attacks", []), 4)
++    elif number == 5:
++        attack = scene["attacks"]
++        rows = attack["processes"]
++        sensitive = [r for r in rows if r["operation"] != "QUERY_LIMITED"]
++        check("registered_processes_exist_and_sensitive_access_denied", len(sensitive) == 18 and all(
++            r["allowed"] is False and r["winerror"] == 5 for r in sensitive))
++        check("no_trusted_primary_token_duplication", all(not r.get("token_duplicate_assign", {}).get("allowed") for r in rows))
++        check("agent_cannot_raise_own_integrity", attack.get("raise_own_integrity", {}).get("allowed") is False)
++        canary = attack.get("canary_handle", {})
++        check("parent_canary_not_inherited", not canary.get("resolved_path", "") or
++              "handle_canary.bin" not in canary["resolved_path"])
++        expected_env = {"SYSTEMROOT", "TEMP", "TMP", "PYTHONUTF8", "PYTHONDONTWRITEBYTECODE", "LC_CTYPE"}
++        check("agent_environment_allowlist", {k.upper() for k in scene["agent_environment"]["environment"]} <= expected_env)
++    elif number == 6:
++        service_check("all_eleven_role_attacks_denied_at_reached_services", scene["attacks"], 11)
++        check("invalid_capability_denied", denied(scene["wrong_capability"]))
++        status = result(scene["status"])
++        check("A_status_does_not_expose_B_state", scene["status"].get("reached") and status.get("status") == "RECOVERED"
++              and all(g["caller"] == "agentA" for g in status["approvals"])
++              and all(r["origin"]["caller"] == "agentA" for r in status["requests"]))
++        check("recovery_role_positive", scene["recovery_positive"].get("status") == "RECOVERED", False)
++        check("management_recovery_role_separation", scene["management_cannot_recover"].get("status") == "REJECTED"
++              and scene["recovery_cannot_grant"].get("status") == "REJECTED")
++    elif number == 7:
++        service_check("stolen_B_handle_and_all_binding_tampering_denied", scene["attacks"], 6)
++        check("B_handle_still_works_for_B", success(scene["B_positive"]), False)
++    elif number == 8:
++        check("first_call_completed", success(scene["initial"]), False)
++        check("identical_replay_duplicate", result(scene["duplicate"]).get("status") == "DUPLICATE")
++        check("conflicting_body_rejected", result(scene["conflict"]).get("status") == "CONFLICT")
++        check("replay_spends_once", sum(e["rid"] == "own_replay" for e in effects) == 1
++              and next(g for g in after["approvals"] if g["task"] == "A")["spent"] ==
++              next(g for g in before["approvals"] if g["task"] == "A")["spent"] + 1)
++    elif number == 9:
++        check("four_parse_errors_rejected", len(scene["parse"]) == 4 and all(denied(x) for x in scene["parse"]))
++        check("permission_error_rejected", denied(scene["permission"]))
++        check("provider_unavailable_preserves_unknown", result(scene["provider_error"]).get("status") == "UNKNOWN"
++              and state["requests"].get("A_provider_unknown", {}).get("phase") == "DISPATCHED_UNKNOWN")
++        check("provider_recovery_positive", success(scene["provider_positive"]), False)
++    elif number == 10:
++        check("durable_revoke_ACK", scene["ack"].get("status") == "LOCAL_REVOKE_COMMITTED")
++        check("old_handle_capability_denied", denied(scene["attack"]))
++        check("B_after_revoke_positive", success(scene["B_positive"]), False)
++    elif number == 11:
++        check("new_controller_after_old_exit", scene["old_controller_pid"] != scene["new_controller_pid"])
++        check("malicious_agent_remained_alive", scene["A_still_alive"], False)
++        check("old_cache_cannot_restore_A_authority", denied(scene["attack"]))
++        check("B_after_controller_recovery_positive", success(scene["B_positive"]), False)
++    elif number == 12:
++        check("both_requests_unknown_when_authority_down", all(result(scene[k]).get("status") == "UNKNOWN"
++              for k in ("A_during_outage", "B_during_outage")))
++        unchanged = scene["after_outage_before_resume"]
++        check("outage_no_spend_or_obligation_loss", unchanged["approvals"] == before["approvals"]
++              and unchanged["requests"] == before["requests"] and unchanged["obligations"] == before["obligations"])
++        check("recovery_role_positive", scene["recovery_positive"].get("status") == "RECOVERED", False)
++        check("B_final_recovery_positive", success(scene["B_positive"]), False)
++
++    # Material/credential check on actual responses, exception projections,
++    # transport and security logs. Expected full values never enter runtime APIs.
++    expected_path = root / "scorer_private" / "expected.json"
++    expected = read(expected_path)
++    accesses.append({"path": str(expected_path), "mode": "scorer_private_expected_values"})
++    forbidden = [s.encode() for s in expected["markers"].values()]
++    for role, values in expected["capabilities"].items():
++        forbidden += [s.encode() for s in values.values()]
++    forbidden += [b"synthetic_result_", b"synthetic_debug_secret_do_not_export"]
++    files = [root / filename]
++    for d in (root / "trusted" / "authority", root / "trusted" / "controller", root / "trusted" / "provider"):
++        files += list(d.glob("*.jsonl"))
++    files = [p for p in files if p.name != "encrypted_results.jsonl"]
++    leaks = []
++    for p in files:
++        raw = p.read_bytes()
++        for secret in forbidden:
++            if secret and secret in raw: leaks.append({"path": str(p), "secret_sha256": hashlib.sha256(secret).hexdigest()})
++    check("responses_errors_and_logs_contain_no_forbidden_secrets", not leaks)
++    # Strict top-level response whitelist; nested projections are checked against
++    # full secret values above and original-provenance rules.
++    def responses(value):
++        if isinstance(value, dict):
++            if "reached" in value and "result" in value: yield value["result"]
++            for child in value.values(): yield from responses(child)
++        elif isinstance(value, list):
++            for child in value: yield from responses(child)
++    allowed = {"status", "reason", "version", "rid", "digest", "origin", "phase", "attempt_id", "release_version",
++               "approvals", "requests", "obligations", "disposals"}
++    check("agent_response_top_level_whitelist", all(set(r) <= allowed for r in responses(scene)))
++    failures = [c for c in checks if not c["pass"]]
++    status = "FAIL_SECURITY" if any(c["security"] for c in failures) else "INCONCLUSIVE" if failures else "PASS"
++    return {"scenario": scene["scenario"], "status": status, "checks": checks, "leaks": leaks,
++            "scorer_access_log": accesses, "authority_version": version, "effects": len(effects)}
++
++
++def main():
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--root", required=True)
++    parser.add_argument("--scene")
++    args = parser.parse_args()
++    root = Path(args.root)
++    if args.scene:
++        result = score_scene(root, args.scene)
++    else:
++        results = []
++        for i in range(1, 13):
++            filename = f"M5-{i:02d}.json"
++            results.append(score_scene(root, filename) if (root / filename).exists() else
++                           {"scenario": f"M5-{i:02d}", "status": "NOT_RUN"})
++        result = {"planned": 12, "counts": dict(Counter(x["status"] for x in results)), "results": results,
++                  "native_requests": 0}
++        (root / "INDEPENDENT_SCORES.json").write_text(json.dumps(result, indent=2))
++    print(json.dumps(result))
++    raise SystemExit(2 if result.get("status") == "FAIL_SECURITY" else 0)
++
++
++if __name__ == "__main__": main()
+--- /dev/null
++++ b/scripts/verify_agent_isolation.py
+@@ -0,0 +1,23 @@
++"""Read actual M5 file ACLs; exact equality with frozen readback, no mutation."""
++import argparse
++import json
++from pathlib import Path
++
++from auth_lifecycle.online_state.windows_isolation import inspect_file_acl
++
++
++def verify(root):
++    root = Path(root).resolve()
++    lock = json.loads((root / "ENVIRONMENT_LOCK.json").read_text())
++    rows = []
++    for name, expected in lock["actual_acl_readback"].items():
++        path = (root / name).resolve()
++        if not path.is_relative_to(root): raise ValueError("ACL_TARGET_OUTSIDE_ROOT")
++        actual = inspect_file_acl(path)
++        rows.append({"object": name, "matches_frozen_acl": actual == expected, "actual_sddl": actual})
++    return {"status": "PASS" if all(r["matches_frozen_acl"] for r in rows) else "CONFIGURATION_CHANGED", "objects": rows}
++
++
++if __name__ == "__main__":
++    p = argparse.ArgumentParser(); p.add_argument("--root", required=True); a = p.parse_args()
++    print(json.dumps(verify(a.root)))
+--- /dev/null
++++ b/src/auth_lifecycle/online_state/isolation_acceptance.py
+@@ -0,0 +1,430 @@
++"""M5: mature Windows restricted-token + ACL deployment fixture, synthetic only."""
++from __future__ import annotations
++
++import argparse
++import hashlib
++import json
++import os
++import platform
++from pathlib import Path
++import re
++import secrets
++import shutil
++import sqlite3
++import subprocess
++import sys
++import time
++
++from .lab import Laboratory, approval, request_for
++from .protocol import canonical, write_json
++from .windows_isolation import IsolationUnavailable, launch_restricted, set_acl, inspect_file_acl
++
++
++SCENARIOS = [f"M5-{i:02d}" for i in range(1, 13)]
++SUPPORT_SIDS = ["S-1-5-32-545", "S-1-1-0", "S-1-5-12"]
++
++
++def current_sid():
++    return re.search(rb"S-\d+(?:-\d+)+", subprocess.check_output(
++        ["whoami.exe", "/user", "/fo", "csv", "/nh"])).group().decode("ascii")
++
++
++def scoped(root, path):
++    root, path = Path(root).resolve(), Path(path).resolve()
++    if path == root or path.is_relative_to(root): return path
++    raise ValueError("M5_PATH_OUTSIDE_OWNED_ROOT")
++
++
++def source_lock():
++    repo = Path(__file__).resolve().parents[3]
++    paths = []
++    for directory in ("src", "scripts", "tests"):
++        for p in (repo / directory).rglob("*"):
++            if p.is_file() and p.suffix in {".py", ".sql", ".ps1"}:
++                paths.append({"path": p.relative_to(repo).as_posix(), "sha256": hashlib.sha256(p.read_bytes()).hexdigest()})
++    paths.append({"path": "pyproject.toml", "sha256": hashlib.sha256((repo / "pyproject.toml").read_bytes()).hexdigest()})
++    return {"files": sorted(paths, key=lambda x: x["path"]), "native_requests": 0}
++
++
++def copy_runtime(target):
++    target = Path(target)
++    source = Path(sys.executable).parent
++    target.mkdir()
++    for p in source.iterdir():
++        if p.is_file() and p.suffix in {".exe", ".dll"}: shutil.copy2(p, target / p.name)
++    ignore = shutil.ignore_patterns("__pycache__", "*.pyc", "site-packages", "test", "tests", "idlelib", "tkinter", "ensurepip")
++    shutil.copytree(source / "Lib", target / "Lib", ignore=ignore)
++    shutil.copytree(source / "DLLs", target / "DLLs", ignore=shutil.ignore_patterns("*_tkinter*"))
++    site = target / "Lib" / "site-packages"
++    site.mkdir()
++    for name in ("cryptography", "cffi", "pycparser"):
++        p = source / "Lib" / "site-packages" / name
++        if p.exists(): shutil.copytree(p, site / name, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
++    for p in (source / "Lib" / "site-packages").glob("_cffi_backend*"):
++        shutil.copy2(p, site / p.name)
++    return target / "python.exe"
++
++
++class Agent:
++    def __init__(self, env, name, domain=None, integrity=4096):
++        self.env, self.name, self.sequence = env, name, 0
++        self.work = env.root / "agents" / name
++        self.work.mkdir()
++        set_acl(self.work, env.owner, [(domain or env.sids[name], "FA")], low=integrity == 4096)
++        for part in ("in", "out"): (self.work / part).mkdir()
++        cfg = {"work": str(self.work), "capability": env.lab.configs["controller"]["identities"].get("agent" + name, ""),
++               "urls": {role: "https://127.0.0.1:" + str(c["port"]) for role, c in env.lab.configs.items()},
++               "certificate": str(env.assets / "server.crt")}
++        write_json(self.work / "config.json", cfg)
++        command = [str(env.python), "-I", "-S", "-B", str(env.assets / "isolation_agent.py"),
++                   "--config", str(self.work / "config.json")]
++        self.command = command
++        self.process = launch_restricted(command, self.work, domain or env.sids[name],
++                                         env.clean_environment(self.work), integrity_rid=integrity)
++        env.owned.append(self.process)
++        env.save_owned_processes()
++        deadline = time.monotonic() + 12
++        while not (self.work / "ready.json").exists():
++            if self.process.poll() is not None:
++                raise IsolationUnavailable("AGENT_BOOT_EXIT", self.process.poll())
++            if time.monotonic() > deadline: raise IsolationUnavailable("AGENT_BOOT_TIMEOUT", 1460)
++            time.sleep(.02)
++        self.identity = json.loads((self.work / "ready.json").read_text())
++
++    def ask(self, action, **fields):
++        self.sequence += 1
++        filename = f"{self.sequence:04d}.json"
++        write_json(self.work / "in" / filename, {"action": action, **fields})
++        path = self.work / "out" / filename
++        deadline = time.monotonic() + 15
++        while not path.exists():
++            if self.process.poll() is not None: raise RuntimeError("AGENT_EXITED")
++            if time.monotonic() > deadline: raise TimeoutError("AGENT_COMMAND_TIMEOUT")
++            time.sleep(.02)
++        result = json.loads(path.read_text())
++        return result
++
++    def rpc(self, operation, payload=None, **fields):
++        return self.ask("rpc", operation=operation, payload=payload or {}, **fields)
++
++
++class IsolationLab:
++    def __init__(self, root):
++        self.root = Path(root).resolve()
++        self.root.mkdir(parents=True, exist_ok=False)
++        self.owner = current_sid()
++        set_acl(self.root, self.owner)
++        seed = [secrets.randbelow(2**30) + 2**29 for _ in range(3)]
++        prefix = "S-1-5-21-" + "-".join(map(str, seed))
++        self.sids = {n: prefix + "-" + str(i) for n, i in [("A", 1001), ("B", 1002), ("R", 1003)]}
++        self.owned, self.agent_objects, self.started = [], {}, time.monotonic()
++        self.acls = {}
++        # Allow traversal to separately ACL-protected children. No generic Users
++        # or Everyone ACE is placed on any M5 resource.
++        for name in ("assets", "agents"):
++            path = self.root / name; path.mkdir()
++            self.acls[name] = set_acl(path, self.owner, [(s, "GRGX") for s in self.sids.values()])
++        self.assets = self.root / "assets"
++        self.python = copy_runtime(self.assets / "python")
++        self.code = self.assets / "source"
++        package = Path(__file__).resolve().parents[1]
++        destination = self.code / "auth_lifecycle" / "online_state"
++        destination.mkdir(parents=True)
++        shutil.copy2(package / "__init__.py", destination.parent / "__init__.py")
++        for name in ("__init__.py", "protocol.py", "storage.py", "materials.py", "services.py", "lab.py",
++                     "reconciliation.py", "isolation_agent.py", "isolation_service.py", "migration.sql", "migration_2.sql"):
++            shutil.copy2(Path(__file__).with_name(name), destination / name)
++        shutil.copy2(Path(__file__).with_name("isolation_agent.py"), self.assets / "isolation_agent.py")
++        self.lab = Laboratory(self.root / "trusted")
++        # Replace inherited user-only security on every precreated trusted item.
++        for p in [self.lab.root, *self.lab.root.rglob("*")]:
++            set_acl(p, self.owner, [(self.sids["R"], "FA")])
++        self.scorer = self.root / "scorer_private"; self.scorer.mkdir()
++        set_acl(self.scorer, self.owner)
++        self.markers = {name: "M5_" + name + "_" + secrets.token_hex(24) for name in
++                        ("AT", "RT", "APP_SECRET", "SCORER_PRIVATE", "INBOX")}
++        (self.scorer / "private.key").write_text(self.markers["SCORER_PRIVATE"])
++        self.lab.configs["controller"]["identities"]["recovery"] = secrets.token_urlsafe(32)
++        permissions = self.lab.configs["controller"]["permissions"]
++        permissions["user"] = ["grant", "revoke", "deliver", "status", "begin_reconciliation", "reconcile", "dispose"]
++        permissions["recovery"] = ["recover"]
++        self.lab.configs["provider"]["synthetic_application_secret"] = self.markers["APP_SECRET"]
++        for role, config in self.lab.configs.items(): write_json(self.lab.root / "secure" / (role + ".json"), config)
++        (self.lab.root / "secure" / "admin.cap").write_text(self.lab.configs["controller"]["identities"]["user"])
++        (self.lab.root / "secure" / "approval_config.json").write_text('{"fixture":"M5"}')
++        # An encrypted synthetic inbox is a file-access target, never an A input.
++        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
++        nonce = os.urandom(12)
++        (self.lab.root / "provider" / "operational_inbox.bin").write_bytes(nonce + AESGCM(
++            (self.lab.root / "secure" / "provider.key").read_bytes()).encrypt(nonce, self.markers["INBOX"].encode(), b"M5"))
++        shutil.copy2(self.lab.root / "secure" / "server.crt", self.assets / "server.crt")
++        # Explicitly inheritable canary remains excluded by bInheritHandles=False.
++        self.canary = (self.lab.root / "secure" / "handle_canary.bin").open("w+b")
++        self.canary.write(os.urandom(32)); self.canary.flush()
++        import msvcrt
++        self.canary_handle = msvcrt.get_osfhandle(self.canary.fileno())
++        os.set_handle_inheritable(self.canary_handle, True)
++        write_json(self.scorer / "expected.json", {"markers": self.markers,
++            "capabilities": {r: c["identities"] for r, c in self.lab.configs.items()}})
++        self.lab.start = self.start_service
++        self.targets = []
++        self.audit = []
++
++    def clean_environment(self, work, service=False):
++        env = {"SystemRoot": os.environ.get("SystemRoot", r"C:\Windows"), "TEMP": str(work),
++               "TMP": str(work), "PYTHONUTF8": "1", "PYTHONDONTWRITEBYTECODE": "1"}
++        if service: env["PYTHONPATH"] = str(self.code)
++        return env
++
++    def save_owned_processes(self):
++        write_json(self.root / "OWNED_PROCESSES.json", {"root": str(self.root), "processes": [
++            {"pid": p.pid, **p.facts} for p in self.owned]})
++
++    def start_service(self, role, fault=None):
++        previous = self.lab.processes.get(role)
++        if previous and previous.poll() is None: raise RuntimeError("OLD_INSTANCE_STILL_RUNNING")
++        ready = self.lab.root / "control" / (role + "_ready.json"); ready.unlink(missing_ok=True)
++        command = [str(self.python), "-B", "-m", "auth_lifecycle.online_state.isolation_service", "--root", str(self.lab.root), "--role", role]
++        if fault: command += ["--fault", fault]
++        p = launch_restricted(command, self.lab.root, self.sids["R"],
++                              self.clean_environment(self.lab.root / "control", True), integrity_rid=8192)
++        self.lab.processes[role] = p; self.owned.append(p)
++        self.save_owned_processes()
++        deadline = time.monotonic() + 12
++        while not ready.exists():
++            if p.poll() is not None: raise IsolationUnavailable("SERVICE_BOOT_" + role, p.poll())
++            if time.monotonic() > deadline: raise IsolationUnavailable("SERVICE_BOOT_TIMEOUT_" + role, 1460)
++            time.sleep(.02)
++        data = json.loads(ready.read_text())
++        if data["pid"] != p.pid: raise RuntimeError("STALE_READY_FILE")
++        self.lab.log.emit("started_restricted", role=role, child_pid=p.pid,
++                          restricting_sid=self.sids["R"], integrity="Medium", boot=data.get("boot"))
++        return data
++
++    def start(self):
++        if any(config.get("native_profile") for config in self.lab.configs.values()):
++            raise ValueError("M5_NATIVE_PROFILE_FORBIDDEN")
++        self.lab.start_all()
++        self.user = self.lab.client("user")
++        self.recovery = self.lab.client("recovery")
++        self.grants = {}
++        for task, gen in [("A", "g0"), ("B", "g1")]:
++            a = approval(task, gen, 100)
++            a["material"] = "synthetic_" + self.markers["AT"] + "_" + self.markers["RT"] + "_" + task
++            self.grants[task] = self.user.call("grant", a)
++            if self.grants[task].get("status") != "GRANTED": raise RuntimeError("GRANT_SETUP_FAILED")
++        self.old_cache = self.lab.snapshot_cache()
++        for task in ("A", "B"):
++            self.agent_objects[task] = Agent(self, task)
++        rprobe = Agent(self, "R_probe", self.sids["R"], 8192)
++        self.rprobe = rprobe
++        self.runtime_scorer_probe = rprobe.ask("read", targets=[{"object": "scorer_private_key", "path": str(self.scorer / "private.key")}])
++        self.setup_identity = {task: obj.ask("identity") for task, obj in self.agent_objects.items()}
++        self.setup_identity["R_probe"] = rprobe.ask("identity")
++        self.read_targets = [
++            ("authority_key", self.lab.root / "secure" / "authority.key"),
++            ("adapter_configuration", self.lab.root / "secure" / "provider.json"),
++            ("management_capability", self.lab.root / "secure" / "admin.cap"),
++            ("operational_inbox", self.lab.root / "provider" / "operational_inbox.bin"),
++            ("scorer_private_key", self.scorer / "private.key"),
++            ("B_configuration", self.agent_objects["B"].work / "config.json"),
++            ("controller_configuration", self.lab.root / "secure" / "controller.json"),
++            ("material_database", self.lab.root / "authority" / "authority.db"),
++            ("audit_evidence", self.scorer / "expected.json")]
++        self.write_targets = [
++            ("authority_database", self.lab.root / "authority" / "authority.db"),
++            ("approval_configuration", self.lab.root / "secure" / "approval_config.json"),
++            ("security_log", self.lab.root / "authority" / "database_ops.jsonl"),
++            ("recovery_cache", self.lab.root / "cache" / "view.json")]
++        self.target_manifest = {label: {"path": str(p), "exists": p.exists(), "sha256": hashlib.sha256(p.read_bytes()).hexdigest()}
++                                for label, p in self.read_targets + self.write_targets}
++        if not all(v["exists"] for v in self.target_manifest.values()): raise RuntimeError("TARGET_MISSING")
++        self.pids = {role: p.pid for role, p in self.lab.processes.items()}
++        self.actual_acls = {str(p.relative_to(self.root)): inspect_file_acl(p) for p in
++            [self.lab.root, self.scorer, self.assets, self.agent_objects["A"].work,
++             self.agent_objects["B"].work, *[p for _,p in self.read_targets + self.write_targets]]}
++        self.lock = {"contract": "ONLINE_TRUSTED_STATE_V1", "crypto": "FROZEN", "native_requests": 0,
++                     "owner_sid": self.owner, "restricting_sids": self.sids, "support_restricting_sids": SUPPORT_SIDS,
++                     "agent_integrity": "S-1-16-4096", "trusted_runtime_integrity": "S-1-16-8192",
++                     "token_user": self.owner, "identities_are": "distinct restricted primary token access domains",
++                     "new_sam_users": 0, "inherit_handles": False, "environment_allowlist": list(self.clean_environment(self.root)),
++                     "ports": {r: c["port"] for r, c in self.lab.configs.items()}, "registered_pids": self.pids,
++                     "runtime": str(self.python), "python_version": sys.version, "sqlite_version": sqlite3.sqlite_version,
++                     "windows_version": platform.platform(), "machine": platform.machine(),
++                     "acl_sddl": self.acls, "actual_acl_readback": self.actual_acls, "targets": self.target_manifest,
++                     "runtime_executable_sha256": hashlib.sha256(self.python.read_bytes()).hexdigest(),
++                     "fault_scope": ["trusted/cache/view.json", "registered controller/authority/provider process"],
++                     "secret_locations": ["trusted/secure", "trusted/authority", "trusted/provider", "scorer_private"],
++                     "outbound_network": "not OS-filtered; tests use registered loopback services only"}
++        write_json(self.root / "ENVIRONMENT_LOCK.json", self.lock)
++        write_json(self.root / "SOURCE_LOCK.json", source_lock())
++        write_json(self.root / "SETUP_CONTROLS.json", {"identities": self.setup_identity,
++            "runtime_scorer_probe": self.runtime_scorer_probe, "targets": self.target_manifest})
++
++    def request(self, task, rid, **changes):
++        r = request_for(self.grants[task]["handle"], task, "g0" if task == "A" else "g1", rid)
++        r.update(changes); return r
++
++    def snapshot(self):
++        return self.user.call("status", {})
++
++    def close(self):
++        # Never enumerate/kill other processes or alter original account objects.
++        results = []
++        for process in reversed(self.owned):
++            try:
++                process.kill(); code = process.wait(5); process.close()
++                results.append({"pid": process.pid, "terminated_and_waited": True, "exit_code": code})
++            except Exception as error: results.append({"pid": process.pid, "error": type(error).__name__})
++        if hasattr(self, "canary"): self.canary.close()
++        if hasattr(self, "lab"):
++            self.lab.executor.shutdown(wait=True, cancel_futures=True)
++        if hasattr(self, "root") and self.root.exists():
++            write_json(self.root / "CLEANUP.json", {"processes": results, "sam_users_created": 0,
++                "native_requests": 0, "retained": "protected audit, synthetic state, copied runtime and scoped ACLs",
++                "external_acl_changes": 0})
++
++
++def run_scene(env, number):
++    A, B = env.agent_objects["A"], env.agent_objects["B"]
++    row = {"scenario": f"M5-{number:02d}", "A_pid": A.process.pid, "B_pid": B.process.pid,
++           "before": env.snapshot(), "started_monotonic_ns": time.monotonic_ns()}
++    if number in {1, 2}:
++        who = "A" if number == 1 else "B"
++        agent = env.agent_objects[who]
++        row["positive"] = agent.ask("identity")
++        row["call"] = agent.rpc("call", env.request(who, "legal_" + who))
++    elif number == 3:
++        row["attacks"] = A.ask("read", targets=[{"object": n, "path": str(p)} for n, p in env.read_targets])
++    elif number == 4:
++        targets = [{"object": n, "path": str(p)} for n, p in env.write_targets]
++        row["attacks"] = A.ask("write", targets=targets)
++        if all(not x.get("allowed") for x in row["attacks"]): row["acl_attacks"] = A.ask("acl", targets=targets)
++    elif number == 5:
++        row["attacks"] = A.ask("process", pids=env.pids, canary_handle=env.canary_handle)
++        row["agent_environment"] = A.ask("identity")
++    elif number == 6:
++        tests = [("controller", "grant", approval("B", "evil")),
++                 ("controller", "revoke", {"revoke_op": "evil_B", "grant_id": env.grants["B"]["grant_id"]}),
++                 ("controller", "begin_reconciliation", {}), ("controller", "reconcile", {}),
++                 ("controller", "deliver", {"rid": "legal_B"}), ("controller", "dispose", {}),
++                 ("controller", "recover", {}), ("authority", "recover", {}),
++                 ("authority", "grant", {}), ("provider", "lookup", {}), ("provider", "hold", {})]
++        row["attacks"] = [{"role": role, "operation": op, **A.rpc(op, p, role=role)} for role, op, p in tests]
++        row["wrong_capability"] = A.rpc("status", {}, token="invalid")
++        row["status"] = A.rpc("status", {})
++        row["recovery_positive"] = env.recovery.call("recover", {})
++        row["management_cannot_recover"] = env.user.call("recover", {})
++        row["recovery_cannot_grant"] = env.recovery.call("grant", approval("B", "evil2"))
++    elif number == 7:
++        req = env.request("B", "stolen_B_handle")
++        tests = [("B_handle", req), ("caller", {**req, "caller": "agentB"})]
++        for field in ("task", "account", "audience", "generation"):
++            tests.append((field, {**env.request("A", "tamper_" + field), field: "wrong"}))
++        row["attacks"] = [{"field": field, **A.rpc("call", body)} for field, body in tests]
++        row["B_positive"] = B.rpc("call", env.request("B", "B_after_handle_attack"))
++    elif number == 8:
++        req = env.request("A", "own_replay")
++        row["initial"] = A.rpc("call", req)
++        row["duplicate"] = A.rpc("call", req)
++        row["conflict"] = A.rpc("call", {**req, "payload": {"value": 2}})
++    elif number == 9:
++        row["parse"] = [A.ask("rpc", operation="call", raw=s) for s in
++                        ('{"rid":"a","rid":"b"}', '{', '{"payload":NaN}', '[]')]
++        row["permission"] = A.rpc("recover", {})
++        # Real provider process unavailability exercises the safe exception path.
++        env.lab.stop("provider")
++        row["provider_error"] = A.rpc("call", env.request("A", "A_provider_unknown"))
++        env.lab.start("provider")
++        env.pids["provider"] = env.lab.processes["provider"].pid
++        row["provider_positive"] = B.rpc("call", env.request("B", "B_after_provider_error"))
++    elif number == 10:
++        row["ack"] = env.user.call("revoke", {"revoke_op": "withdraw_A", "grant_id": env.grants["A"]["grant_id"]})
++        row["attack"] = A.rpc("call", env.request("A", "A_after_revoke"))
++        row["B_positive"] = B.rpc("call", env.request("B", "B_after_A_revoke"))
++    elif number == 11:
++        old = env.lab.processes["controller"].pid
++        env.lab.stop("controller"); env.lab.restore_cache(env.old_cache)
++        row["restored_cache_sha256"] = hashlib.sha256(env.old_cache).hexdigest()
++        env.lab.start("controller")
++        row["old_controller_pid"], row["new_controller_pid"] = old, env.lab.processes["controller"].pid
++        row["A_still_alive"] = A.process.poll() is None
++        row["attack"] = A.rpc("call", env.request("A", "A_after_old_cache"))
++        row["B_positive"] = B.rpc("call", env.request("B", "B_after_old_cache"))
++    elif number == 12:
++        env.lab.stop("authority")
++        row["A_during_outage"] = A.rpc("call", env.request("A", "A_authority_outage"))
++        row["B_during_outage"] = B.rpc("call", env.request("B", "B_authority_outage"))
++        env.lab.start("authority")
++        row["recovery_positive"] = env.recovery.call("recover", {})
++        row["after_outage_before_resume"] = env.snapshot()
++        row["B_positive"] = B.rpc("call", env.request("B", "B_after_authority_outage"))
++    row["after"] = env.snapshot()
++    row["elapsed_seconds"] = (time.monotonic_ns() - row["started_monotonic_ns"]) / 1e9
++    return row
++
++
++def run(out, authorization_id, development=False):
++    out = Path(out).resolve()
++    if out.exists(): raise ValueError("NEW_BATCH_DIRECTORY_REQUIRED")
++    env = None
++    rows = []
++    started = time.monotonic()
++    try:
++        env = IsolationLab(out)
++        write_json(out / "PLAN.json", {"authorization_id": authorization_id, "scenarios": SCENARIOS,
++            "scope": "DEVELOPMENT_SMOKE" if development else "M5_ACCEPTANCE", "max_scene_seconds": 60,
++            "max_batch_seconds": 1800, "native_request_budget": 0,
++            "stop_on": ["unauthorized_read", "unauthorized_write", "wrong_dispatch", "secret_delivery"]})
++        env.start()
++        if development:
++            # Test access before entering the acceptance denominator.
++            controls = {"identity": env.setup_identity, "R_scorer": env.runtime_scorer_probe,
++                "read": env.agent_objects["A"].ask("read", targets=[{"object": n, "path": str(p)} for n,p in env.read_targets]),
++                "write": env.agent_objects["A"].ask("write", targets=[{"object": n, "path": str(p)} for n,p in env.write_targets]),
++                "acl": env.agent_objects["A"].ask("acl", targets=[{"object": n, "path": str(p)} for n,p in env.write_targets]),
++                "process": env.agent_objects["A"].ask("process", pids=env.pids, canary_handle=env.canary_handle),
++                "A_call": env.agent_objects["A"].rpc("call", env.request("A", "dev_A")),
++                "B_call": env.agent_objects["B"].rpc("call", env.request("B", "dev_B"))}
++            write_json(out / "DEVELOPMENT_CONTROLS.json", controls)
++            return {"status": "DEVELOPMENT_COMPLETE", "root": str(out)}
++        # Independent scorer is frozen with the source and never imported by the
++        # service/agent. Invoke it after each scene for immediate stop decisions.
++        scorer = Path(__file__).resolve().parents[3] / "scripts" / "score_agent_isolation.py"
++        for number in range(1, 13):
++            if time.monotonic() - started > 1800: break
++            row = run_scene(env, number)
++            path = out / (f"M5-{number:02d}.json"); write_json(path, row)
++            rows.append(row)
++            result = subprocess.run([sys.executable, "-B", str(scorer), "--root", str(out), "--scene", path.name],
++                                    capture_output=True, timeout=20)
++            if result.returncode not in {0, 2}: raise RuntimeError("SCORER_EXECUTION_FAILED")
++            score = json.loads(result.stdout)
++            write_json(out / (f"M5-{number:02d}.score.json"), score)
++            if score["status"] == "FAIL_SECURITY" or row["elapsed_seconds"] > 60: break
++        return {"status": "BATCH_COMPLETE", "executed": len(rows), "root": str(out)}
++    except IsolationUnavailable as error:
++        out.mkdir(parents=True, exist_ok=True)
++        r = {"status": "BLOCKED_ENVIRONMENT", "operation": error.operation, "win32_error": error.code,
++             "executed": len(rows), "native_requests": 0}
++        write_json(out / "BLOCKED_ENVIRONMENT.json", r)
++        return r
++    except Exception as error:
++        out.mkdir(parents=True, exist_ok=True)
++        write_json(out / "ABORTED.json", {"status": "ABORTED", "exception": type(error).__name__,
++            "executed": len(rows), "native_requests": 0})
++        raise
++    finally:
++        if env is not None: env.close()
++
++
++def main():
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--out", required=True)
++    parser.add_argument("--authorization-id", required=True)
++    parser.add_argument("--development", action="store_true")
++    args = parser.parse_args()
++    print(json.dumps(run(args.out, args.authorization_id, args.development)))
++
++
++if __name__ == "__main__": main()
+--- /dev/null
++++ b/src/auth_lifecycle/online_state/isolation_agent.py
+@@ -0,0 +1,250 @@
++"""Untrusted M5 test program. Runs in a restricted primary token, stdlib only."""
++import argparse
++import ctypes as C
++from ctypes import wintypes as W
++import hashlib
++import json
++import os
++from pathlib import Path
++import ssl
++import time
++import urllib.request
++
++
++def token_information():
++    api = C.WinDLL("advapi32", use_last_error=True)
++    kernel = C.WinDLL("kernel32", use_last_error=True)
++    kernel.GetCurrentProcess.restype = W.HANDLE
++    api.OpenProcessToken.argtypes = [W.HANDLE, W.DWORD, C.POINTER(W.HANDLE)]
++    api.GetTokenInformation.argtypes = [W.HANDLE, C.c_int, C.c_void_p, W.DWORD, C.POINTER(W.DWORD)]
++    api.ConvertSidToStringSidW.argtypes = [C.c_void_p, C.POINTER(W.LPWSTR)]
++    kernel.CloseHandle.argtypes = [W.HANDLE]
++    kernel.LocalFree.argtypes = [C.c_void_p]
++    token = W.HANDLE()
++    if not api.OpenProcessToken(kernel.GetCurrentProcess(), 8, C.byref(token)):
++        return {"error": C.get_last_error()}
++
++    class SID_ATTRIBUTES(C.Structure):
++        _fields_ = [("Sid", C.c_void_p), ("Attributes", W.DWORD)]
++    class GROUPS(C.Structure):
++        _fields_ = [("Count", W.DWORD), ("Groups", SID_ATTRIBUTES * 1)]
++
++    def query(kind):
++        size = W.DWORD()
++        api.GetTokenInformation(token, kind, None, 0, C.byref(size))
++        buffer = C.create_string_buffer(size.value)
++        if not api.GetTokenInformation(token, kind, buffer, size, C.byref(size)):
++            raise OSError(C.get_last_error(), "TOKEN_QUERY")
++        return buffer
++
++    def sid(ptr):
++        text = W.LPWSTR()
++        if not api.ConvertSidToStringSidW(ptr, C.byref(text)):
++            return "INVALID_SID"
++        value = text.value
++        kernel.LocalFree(text)
++        return value
++
++    def groups(kind):
++        buffer = query(kind)
++        count = W.DWORD.from_buffer(buffer).value
++        values = (SID_ATTRIBUTES * count).from_buffer(buffer, GROUPS.Groups.offset)
++        return [{"sid": sid(g.Sid), "attributes": g.Attributes} for g in values]
++
++    try:
++        info = {"user": sid(SID_ATTRIBUTES.from_buffer(query(1)).Sid),
++                "groups": groups(2), "restricting_sids": groups(11),
++                "integrity": sid(SID_ATTRIBUTES.from_buffer(query(25)).Sid),
++                "elevated": W.DWORD.from_buffer(query(20)).value,
++                "token_type": W.DWORD.from_buffer(query(8)).value,
++                "pid": os.getpid()}
++        # Record enabled privilege LUIDs without reading arbitrary host state.
++        raw = query(3)
++        count = W.DWORD.from_buffer(raw).value
++        info["privilege_count"] = count
++        info["privileges_raw_hex"] = raw.raw.hex()
++        return info
++    finally:
++        kernel.CloseHandle(token)
++
++
++def file_probe(targets, mode):
++    results = []
++    for item in targets:
++        path = Path(item["path"])
++        row = {"object": item["object"], "path": str(path), "operation": mode}
++        try:
++            if mode in {"read", "write"}:
++                kernel = C.WinDLL("kernel32", use_last_error=True)
++                kernel.CreateFileW.argtypes = [W.LPCWSTR, W.DWORD, W.DWORD, C.c_void_p,
++                                               W.DWORD, W.DWORD, W.HANDLE]
++                kernel.CreateFileW.restype = W.HANDLE
++                kernel.CloseHandle.argtypes = [W.HANDLE]
++                handle = kernel.CreateFileW(str(path), 0x80000000 if mode == "read" else 0x40000000,
++                                            7, None, 3, 0, None)
++                allowed = handle != C.c_void_p(-1).value
++                row.update(allowed=allowed, winerror=0 if allowed else C.get_last_error(),
++                           api="CreateFileW", actual_content_bytes=0)
++                if allowed:
++                    kernel.CloseHandle(handle)
++                    if mode == "read":
++                        data = path.read_bytes()
++                        row.update(bytes=len(data), sha256=hashlib.sha256(data).hexdigest())
++                else:
++                    row["classification"] = "ACCESS_DENIED" if row["winerror"] == 5 else "OTHER_OS_ERROR"
++            elif mode == "acl":
++                api = C.WinDLL("advapi32", use_last_error=True)
++                kernel = C.WinDLL("kernel32", use_last_error=True)
++                api.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
++                    W.LPCWSTR, W.DWORD, C.POINTER(C.c_void_p), C.c_void_p]
++                api.SetFileSecurityW.argtypes = [W.LPCWSTR, W.DWORD, C.c_void_p]
++                kernel.LocalFree.argtypes = [C.c_void_p]
++                desc = C.c_void_p()
++                if not api.ConvertStringSecurityDescriptorToSecurityDescriptorW(
++                        "D:P(A;;FA;;;WD)", 1, C.byref(desc), None):
++                    raise OSError(C.get_last_error(), "DESCRIPTOR")
++                try:
++                    allowed = bool(api.SetFileSecurityW(str(path), 4 | 0x80000000, desc))
++                    row.update(allowed=allowed, winerror=0 if allowed else C.get_last_error())
++                finally:
++                    kernel.LocalFree(desc)
++        except OSError as error:
++            row.update(allowed=False, winerror=getattr(error, "winerror", None), errno=error.errno,
++                       classification="NOT_FOUND" if isinstance(error, FileNotFoundError) else "ACCESS_ERROR")
++        results.append(row)
++        if row.get("allowed"):
++            break  # preserve first counterexample, no further target accesses
++    return results
++
++
++def process_probe(pids, inherited_handle):
++    kernel = C.WinDLL("kernel32", use_last_error=True)
++    api = C.WinDLL("advapi32", use_last_error=True)
++    kernel.OpenProcess.argtypes = [W.DWORD, W.BOOL, W.DWORD]
++    kernel.OpenProcess.restype = W.HANDLE
++    kernel.CloseHandle.argtypes = [W.HANDLE]
++    api.OpenProcessToken.argtypes = [W.HANDLE, W.DWORD, C.POINTER(W.HANDLE)]
++    rows = []
++    for role, pid in pids.items():
++        for label, mask in [("VM_READ", 0x10), ("VM_WRITE_OPERATION", 0x28), ("DUP_HANDLE", 0x40),
++                            ("CREATE_THREAD", 2), ("TERMINATE", 1), ("WRITE_DAC", 0x40000),
++                            ("QUERY_LIMITED", 0x1000)]:
++            handle = kernel.OpenProcess(mask, False, pid)
++            row = {"role": role, "pid": pid, "operation": label, "mask": mask,
++                   "allowed": bool(handle), "winerror": 0 if handle else C.get_last_error()}
++            if handle:
++                if label == "QUERY_LIMITED":
++                    token = W.HANDLE()
++                    ok = api.OpenProcessToken(handle, 0x2 | 0x1, C.byref(token))
++                    row["token_duplicate_assign"] = {"allowed": bool(ok),
++                        "winerror": 0 if ok else C.get_last_error()}
++                    if token: kernel.CloseHandle(token)
++                kernel.CloseHandle(handle)
++            rows.append(row)
++            if row["allowed"] and label != "QUERY_LIMITED":
++                return {"processes": rows, "stopped_on_sensitive_access": True}
++    kernel.GetHandleInformation.argtypes = [W.HANDLE, C.POINTER(W.DWORD)]
++    flags = W.DWORD()
++    ok = kernel.GetHandleInformation(inherited_handle, C.byref(flags))
++    # If numeric value was reused, resolve its object path; a coincidental handle
++    # does not establish inheritance of the parent's canary file.
++    kernel.GetFinalPathNameByHandleW.argtypes = [W.HANDLE, W.LPWSTR, W.DWORD, W.DWORD]
++    path = C.create_unicode_buffer(32768)
++    length = kernel.GetFinalPathNameByHandleW(inherited_handle, path, len(path), 0) if ok else 0
++    return {"processes": rows, "canary_handle": {"valid": bool(ok),
++            "winerror": 0 if ok else C.get_last_error(), "resolved_path": path.value if length else None}}
++
++
++def raise_own_integrity_probe():
++    api = C.WinDLL("advapi32", use_last_error=True)
++    kernel = C.WinDLL("kernel32", use_last_error=True)
++    kernel.GetCurrentProcess.restype = W.HANDLE
++    kernel.CloseHandle.argtypes = [W.HANDLE]
++    kernel.LocalFree.argtypes = [C.c_void_p]
++    api.OpenProcessToken.argtypes = [W.HANDLE, W.DWORD, C.POINTER(W.HANDLE)]
++    api.ConvertStringSidToSidW.argtypes = [W.LPCWSTR, C.POINTER(C.c_void_p)]
++    api.GetLengthSid.argtypes = [C.c_void_p]
++    api.SetTokenInformation.argtypes = [W.HANDLE, C.c_int, C.c_void_p, W.DWORD]
++    token, sid = W.HANDLE(), C.c_void_p()
++    class LABEL(C.Structure): _fields_ = [("Sid", C.c_void_p), ("Attributes", W.DWORD)]
++    if not api.OpenProcessToken(kernel.GetCurrentProcess(), 0x80 | 8, C.byref(token)):
++        return {"allowed": False, "operation": "OpenOwnTokenAdjustDefault", "winerror": C.get_last_error()}
++    try:
++        if not api.ConvertStringSidToSidW("S-1-16-8192", C.byref(sid)):
++            return {"probe_error": "SID_CONVERSION"}
++        label = LABEL(sid, 0x20)
++        ok = api.SetTokenInformation(token, 25, C.byref(label), C.sizeof(label) + api.GetLengthSid(sid))
++        return {"allowed": bool(ok), "operation": "RaiseOwnIntegrityToMedium", "winerror": 0 if ok else C.get_last_error()}
++    finally:
++        if sid: kernel.LocalFree(sid)
++        kernel.CloseHandle(token)
++
++
++class NoRedirect(urllib.request.HTTPRedirectHandler):
++    def redirect_request(self, *args): return None
++
++
++def rpc(config, request):
++    role = request.get("role", "controller")
++    url = config["urls"][role]
++    # Provisioned fixture endpoints only. Never accept request-provided URLs.
++    context = ssl.create_default_context(cafile=config["certificate"])
++    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect(),
++                                        urllib.request.HTTPSHandler(context=context))
++    body = request.get("raw")
++    body = body.encode() if body is not None else json.dumps(request.get("payload", {})).encode()
++    token = config["capability"] if request.get("token", "own") == "own" else "M5_INVALID_CAPABILITY"
++    message = urllib.request.Request(url + "/" + request["operation"], data=body,
++        headers={"Authorization": "Bearer " + token, "Content-Type": "application/json"}, method="POST")
++    try:
++        with opener.open(message, timeout=4) as response:
++            raw = response.read(1 << 20)
++            return {"reached": True, "http": response.status, "result": json.loads(raw),
++                    "response_bytes": len(raw)}
++    except Exception as error:
++        return {"reached": False, "error_type": type(error).__name__}  # no exception text/URLs/secrets
++
++
++def act(config, command):
++    action = command["action"]
++    if action == "identity":
++        own = Path(config["work"]) / "positive.txt"
++        own.write_text("M5_OWN_WORKSPACE_POSITIVE", encoding="ascii")
++        return {"token": token_information(), "own_read_write": own.read_text() == "M5_OWN_WORKSPACE_POSITIVE",
++                "environment": {k: hashlib.sha256(v.encode()).hexdigest() for k, v in os.environ.items()},
++                "command_line": __import__("sys").argv}
++    if action == "rpc": return rpc(config, command)
++    if action in {"read", "write", "acl"}: return file_probe(command["targets"], action)
++    if action == "process":
++        result = process_probe(command["pids"], command["canary_handle"])
++        result["raise_own_integrity"] = raise_own_integrity_probe()
++        return result
++    raise ValueError("UNKNOWN_TEST_ACTION")
++
++
++def main():
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--config", required=True)
++    args = parser.parse_args()
++    config = json.loads(Path(args.config).read_text(encoding="utf-8"))
++    work = Path(config["work"])
++    def save(path, value):
++        temporary = path.with_suffix(".tmp")
++        temporary.write_text(json.dumps(value), encoding="utf-8")
++        os.replace(temporary, path)
++    save(work / "ready.json", {"pid": os.getpid(), "token": token_information()})
++    seen = set()
++    while not (work / "stop").exists():
++        for path in sorted((work / "in").glob("*.json")):
++            if path.name in seen: continue
++            try:
++                command = json.loads(path.read_text())
++                result = act(config, command)
++            except Exception as error:
++                result = {"probe_error": type(error).__name__}
++            save(work / "out" / path.name, result)
++            seen.add(path.name)
++        time.sleep(.01)
++
++
++if __name__ == "__main__": main()
+--- /dev/null
++++ b/src/auth_lifecycle/online_state/isolation_service.py
+@@ -0,0 +1,35 @@
++"""Safe startup diagnostics for M5 services; no inherited output handles."""
++import argparse
++import json
++from pathlib import Path
++import traceback
++
++
++def main():
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--root", required=True)
++    parser.add_argument("--role", required=True)
++    parser.add_argument("--fault")
++    args = parser.parse_args()
++    try:
++        import os
++        import sys
++        import hashlib
++        from .isolation_agent import token_information
++        metadata = {"token": token_information(), "command_line": sys.argv,
++                    "environment": {k: hashlib.sha256(v.encode()).hexdigest() for k,v in os.environ.items()}}
++        (Path(args.root) / "control" / (args.role + "_" + str(os.getpid()) + "_isolation.json")).write_text(json.dumps(metadata))
++        from .services import serve
++        serve(args.role, args.root, args.fault)
++    except Exception as error:
++        # Class, numeric OS codes and frame locations, never exception text.
++        record = {"exception": type(error).__name__, "winerror": getattr(error, "winerror", None),
++                  "errno": getattr(error, "errno", None),
++                  "frames": [{"file": f.filename, "function": f.name, "line": f.lineno}
++                             for f in traceback.extract_tb(error.__traceback__)]}
++        if isinstance(error, ImportError): record["loader_error"] = str(error)
++        (Path(args.root) / "control" / (args.role + "_startup_error.json")).write_text(json.dumps(record))
++        raise SystemExit(1)
++
++
++if __name__ == "__main__": main()
+--- /dev/null
++++ b/src/auth_lifecycle/online_state/windows_isolation.py
+@@ -0,0 +1,231 @@
++"""Windows restricted-primary-token primitives for the synthetic M5 fixture.
++
++No impersonation is used: arbitrary child code runs under the restricted primary
++token. This module deliberately has no native-provider or account-management API.
++"""
++from __future__ import annotations
++
++import ctypes as C
++from ctypes import wintypes as W
++import json
++import os
++from pathlib import Path
++import subprocess
++import time
++import re
++
++
++class IsolationUnavailable(RuntimeError):
++    def __init__(self, operation, code):
++        self.operation, self.code = operation, code
++        super().__init__(f"{operation}: Win32 {code}")
++
++
++def _windows():
++    if os.name != "nt":
++        raise IsolationUnavailable("WINDOWS_REQUIRED", 50)
++    return C.WinDLL("advapi32", use_last_error=True), C.WinDLL("kernel32", use_last_error=True)
++
++
++class SID_AND_ATTRIBUTES(C.Structure):
++    _fields_ = [("Sid", C.c_void_p), ("Attributes", W.DWORD)]
++
++
++class STARTUPINFO(C.Structure):
++    _fields_ = [("cb", W.DWORD), ("lpReserved", W.LPWSTR), ("lpDesktop", W.LPWSTR),
++                ("lpTitle", W.LPWSTR), ("dwX", W.DWORD), ("dwY", W.DWORD),
++                ("dwXSize", W.DWORD), ("dwYSize", W.DWORD), ("dwXCountChars", W.DWORD),
++                ("dwYCountChars", W.DWORD), ("dwFillAttribute", W.DWORD),
++                ("dwFlags", W.DWORD), ("wShowWindow", W.WORD), ("cbReserved2", W.WORD),
++                ("lpReserved2", C.c_void_p), ("hStdInput", W.HANDLE),
++                ("hStdOutput", W.HANDLE), ("hStdError", W.HANDLE)]
++
++
++class PROCESS_INFORMATION(C.Structure):
++    _fields_ = [("hProcess", W.HANDLE), ("hThread", W.HANDLE),
++                ("dwProcessId", W.DWORD), ("dwThreadId", W.DWORD)]
++
++
++class SECURITY_ATTRIBUTES(C.Structure):
++    _fields_ = [("nLength", W.DWORD), ("lpSecurityDescriptor", C.c_void_p),
++                ("bInheritHandle", W.BOOL)]
++
++
++def _check(ok, name):
++    if not ok:
++        raise IsolationUnavailable(name, C.get_last_error())
++
++
++def _sid(api, value):
++    result = C.c_void_p()
++    api.ConvertStringSidToSidW.argtypes = [W.LPCWSTR, C.POINTER(C.c_void_p)]
++    api.ConvertStringSidToSidW.restype = W.BOOL
++    _check(api.ConvertStringSidToSidW(value, C.byref(result)), "ConvertStringSidToSidW")
++    return result
++
++
++def set_acl(path, owner_sid, grants=(), low=False):
++    """Replace DACL only on caller-owned M5 objects; owner implicit rights limited.
++
++    grants is a sequence of (SID, SDDL rights), e.g. (agent_sid, 'GRGX').
++    The caller must scope path to the M5 root before invoking this low-level API.
++    """
++    api, kernel = _windows()
++    api.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
++        W.LPCWSTR, W.DWORD, C.POINTER(C.c_void_p), C.POINTER(W.DWORD)]
++    api.SetFileSecurityW.argtypes = [W.LPCWSTR, W.DWORD, C.c_void_p]
++    kernel.LocalFree.argtypes = [C.c_void_p]
++    # OWNER RIGHTS suppresses implicit owner WRITE_DAC. Explicit trusted SID
++    # remains able to administer; restricted SID check still has to succeed.
++    dacl = f"D:P(A;OICI;RC;;;OW)(A;OICI;FA;;;{owner_sid})(A;OICI;FA;;;SY)"
++    for sid, rights in grants:
++        dacl += f"(A;OICI;{rights};;;{sid})"
++    descriptor = C.c_void_p()
++    _check(api.ConvertStringSecurityDescriptorToSecurityDescriptorW(dacl, 1, C.byref(descriptor), None),
++           "ConvertStringSecurityDescriptorToSecurityDescriptorW")
++    try:
++        flags = 4 | 0x80000000
++        _check(api.SetFileSecurityW(str(Path(path).resolve()), flags, descriptor), "SetFileSecurityW")
++    finally:
++        kernel.LocalFree(descriptor)
++    if low:
++        result = subprocess.run(["icacls.exe", str(Path(path).resolve()),
++                                 "/setintegritylevel", "(OI)(CI)L"], capture_output=True)
++        if result.returncode:
++            raise IsolationUnavailable("icacls_setintegritylevel", result.returncode)
++    return dacl
++
++
++def inspect_file_acl(path):
++    api, kernel = _windows()
++    api.GetFileSecurityW.argtypes = [W.LPCWSTR, W.DWORD, C.c_void_p, W.DWORD, C.POINTER(W.DWORD)]
++    api.ConvertSecurityDescriptorToStringSecurityDescriptorW.argtypes = [
++        C.c_void_p, W.DWORD, W.DWORD, C.POINTER(W.LPWSTR), C.c_void_p]
++    kernel.LocalFree.argtypes = [C.c_void_p]
++    flags, size = 1 | 4 | 0x10, W.DWORD()
++    api.GetFileSecurityW(str(path), flags, None, 0, C.byref(size))
++    buffer = C.create_string_buffer(size.value)
++    _check(api.GetFileSecurityW(str(path), flags, buffer, size, C.byref(size)), "GetFileSecurityW")
++    output = W.LPWSTR()
++    _check(api.ConvertSecurityDescriptorToStringSecurityDescriptorW(buffer, 1, flags, C.byref(output), None),
++           "SecurityDescriptorToString")
++    try: return output.value
++    finally: kernel.LocalFree(output)
++
++
++def process_facts(handle):
++    _, kernel = _windows()
++    kernel.GetProcessTimes.argtypes = [W.HANDLE, C.POINTER(W.FILETIME), C.POINTER(W.FILETIME),
++                                     C.POINTER(W.FILETIME), C.POINTER(W.FILETIME)]
++    kernel.QueryFullProcessImageNameW.argtypes = [W.HANDLE, W.DWORD, W.LPWSTR, C.POINTER(W.DWORD)]
++    values = [W.FILETIME() for _ in range(4)]
++    _check(kernel.GetProcessTimes(handle, *(C.byref(v) for v in values)), "GetProcessTimes")
++    output, size = C.create_unicode_buffer(32768), W.DWORD(32768)
++    _check(kernel.QueryFullProcessImageNameW(handle, 0, output, C.byref(size)), "QueryFullProcessImageNameW")
++    return {"created_filetime": values[0].dwLowDateTime | values[0].dwHighDateTime << 32,
++            "image": output.value}
++
++
++class RestrictedProcess:
++    def __init__(self, handle, pid):
++        self.handle, self.pid = handle, pid
++        self.facts = process_facts(handle)
++
++    def poll(self):
++        _, kernel = _windows()
++        kernel.GetExitCodeProcess.argtypes = [W.HANDLE, C.POINTER(W.DWORD)]
++        code = W.DWORD()
++        _check(kernel.GetExitCodeProcess(self.handle, C.byref(code)), "GetExitCodeProcess")
++        return None if code.value == 259 else code.value
++
++    def wait(self, timeout=10):
++        deadline = time.monotonic() + timeout
++        while self.poll() is None:
++            if time.monotonic() >= deadline:
++                raise TimeoutError("RESTRICTED_PROCESS_TIMEOUT")
++            time.sleep(.02)
++        return self.poll()
++
++    def kill(self):
++        _, kernel = _windows()
++        kernel.TerminateProcess.argtypes = [W.HANDLE, W.UINT]
++        if self.poll() is None:
++            _check(kernel.TerminateProcess(self.handle, 137), "TerminateProcess")
++
++    def close(self):
++        _, kernel = _windows()
++        kernel.CloseHandle.argtypes = [W.HANDLE]
++        kernel.CloseHandle(self.handle)
++
++
++def launch_restricted(command, cwd, restricting_sid, environment, support_sids=("S-1-1-0", "S-1-5-12"), integrity_rid=4096):
++    """Create a low-IL primary token with disabled privileges and unique SID.
++
++    BUILTIN Users is an additional restricting SID to read OS executable files.
++    Protected M5 resources must therefore never grant BUILTIN Users access.
++    No handles are inherited; the environment is an explicit caller allowlist.
++    """
++    api, kernel = _windows()
++    kernel.GetCurrentProcess.restype = W.HANDLE
++    kernel.CloseHandle.argtypes = [W.HANDLE]
++    kernel.LocalFree.argtypes = [C.c_void_p]
++    api.OpenProcessToken.argtypes = [W.HANDLE, W.DWORD, C.POINTER(W.HANDLE)]
++    api.CreateRestrictedToken.argtypes = [W.HANDLE, W.DWORD, W.DWORD, C.c_void_p,
++                                         W.DWORD, C.c_void_p, W.DWORD,
++                                         C.POINTER(SID_AND_ATTRIBUTES), C.POINTER(W.HANDLE)]
++    api.SetTokenInformation.argtypes = [W.HANDLE, C.c_int, C.c_void_p, W.DWORD]
++    api.GetLengthSid.argtypes = [C.c_void_p]
++    api.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
++        W.LPCWSTR, W.DWORD, C.POINTER(C.c_void_p), C.POINTER(W.DWORD)]
++    api.GetSecurityDescriptorDacl.argtypes = [C.c_void_p, C.POINTER(W.BOOL),
++                                             C.POINTER(C.c_void_p), C.POINTER(W.BOOL)]
++    api.CreateProcessAsUserW.argtypes = [W.HANDLE, W.LPCWSTR, W.LPWSTR,
++        C.c_void_p, C.c_void_p, W.BOOL, W.DWORD, C.c_void_p, W.LPCWSTR,
++        C.POINTER(STARTUPINFO), C.POINTER(PROCESS_INFORMATION)]
++    original, restricted = W.HANDLE(), W.HANDLE()
++    allocated = []
++    descriptor = C.c_void_p()
++    try:
++        _check(api.OpenProcessToken(kernel.GetCurrentProcess(), 0x0002 | 0x0008 | 0x0001 | 0x0080, C.byref(original)),
++               "OpenProcessToken")
++        restricting_values = (restricting_sid, "S-1-5-32-545", *support_sids)
++        if integrity_rid not in {4096, 8192}:
++            raise ValueError("UNREGISTERED_INTEGRITY_LEVEL")
++        for value in (*restricting_values, f"S-1-16-{integrity_rid}"):
++            allocated.append(_sid(api, value))
++        sids = (SID_AND_ATTRIBUTES * len(restricting_values))(
++            *(SID_AND_ATTRIBUTES(p, 0) for p in allocated[:-1]))
++        _check(api.CreateRestrictedToken(original, 1, 0, None, 0, None, len(sids), sids, C.byref(restricted)),
++               "CreateRestrictedToken")
++        label = SID_AND_ATTRIBUTES(allocated[-1], 0x20)
++        _check(api.SetTokenInformation(restricted, 25, C.byref(label),
++                                      C.sizeof(label) + api.GetLengthSid(allocated[-1])), "SetTokenIntegrityLevel")
++        owner = re.search(rb"S-\d+(?:-\d+)+", subprocess.check_output(
++            ["whoami.exe", "/user", "/fo", "csv", "/nh"])).group().decode("ascii")
++        label_name = "LW" if integrity_rid == 4096 else "ME"
++        sddl = f"D:P(A;;RC;;;OW)(A;;GA;;;{owner})(A;;GA;;;SY)(A;;GA;;;{restricting_sid})S:(ML;;NW;;;{label_name})"
++        _check(api.ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1, C.byref(descriptor), None),
++               "ProcessSecurityDescriptor")
++        present, defaulted, acl = W.BOOL(), W.BOOL(), C.c_void_p()
++        _check(api.GetSecurityDescriptorDacl(descriptor, C.byref(present), C.byref(acl), C.byref(defaulted)),
++               "GetSecurityDescriptorDacl")
++        _check(api.SetTokenInformation(restricted, 6, C.byref(acl), C.sizeof(acl)), "SetTokenDefaultDacl")
++        attributes = SECURITY_ATTRIBUTES(C.sizeof(SECURITY_ATTRIBUTES), descriptor, False)
++        startup, process = STARTUPINFO(), PROCESS_INFORMATION()
++        startup.cb = C.sizeof(startup)
++        env = "\0".join(f"{k}={v}" for k, v in sorted(environment.items(), key=lambda x: x[0].upper())) + "\0\0"
++        envbuf = C.create_unicode_buffer(env)
++        cmd = C.create_unicode_buffer(subprocess.list2cmdline([str(x) for x in command]))
++        _check(api.CreateProcessAsUserW(restricted, str(command[0]), cmd, C.byref(attributes), C.byref(attributes), False,
++                                      0x08000000 | 0x400, envbuf, str(cwd),
++                                      C.byref(startup), C.byref(process)), "CreateProcessAsUserW")
++        kernel.CloseHandle(process.hThread)
++        return RestrictedProcess(process.hProcess, process.dwProcessId)
++    finally:
++        if descriptor:
++            kernel.LocalFree(descriptor)
++        for ptr in allocated:
++            kernel.LocalFree(ptr)
++        for handle in (restricted, original):
++            if handle:
++                kernel.CloseHandle(handle)
+--- /dev/null
++++ b/tests/test_agent_isolation.py
+@@ -0,0 +1,84 @@
++"""M5 development tests; OS integration is distinct from acceptance sampling."""
++import importlib.util
++import json
++import os
++from pathlib import Path
++import secrets
++import unittest
++
++from auth_lifecycle.online_state.isolation_acceptance import IsolationLab, run_scene, scoped, source_lock
++
++SCORER = Path(__file__).resolve().parents[1] / "scripts" / "score_agent_isolation.py"
++spec = importlib.util.spec_from_file_location("independent_m5_rules", SCORER)
++rules = importlib.util.module_from_spec(spec)
++spec.loader.exec_module(rules)
++
++
++class IsolationContractTests(unittest.TestCase):
++    def test_path_boundary(self):
++        root = Path(__file__).resolve().parent
++        self.assertEqual(scoped(root, root / "case"), root / "case")
++        with self.assertRaises(ValueError): scoped(root, root.parent)
++
++    def test_source_lock_includes_independent_checker(self):
++        paths = {p["path"] for p in source_lock()["files"]}
++        self.assertIn("scripts/score_agent_isolation.py", paths)
++        self.assertIn("src/auth_lifecycle/online_state/windows_isolation.py", paths)
++
++
++@unittest.skipUnless(os.name == "nt", "M5 uses Windows kernel access checks")
++class IsolationOSDevelopmentTests(unittest.TestCase):
++    @classmethod
++    def setUpClass(cls):
++        parent = Path(os.environ.get("M5_TEST_ROOT", r"D:\毕业设计\mainline_agent_isolation_v1\dev_work"))
++        parent.mkdir(parents=True, exist_ok=True)
++        cls.root = parent / ("integration_" + secrets.token_hex(5))
++        cls.env = IsolationLab(cls.root)
++        cls.addClassCleanup(cls.env.close)
++        cls.env.start()
++        cls.rows = {}
++        for i in range(1, 13):
++            row = run_scene(cls.env, i)
++            path = cls.root / (f"M5-{i:02d}.json")
++            path.write_text(json.dumps(row))
++            cls.rows[i] = row
++            verdict = rules.score_scene(cls.root, path.name)
++            (cls.root / (f"M5-{i:02d}.devscore.json")).write_text(json.dumps(verdict))
++            if verdict["status"] == "FAIL_SECURITY":
++                raise AssertionError(json.dumps([x for x in verdict["checks"] if not x["pass"]]))
++
++    def test_all_twelve_development_paths_and_rules(self):
++        for i in self.rows:
++            with self.subTest(scene=i):
++                result = rules.score_scene(self.root, f"M5-{i:02d}.json")
++                self.assertEqual(result["status"], "PASS", [c for c in result["checks"] if not c["pass"]])
++
++    def altered_score(self, number, mutate):
++        row = json.loads(json.dumps(self.rows[number]))
++        mutate(row)
++        path = self.root / "deliberately_invalid.json"
++        path.write_text(json.dumps(row))
++        return rules.score_scene(self.root, path.name)
++
++    def test_checker_rejects_forced_file_access_pass(self):
++        def mutate(row): row["attacks"][0].update(allowed=True, winerror=0)
++        self.assertEqual(self.altered_score(3, mutate)["status"], "FAIL_SECURITY")
++
++    def test_checker_rejects_missing_target_as_denial(self):
++        def mutate(row): row["attacks"][0].update(allowed=False, winerror=2)
++        self.assertEqual(self.altered_score(3, mutate)["status"], "INCONCLUSIVE")
++
++    def test_checker_rejects_management_call_not_reaching_service(self):
++        def mutate(row): row["attacks"][0].update(reached=False)
++        self.assertEqual(self.altered_score(6, mutate)["status"], "INCONCLUSIVE")
++
++    def test_checker_rejects_secret_in_error(self):
++        def mutate(row): row["parse"][0]["result"]["reason"] = self.env.markers["RT"]
++        self.assertEqual(self.altered_score(9, mutate)["status"], "FAIL_SECURITY")
++
++    def test_checker_requires_positive_control(self):
++        def mutate(row): row["call"]["result"]["status"] = "REJECTED"
++        self.assertEqual(self.altered_score(1, mutate)["status"], "INCONCLUSIVE")
++
++
++if __name__ == "__main__": unittest.main()

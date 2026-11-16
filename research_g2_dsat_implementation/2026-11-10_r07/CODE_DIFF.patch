@@ -1,0 +1,513 @@
+--- src/auth_lifecycle/online_state/dsat_flow.py (R06)
++++ src/auth_lifecycle/online_state/dsat_flow.py (R07)
+@@ -1,10 +1,12 @@
+-"""Offline network construction and proof binding, with an explicit backend gate.
+-
+-No mature optimizer is installed in the approved environment. solve() therefore
+-does NOT implement an improvised optimizer: it returns BACKEND_UNAVAILABLE.
+-Hand-supplied proof vectors can be bound and independently checked separately.
++"""Offline integer-flow adapter and proof producer for approved NetworkX 3.7.
++
++The optimizer runs only in an isolated environment with the pinned distribution.
++The independent checker is not imported. Native/authority operations are absent.
+ """
+ import importlib.util
++import importlib.metadata
++from pathlib import Path
++import sys
+ from time import perf_counter_ns
+ 
+ from .dsat_types import (
+@@ -13,11 +15,39 @@
+ )
+ 
+ 
++class BackendUnavailable(RuntimeError):
++    pass
++
++
++def _load_backend():
++    if sys.prefix == sys.base_prefix:
++        raise BackendUnavailable("ISOLATED_ENVIRONMENT_REQUIRED")
++    spec = importlib.util.find_spec("networkx")
++    if spec is None or spec.origin is None:
++        raise BackendUnavailable("MATURE_BACKEND_NOT_INSTALLED")
++    if not Path(spec.origin).resolve().is_relative_to(Path(sys.prefix).resolve()):
++        raise BackendUnavailable("BACKEND_ORIGIN_OUTSIDE_ENVIRONMENT")
++    if importlib.metadata.version("networkx") != "3.7":
++        raise BackendUnavailable("DEPENDENCY_INCOMPATIBLE")
++    import networkx as nx
++    if nx.__version__ != "3.7":
++        raise BackendUnavailable("DEPENDENCY_INCOMPATIBLE")
++    return nx
++
++
++def _backend_info(nx):
++    return {"name": "NetworkX", "version": nx.__version__, "module": nx.__file__,
++            "environment": sys.prefix, "configured": True, "status": "BACKEND_READY",
++            "flow_algorithm": "network_simplex", "cut_algorithm": "edmonds_karp",
++            "potential_algorithm": "single_source_bellman_ford_path_length", "builtin_backend_only": True}
++
++
+ def backend_status():
+-    return {"required": "mature integer min-cost-flow backend",
+-            "candidate": "NetworkX", "locally_detected": importlib.util.find_spec("networkx") is not None,
+-            "configured": False, "status": "BACKEND_UNAVAILABLE",
+-            "reason": "NO_APPROVED_FROZEN_MATURE_BACKEND", "network_install_performed": False}
++    try:
++        return _backend_info(_load_backend())
++    except (BackendUnavailable, ImportError, importlib.metadata.PackageNotFoundError) as error:
++        return {"candidate": "NetworkX", "configured": False, "status": "BACKEND_UNAVAILABLE",
++                "reason": str(error) if isinstance(error, BackendUnavailable) else "MATURE_BACKEND_NOT_INSTALLED"}
+ 
+ 
+ def build_network(math_input, mode, limits=DEFAULT_LIMITS):
+@@ -46,21 +76,171 @@
+             "required_flow": h, "C_T": sum(value["c"][i] for i in value["T"])}
+ 
+ 
+-def solve(math_input, limits=DEFAULT_LIMITS):
+-    """The missing-library branch is deliberate and never returns a solved flow."""
++def _graph(nx, spec):
++    graph = nx.DiGraph()
++    for n in spec["nodes"]:
++        graph.add_node(n, demand=spec["demand"][n])
++    for a in spec["arcs"]:
++        graph.add_edge(a["tail"], a["head"], capacity=a["capacity"], weight=a["cost"])
++    return graph
++
++
++def _sparse_flow(spec, flow, expected_value):
++    legal = {(a["tail"], a["head"]) for a in spec["arcs"]}
++    if type(flow) is not dict or set(flow) != set(spec["nodes"]):
++        raise InputError("INVALID_CERTIFICATE")
++    for u, adjacent in flow.items():
++        if type(adjacent) is not dict:
++            raise InputError("INVALID_CERTIFICATE")
++        for v, x in adjacent.items():
++            if (u, v) not in legal or type(x) is not int or x < 0:
++                raise InputError("INVALID_CERTIFICATE")
++    sparse, balance, cost = [], {n: 0 for n in spec["nodes"]}, 0
++    for a in spec["arcs"]:
++        x = flow[a["tail"]].get(a["head"], 0)
++        if type(x) is not int or not 0 <= x <= a["capacity"]:
++            raise InputError("INVALID_CERTIFICATE")
++        if x:
++            sparse.append([a["tail"], a["head"], x])
++        balance[a["tail"]] -= x
++        balance[a["head"]] += x
++        cost += x * a["cost"]
++    if any(balance[n] != (-expected_value if n == "s" else expected_value if n == "t" else 0) for n in balance):
++        raise InputError("INVALID_CERTIFICATE")
++    return sparse, cost
++
++
++def _potentials(nx, spec, sparse, metrics):
++    start = perf_counter_ns()
++    flow = {(u, v): x for u, v, x in sparse}
++    residual = nx.MultiDiGraph()
++    residual.add_nodes_from(spec["nodes"])
++    arcs = []
++    for a in spec["arcs"]:
++        u, v, cap, cost = a["tail"], a["head"], a["capacity"], a["cost"]
++        x = flow.get((u, v), 0)
++        if x < cap:
++            residual.add_edge(u, v, key=a["id"] + ":forward", weight=cost)
++            arcs.append((u, v, cost))
++        if x > 0:
++            residual.add_edge(v, u, key=a["id"] + ":reverse", weight=-cost)
++            arcs.append((v, u, -cost))
++    super_source = "__dsat_potential_source__"
++    residual.add_node(super_source)
++    for n in spec["nodes"]:
++        residual.add_edge(super_source, n, key="super:" + n, weight=0)
++    metrics["backend_calls"].append("bellman_ford:" + spec["mode"])
++    distances = nx.single_source_bellman_ford_path_length(residual, super_source, weight="weight", backend="networkx")
++    pi = {n: distances[n] for n in spec["nodes"]}
++    if any(type(x) is not int for x in pi.values()) or any(c + pi[u] - pi[v] < 0 for u, v, c in arcs):
++        raise InputError("INVALID_CERTIFICATE")
++    metrics["potential_generation_ns"] += perf_counter_ns() - start
++    metrics["residual_arcs"] += len(arcs)
++    return pi
++
++
++def _optimize(nx, spec, metrics):
++    if spec["required_flow"] == 0:
++        return {"flow": [], "potentials": {n: 0 for n in spec["nodes"]}, "cost": 0}
++    graph_start = perf_counter_ns()
++    graph = _graph(nx, spec)
++    metrics["library_graph_build_ns"] += perf_counter_ns() - graph_start
++    metrics["backend_calls"].append("network_simplex:" + spec["mode"])
++    start = perf_counter_ns()
++    try:
++        cost, flow = nx.network_simplex(graph, demand="demand", capacity="capacity", weight="weight", backend="networkx")
++    finally:
++        metrics[spec["mode"] + "_flow_ns"] += perf_counter_ns() - start
++    sparse, actual = _sparse_flow(spec, flow, spec["required_flow"])
++    if type(cost) is not int or cost != actual:
++        raise InputError("INVALID_CERTIFICATE")
++    return {"flow": sparse, "potentials": _potentials(nx, spec, sparse, metrics), "cost": cost}
++
++
++def _cut_proof(nx, spec, metrics):
++    start = perf_counter_ns()
++    graph = _graph(nx, spec)
++    def algorithm(graph, source, sink, **kwargs):
++        return nx.algorithms.flow.edmonds_karp(graph, source, sink, backend="networkx", **kwargs)
++    metrics["backend_calls"].append("maximum_flow")
++    value, flow = nx.maximum_flow(graph, "s", "t", capacity="capacity", flow_func=algorithm, backend="networkx")
++    metrics["backend_calls"].append("minimum_cut")
++    cut_value, partition = nx.minimum_cut(graph, "s", "t", capacity="capacity", flow_func=algorithm, backend="networkx")
++    if type(value) is not int or type(cut_value) is not int or value != cut_value or not 0 <= value < spec["required_flow"]:
++        raise InputError("UNVERIFIED_INFEASIBILITY")
++    sparse, _ = _sparse_flow(spec, flow, value)
++    left, right = partition
++    if "s" not in left or "t" in left or set(left) | set(right) != set(spec["nodes"]) or set(left) & set(right):
++        raise InputError("UNVERIFIED_INFEASIBILITY")
++    actual_cut = sum(a["capacity"] for a in spec["arcs"] if a["tail"] in left and a["head"] not in left)
++    if actual_cut != value:
++        raise InputError("UNVERIFIED_INFEASIBILITY")
++    metrics["cut_generation_ns"] += perf_counter_ns() - start
++    return {"kind": "INFEASIBLE", "flow": sparse, "cut": sorted(left), "value": value}
++
++
++def solve(math_input, limits=DEFAULT_LIMITS, *, bindings=None):
++    """Optimize both integer objectives; a bound proof packet is optional."""
+     started = perf_counter_ns()
+     try:
+         mnet = build_network(math_input, "m", limits)
+         dnet = build_network(math_input, "d", limits)
+     except InputError as error:
+         return {"status": error.code, "obligation_action": "KEEP_EXISTING", "solved": False}
+-    return {"status": "BACKEND_UNAVAILABLE", "solved": False, "backend": backend_status(),
++    common = {
+             "math_input_digest": mnet["math_input_digest"], "C_T": mnet["C_T"],
+             "network_nodes": len(mnet["nodes"]), "network_arcs": len(mnet["arcs"]),
+-            "network_build_ns": perf_counter_ns() - started, "C_flow_ns": None,
+-            "m_T": None, "d_T": None, "R_T": None, "H_T": None,
++            "network_build_ns": perf_counter_ns() - started,
+             "m_network": mnet, "d_network": dnet,
+-            "obligation_action": "KEEP_EXISTING", "native_admission": "SOURCE_OR_REFINEMENT_GAP"}
++            "obligation_action": "KEEP_EXISTING", "native_admission": "SOURCE_OR_REFINEMENT_GAP", "global_complete": False}
++    load_start = perf_counter_ns()
++    try:
++        nx = _load_backend()
++    except (BackendUnavailable, ImportError, importlib.metadata.PackageNotFoundError) as error:
++        return {**common, "status": "BACKEND_UNAVAILABLE", "solved": False,
++                "backend": {"configured": False, "reason": str(error) if isinstance(error, BackendUnavailable) else "MATURE_BACKEND_NOT_INSTALLED"},
++                "m_T": None, "d_T": None, "R_T": None, "H_T": None, "C_flow_ns": None}
++    metrics = {"backend_import_ns": perf_counter_ns() - load_start, "network_build_ns": common["network_build_ns"],
++               "library_graph_build_ns": 0, "m_flow_ns": 0, "d_flow_ns": 0,
++               "potential_generation_ns": 0, "cut_generation_ns": 0, "proof_packet_ns": 0,
++               "backend_calls": [], "residual_arcs": 0}
++    try:
++        try:
++            m = _optimize(nx, mnet, metrics)
++        except (nx.NetworkXUnfeasible, nx.NetworkXError):
++            cut = _cut_proof(nx, mnet, metrics)
++            packet_start = perf_counter_ns()
++            packet = (assemble_infeasible_packet(mnet["math_input"], bindings, cut["flow"], cut["cut"], cut["value"])
++                      if bindings is not None else None)
++            metrics["proof_packet_ns"] = perf_counter_ns() - packet_start
++            metrics["total_solver_ns"] = perf_counter_ns() - started
++            return {**common, "status": "EVIDENCE_CONFLICT", "solved": True, "feasible": False,
++                    "backend": _backend_info(nx), "certificate": cut, "proof_packet": packet,
++                    "m_T": None, "d_T": None, "R_T": None, "H_T": None,
++                    "C_flow_ns": metrics["m_flow_ns"], "metrics": metrics}
++        d = _optimize(nx, dnet, metrics)
++        R, H = common["C_T"] - m["cost"], common["C_T"] - d["cost"]
++        if not 0 <= R <= H:
++            raise InputError("INVALID_CERTIFICATE")
++        packet_start = perf_counter_ns()
++        packet = assemble_optimum_packet(mnet["math_input"], bindings, m, d) if bindings is not None else None
++        metrics["proof_packet_ns"] = perf_counter_ns() - packet_start
++        metrics["total_solver_ns"] = perf_counter_ns() - started
++        return {**common, "status": "MATH_OPTIMAL", "solved": True, "feasible": True,
++                "backend": _backend_info(nx), "certificates": {"m": m, "d": d}, "proof_packet": packet,
++                "m_T": m["cost"], "d_T": d["cost"], "R_T": R, "H_T": H,
++                "C_flow_ns": metrics["m_flow_ns"] + metrics["d_flow_ns"], "metrics": metrics}
++    except MemoryError:
++        error_code = "UNKNOWN_RESOURCE_LIMIT"
++    except InputError as error:
++        error_code = error.code
++    except nx.NetworkXUnbounded:
++        error_code = "INVALID_CERTIFICATE"
++    except (nx.NetworkXException, KeyError, TypeError, ValueError):
++        error_code = "INVALID_CERTIFICATE"
++    metrics["total_solver_ns"] = perf_counter_ns() - started
++    return {**common, "status": error_code, "solved": False, "backend": _backend_info(nx),
++            "m_T": None, "d_T": None, "R_T": None, "H_T": None, "metrics": metrics}
+ 
+ 
+ def make_bindings(bundle, projection):
+--- scripts/run_dsat_offline_tests.py (R06)
++++ scripts/run_dsat_offline_tests.py (R07)
+@@ -24,7 +24,7 @@
+ )
+ ALLOWED_IMPORTS = {"argparse", "ast", "copy", "dataclasses", "hashlib", "importlib", "json", "pathlib",
+                    "re", "socket", "time", "tracemalloc", "unittest", "dsat_test_support", "dsat_types",
+-                   "auth_lifecycle"}
++                   "auth_lifecycle", "sys"}
+ 
+ 
+ def preflight():
+@@ -40,6 +40,8 @@
+             elif isinstance(node, ast.ImportFrom):
+                 imported.append(node.module or "")
+         for module in imported:
++            if module == "networkx" and name == "src/auth_lifecycle/online_state/dsat_flow.py":
++                continue  # R07 approved pinned backend; checker and S1 remain isolated.
+             if module.split(".")[0] not in ALLOWED_IMPORTS:
+                 raise RuntimeError("UNAPPROVED_IMPORT")
+             if any(bad in module.split(".") for bad in ("storage", "services", "native_provider", "native_http")):
+@@ -129,9 +131,15 @@
+             records = list(result.records.values())
+             counts = {status: sum(r["status"] == status for r in records) for status in ("PASS", "FAIL", "ERROR", "SKIP")}
+             record.update(test_count=result.testsRun, counts=counts, tests=records,
+-                          successful=result.wasSuccessful(), backend="BACKEND_UNAVAILABLE",
+-                          scope="pure S1/network construction and independent checking of supplied vectors; no optimizer solve")
++                          successful=result.wasSuccessful(),
++                          scope="approved pure S1/S2 optimization and independent synthetic proof checking only")
+             support = importlib.import_module("dsat_test_support")
++            flow_module = importlib.import_module("auth_lifecycle.online_state.dsat_flow")
++            record["backend_metadata"] = flow_module.backend_status()
++            record["backend"] = record["backend_metadata"]["status"]
++            record["optimizer_executed"] = any(
++                any(call.startswith("network_simplex:") for call in metric["backend_calls"])
++                for row in support.CASE_RESULTS.values() for metric in row.get("automatic_solver_metrics", []))
+             (directory / "CASE_RESULTS.json").write_text(json.dumps(support.CASE_RESULTS, indent=2) + "\n", encoding="utf-8")
+             proofs = directory / "proofs"
+             proofs.mkdir()
+--- tests/test_dsat_projection.py (R06)
++++ tests/test_dsat_projection.py (R07)
+@@ -13,7 +13,7 @@
+ from auth_lifecycle.online_state.dsat_types import (
+     AuthoritySnapshot, EvidenceEnvelope, Limits, canonical, normalize_math, InputError,
+ )
+-from auth_lifecycle.online_state.dsat_flow import build_network, solve
++from auth_lifecycle.online_state.dsat_flow import build_network, solve, BackendUnavailable
+ from dsat_test_support import load_case, rebind_fixture, CASE_RESULTS, ROOT
+ 
+ 
+@@ -255,7 +255,8 @@
+     def test_backend_missing_is_not_a_zero_flow_solution(self):
+         case = load_case("A06")
+         m = project_evidence(case["bundle"], case["trusted_manifest"])["math_input"]
+-        r = solve(m)
++        with patch("auth_lifecycle.online_state.dsat_flow._load_backend", side_effect=BackendUnavailable("TEST_MISSING_BACKEND")):
++            r = solve(m)
+         self.assertEqual(r["status"], "BACKEND_UNAVAILABLE")
+         self.assertIsNone(r["m_T"])
+         self.assertIsNone(r["H_T"])
+--- tests/test_dsat_certificate.py (R06)
++++ tests/test_dsat_certificate.py (R07)
+@@ -2,15 +2,17 @@
+ import ast
+ import copy
+ import hashlib
++import json
+ from pathlib import Path
+ from time import perf_counter_ns
++import tracemalloc
+ import unittest
+ from unittest.mock import patch
+ 
+ from auth_lifecycle.online_state.dsat_projection import project_evidence
+ from auth_lifecycle.online_state.dsat_types import canonical
+ from auth_lifecycle.online_state.dsat_flow import (
+-    assemble_optimum_packet, assemble_infeasible_packet, make_bindings,
++    assemble_optimum_packet, assemble_infeasible_packet, make_bindings, solve,
+ )
+ from dsat_test_support import (
+     CHECKER, ROOT, load_case, rebind_fixture, proof_for, rehash_packet,
+@@ -306,4 +308,189 @@
+         self.assertTrue(r["mathematics_accepted"])
+ 
+     def test_optimizer_execution_not_run_without_dependency(self):
+-        self.skipTest("No installed approved mature flow backend; manual proof checking is exercised separately")
++        # R06's exact test identity is retained; it now genuinely exercises S2.
++        case = load_case("A06"); p = _project(case)
++        r = solve(p["math_input"], bindings=make_bindings(case["bundle"], p))
++        self.assertTrue(r["solved"], r)
++        self.assertEqual(r["status"], "MATH_OPTIMAL")
++        self.assertIn("network_simplex:m", r["metrics"]["backend_calls"])
++        self.assertIn("network_simplex:d", r["metrics"]["backend_calls"])
++        checked = CHECKER.check_certificate(r["proof_packet"])
++        self.assertTrue(checked["mathematics_accepted"], checked)
++        self.assertEqual((checked["R_T"], checked["H_T"]), (0, 0))
++
++
++class AutomaticBackendCases(unittest.TestCase):
++    pass
++
++
++_EXPECTED_A = {"A01": (0, 0), "A02": (1, 1), "A03": (2, 2), "A04": (2, 2),
++               "A05": (2, 2), "A06": (0, 0), "A07": (2, 2), "A08": (1, 2),
++               "A09": (2, 2), "A10": (2, 2), "A14": (2, 2), "A15": (1, 2),
++               "A16": (2, 3), "A17": (2, 3), "A18": (1, 1), "A20": (2, 2),
++               "A21": (1, 2), "A22": (2, 2), "A24": (0, 0)}
++
++
++def _automatic_case(case_id):
++    def run(self):
++        case = load_case(case_id); projected = _project(case)
++        row = CASE_RESULTS.setdefault(case_id, {"case_id": case_id})
++        if projected["math_input"] is None:
++            self.assertEqual(projected["status"], "REJECT_UNAUTHORIZED")
++            row["auto_solver_gate"] = "REJECTED_AT_PROJECTION_NO_SOLVER"
++            return
++        targets = list(case["manual_proofs"]) or ["A"]
++        results = {}; timings = []
++        for target in targets:
++            mathematical = copy.deepcopy(projected["math_input"])
++            if case["manual_proofs"]:
++                mathematical["T"] = case["manual_proofs"][target]["T"]
++            bindings = make_bindings(case["bundle"], projected)
++            bindings["scope"]["target_attempts"] = list(mathematical["T"])
++            tracemalloc.start()
++            result = solve(mathematical, bindings=bindings)
++            _, peak = tracemalloc.get_traced_memory(); tracemalloc.stop()
++            self.assertTrue(result["solved"], result)
++            packet = result["proof_packet"]
++            t = perf_counter_ns(); checked = CHECKER.check_certificate(packet,
++                expected_math_digest=result["math_input_digest"], expected_scope_digest=packet["digests"]["scope_digest"])
++            verify_ns = perf_counter_ns() - t
++            self.assertTrue(checked["mathematics_accepted"], checked)
++            self.assertEqual(checked["native_admission"], "SOURCE_OR_REFINEMENT_GAP")
++            self.assertFalse(checked["global_complete"])
++            self.assertTrue({o["id"] for o in case["bundle"]["obligations"]} <= set(checked["remaining_obligations"]))
++            if case_id == "A19":
++                self.assertEqual(checked["result"], "EVIDENCE_CONFLICT")
++                self.assertEqual(checked["cut_capacity"], 3)
++                self.assertIsNone(checked["H_T"])
++            else:
++                self.assertEqual((checked["R_T"], checked["H_T"]), _EXPECTED_A[case_id] if target == "A" else (0, 0))
++            if case_id in {"A05", "A07", "A10", "A14", "A20", "A22"}:
++                self.assertFalse(checked["conditional_material_closed"])
++            if case_id == "A24":
++                self.assertIn("await_terminal:i1", checked["remaining_obligations"])
++            CORE_PACKETS["AUTO_" + case_id + "_" + target] = packet
++            results[target] = checked
++            timings.append({"target": target, **result["metrics"], "C_flow_ns": result["C_flow_ns"],
++                            "C_verify_ns": verify_ns, "solver_traced_peak_bytes": peak,
++                            "input_bytes": len(canonical(mathematical)), "certificate_bytes": len(canonical(packet)),
++                            "network_nodes": result["network_nodes"], "network_arcs": result["network_arcs"]})
++        row["automatic_certificate_results"] = results
++        row["automatic_solver_metrics"] = timings
++        row["automatic_backend"] = "NetworkX3.7_builtin"
++    return run
++
++
++for _case_id in [f"A{i:02d}" for i in range(1, 25)]:
++    setattr(AutomaticBackendCases, "test_auto_" + _case_id, _automatic_case(_case_id))
++
++
++class AutomaticBackendSpecific(unittest.TestCase):
++    def verify_model(self, mathematical, expected_R_H=None, conflict=False, bindings=None):
++        if bindings is None:
++            case = load_case("A06"); bindings = make_bindings(case["bundle"], _project(case))
++            bindings["scope"]["target_attempts"] = list(mathematical["T"])
++            # Boundary-only models are mathematical, without a real native-source assertion.
++            bindings["scope"]["coverage_complete"] = False
++        r = solve(mathematical, bindings=bindings)
++        self.assertTrue(r["solved"], r)
++        checked = CHECKER.check_certificate(r["proof_packet"])
++        self.assertTrue(checked["mathematics_accepted"], checked)
++        if conflict:
++            self.assertEqual(r["status"], "EVIDENCE_CONFLICT")
++            self.assertLess(checked["cut_capacity"], checked["required_flow"])
++        elif expected_R_H is not None:
++            self.assertEqual((r["R_T"], r["H_T"]), expected_R_H)
++        self.assertFalse(checked["global_complete"])
++        return r
++
++    def test_auto_empty_U_keeps_original_capacity(self):
++        self.verify_model({"I": ["a"], "T": ["a"], "c": {"a": 2 ** 80}, "U": [], "E": [], "D_P": []}, (2 ** 80, 2 ** 80))
++
++    def test_auto_empty_T(self):
++        m = _project(load_case("A06"))["math_input"]; m["T"] = []
++        self.verify_model(m, (0, 0))
++
++    def test_auto_zero_capacity(self):
++        self.verify_model({"I": ["a"], "T": ["a"], "c": {"a": 0}, "U": ["u"], "E": [["u", "a"]], "D_P": []}, conflict=True)
++
++    def test_auto_capacity_above_h_is_not_used_for_C_T(self):
++        self.verify_model({"I": ["a"], "T": ["a"], "c": {"a": 2 ** 80}, "U": ["u", "v"], "E": [["u", "a"], ["v", "a"]], "D_P": ["u", "v"]}, (2 ** 80 - 2, 2 ** 80 - 2))
++
++    def test_auto_missing_E_yields_cut(self):
++        self.verify_model({"I": ["a"], "T": ["a"], "c": {"a": 2}, "U": ["u", "v"], "E": [["u", "a"]], "D_P": []}, conflict=True)
++
++    def test_auto_same_identifier_in_both_namespaces(self):
++        self.verify_model({"I": ["s"], "T": ["s"], "c": {"s": 1}, "U": ["s"], "E": [["s", "s"]], "D_P": ["s"]}, (0, 0))
++
++    def test_auto_missing_D_in_both_targets(self):
++        case = load_case("A06"); case["bundle"]["envelopes"] = [e for e in case["bundle"]["envelopes"] if e["id"] != "syn:d:v1"]
++        case["trusted_manifest"] = rebind_fixture(case["bundle"]); p = _project(case)
++        for target in [["i1", "i2", "i_p"], ["j"]]:
++            m = dict(p["math_input"], T=target); b = make_bindings(case["bundle"], p); b["scope"]["target_attempts"] = target
++            r = self.verify_model(m, (0, 1), bindings=b)
++            self.assertFalse(r["proof_packet"]["claims"]["conditional_material_closed"])
++
++    def test_auto_fourth_source(self):
++        m = copy.deepcopy(_project(load_case("A06"))["math_input"])
++        m["I"].append("z"); m["c"]["z"] = 1
++        for u in ["v1", "v2", "v3"]:m["E"].append([u, "z"])
++        for target in [["i1", "i2", "i_p"], ["j"]]:
++            self.verify_model(dict(m, T=target), (1, 1))
++
++    def test_auto_open_frontier_even_saturated(self):
++        for flag in ("frontier", "source", "derivative"):
++            case = load_case("A06")
++            if flag == "frontier":case["bundle"]["scope"]["open_frontiers"] = ["frontier:new_grant"]
++            elif flag == "source":case["bundle"]["contract"]["source_complete"] = False
++            else:case["bundle"]["contract"].update(derivations_covered=False, frontier_complete=False)
++            case["trusted_manifest"] = rebind_fixture(case["bundle"]); p = _project(case)
++            r = self.verify_model(p["math_input"], (0, 0), bindings=make_bindings(case["bundle"], p))
++            self.assertFalse(r["proof_packet"]["claims"]["conditional_material_closed"])
++
++    def test_auto_resource_and_bad_integer_rejection(self):
++        from auth_lifecycle.online_state.dsat_types import Limits
++        m = _project(load_case("A06"))["math_input"]
++        self.assertEqual(solve(m, Limits(edges=1))["status"], "UNKNOWN_RESOURCE_LIMIT")
++        for bad in (True, 1.0, -1):
++            x = copy.deepcopy(m); x["c"]["i1"] = bad
++            self.assertEqual(solve(x)["status"], "INVALID_INPUT")
++
++    def test_auto_tamper_flows_potentials_and_pins(self):
++        case = load_case("A06"); p = _project(case)
++        original = self.verify_model(p["math_input"], (0, 0), bindings=make_bindings(case["bundle"], p))["proof_packet"]
++        for change in ("flow", "potential", "hash", "obligations", "native", "dependency", "scope"):
++            q = copy.deepcopy(original); pins = None
++            if change == "flow":q["proof"]["m"]["flow"][0][2] = 2
++            elif change == "potential":q["proof"]["d"]["potentials"]["t"] -= 100
++            elif change == "hash":q["claims"]["m_T"] += 1
++            elif change == "obligations":q["claims"]["remaining_obligations"] = []
++            elif change == "native":q["claims"]["native_admission"] = "CLOSED"
++            elif change == "dependency":
++                pins = {"dependency_digest": original["digests"]["dependency_digest"]};q["bindings"]["dependency"]["authority_version"] += 1
++            else:
++                pins = {"scope_digest": original["digests"]["scope_digest"]};q["bindings"]["scope"]["paths"].append("new_path")
++            rehash_packet(q)
++            self.assertEqual(CHECKER.check_certificate(q, expected_digests=pins)["status"], "INVALID_CERTIFICATE", change)
++
++    def test_auto_tampered_cut_rejected(self):
++        case = load_case("A19"); p = _project(case)
++        q = self.verify_model(p["math_input"], conflict=True, bindings=make_bindings(case["bundle"], p))["proof_packet"]
++        q["proof"]["cut"].append("t"); rehash_packet(q)
++        self.assertEqual(CHECKER.check_certificate(q)["status"], "INVALID_CERTIFICATE")
++
++    def test_false_backend_infeasible_is_not_accepted_without_cut(self):
++        from auth_lifecycle.online_state.dsat_flow import _load_backend
++        nx = _load_backend(); m = _project(load_case("A06"))["math_input"]
++        with patch.object(nx, "network_simplex", side_effect=nx.NetworkXUnfeasible()):
++            r = solve(m)
++        self.assertEqual(r["status"], "UNVERIFIED_INFEASIBILITY")
++        self.assertFalse(r["solved"])
++
++    def test_failed_or_invalid_potential_stops_proof(self):
++        from auth_lifecycle.online_state.dsat_flow import _load_backend
++        nx = _load_backend(); m = _project(load_case("A06"))["math_input"]
++        with patch.object(nx, "single_source_bellman_ford_path_length", side_effect=nx.NetworkXUnbounded()):
++            r = solve(m)
++        self.assertEqual(r["status"], "INVALID_CERTIFICATE")
++        self.assertFalse(r["solved"])

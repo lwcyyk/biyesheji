@@ -1,0 +1,1026 @@
+--- a/scripts/check_reconciliation_receipt.py
++++ b/scripts/check_reconciliation_receipt.py
+@@ -18,7 +18,9 @@
+         if facts.get(key) is not True:failures.append(key)
+     for key in ("actual_sends", "per_send_effect_bound", "observed_distinct_effects"):
+         if type(facts.get(key)) is not int or facts[key] != 1:failures.append(key)
+-    for key in ("source_lemma_ref", "query_ref", "identifier_receipt_ref"):
++    origin = receipt.get("evidence_origin", "IDENTIFIER_POINT_READ")
++    refs = ("source_lemma_ref", "query_ref", "enumeration_ref", "authorized_scope_ref") if origin == "AUTHORIZED_SCOPE_ENUMERATION" else ("source_lemma_ref", "query_ref", "identifier_receipt_ref")
++    for key in refs:
+         if not evidence.get(key):failures.append(key)
+     target = receipt.get("target", {})
+     if not all(target.get(k) for k in ("rid", "attempt_id", "grant_id", "generation", "account", "request_digest")):
+@@ -50,7 +52,7 @@
+                 per_send_effect_bound=model.get("per_send_effect_bound"), observed_distinct_effects=query.get("observed_distinct_effects", 0))
+             if facts != expected:failures.append("PACKET_FACT_MISMATCH")
+             metadata = query.get("identifier_receipt")
+-            if facts.get("origin_bound") is True:
++            if facts.get("origin_bound") is True and origin == "IDENTIFIER_POINT_READ":
+                 if not isinstance(metadata, dict):
+                     failures.append("IDENTIFIER_RECEIPT_MISSING")
+                 else:
+@@ -61,6 +63,36 @@
+                             or metadata.get("origin") != original["origin"] or metadata.get("rid") != target["rid"]
+                             or metadata.get("native_unit_id") != query.get("native_unit_id")):
+                         failures.append("IDENTIFIER_SOURCE")
++            if origin == "AUTHORIZED_SCOPE_ENUMERATION":
++                for flag in ("collection_complete", "all_returned_rows_authorized", "registered_universe_complete", "organization_equal_filter"):
++                    if query.get(flag) is not True:failures.append(flag)
++                bound = query.get("record_upper_bound")
++                capacity = query.get("page_capacity")
++                budgets = model.get("approved_scope_budgets", [])
++                if (type(bound) is not int or type(capacity) is not int or not 0 < bound <= capacity
++                        or not budgets or any(type(n) is not int or n < 0 for n in budgets) or sum(budgets) != bound):
++                    failures.append("ENUMERATION_BOUND")
++                if query.get("page_number") != 1 or query.get("snapshot_scope") != "single_find_statement":
++                    failures.append("ENUMERATION_SNAPSHOT")
++                rows = query.get("returned_records", [])
++                if query.get("organization") != model.get("organization") or any(r.get("organization") != model.get("organization") for r in rows):
++                    failures.append("ENUMERATION_ORGANIZATION")
++                if (any(r.get("application") != model.get("application_name") or r.get("user") not in model.get("account_names", []) for r in rows)
++                        or model.get("account_id_by_name", {}).get(query.get("target_user")) != target["account"]
++                        or model.get("client_id") != target.get("audience")):
++                    failures.append("ENUMERATION_UNIVERSE")
++                selected = sorted({r["unit_id"] for r in rows if r.get("user") == query.get("target_user") and r.get("application") == model.get("application_name")})
++                candidates = sorted(set(selected) - set(query.get("known_input_ids", [])))
++                if (selected != query.get("target_unit_ids") or candidates != query.get("candidate_unit_ids")
++                        or len(candidates) != 1 or candidates[0] != query.get("selected_unit_id")):
++                    failures.append("ENUMERATION_SELECTION")
++                input_context = query.get("input_context", {})
++                encoded = json.dumps(input_context, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode()
++                if (hashlib.sha256(encoded).hexdigest() != query.get("input_context_ref")
++                        or input_context.get("known_unit_ids") != query.get("known_input_ids")
++                        or input_context.get("unknown_creators") != [target["rid"]]
++                        or input_context.get("account_grant_count") != 2 or input_context.get("account_budget_total") != 20):
++                    failures.append("ENUMERATION_SOURCE_CONTEXT")
+             for item in model.get("source_files", []):
+                 if hashlib.sha256(Path(item["path"]).read_bytes()).hexdigest() != item["sha256"]:
+                     failures.append("SOURCE_HASH")
+--- a/scripts/measure_native_casdoor.py
++++ b/scripts/measure_native_casdoor.py
+@@ -50,12 +50,19 @@
+                "userinfo_http": answer["http"], "accepted": accepted if determinate else None,
+                "runner_has_result": known.get(rid, {}).get("phase") in {"RESULT_AVAILABLE", "QUARANTINED", "DISPOSED"},
+                "userinfo_native_sequence": answer["sequence"]}
+-        if stage == "final" and rid.startswith("A") and row["runner_has_result"]:
++        if stage == "final" and rid.startswith("A") and row["runner_has_result"] and not profile.get("measurement_no_refresh"):
+             attempted = http.call("refresh", actor=actor["name"], form={
+                 "client_id": profile["client_id"], "client_secret": profile["client_secret"],
+                 "grant_type": "refresh_token", "refresh_token": body["refresh_token"], "scope": "openid"})
+             row["refresh_http"] = attempted["http"]
+             row["refresh_rejected"] = attempted["http"] in {400, 401, 403} and not attempted["body"].get("access_token")
++        if stage == "final" and rid.startswith("A") and row["runner_has_result"] and profile.get("measurement_no_refresh"):
++            active_rt = http.call("introspect", actor=actor["name"], form={
++                "client_id": profile["client_id"], "client_secret": profile["client_secret"],
++                "token": body["refresh_token"], "token_type_hint": "refresh_token"})
++            row["refresh_introspection_active"] = active_rt["body"].get("active") if active_rt["http"] == 200 else None
++            row["refresh_rejected"] = row["refresh_introspection_active"] is False
++            row["refresh_check_kind"] = "READ_ONLY_INTROSPECTION"
+         if stage == "final":
+             active = http.call("introspect", actor=actor["name"], form={
+                 "client_id": profile["client_id"], "client_secret": profile["client_secret"],
+@@ -68,7 +75,7 @@
+     unit_rows = []
+     with sqlite3.connect("file:" + str(database) + "?mode=ro", uri=True) as connection:
+         records = connection.execute('SELECT name,access_token,access_token_hash,refresh_token,expires_in FROM token WHERE user=? AND application=?',
+-                                     (actor["name"], "app-l1-0")).fetchall()
++                                     (actor["name"], profile.get("application_name", "app-l1-0"))).fetchall()
+         for name, at, at_hash, rt, expires in records:
+             for access_token, (rid, body) in pairs.items():
+                 if at == access_token or at_hash == hashlib.sha256(access_token.encode()).hexdigest():
+@@ -78,7 +85,7 @@
+     result = {"stage": stage, "rows": rows, "native_units": unit_rows,
+               "accesses": [{"path": "secure/http/*.aes", "role": "scorer_only_native_responses"},
+                            {"path": str(database), "mode": "read_only", "filter_user": actor["name"],
+-                            "filter_application": "app-l1-0", "SQL_queries": 1}],
++                            "filter_application": profile.get("application_name", "app-l1-0"), "SQL_queries": 1}],
+               "cookie_free": True, "HTTP_category": category}
+     target = case / "scorer" / (stage + "_native.json")
+     target.write_text(json.dumps(result, indent=2) + "\n")
+--- /dev/null
++++ b/scripts/native_unidentified.py
+@@ -0,0 +1,14 @@
++"""Explicitly authorized M4 dedicated-scope acceptance."""
++import argparse
++from pathlib import Path
++import sys
++sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"src"))
++from auth_lifecycle.online_state.unidentified_acceptance import run
++
++if __name__=="__main__":
++    parser=argparse.ArgumentParser()
++    parser.add_argument('--out',required=True)
++    parser.add_argument('--authorization-id',required=True)
++    parser.add_argument('--allow-native-casdoor',required=True,action='store_true')
++    args=parser.parse_args()
++    run(args.out,args.authorization_id,args.allow_native_casdoor)
+--- /dev/null
++++ b/scripts/score_unidentified.py
+@@ -0,0 +1,108 @@
++"""Independent M4 evidence checks, including no pre-query identifiers."""
++import argparse
++import hashlib
++import importlib.util
++import json
++from pathlib import Path
++import sqlite3
++import sys
++
++from cryptography.hazmat.primitives.ciphers.aead import AESGCM
++
++sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"src"))
++from auth_lifecycle.online_state.native_http import private_http_records
++
++
++def score(root):
++    root=Path(root)
++    outcome=json.loads((root/"runner/outcome.json").read_text())
++    if outcome["status"]!="OBSERVED":
++        result={"status":"ABORTED","reason":"INCOMPLETE_RUNTIME_TRACE"}
++        (root/"scorer/result.json").write_text(json.dumps(result));return result
++    checks=[]
++    def verify(name,ok):checks.append({"name":name,"pass":bool(ok)})
++    receipt=json.loads((root/"runner/closure_receipt.json").read_text())
++    spec=importlib.util.spec_from_file_location('receipt_checker',Path(__file__).with_name('check_reconciliation_receipt.py'))
++    checker=importlib.util.module_from_spec(spec);spec.loader.exec_module(checker)
++    receipt_check=checker.check(receipt)
++    verify('independent_receipt',receipt_check['status']!='INVALID')
++    profile=json.loads((root/'secure/native_profile.json').read_text())
++    batch=Path(profile['batch'])
++    policy=json.loads((batch/'BUDGET_AND_AUTHORIZATION.json').read_text())
++    with sqlite3.connect('file:'+str(root/'authority/authority.db')+'?mode=ro',uri=True) as con:
++        sealed=con.execute('SELECT ciphertext FROM authority_state WHERE id=1').fetchone()[0]
++        events=[(v,op,json.loads(p)) for v,op,p in con.execute('SELECT version,operation,projection FROM authority_events ORDER BY version')]
++    state=json.loads(AESGCM((root/'secure/authority.key').read_bytes()).decrypt(sealed[:12],sealed[12:],b'auth-lifecycle/online-state/schema-1'))
++    target=state['requests']['A1']
++    verify('receipt_committed',state['reconciliation_windows'][target['origin']['account']]['receipt']==receipt)
++    verify('target_binding',receipt['target']['attempt_id']==target['attempt_id'] and receipt['target']['request_digest']==target['digest'])
++    verify('no_operational_journal_or_inbox',profile['identifier_journal'] is False and profile['durable_inbox'] is False
++           and not (root/'provider/identifier_receipts.jsonl').exists() and not (root/'provider/native_inbox.jsonl').exists())
++    pre=outcome['pre_query_inputs']
++    prior=next(r for r in pre['runtime_projection']['requests'] if r['rid']=='A1')
++    verify('recovery_projection_unknown',prior['phase']=='DISPATCHED_UNKNOWN' and pre['lookup']['status']=='UNKNOWN')
++    raw=private_http_records(batch)
++    refresh=[r for r in raw if r['actor']==profile['actor']['name'] and r['category']=='method' and r['operation']=='refresh']
++    verify('one_refresh_send',len(refresh)==1)
++    if refresh:
++        body=refresh[0]['response']['body']
++        claims=json.loads(__import__('base64').urlsafe_b64decode(body['access_token'].split('.')[1]+'=='))
++        prior_bytes=json.dumps(pre,sort_keys=True).encode()
++        verify('pre_query_projection_has_no_A1_identifiers',all(value.encode() not in prior_bytes for value in
++            [body['access_token'],body['refresh_token'],claims['jti'],claims['jti'].split('/')[-1]]))
++    verify('audit_sealed_to_scorer',policy['audit_mode']=='sealed_to_scorer' and not (batch/'secure/http.key').exists()
++           and (batch/'scorer_secret/http-audit-private.pem').exists())
++    query=receipt['evidence']['packet']['query']
++    rowset=query.get('returned_records',[])
++    if receipt['claim']=='CLOSED':
++        verify('organization_authorized_and_complete',receipt['evidence_origin']=='AUTHORIZED_SCOPE_ENUMERATION'
++               and query.get('collection_complete') is True and query.get('organization')==policy['organization'])
++    if rowset:
++        verify('all_rows_in_authorized_org',all(r['organization']==policy['organization'] for r in rowset))
++        verify('exact_target_selection',set(query['target_unit_ids'])=={r['unit_id'] for r in rowset if r['user']==profile['actor']['name'] and r['application']==policy['application_name']})
++    other={r['unit_id'] for r in rowset if r['user']!=profile['actor']['name']}
++    if receipt['claim']=='CLOSED':
++        verify('other_accounts_not_selected',bool(other) and not (other & set(query['candidate_unit_ids'])))
++    verify('B_and_interferer_preserved',outcome['B_after']['status']=='RESULT_AVAILABLE' and outcome['interferer_preserved']['status']=='RESULT_AVAILABLE')
++    initial=json.loads((root/'scorer/initial_native.json').read_text())
++    final=json.loads((root/'scorer/final_native.json').read_text())
++    verify('native_B_acceptance',any(r['rid']=='B0' and r['accepted'] is True for r in final['rows']))
++    if receipt['claim']=='CLOSED':
++        a=[r for r in final['rows'] if r['rid'].startswith('A')]
++        verify('native_A_units_inactive',len(a)==2 and all(r['accepted'] is False and r.get('refresh_rejected') is True for r in a))
++        verify('remaining_effects_and_obligations_closed',receipt['remaining_creation_bound']==0 and 'A1' not in outcome['final_state']['obligations'])
++    else:
++        verify('unknown_obligation_retained','A1' in outcome['final_state']['obligations'])
++    if outcome['scenario']=='M4-02':
++        empty=json.loads((root/'runner/empty_receipt.json').read_text())
++        first=empty['evidence']['packet']['query']
++        verify('pre_send_not_falsely_closed',empty['claim']=='UNKNOWN' and empty['facts']['actual_sends']==0 and empty['remaining_creation_bound']==1)
++        if first.get('collection_complete') is True:
++            verify('real_native_empty_candidate_observation',first['query_kind']=='organization_equal_single_page'
++                   and first['candidate_unit_ids']==[] and len(first['target_unit_ids'])==2)
++    processes=[json.loads(l) for l in (root/'control/processes.jsonl').read_text().splitlines()]
++    verify('all_case_processes_exited',sorted(r['child_pid'] for r in processes if r['event']=='started')==sorted(r['child_pid'] for r in processes if r['event']=='terminated_and_waited'))
++    secret_values=[profile['client_secret'],profile['actor']['password']]
++    for record in raw:
++        if record['actor'] in policy['account_names'] and isinstance(record['response'].get('body'),dict):
++            body=record['response']['body']
++            secret_values += [body[k] for k in ['access_token','refresh_token','id_token'] if body.get(k)]
++    leaks=[]
++    for folder in ['runner','controller','control','provider','authority','scorer']:
++        for path in (root/folder).rglob('*'):
++            if path.is_file() and path.suffix in {'.json','.jsonl','.txt','.stderr'} and path.name!='native_inbox.jsonl':
++                if any(s.encode() in path.read_bytes() for s in secret_values):leaks.append(str(path.relative_to(root)))
++    verify('public_output_custody',not leaks)
++    status=('PASS_CLOSED' if receipt['claim']=='CLOSED' else 'PASS_CONSERVATIVE_UNKNOWN') if all(c['pass'] for c in checks) else 'SAFETY_FAILURE'
++    result={'status':status,'checks':checks,'receipt_checker':receipt_check,'closure':receipt['claim'],
++            'remaining_obligations':outcome['final_state']['obligations'],'leak_paths':leaks,
++            'read_scope':policy['organization'],'global_record_bound':query.get('record_upper_bound'),'returned_rows':len(rowset),
++            'target_rows':len(query.get('target_unit_ids',[])),'candidates':len(query.get('candidate_unit_ids',[])),
++            'observed_target_G':len({r['native_unit_ref'] for s in [initial,final] for r in s['native_units']})}
++    (root/'scorer/result.json').write_text(json.dumps(result,indent=2)+'\n');return result
++
++
++if __name__=='__main__':
++    parser=argparse.ArgumentParser();parser.add_argument('--case',required=True)
++    args=parser.parse_args();result=score(args.case);print(json.dumps({'status':result['status']}))
++    raise SystemExit(1 if result['status']=='SAFETY_FAILURE' else 0)
+--- /dev/null
++++ b/src/auth_lifecycle/online_state/enumeration.py
+@@ -0,0 +1,34 @@
++"""Authorized-scope snapshot and conservative difference attribution."""
++
++
++class ScopeViolation(ValueError):
++    pass
++
++
++def analyze(rows, organization, application, target_user, allowed_users, known_ids,
++            page_capacity, record_bound, unique_unknown, manifest_ok, actual_sends):
++    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
++        raise ValueError("INVALID_COLLECTION")
++    if any(row.get("organization") != organization for row in rows):
++        raise ScopeViolation("UNAUTHORIZED_ORGANIZATION_RETURNED")
++    projections = [{"unit_id": row.get("owner", "") + "/" + row.get("name", ""),
++                    "user": row.get("user"), "application": row.get("application"),
++                    "organization": row.get("organization")} for row in rows]
++    ids = [row["unit_id"] for row in projections]
++    universe_ok = all(row["user"] in allowed_users and row["application"] == application for row in projections)
++    complete = (type(page_capacity) is int and type(record_bound) is int
++                and 0 < record_bound <= page_capacity and len(rows) <= record_bound
++                and len(ids) == len(set(ids)) and universe_ok and manifest_ok)
++    target = [row["unit_id"] for row in projections if row["user"] == target_user and row["application"] == application]
++    candidates = sorted(set(target) - set(known_ids))
++    bound = complete and unique_unknown and actual_sends == 1 and len(candidates) == 1
++    return {"evidence_origin": "AUTHORIZED_SCOPE_ENUMERATION", "query_kind": "organization_equal_single_page",
++            "exact_authorized_read": True, "record_found": len(candidates) == 1, "origin_bound": bound,
++            "actual_sends": actual_sends, "observed_distinct_effects": 1 if bound else 0,
++            "organization": organization, "application": application, "target_user": target_user,
++            "all_returned_rows_authorized": True, "registered_universe_complete": universe_ok,
++            "collection_complete": complete, "page_capacity": page_capacity, "record_upper_bound": record_bound,
++            "page_number": 1, "snapshot_scope": "single_find_statement", "organization_equal_filter": True,
++            "returned_records": projections, "target_unit_ids": sorted(set(target)),
++            "known_input_ids": sorted(set(known_ids)), "candidate_unit_ids": candidates,
++            "selected_unit_id": candidates[0] if bound else None}
+--- a/src/auth_lifecycle/online_state/native_acceptance.py
++++ b/src/auth_lifecycle/online_state/native_acceptance.py
+@@ -81,19 +81,20 @@
+ 
+ 
+ def create_actor(admin, batch, name):
++    organization = admin.policy.get("organization", "l1-study")
+     prior = admin.call("get_user", actor=name)
+     if prior["http"] != 200 or prior["body"].get("data") is not None:
+         raise RuntimeError("TEST_ACCOUNT_NAME_ALREADY_PRESENT")
+-    actor = {"name": name, "password": secrets.token_urlsafe(22), "owner": "l1-study",
++    actor = {"name": name, "password": secrets.token_urlsafe(22), "owner": organization,
+              "precheck_absent": True, "creation_attempted": True}
+     write_json(batch / "secure" / (name + ".json"), actor)
+     answer = admin.call("add_user", actor=name, payload={
+-        "owner": "l1-study", "name": name, "displayName": "M2 owned fixture", "type": "normal-user",
++        "owner": organization, "name": name, "displayName": "owned lifecycle fixture", "type": "normal-user",
+         "password": actor["password"], "email": name + "@example.invalid", "isAdmin": False, "isForbidden": False})
+     if answer["http"] != 200 or answer["body"].get("status") != "ok":
+         raise RuntimeError("TEST_ACCOUNT_CREATION_UNCERTAIN")
+     row = admin.call("get_user", actor=name)["body"].get("data")
+-    if not row or row.get("name") != name or row.get("owner") != "l1-study":
++    if not row or row.get("name") != name or row.get("owner") != organization:
+         raise RuntimeError("TEST_ACCOUNT_ID_UNAVAILABLE")
+     actor.update(id=row["id"], created_verified=True)
+     write_json(batch / "secure" / (name + ".json"), actor)
+@@ -215,6 +216,7 @@
+ 
+ def cleanup_actor(admin, batch, profile, root):
+     actor = profile["actor"]
++    organization = profile.get("organization", admin.policy.get("organization", "l1-study"))
+     admin.category = "cleanup"
+     response_records = private_http_records(batch)
+     refresh_tokens = {r["response"]["body"]["refresh_token"] for r in response_records
+@@ -226,8 +228,8 @@
+         result = cleanup_http.call("revoke", actor=actor["name"], form={"client_id": profile["client_id"],
+             "client_secret": profile["client_secret"], "token": token, "token_type_hint": "refresh_token"})
+         revoked.append(result["http"])
+-    disabled = admin.call("disable_user", actor=actor["name"], payload={"owner": "l1-study", "name": actor["name"], "isForbidden": True})
+-    deleted = admin.call("delete_user", actor=actor["name"], payload={"owner": "l1-study", "name": actor["name"]})
++    disabled = admin.call("disable_user", actor=actor["name"], payload={"owner": organization, "name": actor["name"], "isForbidden": True})
++    deleted = admin.call("delete_user", actor=actor["name"], payload={"owner": organization, "name": actor["name"]})
+     absent = admin.call("get_user", actor=actor["name"])
+     result = {"account": actor["name"], "revoke_responses": revoked,
+               "disable_ok": disabled["body"].get("status") == "ok", "delete_ok": deleted["body"].get("status") == "ok",
+--- a/src/auth_lifecycle/online_state/native_http.py
++++ b/src/auth_lifecycle/online_state/native_http.py
+@@ -12,6 +12,8 @@
+ import urllib.request
+ 
+ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
++from cryptography.hazmat.primitives import hashes, serialization
++from cryptography.hazmat.primitives.asymmetric import padding, rsa
+ 
+ from .protocol import InvalidInput, NoRedirect, canonical, digest, write_json
+ 
+@@ -32,22 +34,38 @@
+     "userinfo": ("GET", "/api/userinfo"),
+     "introspect": ("POST", "/api/login/oauth/introspect"),
+     "get_token": ("GET", "/api/get-token"),
++    "get_tokens": ("GET", "/api/get-tokens"),
++    "owned_organization": ("GET", "/api/get-organization"),
++    "add_organization": ("POST", "/api/add-organization"),
++    "delete_organization": ("POST", "/api/delete-organization"),
++    "owned_application": ("GET", "/api/get-application"),
++    "add_application": ("POST", "/api/add-application"),
++    "delete_application": ("POST", "/api/delete-application"),
+ }
+ 
+ 
+-def create_budget(batch, authorization_id, account_names, limits=None, total=240, maximum_accounts=4, plan=4, wall_seconds=3600, point_reads=False):
++def create_budget(batch, authorization_id, account_names, limits=None, total=240, maximum_accounts=4, plan=4, wall_seconds=3600, point_reads=False, scope=None):
+     batch = Path(batch)
+     write_json(batch / "BUDGET_AND_AUTHORIZATION.json", {
+         "authorization_id": authorization_id, "total": total, "categories": limits or LIMITS,
+         "cleanup_reserved": (limits or LIMITS)["cleanup"], "maximum_new_accounts": maximum_accounts, "account_names": account_names,
+         "base": "http://127.0.0.1:18081", "plan_denominator": plan,
+         "wall_clock_seconds": wall_seconds, "retries_charged_before_send": True,
+-        "exact_point_reads_enabled": point_reads})
++        "exact_point_reads_enabled": point_reads, **(scope or {})})
+     con = sqlite3.connect(batch / "native_budget.db")
+     con.execute("CREATE TABLE requests(seq INTEGER PRIMARY KEY AUTOINCREMENT,category TEXT,operation TEXT,actor TEXT,started_ns INTEGER,http INTEGER,error_type TEXT,request_bytes INTEGER,response_bytes INTEGER,attempt_id TEXT,rid TEXT,request_digest TEXT)")
+     con.commit()
+     con.close()
+-    (batch / "secure" / "http.key").write_bytes(os.urandom(32))
++    if (scope or {}).get("audit_mode") == "sealed_to_scorer":
++        from .lab import protect_directory
++        private = batch / "scorer_secret"
++        private.mkdir()
++        protect_directory(private)
++        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
++        (private / "http-audit-private.pem").write_bytes(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
++        (batch / "secure" / "http-audit-public.pem").write_bytes(key.public_key().public_bytes(serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo))
++    else:
++        (batch / "secure" / "http.key").write_bytes(os.urandom(32))
+     (batch / "secure" / "http").mkdir()
+ 
+ 
+@@ -58,7 +76,12 @@
+         self.batch = Path(batch)
+         self.category = category
+         self.policy = json.loads((self.batch / "BUDGET_AND_AUTHORIZATION.json").read_text())
+-        self.key = (self.batch / "secure" / "http.key").read_bytes()
++        self.audit_public = None
++        self.key = None
++        if self.policy.get("audit_mode") == "sealed_to_scorer":
++            self.audit_public = serialization.load_pem_public_key((self.batch / "secure" / "http-audit-public.pem").read_bytes())
++        else:
++            self.key = (self.batch / "secure" / "http.key").read_bytes()
+         handlers = [urllib.request.ProxyHandler({}), NoRedirect()]
+         if cookies:
+             handlers.append(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+@@ -86,7 +109,9 @@
+         actor_operations = {"add_user", "get_user", "disable_user", "delete_user", "issue", "refresh", "revoke", "userinfo", "introspect", "get_token"}
+         if operation in actor_operations and actor not in self.policy["account_names"]:
+             raise InvalidInput("NATIVE_ACCOUNT_OUT_OF_SCOPE")
+-        if self.category == "method" and operation not in {"issue", "refresh", "userinfo", "revoke", "introspect", "get_token"}:
++        organization = self.policy.get("organization", "l1-study")
++        client_id = self.policy.get("client_id", "l1-client-0")
++        if self.category == "method" and operation not in {"issue", "refresh", "userinfo", "revoke", "introspect", "get_token", "get_tokens"}:
+             raise InvalidInput("METHOD_INTERFACE_DENIED")
+         if operation in {"issue", "refresh", "revoke", "introspect"}:
+             fields = {
+@@ -96,7 +121,7 @@
+                 "introspect": {"client_id", "client_secret", "token", "token_type_hint"}}
+             if not isinstance(form, dict) or set(form) != fields[operation]:
+                 raise InvalidInput("NATIVE_FORM_FIELDS_DENIED")
+-            if form.get("client_id") != "l1-client-0":
++            if form.get("client_id") != client_id:
+                 raise InvalidInput("NATIVE_CLIENT_OUT_OF_SCOPE")
+         if operation == "issue" and form["grant_type"] != "password":
+             raise InvalidInput("NATIVE_GRANT_DENIED")
+@@ -105,20 +130,41 @@
+         if operation == "issue" and form.get("username") != actor:
+             raise InvalidInput("NATIVE_LOGIN_ACCOUNT_MISMATCH")
+         if operation in {"add_user", "disable_user", "delete_user"}:
+-            if payload.get("owner") != "l1-study" or payload.get("name") != actor:
++            if payload.get("owner") != organization or payload.get("name") != actor:
+                 raise InvalidInput("NATIVE_MUTATION_ACCOUNT_MISMATCH")
+         method, path = ROUTES[operation]
++        object_kinds = {"owned_organization": "organization", "add_organization": "organization", "delete_organization": "organization",
++                        "owned_application": "application_name", "add_application": "application_name", "delete_application": "application_name"}
++        if operation in object_kinds:
++            expected = self.policy.get(object_kinds[operation])
++            if not self.policy.get("dedicated_scope") or self.category not in {"environment", "cleanup"} or not expected:
++                raise InvalidInput("OWNED_OBJECT_SCOPE_REQUIRED")
++            if operation.startswith("owned_"):
++                path += "?" + urllib.parse.urlencode({"id": "admin/" + expected})
++            elif not payload or payload.get("owner") != "admin" or payload.get("name") != expected:
++                raise InvalidInput("OWNED_OBJECT_MISMATCH")
++            if operation == "add_application" and (payload.get("organization") != organization or payload.get("clientId") != client_id):
++                raise InvalidInput("OWNED_APPLICATION_BINDING")
++            if operation == "delete_application" and payload.get("organization") != organization:
++                raise InvalidInput("OWNED_APPLICATION_DELETE_ORGANIZATION_REQUIRED")
++        if operation == "get_tokens":
++            if not self.policy.get("organization_scope_read_enabled") or not self.policy.get("dedicated_scope"):
++                raise InvalidInput("EXPLICIT_ORGANIZATION_READ_REQUIRED")
++            if form is not None or payload is not None:
++                raise InvalidInput("FIXED_SCOPE_QUERY_FIELDS")
++            path += "?" + urllib.parse.urlencode({"owner": "admin", "organization": organization,
++                "pageSize": self.policy["page_size"], "p": 1, "field": "", "value": "", "sortField": "name", "sortOrder": "ascend"})
+         if operation == "get_token":
+             if (not self.policy.get("exact_point_reads_enabled") or not isinstance(payload, dict)
+                     or set(payload) != {"id"} or not payload["id"].startswith("admin/")
+                     or not context or context.get("verified_unit_id") != payload["id"]):
+                 raise InvalidInput("EXACT_OWNED_RECORD_BINDING_REQUIRED")
+-            path += "?" + urllib.parse.urlencode({"id": payload["id"], "organization": "l1-study"})
++            path += "?" + urllib.parse.urlencode({"id": payload["id"], "organization": organization})
+             payload = None
+         if operation == "get_user":
+-            path += "?" + urllib.parse.urlencode({"id": "l1-study/" + actor})
++            path += "?" + urllib.parse.urlencode({"id": organization + "/" + actor})
+         if operation == "disable_user":
+-            path += "?" + urllib.parse.urlencode({"id": "l1-study/" + actor, "columns": "isForbidden"})
++            path += "?" + urllib.parse.urlencode({"id": organization + "/" + actor, "columns": "isForbidden"})
+         data = None
+         request_headers = dict(headers or {})
+         if any(key.lower() in {"cookie", "host"} for key in request_headers):
+@@ -156,7 +202,12 @@
+                          "raw_response_base64": base64.b64encode(raw).decode(),
+                          "error_type": error_type, "started_ns": started, "finished_ns": finished}
+         nonce = os.urandom(12)
+-        encrypted = nonce + AESGCM(self.key).encrypt(nonce, canonical(secret_record), b"native-http-v1")
++        if self.audit_public is not None:
++            audit_key = AESGCM.generate_key(bit_length=256)
++            capsule = self.audit_public.encrypt(audit_key, padding.OAEP(mgf=padding.MGF1(hashes.SHA256()), algorithm=hashes.SHA256(), label=None))
++            encrypted = b"M4AE" + len(capsule).to_bytes(2, "big") + capsule + nonce + AESGCM(audit_key).encrypt(nonce, canonical(secret_record), b"native-http-v2")
++        else:
++            encrypted = nonce + AESGCM(self.key).encrypt(nonce, canonical(secret_record), b"native-http-v1")
+         path = self.batch / "secure" / "http" / (str(sequence) + ".aes")
+         with path.open("wb") as stream:
+             stream.write(encrypted)
+@@ -172,9 +223,18 @@
+ 
+ def private_http_records(batch):
+     batch = Path(batch)
+-    cipher = AESGCM((batch / "secure" / "http.key").read_bytes())
++    cipher = AESGCM((batch / "secure" / "http.key").read_bytes()) if (batch / "secure" / "http.key").exists() else None
++    private = None
++    if cipher is None:
++        private = serialization.load_pem_private_key((batch / "scorer_secret" / "http-audit-private.pem").read_bytes(), password=None)
+     result = []
+     for path in sorted((batch / "secure" / "http").glob("*.aes"), key=lambda p: int(p.stem)):
+         raw = path.read_bytes()
+-        result.append(json.loads(cipher.decrypt(raw[:12], raw[12:], b"native-http-v1")))
++        if raw.startswith(b"M4AE"):
++            size = int.from_bytes(raw[4:6], "big")
++            key = private.decrypt(raw[6:6+size], padding.OAEP(mgf=padding.MGF1(hashes.SHA256()), algorithm=hashes.SHA256(), label=None))
++            nonce = raw[6+size:18+size]
++            result.append(json.loads(AESGCM(key).decrypt(nonce, raw[18+size:], b"native-http-v2")))
++        else:
++            result.append(json.loads(cipher.decrypt(raw[:12], raw[12:], b"native-http-v1")))
+     return result
+--- a/src/auth_lifecycle/online_state/native_provider.py
++++ b/src/auth_lifecycle/online_state/native_provider.py
+@@ -13,6 +13,7 @@
+ from .materials import decode64, token_bundle, validate_material, verified_claims
+ from .native_http import NativeHTTP
+ from .protocol import EventLog, InvalidInput, canonical, digest, exact_fields, write_json
++from .enumeration import analyze, ScopeViolation
+ 
+ 
+ class CasdoorProvider:
+@@ -122,6 +123,11 @@
+                 write_json(path, {**context, "position": "identifier durable, response delivery held"})
+                 while not path.with_suffix(".release").exists():
+                     time.sleep(0.01)
++        if kind == "refresh" and self.profile.get("hold_response_without_identifiers"):
++            path = self.root / "provider" / "response_ready_without_identifiers.json"
++            write_json(path, {**context, "position": "response withheld; no operational body or identifier retained"})
++            while not path.with_suffix(".release").exists():
++                time.sleep(0.01)
+         if self.profile.get("durable_inbox", True):
+             with self.lock:
+                 nonce = os.urandom(12)
+@@ -142,6 +148,8 @@
+         return {"status": "PROVIDER_RESULT", **result}
+ 
+     def reconcile_query(self, payload):
++        if self.profile.get("query_mode") == "AUTHORIZED_SCOPE_ENUMERATION":
++            return self.reconcile_enumeration(payload)
+         exact_fields(payload, ("rid", "digest", "origin", "attempt_id", "release_version"))
+         with sqlite3.connect("file:" + str(Path(self.profile["batch"]) / "native_budget.db") + "?mode=ro", uri=True) as con:
+             sends = con.execute("SELECT COUNT(*) FROM requests WHERE category='method' AND operation='refresh' AND attempt_id=? AND rid=? AND request_digest=? AND actor=?",
+@@ -179,3 +187,36 @@
+         evidence.update(record_found=True, origin_bound=True, observed_distinct_effects=1)
+         return {"status": "RECONCILED_MATERIAL", "evidence": evidence,
+                 "result": {**payload, "material": material, "outcome": "OK"}}
++
++    def reconcile_enumeration(self, payload):
++        exact_fields(payload, ("rid", "digest", "origin", "attempt_id", "release_version", "enumeration_context"))
++        known = payload["enumeration_context"]
++        with sqlite3.connect("file:" + str(Path(self.profile["batch"]) / "native_budget.db") + "?mode=ro", uri=True) as con:
++            sends = con.execute("SELECT COUNT(*) FROM requests WHERE category='method' AND operation='refresh' AND attempt_id=? AND rid=? AND request_digest=? AND actor=?",
++                (payload["attempt_id"], payload["rid"], payload["digest"], self.profile["actor"]["name"])).fetchone()[0]
++        basic = base64.b64encode((self.profile["client_id"] + ":" + self.profile["client_secret"]).encode()).decode()
++        context = {key: payload[key] for key in ("rid", "digest", "attempt_id")}
++        answer = self.http.call("get_tokens", actor=self.profile["actor"]["name"],
++                                headers={"Authorization": "Basic " + basic}, context=context)
++        rows = answer["body"].get("data") if answer["http"] == 200 else None
++        if not isinstance(rows, list) or answer["error_type"]:
++            return {"status": "UNKNOWN", "reason": "AUTHORIZED_ENUMERATION_UNAVAILABLE", "evidence": {"actual_sends": sends}}
++        try:
++            evidence = analyze(rows, self.profile["organization"], self.profile["application_name"], self.profile["actor"]["name"],
++                self.http.policy["account_names"], known["known_unit_ids"], self.http.policy["page_size"], self.http.policy["record_upper_bound"],
++                known["unknown_creators"] == [payload["rid"]], known["account_grant_count"] == 2 and known["account_budget_total"] == 20, sends)
++        except ScopeViolation:
++            return {"status": "SAFETY_FAILURE", "reason": "QUERY_SCOPE_ESCAPED"}
++        evidence.update(query_ref="native-http-" + str(answer["sequence"]), enumeration_ref=digest(rows),
++            authorized_scope_ref=digest({"organization": self.profile["organization"], "scope": "ALL_TOKEN_RECORDS"}),
++            input_context=known, input_context_ref=digest(known), reported_pages=answer["body"].get("data2"))
++        if not evidence["origin_bound"]:
++            return {"status": "UNKNOWN", "reason": "COLLECTION_OR_ATTRIBUTION_UNRESOLVED", "evidence": evidence}
++        selected = next(row for row in rows if row["owner"] + "/" + row["name"] == evidence["selected_unit_id"])
++        body = {dst: selected.get(src) for dst, src in [("access_token", "accessToken"), ("refresh_token", "refreshToken"),
++            ("id_token", "idToken"), ("token_type", "tokenType"), ("scope", "scope"), ("expires_in", "expiresIn")]}
++        material = token_bundle(body, self.profile)
++        if material["derived"]["verified_claims"]["jti"] != evidence["selected_unit_id"]:
++            return {"status": "UNKNOWN", "reason": "ENUMERATED_UNIT_CLAIM_CONFLICT", "evidence": evidence}
++        result = {key: payload[key] for key in ("rid", "digest", "origin", "attempt_id", "release_version")}
++        return {"status": "RECONCILED_MATERIAL", "evidence": evidence, "result": {**result, "material": material, "outcome": "OK"}}
+--- a/src/auth_lifecycle/online_state/reconciliation.py
++++ b/src/auth_lifecycle/online_state/reconciliation.py
+@@ -16,7 +16,14 @@
+         missing.append("source_lemma_ref")
+     if not evidence.get("query_ref"):
+         missing.append("query_ref")
+-    if not evidence.get("identifier_receipt_ref"):
++    origin = evidence.get("origin", "IDENTIFIER_POINT_READ")
++    if origin == "AUTHORIZED_SCOPE_ENUMERATION":
++        query = evidence.get("packet", {}).get("query", {})
++        if not evidence.get("enumeration_ref") or not evidence.get("authorized_scope_ref"):
++            missing.append("enumeration_scope_reference")
++        if query.get("collection_complete") is not True:
++            missing.append("authorized_collection_complete")
++    elif not evidence.get("identifier_receipt_ref"):
+         missing.append("identifier_receipt_ref")
+     remaining = None
+     if facts.get("per_send_effect_bound") == 1 and facts.get("future_retry_excluded") is True and evidence.get("source_lemma_ref"):
+@@ -26,6 +33,7 @@
+               and facts.get("record_found") is True and facts.get("origin_bound") is True):
+             remaining = 0
+     return {"schema": "native-attempt-closure/1", "target": target,
++            "evidence_origin": origin,
+             "claim": "CLOSED" if not missing else "UNKNOWN", "facts": facts,
+             "evidence": evidence, "missing": missing,
+             "remaining_creation_bound": remaining,
+--- a/src/auth_lifecycle/online_state/services.py
++++ b/src/auth_lifecycle/online_state/services.py
+@@ -170,8 +170,14 @@
+         query = window.get("query_evidence", {})
+         if payload["step"] == "discover":
+             target = context["target"]
+-            response = self.provider.call("reconcile_query", {key: target[key] for key in
+-                ("rid", "digest", "origin", "attempt_id", "release_version")})
++            request = {key: target[key] for key in ("rid", "digest", "origin", "attempt_id", "release_version")}
++            if self.config.get("reconciliation_model", {}).get("evidence_origin") == "AUTHORIZED_SCOPE_ENUMERATION":
++                request["enumeration_context"] = {"known_unit_ids": context["known_unit_ids"],
++                    "account_grant_count": context["account_grant_count"], "account_budget_total": context["account_budget_total"],
++                    "unknown_creators": window["unknown_creators_at_open"], "context_version": context["version"]}
++            response = self.provider.call("reconcile_query", request)
++            if response.get("status") == "SAFETY_FAILURE":
++                return response
+             query = response.get("evidence", {})
+             if (response.get("status") == "RECONCILED_MATERIAL" and window["unknown_creators_at_open"] == [payload["rid"]]
+                     and query.get("actual_sends") == 1 and query.get("origin_bound") is True):
+@@ -203,7 +209,9 @@
+         safe_context["window"] = {key: window[key] for key in ("window_id", "target_rid", "active", "unknown_creators_at_open", "opened_version")}
+         packet = {"context": safe_context, "query": query, "model": model}
+         evidence = {"query_ref": query.get("query_ref"), "identifier_receipt_ref": query.get("identifier_receipt_ref"),
+-                    "source_lemma_ref": model.get("source_lemma_ref"), "packet": packet, "packet_ref": digest(packet)}
++                    "source_lemma_ref": model.get("source_lemma_ref"), "packet": packet, "packet_ref": digest(packet),
++                    "origin": model.get("evidence_origin", "IDENTIFIER_POINT_READ"),
++                    "enumeration_ref": query.get("enumeration_ref"), "authorized_scope_ref": query.get("authorized_scope_ref")}
+         receipt = make_receipt(binding, facts, evidence)
+         return self.authority.call("save_reconciliation", {"rid": payload["rid"], "window_id": payload["window_id"],
+                                    "receipt": receipt, "query_evidence": query, "B_rid": payload["B_rid"]})
+--- a/src/auth_lifecycle/online_state/storage.py
++++ b/src/auth_lifecycle/online_state/storage.py
+@@ -381,11 +381,18 @@
+                     and b["request"]["operation"] == "userinfo" and b["phase"] == "RESULT_AVAILABLE"
+                     and b["release_version"] > last_disposal and last_disposal > 0
+                     and state["grants"][b["origin"]["grant_id"]]["active"])
++        account_grants = [g for g in state["grants"].values() if g["account"] == req["origin"]["account"]]
++        known_ids = sorted({r["result_material"]["derived"]["verified_claims"]["jti"]
++            for r in state["requests"].values() if r["origin"]["account"] == req["origin"]["account"]
++            and isinstance(r["result_material"], dict) and r["result_material"].get("kind") == "casdoor_oauth"
++            and r["result_material"].get("derived", {}).get("verified_claims", {}).get("jti")})
+         return {"status": "RECONCILIATION_CONTEXT", "window": window, "target": request_projection(req),
+                 "A_revoked": not state["grants"][req["origin"]["grant_id"]]["active"],
+                 "known_A_rids": [r["rid"] for r in a_rows],
+                 "known_A_units_inactive": bool(a_rows) and all(r["phase"] == "DISPOSED" for r in a_rows),
+-                "B_preserved_after_disposal": b_ok, "disposition_versions": [d.get("completed_version") for d in disposals]}
++                "B_preserved_after_disposal": b_ok, "disposition_versions": [d.get("completed_version") for d in disposals],
++                "known_unit_ids": known_ids, "account_grant_count": len(account_grants),
++                "account_budget_total": sum(g["limit"] for g in account_grants)}
+ 
+     def save_reconciliation(self, state, payload, version):
+         exact_fields(payload, ("rid", "window_id", "receipt", "query_evidence", "B_rid"))
+--- /dev/null
++++ b/src/auth_lifecycle/online_state/unidentified_acceptance.py
+@@ -0,0 +1,265 @@
++"""M4 dedicated-organization enumeration. Existing scope remains read-only."""
++
++from collections import Counter
++import copy
++import hashlib
++import json
++from pathlib import Path
++import secrets
++import sqlite3
++import subprocess
++import sys
++import time
++
++from .lab import protect_directory
++from .native_acceptance import preflight, create_actor, configure_case, native_request, observe, cleanup_actor, require
++from .native_http import create_budget
++from .protocol import write_json
++from .reconciliation_acceptance import source_model, wait_file
++
++
++LIMITS = {"environment": 60, "method": 60, "measurement": 40, "cleanup": 60}
++
++
++def setup_scope(admin, batch, template, scope):
++    reference = admin.call("application")["body"].get("data", {})
++    certificate = reference.get("cert")
++    if not certificate:
++        raise RuntimeError("EXTRA_CERTIFICATE_DEPENDENCY_UNSATISFIED")
++    if admin.call("owned_organization")["body"].get("data") is not None:
++        raise RuntimeError("OWNED_ORGANIZATION_ALREADY_EXISTS")
++    intent = {"organization": scope["organization"], "application": scope["application_name"],
++              "organization_attempted": True, "application_attempted": False}
++    write_json(batch / "secure/scope_intent.json", intent)
++    org = {"owner": "admin", "name": scope["organization"], "displayName": "Owned M4 isolated scope", "passwordType": "bcrypt"}
++    if admin.call("add_organization", payload=org)["body"].get("status") != "ok":
++        raise RuntimeError("ORGANIZATION_CREATE_UNCERTAIN")
++    organization = admin.call("owned_organization")["body"].get("data")
++    if not organization or organization.get("name") != scope["organization"]:
++        raise RuntimeError("ORGANIZATION_READBACK_FAILED")
++    if admin.call("owned_application")["body"].get("data") is not None:
++        raise RuntimeError("OWNED_APPLICATION_ALREADY_EXISTS")
++    secret = secrets.token_urlsafe(32)
++    intent["application_attempted"] = True
++    write_json(batch / "secure/scope_intent.json", intent)
++    app = {"owner": "admin", "name": scope["application_name"], "displayName": "Owned M4 application",
++        "organization": scope["organization"], "clientId": scope["client_id"], "clientSecret": secret,
++        "cert": certificate, "tokenSigningMethod": reference.get("tokenSigningMethod") or "RS256",
++        "tokenFormat": "JWT", "grantTypes": ["password", "refresh_token"], "expireInHours": 1,
++        "refreshExpireInHours": 1, "disableRefreshRotation": False, "enablePassword": True,
++        "enableSignUp": False, "isShared": False, "providers": []}
++    if admin.call("add_application", payload=app)["body"].get("status") != "ok":
++        raise RuntimeError("APPLICATION_CREATE_UNCERTAIN")
++    loaded = admin.call("owned_application")["body"].get("data")
++    if not loaded or loaded.get("organization") != scope["organization"] or loaded.get("clientId") != scope["client_id"]:
++        raise RuntimeError("APPLICATION_READBACK_FAILED")
++    profile = {**template, "organization": scope["organization"], "application_name": scope["application_name"],
++        "client_id": scope["client_id"], "client_secret": secret, "durable_inbox": False, "identifier_journal": False,
++        "query_mode": "AUTHORIZED_SCOPE_ENUMERATION", "measurement_no_refresh": True}
++    write_json(batch / "secure/scope_profile.json", profile)
++    write_json(batch / "SCOPE_ENVIRONMENT.json", {"organization": org, "application": {k:loaded.get(k) for k in
++        ("name","organization","clientId","cert","tokenSigningMethod","tokenFormat","grantTypes","expireInHours","refreshExpireInHours","disableRefreshRotation")},
++        "reused_existing_certificate": certificate, "new_native_objects_allowed": {"organization":1,"application":1,"accounts":3},
++        "new_certificates_providers_or_policies":0,"read_scope":"ALL_TOKEN_RECORDS_IN_DEDICATED_ORGANIZATION"})
++    return profile
++
++
++def configure(root, profile, model):
++    lab = configure_case(root, profile)
++    lab.configs["provider"]["permissions"]["adapter"].append("reconcile_query")
++    lab.configs["controller"]["permissions"]["user"] += ["begin_reconciliation", "reconcile"]
++    lab.configs["controller"]["reconciliation_model"] = model
++    lab.configs["authority"]["permissions"]["controller"] += ["begin_reconciliation", "reconciliation_context", "save_reconciliation"]
++    for role, config in lab.configs.items():
++        write_json(root / "secure" / (role + ".json"), config)
++    return lab
++
++
++def enroll(lab, profile, task, generation, caller=None):
++    caller = caller or "agent" + task
++    login = {"schema":2,"kind":"casdoor_login","issuer":profile["base"],"client":profile["client_id"],
++        "expected_account":profile["actor"]["id"],"username":profile["actor"]["name"],"password":profile["actor"]["password"]}
++    grant = require(lab.client(timeout=12).call("grant", {"approval_op":"approve_"+task,"caller":caller,"task":task,
++        "account":profile["actor"]["id"],"audience":profile["client_id"],"generation":generation,
++        "operations":["issue","refresh","userinfo"],"budget":10,"material":login}),"GRANTED")
++    issued = lab.client(caller,timeout=12).call("call",native_request(grant["handle"],profile,task,generation,task+"0","issue"))
++    require(issued,"RESULT_AVAILABLE")
++    return grant
++
++
++def check_interferer(lab, profile, grant, suffix):
++    request = native_request(grant["handle"],profile,"I","i0","I_check_"+suffix,"userinfo","I0")
++    return require(lab.client("agentB",timeout=12).call("call",request),"RESULT_AVAILABLE")
++
++
++def run_case(batch, root, profile, model, scenario, interferer_lab, interferer_profile, interferer_grant):
++    lab = configure(root,profile,model)
++    outcome = {"scenario":scenario,"status":"RUNNING"}
++    try:
++        lab.start_all()
++        user = lab.client(timeout=12)
++        a = enroll(lab,profile,"A","g0")
++        b = enroll(lab,profile,"B","g1")
++        write_json(root/"runner/initial_visible.json",user.call("status",{}))
++        initial = observe(batch,root,"initial")
++        if not all(r["accepted"] is True for r in initial["rows"]):
++            raise RuntimeError("INITIAL_ACCEPTANCE_FAILED")
++        if scenario=="M4-01":
++            lab.restart_controller("after_effect")
++        pending=lab.async_call("agentA","call",native_request(a["handle"],profile,"A","g0","A1","refresh","A0"))
++        if scenario=="M4-01":
++            lab.wait_barrier("after_effect")
++            lab.stop("controller")
++            outcome["lost_response"]=pending.result(timeout=5)
++            lab.start("controller")
++        else:
++            wait_file(root/"provider/before_native_refresh.json")
++        require(user.call("revoke",{"revoke_op":"retireA","grant_id":a["grant_id"]}),"LOCAL_REVOKE_COMMITTED")
++        require(user.call("begin_reconciliation",{"rid":"A1","window_id":"window1"}),"WINDOW_OPEN")
++        outcome["B_creation_paused"]=require(lab.client("agentB").call("call",native_request(b["handle"],profile,"B","g1","B_create","refresh","B0")),"REJECTED")
++        require(lab.client("agentB",timeout=12).call("call",native_request(b["handle"],profile,"B","g1","B_inside","userinfo","B0")),"RESULT_AVAILABLE")
++        pre=user.call("status",{})
++        outcome["pre_query_inputs"]={"runtime_projection":pre,"lookup":user.call("deliver",{"rid":"A1"}),
++            "identifier_journal_exists":(root/"provider/identifier_receipts.jsonl").exists(),
++            "operational_inbox_exists":(root/"provider/native_inbox.jsonl").exists(),
++            "audit_private_key_loaded_by_runtime":False,"audit_mode":"sealed_to_scorer"}
++        write_json(root/"runner/pre_query_inputs.json",outcome["pre_query_inputs"])
++        query={"rid":"A1","window_id":"window1","step":"discover","B_rid":""}
++        if scenario=="M4-02":
++            empty=require(user.call("reconcile",query),"UNKNOWN")
++            outcome["empty_candidates"]=empty
++            write_json(root/"runner/empty_receipt.json",empty["receipt"])
++            (root/"provider/before_native_refresh.release").touch()
++            wait_file(root/"provider/response_ready_without_identifiers.json")
++        found=user.call("reconcile",query)
++        if found.get("status")=="SAFETY_FAILURE":
++            raise RuntimeError("QUERY_SCOPE_SAFETY_FAILURE")
++        outcome["discovery"]=found
++        outcome["B_after"]=require(lab.client("agentB",timeout=12).call("call",native_request(b["handle"],profile,"B","g1","B_after","userinfo","B0")),"RESULT_AVAILABLE")
++        outcome["interferer_preserved"]=check_interferer(interferer_lab,interferer_profile,interferer_grant,scenario)
++        final=user.call("reconcile",{"rid":"A1","window_id":"window1","step":"finish","B_rid":"B_after"})
++        outcome["closure"]=final
++        if "receipt" in final:
++            write_json(root/"runner/closure_receipt.json",final["receipt"])
++        if scenario=="M4-02":
++            (root/"provider/response_ready_without_identifiers.release").touch()
++            outcome["late_response"]=pending.result(timeout=15)
++        outcome["final_state"]=user.call("status",{})
++        write_json(root/"runner/final_visible.json",outcome["final_state"])
++        observe(batch,root,"final")
++        outcome["status"]="OBSERVED"
++    except Exception as error:
++        outcome["status"]="UNKNOWN"
++        outcome["exception_type"]=type(error).__name__
++        try:write_json(root/"runner/final_visible.json",lab.client().call("status",{}))
++        except Exception:pass
++    finally:
++        lab.close()
++        write_json(root/"runner/outcome.json",outcome)
++    return outcome
++
++
++def cleanup_scope(admin,batch):
++    intent_path=batch/"secure/scope_intent.json"
++    result={"scope":"owned app/org only"}
++    if not intent_path.exists():return result
++    intent=json.loads(intent_path.read_text())
++    admin.category="cleanup"
++    if intent.get("application_attempted"):
++        response=admin.call("delete_application",payload={"owner":"admin","name":intent["application"],"organization":intent["organization"]})
++        result["application_delete_response_ok"]=response["body"].get("status")=="ok"
++        result["application_absent"]=admin.call("owned_application")["body"].get("data") is None
++        result["application_delete_ok"]=result["application_delete_response_ok"] and result["application_absent"]
++    if intent.get("organization_attempted"):
++        response=admin.call("delete_organization",payload={"owner":"admin","name":intent["organization"]})
++        result["organization_delete_ok"]=response["body"].get("status")=="ok"
++        result["organization_absent"]=admin.call("owned_organization")["body"].get("data") is None
++    write_json(batch/"SCOPE_CLEANUP.json",result)
++    return result
++
++
++def run(output,authorization_id,allow_native=False):
++    if not allow_native:raise ValueError("EXPLICIT_NATIVE_ENABLE_REQUIRED")
++    output=Path(output).resolve();output.mkdir(parents=True,exist_ok=False)
++    (output/"secure").mkdir();protect_directory(output/"secure")
++    nonce=secrets.token_hex(5)
++    names=["l1-m4-"+nonce+"-1","l1-m4-"+nonce+"-2"]
++    names.append("extra-"+names[0]+"-tail")
++    scope={"organization":"l1-m4-org-"+nonce,"application_name":"app-m4-"+nonce,"client_id":"m4-client-"+nonce,
++           "dedicated_scope":True,"organization_scope_read_enabled":True,"page_size":100,"record_upper_bound":50,"audit_mode":"sealed_to_scorer"}
++    create_budget(output,authorization_id,names,LIMITS,220,3,2,2700,scope=scope)
++    repo=Path(__file__).resolve().parents[3]
++    model=source_model(output,repo)
++    model.update(evidence_origin="AUTHORIZED_SCOPE_ENUMERATION",organization=scope["organization"],application_name=scope["application_name"],
++                 client_id=scope["client_id"],account_names=names,approved_scope_budgets=[10,10,10,10,10],record_upper_bound=50,
++                 source_lemma_ref="COMPLETENESS_AND_ATTRIBUTION.md:approved-budget-sum-and-single-Find")
++    files=list((repo/"src/auth_lifecycle/online_state").glob("*"))+list((repo/"scripts").glob("*unidentified*.py"))+[repo/"scripts/check_reconciliation_receipt.py",repo/"scripts/measure_native_casdoor.py"]
++    write_json(output/"SOURCE_LOCK.json",{"authorization_id":authorization_id,"files":[{"path":str(p),"sha256":hashlib.sha256(p.read_bytes()).hexdigest()} for p in files if p.is_file()]})
++    admin=template=sentinel=None;actors=[];records=[];stopped=False;started=time.monotonic()
++    try:
++        admin,old_template,reference_public=preflight(output,repo/".runtime/l1")
++        template=setup_scope(admin,output,old_template,scope)
++        for name in names:
++            actors.append(create_actor(admin,output,name))
++        model["account_id_by_name"]={a["name"]:a["id"] for a in actors}
++        write_json(output/"MODEL.json",model)
++        sent_profile={**template,"actor":actors[2]}
++        sentinel=configure_case(output/"INTERFERER",sent_profile)
++        sentinel.start_all()
++        sent_grant=enroll(sentinel,sent_profile,"I","i0","agentB")
++        write_json(output/"INTERFERER/runner/initial_visible.json",sentinel.client().call("status",{}))
++        for index,scenario in enumerate(["M4-01","M4-02"]):
++            if stopped or time.monotonic()-started>2550:
++                records.append({"scenario":scenario,"status":"NOT_RUN"});continue
++            root=output/scenario
++            profile={**template,"actor":actors[index],"hold_before_native_refresh":scenario=="M4-02",
++                     "hold_response_without_identifiers":scenario=="M4-02"}
++            try:
++                outcome=run_case(output,root,profile,model,scenario,sentinel,sent_profile,sent_grant)
++                script=repo/"scripts/score_unidentified.py"
++                with (root/"scorer/console.txt").open("wb") as stream:
++                    subprocess.run([sys.executable,"-B",str(script),"--case",str(root)],stdout=stream,stderr=stream,timeout=40)
++                path=root/"scorer/result.json"
++                score=json.loads(path.read_text()) if path.exists() else {"status":"ABORTED"}
++                records.append({"scenario":scenario,"status":score["status"],"closure":outcome.get("closure",{}).get("status")})
++                stopped=score["status"] not in {"PASS_CLOSED","PASS_CONSERVATIVE_UNKNOWN"}
++            except Exception as error:
++                records.append({"scenario":scenario,"status":"ABORTED","error_type":type(error).__name__});stopped=True
++            finally:
++                cleanup=cleanup_actor(admin,output,{**template,"actor":actors[index]},root)
++                if not cleanup.get("account_absent") or not cleanup.get("all_observed_access_rejected",False):stopped=True
++            write_json(output/"RESULTS.json",{"records":records,"counts":dict(Counter(r["status"] for r in records))})
++        outcome_i={"status":"OBSERVED","role":"interferer"}
++        write_json(output/"INTERFERER/runner/final_visible.json",sentinel.client().call("status",{}))
++        write_json(output/"INTERFERER/runner/outcome.json",outcome_i)
++    except Exception as error:
++        stopped=True
++        write_json(output/"ERROR.json",{"exception_type":type(error).__name__,"reason":"SCOPE_SETUP_OR_EXECUTION_UNAVAILABLE"})
++    finally:
++        if sentinel:sentinel.close()
++        if admin and template:
++            known_names={actor["name"] for actor in actors}
++            for name in names:
++                path=output/"secure"/(name+".json")
++                if name in known_names or not path.exists():continue
++                intent=json.loads(path.read_text())
++                if not intent.get("precheck_absent"):continue
++                admin.category="cleanup"
++                found=admin.call("get_user",actor=name)["body"].get("data")
++                if found and found.get("name")==name and found.get("owner")==scope["organization"]:
++                    intent["id"]=found["id"]
++                    actors.append(intent)
++            # Also clean accounts whose planned trajectory was never sampled.
++            for actor in actors:
++                existing=next((output/s for s in ["M4-01","M4-02","INTERFERER"] if (output/s/"secure/native_profile.json").exists() and json.loads((output/s/"secure/native_profile.json").read_text())["actor"]["id"]==actor["id"]),None)
++                if existing is not None and (existing/"scorer/cleanup.json").exists():continue
++                root=existing or output/("UNSAMPLED_"+actor["name"])
++                cleanup_actor(admin,output,{**template,"actor":actor},root)
++        if admin:cleanup_scope(admin,output)
++    seen={r["scenario"] for r in records}
++    records.extend({"scenario":s,"status":"NOT_RUN"} for s in ["M4-01","M4-02"] if s not in seen)
++    with sqlite3.connect(output/"native_budget.db") as con:cost=dict(con.execute('SELECT category,COUNT(*) FROM requests GROUP BY category'))
++    result={"authorization_id":authorization_id,"records":records,"counts":dict(Counter(r["status"] for r in records)),
++            "HTTP_categories":cost,"HTTP_total":sum(cost.values()),"elapsed_seconds_including_cleanup":time.monotonic()-started,
++            "stopped_early":stopped,"automatic_resampling":0}
++    write_json(output/"RESULTS.json",result);print(json.dumps(result),flush=True);return result
+--- /dev/null
++++ b/tests/test_unidentified.py
+@@ -0,0 +1,131 @@
++"""M4 scope, completeness, exclusion, and sealed-audit regressions."""
++
++import copy
++import io
++import json
++import os
++from pathlib import Path
++import secrets
++import unittest
++from unittest.mock import Mock
++
++from auth_lifecycle.online_state.enumeration import analyze, ScopeViolation
++from auth_lifecycle.online_state.lab import initialize
++from auth_lifecycle.online_state.native_http import create_budget, NativeHTTP, private_http_records
++from auth_lifecycle.online_state.protocol import digest
++from auth_lifecycle.online_state.reconciliation import make_receipt
++import test_reconciliation as base_receipts
++
++
++def row(name,user='target',organization='org4',application='app4'):
++    return {'owner':'admin','name':name,'organization':organization,'application':application,'user':user}
++
++
++def analyzed(rows=None,**changes):
++    values={'organization':'org4','application':'app4','target_user':'target','allowed_users':['target','target-extra','peer'],
++            'known_ids':['admin/A0','admin/B0'],'page_capacity':100,'record_bound':50,'unique_unknown':True,'manifest_ok':True,'actual_sends':1}
++    values.update(changes)
++    return analyze(rows if rows is not None else [row('B0'),row('A1'),row('I0','target-extra')],**values)
++
++
++def receipt_for(query):
++    target,facts,evidence=base_receipts.fixture()
++    known={'known_unit_ids':query['known_input_ids'],'unknown_creators':['A1'],'account_grant_count':2,'account_budget_total':20}
++    query.update(input_context=known,input_context_ref=digest(known))
++    evidence['origin']='AUTHORIZED_SCOPE_ENUMERATION'
++    evidence['identifier_receipt_ref']=None
++    evidence['enumeration_ref']='synthetic-native-snapshot'
++    evidence['authorized_scope_ref']='synthetic-authorized-org'
++    evidence['packet']['query']=query
++    evidence['packet']['model'].update(organization='org4',application_name='app4',client_id=target['audience'],
++        account_names=['target','target-extra','peer'],account_id_by_name={'target':target['account'],'target-extra':'I','peer':'P'},approved_scope_budgets=[10,10,10,10,10])
++    evidence['packet_ref']=digest(evidence['packet'])
++    for key in ['exact_authorized_read','record_found','origin_bound','actual_sends','observed_distinct_effects']:facts[key]=query[key]
++    return make_receipt(target,facts,evidence)
++
++
++class EnumerationTests(unittest.TestCase):
++    def test_single_unknown_positive_and_substring_interferer_excluded(self):
++        query=analyzed()
++        self.assertEqual(query['candidate_unit_ids'],['admin/A1'])
++        self.assertNotIn('admin/I0',query['target_unit_ids'])
++        receipt=receipt_for(query)
++        self.assertEqual(receipt['claim'],'CLOSED')
++        self.assertEqual(base_receipts.CHECKER.check(receipt)['status'],'VALID_CONDITIONAL_CLOSED')
++
++    def test_unsafe_models_cannot_force_closed(self):
++        cases={
++            'two_unknown_creators':analyzed(unique_unknown=False),
++            'extra_approval':analyzed(manifest_ok=False),
++            'other_account_only':analyzed([row('B0'),row('I0','target-extra')]),
++            'wrong_application':analyzed([row('B0'),row('A1',application='other')]),
++            'page_below_bound':analyzed(page_capacity=2),
++            'insert_delete_pagination':analyzed(page_capacity=2),
++            'same_lists_then_late_create':analyzed([row('A0'),row('B0')],actual_sends=0),
++            'zero_candidate_future_send':analyzed([row('A0'),row('B0')],actual_sends=0)}
++        for name,query in cases.items():
++            with self.subTest(name=name):
++                receipt=receipt_for(query)
++                self.assertEqual(receipt['claim'],'UNKNOWN')
++                receipt.update(claim='CLOSED',remaining_creation_bound=0,remaining_obligations=[])
++                self.assertEqual(base_receipts.CHECKER.check(receipt)['status'],'INVALID')
++
++    def test_wrong_organization_is_scope_violation(self):
++        with self.assertRaises(ScopeViolation):analyzed([row('A1',organization='shared')])
++
++    def test_count_timing_metadata_is_not_completeness_basis(self):
++        query=analyzed()
++        query['reported_pages']=0
++        self.assertEqual(receipt_for(query)['claim'],'CLOSED')
++        query['page_capacity']=1
++        query['collection_complete']=False
++        self.assertEqual(receipt_for(query)['claim'],'UNKNOWN')
++
++    def test_disposal_unknown_and_B_failure_refuse_closed(self):
++        for key in ['known_A_units_inactive','B_preserved_after_disposal']:
++            receipt=receipt_for(analyzed());receipt['facts'][key]=False
++            self.assertEqual(base_receipts.CHECKER.check(receipt)['status'],'INVALID')
++
++    def test_candidate_selection_tampering_rejected(self):
++        receipt=receipt_for(analyzed())
++        receipt['evidence']['packet']['query']['selected_unit_id']='admin/I0'
++        receipt['evidence']['packet_ref']=digest(receipt['evidence']['packet'])
++        self.assertEqual(base_receipts.CHECKER.check(receipt)['status'],'INVALID')
++
++
++class AuditScopeTests(unittest.TestCase):
++    def test_runtime_has_only_audit_public_key_and_fixed_org_query(self):
++        parent=Path(os.environ.get('UNIDENTIFIED_TEST_ROOT',Path(__file__).resolve().parents[2]/'mainline_native_unidentified_v1/dev_work'))
++        parent.mkdir(parents=True,exist_ok=True)
++        root=initialize(parent/secrets.token_hex(8))
++        scope={'organization':'org4','application_name':'app4','client_id':'client4','dedicated_scope':True,
++               'organization_scope_read_enabled':True,'page_size':100,'record_upper_bound':50,'audit_mode':'sealed_to_scorer'}
++        create_budget(root,'synthetic-only',['target','target-extra','peer'],scope=scope)
++        client=NativeHTTP(root,'method',enabled=True)
++        self.assertIsNone(client.key)
++        self.assertIsNotNone(client.audit_public)
++        self.assertFalse((root/'secure/http.key').exists())
++        response=io.BytesIO(b'{"status":"ok","data":[]}');response.status=200
++        client.opener.open=Mock(return_value=response)
++        client.call('get_tokens',actor='target')
++        url=client.opener.open.call_args.args[0].full_url
++        self.assertIn('organization=org4',url)
++        self.assertIn('pageSize=100',url)
++        self.assertNotIn('value=target',url)
++        self.assertEqual(private_http_records(root)[0]['response']['body']['data'],[])
++        self.assertTrue((root/'secure/http/1.aes').read_bytes().startswith(b'M4AE'))
++
++    def test_application_delete_requires_original_organization(self):
++        from auth_lifecycle.online_state.protocol import InvalidInput
++        parent=Path(os.environ.get('UNIDENTIFIED_TEST_ROOT',Path(__file__).resolve().parents[2]/'mainline_native_unidentified_v1/dev_work'))
++        parent.mkdir(parents=True,exist_ok=True)
++        root=initialize(parent/secrets.token_hex(8))
++        scope={'organization':'org4','application_name':'app4','client_id':'client4','dedicated_scope':True}
++        create_budget(root,'synthetic-only',['target'],scope=scope)
++        client=NativeHTTP(root,'cleanup',enabled=True)
++        client.opener.open=Mock(side_effect=AssertionError('no native network'))
++        with self.assertRaises(InvalidInput):
++            client.call('delete_application',payload={'owner':'admin','name':'app4'})
++        with self.assertRaises(InvalidInput):
++            client.call('delete_application',payload={'owner':'admin','name':'app4','organization':'shared'})
++        self.assertFalse(client.opener.open.called)

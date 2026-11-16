@@ -1,0 +1,1710 @@
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -9,5 +9,11 @@
+ requires-python = ">=3.11"
+ dependencies = []
+ 
++[project.optional-dependencies]
++online-state = ["cryptography==50.0.2"]
++
+ [tool.setuptools.packages.find]
+ where = ["src"]
++
++[tool.setuptools.package-data]
++"auth_lifecycle.online_state" = ["migration.sql"]
+--- a/README.md
++++ b/README.md
+@@ -1,4 +1,10 @@
+ # 认证生命周期 L0 工程
++
++新增的成熟在线状态运行层可从 `python scripts/online_state.py --help` 使用。
++它实现 ONLINE_TRUSTED_STATE_V1 的本地事务、材料托管和恢复路径，使用可选依赖
++`pip install -e ".[online-state]"`。本轮架构、复现和验收记录位于
++[mainline_online_state_v1](../mainline_online_state_v1/ACCEPTANCE_REPORT.md)。
++原生服务取证需要对应的后续授权和能力证据。
+ 
+ 本阶段：**v2.16 有界正确性语义、独立参考与可检查证书**。代码版本 `0.16.0`。
+ 
+--- /dev/null
++++ b/scripts/online_state.py
+@@ -0,0 +1,10 @@
++"""Run the isolated ONLINE_TRUSTED_STATE_V1 runtime from a source checkout."""
++from pathlib import Path
++import sys
++
++sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
++
++from auth_lifecycle.online_state.cli import main
++
++if __name__ == "__main__":
++    main()
+--- /dev/null
++++ b/scripts/score_online_state.py
+@@ -0,0 +1,188 @@
++"""Independent offline scorer: no imports from auth_lifecycle or its runtime."""
++
++import argparse
++import base64
++from collections import Counter
++import hashlib
++import json
++from pathlib import Path
++import sqlite3
++
++from cryptography.hazmat.primitives.ciphers.aead import AESGCM
++
++
++def canonical(value):
++    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True,
++                      allow_nan=False).encode()
++
++
++def lines(path):
++    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
++
++
++def score(root):
++    root = Path(root)
++    accesses = []
++    checks = []
++
++    def check(name, condition):
++        checks.append({"name": name, "pass": bool(condition)})
++
++    database = root / "authority" / "authority.db"
++    accesses.append({"path": str(database), "mode": "sqlite_read_only"})
++    with sqlite3.connect("file:" + str(database) + "?mode=ro", uri=True) as connection:
++        version, sealed = connection.execute("SELECT version,ciphertext FROM authority_state WHERE id=1").fetchone()
++        events = [{"version": v, "operation": op, **json.loads(raw)} for v, op, raw in
++                  connection.execute("SELECT version,operation,projection FROM authority_events ORDER BY version")]
++    key_path = root / "secure" / "authority.key"
++    accesses.append({"path": str(key_path), "mode": "scorer_privileged_key_read"})
++    state = json.loads(AESGCM(key_path.read_bytes()).decrypt(sealed[:12], sealed[12:],
++                                                          b"auth-lifecycle/online-state/schema-1"))
++    truth_path = root / "provider" / "truth.jsonl"
++    accesses.append({"path": str(truth_path), "mode": "scorer_only_effect_truth"})
++    effects = [e for e in lines(truth_path) if e["event"] == "effect"]
++    outcome = json.loads((root / "runner" / "outcome.json").read_text())
++    check("committed_event_sequence", [e["version"] for e in events] == list(range(1, version + 1)))
++    releases = {}
++    revoked = set()
++    release_order_valid = True
++    for event in events:
++        result = event["result"]
++        if event["operation"] == "revoke" and result["status"] == "LOCAL_REVOKE_COMMITTED":
++            revoked.add(result["grant_id"])
++        if event["operation"] == "release" and result.get("send"):
++            req = next(r for r in event["state"]["requests"] if r["rid"] == result["rid"])
++            release_order_valid &= req["origin"]["grant_id"] not in revoked
++            release_order_valid &= req["release_version"] == event["version"]
++            releases[req["attempt_id"]] = req
++    check("no_new_release_after_revoke_commit", release_order_valid)
++    check("every_provider_effect_has_matching_durable_release", all(
++        e["attempt_id"] in releases and all(e[k] == releases[e["attempt_id"]][k]
++        for k in ("rid", "digest", "origin", "release_version")) for e in effects))
++    counts = Counter(e["rid"] for e in effects)
++    check("no_automatic_unknown_request_retransmission", all(n <= 1 for n in counts.values()))
++    for grant in state["grants"].values():
++        requests = [r for r in state["requests"].values() if r["origin"]["grant_id"] == grant["grant_id"]]
++        reserved = sum(r["phase"] == "QUEUED" for r in requests)
++        spent = sum(r["phase"] in {"DISPATCHED_UNKNOWN", "RESULT_AVAILABLE", "QUARANTINED"} for r in requests)
++        check("budget_" + grant["task"], reserved == grant["reserved"] and spent == grant["spent"]
++              and reserved + spent <= grant["limit"])
++    source_correct = True
++    result_correct = True
++    for req in state["requests"].values():
++        grant = state["grants"][req["origin"]["grant_id"]]
++        source_correct &= all(req["origin"][k] == grant[k] for k in req["origin"])
++        original = {"caller": req["origin"]["caller"], "request": req["request"]}
++        source_correct &= hashlib.sha256(canonical(original)).hexdigest() == req["digest"]
++        if req["result_digest"]:
++            result = {k: req[k] for k in ("rid", "digest", "origin", "attempt_id", "release_version")}
++            result.update(material=req["result_material"], outcome="OK")
++            result_correct &= hashlib.sha256(canonical(result)).hexdigest() == req["result_digest"]
++    check("request_source_and_digest", source_correct)
++    check("result_registration_atomic_binding", result_correct)
++    a = next(g for g in state["grants"].values() if g["task"] == "A")
++    b_requests = [r for r in state["requests"].values() if r["origin"]["task"] == "B"]
++    check("A_revoked_and_new_admission_rejected", not a["active"] and
++          outcome.get("post_ack_A", {}).get("status") == "REJECTED")
++    check("B_completed_after_recovery", any(r["phase"] == "RESULT_AVAILABLE" for r in b_requests)
++          and outcome.get("B_result", {}).get("status") == "RESULT_AVAILABLE")
++    a_request = state["requests"].get("A1")
++    if a_request and a_request["result_digest"]:
++        check("late_A_is_quarantined_under_original_generation", a_request["phase"] == "QUARANTINED"
++              and a_request["origin"]["generation"] == "g0")
++    expected_effect = outcome["scenario"] not in {"pending_before_commit", "release_before_send"}
++    check("scenario_A_effect_count", counts.get("A1", 0) == int(expected_effect))
++    if outcome["scenario"] == "release_before_send":
++        check("unresolved_release_retained", a_request is not None and a_request["phase"] == "DISPATCHED_UNKNOWN")
++    if outcome["scenario"] == "authority_outage":
++        check("authority_outage_returns_unknown", outcome.get("outage_recover", {}).get("status") == "UNKNOWN")
++    process_events = lines(root / "control" / "processes.jsonl")
++    active = {}
++    ordered = True
++    controller_starts = 0
++    for event in process_events:
++        if event["event"] == "started":
++            ordered &= event["role"] not in active
++            active[event["role"]] = event["child_pid"]
++            controller_starts += int(event["role"] == "controller")
++        elif event["event"] == "terminated_and_waited":
++            ordered &= active.pop(event["role"], None) == event["child_pid"]
++    check("single_active_process_and_cleanup", ordered and not active)
++    if outcome["scenario"] != "normal":
++        check("real_controller_restart", controller_starts >= 2)
++    operation_rows = lines(root / "authority" / "database_ops.jsonl")
++    check("database_budget_100", len(operation_rows) + 2 <= 100)
++    check("trace_window_60_seconds", outcome["elapsed_seconds"] <= 60)
++    secrets_to_scan = [g["material"] for g in state["grants"].values()]
++    secrets_to_scan += [r["result_material"] for r in state["requests"].values() if r["result_material"]]
++    provider_key_path = root / "secure" / "provider.key"
++    encrypted_results = root / "provider" / "encrypted_results.jsonl"
++    if encrypted_results.exists():
++        accesses.extend([{"path": str(provider_key_path), "mode": "scorer_privileged_key_read"},
++                         {"path": str(encrypted_results), "mode": "scorer_only_hidden_results"}])
++        provider_cipher = AESGCM(provider_key_path.read_bytes())
++        for line in encrypted_results.read_bytes().splitlines():
++            encrypted = base64.b64decode(line)
++            provider_result = json.loads(provider_cipher.decrypt(encrypted[:12], encrypted[12:], b"fake-provider-v1"))
++            secrets_to_scan.append(provider_result["material"])
++    for role in ("authority", "controller", "provider"):
++        cfg = json.loads((root / "secure" / (role + ".json")).read_text())
++        secrets_to_scan.extend(cfg["identities"].values())
++    secrets_to_scan.append("synthetic_debug_secret_do_not_export")
++    leaks = []
++    for folder in ("controller", "runner", "control", "scorer", "authority", "provider"):
++        for path in (root / folder).rglob("*"):
++            if path.is_file() and path.suffix in {".json", ".jsonl", ".stderr", ".txt"} and path.name != "encrypted_results.jsonl":
++                raw = path.read_bytes()
++                if any(value.encode() in raw for value in secrets_to_scan):
++                    leaks.append(str(path.relative_to(root)))
++    event_bytes = canonical(events)
++    if any(value.encode() in event_bytes for value in secrets_to_scan):
++        leaks.append("authority_events_projection")
++    check("no_secret_in_logs_exceptions_or_management_projection", not leaks)
++    rpc = lines(root / "runner" / "rpc.jsonl")
++    recovery_rpc = [r for r in lines(root / "controller" / "events.jsonl")
++                    if r["event"] == "rpc" and r["operation"] == "recover"]
++    budget_checks = {"database_budget_100", "trace_window_60_seconds"}
++    failed = [c["name"] for c in checks if not c["pass"]]
++    verdict = "PASS"
++    if any(name not in budget_checks for name in failed):
++        verdict = "SAFETY_FAILURE"
++    elif failed:
++        verdict = "INCONCLUSIVE"
++    result = {
++        "status": verdict,
++        "scenario": outcome["scenario"], "checks": checks, "leak_paths": leaks,
++        "metrics": {"authority_sql_statements_including_setup": len(operation_rows),
++                    "scorer_read_only_sql_statements": 2,
++                    "total_explicit_sql_statements": len(operation_rows) + 2,
++                    "committed_transactions": len(events),
++                    "conflict_decisions": sum(e["result"]["status"] == "CONFLICT" for e in events),
++                    "sqlite_retry_count": 0,
++                    "bound_value_bytes_proxy": sum(r.get("bound_value_bytes", 0) for r in operation_rows),
++                    "logical_state_snapshot_bytes_written": sum(e["logical_state_bytes"] for e in events),
++                    "runner_rpc_request_json_bytes": sum(r.get("request_json_bytes", 0) for r in rpc),
++                    "runner_rpc_response_json_bytes": sum(r.get("response_json_bytes", 0) for r in rpc),
++                    "recovery_response_json_bytes": sum(r.get("response_json_bytes", 0) for r in recovery_rpc),
++                    "authority_db_file_bytes": database.stat().st_size,
++                    "authority_wal_file_bytes_at_score": (database.with_name(database.name + "-wal")).stat().st_size
++                       if database.with_name(database.name + "-wal").exists() else 0,
++                    "physical_WAL_bytes_written": None, "fsync_count": None,
++                    "B_after_recovery_seconds": outcome.get("B_after_recovery_seconds"),
++                    "trace_seconds": outcome["elapsed_seconds"], "provider_effects": len(effects)},
++        "final_obligations": [r["rid"] for r in state["requests"].values()
++                              if r["phase"] in {"DISPATCHED_UNKNOWN", "QUARANTINED"}],
++        "native_requests": 0, "scope": "finite local process/cache fault trace",
++        "accesses": accesses,
++    }
++    (root / "scorer" / "result.json").write_text(json.dumps(result, indent=2) + "\n")
++    return result
++
++
++if __name__ == "__main__":
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--root", required=True)
++    args = parser.parse_args()
++    result = score(args.root)
++    print(json.dumps({"status": result["status"], "scenario": result["scenario"]}))
++    raise SystemExit(0 if result["status"] == "PASS" else 1)
+--- /dev/null
++++ b/src/auth_lifecycle/online_state/__init__.py
+@@ -0,0 +1,3 @@
++"""ONLINE_TRUSTED_STATE_V1: a local, trusted transactional runtime."""
++
++__version__ = "0.1.0"
+--- /dev/null
++++ b/src/auth_lifecycle/online_state/acceptance.py
+@@ -0,0 +1,216 @@
++"""Budgeted M1 runner. Decisions use only runner APIs and explicit fault barriers."""
++
++from collections import Counter
++import hashlib
++import json
++import os
++from pathlib import Path
++import signal
++import subprocess
++import sys
++import time
++
++from .lab import Laboratory, approval, request_for
++from .protocol import write_json
++
++
++SCENARIOS = ("normal", "pending_before_commit", "release_before_send",
++             "effect_before_registration", "revoke_before_commit",
++             "old_cache_after_ack", "authority_outage")
++
++
++class ObservedSafetyFailure(RuntimeError):
++    pass
++
++
++class TraceInconclusive(RuntimeError):
++    pass
++
++
++def require_status(result, expected):
++    if result.get("status") in {"UNKNOWN", "INCONCLUSIVE"}:
++        raise TraceInconclusive("REQUIRED_OBSERVATION_UNAVAILABLE")
++    if result.get("status") != expected:
++        raise ObservedSafetyFailure("UNEXPECTED_OBSERVABLE_DECISION")
++
++
++def run_trace(root, scenario):
++    started = time.monotonic()
++    fault = {"pending_before_commit": "before_admit", "release_before_send": "after_release",
++             "effect_before_registration": "after_effect", "revoke_before_commit": "before_revoke"}.get(scenario)
++    # Reserve two SQL reads for the independent offline scorer.
++    lab = Laboratory(root, operation_limit=98)
++    outcome = {"scenario": scenario, "status": "RUNNING", "native_requests": 0}
++    try:
++        lab.start_all(fault)
++        user = lab.client()
++        grant_a = user.call("grant", approval("A", "g0"))
++        grant_b = user.call("grant", approval("B", "g1"))
++        outcome["grants"] = [grant_a, grant_b]
++        if grant_a.get("status") != "GRANTED" or grant_b.get("status") != "GRANTED":
++            raise RuntimeError("SETUP_APPROVAL_FAILED")
++        user.call("recover", {})
++        snapshot = lab.snapshot_cache()
++        (lab.root / "control" / "old_cache_snapshot.json").write_bytes(snapshot)
++        request_a = request_for(grant_a["handle"], "A", "g0", "A1")
++        request_b = request_for(grant_b["handle"], "B", "g1", "B1")
++        revoke = {"revoke_op": "revoke_A_g0", "grant_id": grant_a["grant_id"]}
++        if scenario in {"pending_before_commit", "release_before_send", "effect_before_registration"}:
++            pending = lab.async_call("agentA", "call", request_a)
++            lab.wait_barrier(fault)
++            lab.stop("controller")
++            outcome["interrupted_A"] = pending.result(timeout=5)
++            lab.start("controller")
++        else:
++            outcome["A_result"] = lab.client("agentA").call("call", request_a)
++        if scenario == "revoke_before_commit":
++            pending = lab.async_call("user", "revoke", revoke)
++            lab.wait_barrier(fault)
++            lab.stop("controller")
++            outcome["interrupted_revoke"] = pending.result(timeout=5)
++            lab.start("controller")
++        outcome["revoke_ack"] = user.call("revoke", revoke)
++        require_status(outcome["revoke_ack"], "LOCAL_REVOKE_COMMITTED")
++        if scenario == "old_cache_after_ack":
++            lab.stop("controller")
++            lab.restore_cache(snapshot)
++            lab.start("controller")
++        if scenario == "authority_outage":
++            lab.stop("controller")
++            lab.stop("authority")
++            lab.start("controller")
++            outcome["outage_recover"] = user.call("recover", {})
++            outcome["outage_B"] = lab.client("agentB").call("call", request_b)
++            lab.start("authority")
++        recovery_started = time.monotonic()
++        outcome["recovered"] = user.call("recover", {})
++        outcome["post_ack_A"] = lab.client("agentA").call(
++            "call", request_for(grant_a["handle"], "A", "g0", "A_after_ack"))
++        require_status(outcome["post_ack_A"], "REJECTED")
++        if scenario in {"release_before_send", "effect_before_registration"}:
++            outcome["repeat_unknown_A"] = lab.client("agentA").call("call", request_a)
++        outcome["B_result"] = lab.client("agentB").call("call", request_b)
++        require_status(outcome["B_result"], "RESULT_AVAILABLE")
++        outcome["B_after_recovery_seconds"] = time.monotonic() - recovery_started
++        if scenario not in {"pending_before_commit", "release_before_send"}:
++            outcome["late_result"] = user.call("deliver", {"rid": "A1"})
++        outcome["final_visible_state"] = user.call("status", {})
++        outcome["status"] = "OBSERVED"
++    except ObservedSafetyFailure as error:
++        outcome["status"] = "SAFETY_FAILURE"
++        outcome["exception_type"] = type(error).__name__
++    except TraceInconclusive as error:
++        outcome["status"] = "INCONCLUSIVE"
++        outcome["exception_type"] = type(error).__name__
++    except Exception as error:
++        outcome["status"] = "ABORTED"
++        outcome["exception_type"] = type(error).__name__
++    finally:
++        lab.close()
++        outcome["elapsed_seconds"] = time.monotonic() - started
++        write_json(lab.root / "runner" / "outcome.json", outcome)
++    return outcome
++
++
++def continuation_plan(previous_result, authorization_id):
++    previous = json.loads(Path(previous_result).read_text())
++    if previous["authorization_id"] != authorization_id:
++        raise ValueError("CONTINUATION_AUTHORIZATION_MISMATCH")
++    if any(r["status"] == "SAFETY_FAILURE" for r in previous["records"]):
++        raise ValueError("SAFETY_FAILURE_REQUIRES_SEPARATE_BATCH_AUTHORIZATION")
++    full_plan = {(scenario, repeat) for scenario in SCENARIOS for repeat in range(1, 4)}
++    recorded = [(row["scenario"], row["repeat"]) for row in previous["records"]]
++    if len(recorded) != 21 or set(recorded) != full_plan:
++        raise ValueError("INVALID_ORIGINAL_DENOMINATOR")
++    return {pair for pair, row in zip(recorded, previous["records"]) if row["status"] == "NOT_RUN"}
++
++
++def run_acceptance(output, authorization_id, continue_from=None):
++    selected = continuation_plan(continue_from, authorization_id) if continue_from else None
++    output = Path(output).resolve()
++    output.mkdir(parents=True, exist_ok=False)
++    repo = Path(__file__).resolve().parents[3]
++    files = list((repo / "src" / "auth_lifecycle" / "online_state").glob("*"))
++    files += [repo / "scripts" / "online_state.py", repo / "scripts" / "score_online_state.py"]
++    manifest = [{"path": str(p), "sha256": hashlib.sha256(p.read_bytes()).hexdigest()}
++                for p in files if p.is_file()]
++    write_json(output / "batch_lock.json", {
++        "authorization_id": authorization_id, "scenarios": list(SCENARIOS), "repeats": 3,
++        "max_traces": 21, "max_trace_seconds": 60, "max_batch_seconds": 1800,
++        "max_sql_statements_per_trace": 100, "source_manifest": manifest,
++        "native_requests": 0, "rerun_requires_separate_authorization": True,
++        "continuation_of": str(continue_from) if continue_from else None,
++        "selected_original_slots": sorted(selected) if selected is not None else None})
++    started = time.monotonic()
++    records = []
++    stopped = False
++    environment = dict(os.environ)
++    environment["PYTHONPATH"] = str(repo / "src")
++    environment["PYTHONDONTWRITEBYTECODE"] = "1"
++    for scenario in SCENARIOS:
++        for repeat in range(1, 4):
++            if selected is not None and (scenario, repeat) not in selected:
++                continue
++            name = scenario + "_" + str(repeat)
++            record = {"scenario": scenario, "repeat": repeat, "path": name}
++            # Reserve the trace window, scoring, and process cleanup within 30 min.
++            if stopped or time.monotonic() - started >= 1710:
++                record["status"] = "NOT_RUN"
++                records.append(record)
++                continue
++            root = output / name
++            command = [sys.executable, "-B", "-m", "auth_lifecycle.online_state.cli", "trace",
++                       "--root", str(root), "--scenario", scenario]
++            flags = (subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP) if os.name == "nt" else 0
++            with (output / (name + ".runner.txt")).open("wb") as log:
++                process = subprocess.Popen(command, env=environment, stdout=log, stderr=log,
++                                           creationflags=flags, start_new_session=os.name != "nt")
++                try:
++                    process.wait(timeout=min(60, max(0.1, 1800 - (time.monotonic() - started))))
++                except subprocess.TimeoutExpired:
++                    if os.name == "nt":
++                        subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
++                                       capture_output=True, timeout=8)
++                    else:
++                        os.killpg(process.pid, signal.SIGKILL)
++                    process.wait(timeout=5)
++                    record["status"] = "INCONCLUSIVE"
++                    record["reason"] = "OBSERVATION_WINDOW_EXHAUSTED"
++            if "status" not in record:
++                outcome_path = root / "runner" / "outcome.json"
++                if process.returncode != 0 or not outcome_path.exists():
++                    record["status"] = "ABORTED"
++                    record["reason"] = "TRACE_PROCESS_FAILED"
++                    stopped = True
++                else:
++                    outcome = json.loads(outcome_path.read_text())
++                    if outcome["status"] in {"ABORTED", "SAFETY_FAILURE", "INCONCLUSIVE"}:
++                        record["status"] = outcome["status"]
++                        stopped = outcome["status"] in {"ABORTED", "SAFETY_FAILURE"}
++                    else:
++                        score_command = [sys.executable, "-B", str(repo / "scripts" / "score_online_state.py"),
++                                         "--root", str(root)]
++                        with (output / (name + ".score.txt")).open("wb") as log:
++                            scored = subprocess.run(score_command, stdout=log, stderr=log, timeout=15)
++                        score_path = root / "scorer" / "result.json"
++                        if score_path.exists():
++                            score_result = json.loads(score_path.read_text())
++                            record["status"] = score_result["status"]
++                            record["metrics"] = score_result["metrics"]
++                            record["final_obligations"] = score_result["final_obligations"]
++                            record["failed_checks"] = [x["name"] for x in score_result["checks"] if not x["pass"]]
++                        else:
++                            record["status"] = "ABORTED"
++                        if record["status"] in {"SAFETY_FAILURE", "ABORTED"}:
++                            stopped = True
++            records.append(record)
++            write_json(output / "results.json", {"records": records,
++                       "counts": dict(Counter(r["status"] for r in records)),
++                       "elapsed_seconds": time.monotonic() - started, "native_requests": 0})
++            print(json.dumps({"trace": name, "status": record["status"]}), flush=True)
++    result = {"records": records, "counts": dict(Counter(r["status"] for r in records)),
++              "elapsed_seconds": time.monotonic() - started, "native_requests": 0,
++              "authorization_id": authorization_id, "automatic_reruns": 0}
++    result["continuation_of"] = str(continue_from) if continue_from else None
++    write_json(output / "results.json", result)
++    return result
+--- /dev/null
++++ b/src/auth_lifecycle/online_state/cli.py
+@@ -0,0 +1,58 @@
++"""Process entry points for the mature online-state baseline."""
++
++import argparse
++import json
++from pathlib import Path
++
++from .lab import Laboratory, initialize
++from .services import serve
++
++
++def main():
++    parser = argparse.ArgumentParser()
++    commands = parser.add_subparsers(dest="command", required=True)
++    init = commands.add_parser("init")
++    init.add_argument("--root", required=True)
++    init.add_argument("--operation-limit", type=int)
++    server = commands.add_parser("serve")
++    server.add_argument("--root", required=True)
++    server.add_argument("--role", choices=["authority", "provider", "controller"], required=True)
++    server.add_argument("--fault", choices=["before_admit", "after_admit", "after_release", "after_effect",
++                                         "before_revoke", "after_revoke_commit"])
++    request = commands.add_parser("request")
++    request.add_argument("--root", required=True)
++    request.add_argument("--identity", choices=["user", "agentA", "agentB"], required=True)
++    request.add_argument("--operation", required=True)
++    request.add_argument("--input", required=True)
++    m1 = commands.add_parser("m1")
++    m1.add_argument("--out", required=True)
++    m1.add_argument("--authorization-id", required=True)
++    m1.add_argument("--continue-from", help="Execute only NOT_RUN slots from the same authorized plan")
++    trace = commands.add_parser("trace")
++    trace.add_argument("--root", required=True)
++    trace.add_argument("--scenario", required=True)
++    args = parser.parse_args()
++    if args.command == "init":
++        initialize(args.root, args.operation_limit)
++        print(json.dumps({"status": "INITIALIZED", "root": str(Path(args.root).resolve())}))
++    elif args.command == "serve":
++        serve(args.role, args.root, args.fault)
++    elif args.command == "request":
++        lab = Laboratory(args.root, create=False)
++        try:
++            result = lab.client(args.identity).call(args.operation, json.loads(Path(args.input).read_text()))
++            print(json.dumps(result, ensure_ascii=False))
++        finally:
++            lab.close()
++    elif args.command == "m1":
++        from .acceptance import run_acceptance
++        run_acceptance(args.out, args.authorization_id, args.continue_from)
++    elif args.command == "trace":
++        from .acceptance import SCENARIOS, run_trace
++        if args.scenario not in SCENARIOS:
++            parser.error("unknown scenario")
++        run_trace(args.root, args.scenario)
++
++
++if __name__ == "__main__":
++    main()
+--- /dev/null
++++ b/src/auth_lifecycle/online_state/lab.py
+@@ -0,0 +1,212 @@
++"""Isolated process fixture. Only synthetic credentials and loopback endpoints."""
++
++from concurrent.futures import ThreadPoolExecutor
++from datetime import datetime, timedelta, timezone
++import ipaddress
++import json
++import os
++from pathlib import Path
++import re
++import secrets
++import socket
++import subprocess
++import sys
++import time
++
++from cryptography import x509
++from cryptography.hazmat.primitives import hashes, serialization
++from cryptography.hazmat.primitives.asymmetric import rsa
++from cryptography.x509.oid import NameOID
++
++from .protocol import Client, EventLog, write_json
++
++
++def protect_directory(path):
++    if os.name == "nt":
++        output = subprocess.check_output(["whoami", "/user", "/fo", "csv", "/nh"])
++        match = re.search(rb"S-\d+(?:-\d+)+", output)
++        if match is None:
++            raise RuntimeError("CURRENT_USER_SID_UNAVAILABLE")
++        sid = match.group().decode("ascii")
++        command = ["icacls", str(path), "/inheritance:r", "/grant:r",
++                   "*" + sid + ":(OI)(CI)F", "/grant:r", "*S-1-5-18:(OI)(CI)F"]
++        result = subprocess.run(command, capture_output=True)
++        if result.returncode:
++            raise RuntimeError("PRIVATE_DIRECTORY_ACL_FAILED")
++        return {"mechanism": "Windows DACL", "allowed_sids": [sid, "S-1-5-18"]}
++    os.chmod(path, 0o700)
++    return {"mechanism": "POSIX", "mode": "0700"}
++
++
++def free_port():
++    with socket.socket() as sock:
++        sock.bind(("127.0.0.1", 0))
++        return sock.getsockname()[1]
++
++
++def initialize(root, operation_limit=None):
++    root = Path(root).resolve()
++    root.mkdir(parents=True, exist_ok=False)
++    secure = root / "secure"
++    secure.mkdir()
++    acl = protect_directory(secure)
++    for directory in ("authority", "provider", "controller", "cache", "control", "runner", "scorer"):
++        (root / directory).mkdir()
++    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
++    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "online-state-local-test")])
++    now = datetime.now(timezone.utc)
++    certificate = (x509.CertificateBuilder().subject_name(name).issuer_name(name)
++                   .public_key(private_key.public_key()).serial_number(x509.random_serial_number())
++                   .not_valid_before(now - timedelta(minutes=5)).not_valid_after(now + timedelta(days=7))
++                   .add_extension(x509.SubjectAlternativeName([x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]), False)
++                   .sign(private_key, hashes.SHA256()))
++    cert_path = secure / "server.crt"
++    key_path = secure / "server.key"
++    cert_path.write_bytes(certificate.public_bytes(serialization.Encoding.PEM))
++    key_path.write_bytes(private_key.private_bytes(serialization.Encoding.PEM,
++                                                  serialization.PrivateFormat.PKCS8,
++                                                  serialization.NoEncryption()))
++    (secure / "authority.key").write_bytes(os.urandom(32))
++    (secure / "provider.key").write_bytes(os.urandom(32))
++    ports = {}
++    while len(ports) < 3:
++        port = free_port()
++        if port not in ports.values() and port not in {18080, 18081, 8080}:
++            ports[("authority", "provider", "controller")[len(ports)]] = port
++    authority_token = secrets.token_urlsafe(32)
++    provider_token = secrets.token_urlsafe(32)
++    common = {"certificate": str(cert_path), "tls_key": str(key_path)}
++    configs = {
++        "authority": {**common, "port": ports["authority"], "operation_limit": operation_limit,
++                      "identities": {"controller": authority_token},
++                      "permissions": {"controller": ["grant", "admit", "release", "record", "revoke", "recover"]}},
++        "provider": {**common, "port": ports["provider"],
++                     "identities": {"adapter": provider_token, "fixture": secrets.token_urlsafe(32)},
++                     "permissions": {"adapter": ["perform", "lookup"], "fixture": ["hold"]}},
++        "controller": {**common, "port": ports["controller"],
++                       "authority_url": "https://127.0.0.1:" + str(ports["authority"]),
++                       "provider_url": "https://127.0.0.1:" + str(ports["provider"]),
++                       "authority_token": authority_token, "provider_token": provider_token,
++                       "identities": {name: secrets.token_urlsafe(32) for name in ("user", "agentA", "agentB")},
++                       "permissions": {"user": ["grant", "revoke", "recover", "deliver", "status"],
++                                       "agentA": ["call", "status"], "agentB": ["call", "status"]}}
++    }
++    for role, config in configs.items():
++        write_json(secure / (role + ".json"), config)
++    write_json(root / "control" / "environment.json", {
++        "contract": "ONLINE_TRUSTED_STATE_V1", "ports": ports, "acl": acl,
++        "operation_limit": operation_limit, "fault_domain": "controller process and cache/view.json",
++        "independent_paths": ["authority", "provider", "secure"], "native_requests": 0,
++        "identity_fixture": "Bearer capabilities provisioned outside agent input; trusted same-host test principal",
++        "same_os_account_trust": "OS account and fixture are trusted; adversarial OS-user isolation untested"})
++    return root
++
++
++class Laboratory:
++    def __init__(self, root, operation_limit=None, create=True):
++        self.root = initialize(root, operation_limit) if create else Path(root).resolve()
++        self.processes = {}
++        self.streams = []
++        self.log = EventLog(self.root / "control" / "processes.jsonl")
++        self.runner_log = EventLog(self.root / "runner" / "rpc.jsonl")
++        self.executor = ThreadPoolExecutor(max_workers=12)
++        self.configs = {role: json.loads((self.root / "secure" / (role + ".json")).read_text())
++                        for role in ("authority", "provider", "controller")}
++
++    def start(self, role, fault=None):
++        if role in self.processes and self.processes[role].poll() is None:
++            raise RuntimeError("PROCESS_ALREADY_RUNNING")
++        ready = self.root / "control" / (role + "_ready.json")
++        ready.unlink(missing_ok=True)
++        env = dict(os.environ)
++        env["PYTHONPATH"] = str(Path(__file__).resolve().parents[2])
++        env["PYTHONDONTWRITEBYTECODE"] = "1"
++        command = [sys.executable, "-B", "-m", "auth_lifecycle.online_state.cli", "serve",
++                   "--root", str(self.root), "--role", role]
++        if fault:
++            command += ["--fault", fault]
++        filename = role + "_" + secrets.token_hex(4) + ".stderr"
++        stream = (self.root / "control" / filename).open("wb")
++        self.streams.append(stream)
++        flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
++        process = subprocess.Popen(command, env=env, stdout=stream, stderr=stream, creationflags=flags)
++        self.processes[role] = process
++        deadline = time.monotonic() + 8
++        while time.monotonic() < deadline:
++            if process.poll() is not None:
++                raise RuntimeError("SERVICE_START_FAILED_" + role)
++            if ready.exists():
++                data = json.loads(ready.read_text())
++                if data["pid"] == process.pid:
++                    self.log.emit("started", role=role, child_pid=process.pid, boot=data.get("boot"))
++                    return data
++            time.sleep(0.02)
++        raise TimeoutError("SERVICE_START_TIMEOUT_" + role)
++
++    def start_all(self, fault=None):
++        self.start("authority")
++        self.start("provider")
++        return self.start("controller", fault)
++
++    def stop(self, role):
++        process = self.processes.get(role)
++        if process is not None and process.poll() is None:
++            process.kill()
++            code = process.wait(timeout=5)
++            self.log.emit("terminated_and_waited", role=role, child_pid=process.pid, exit_code=code)
++
++    def restart_controller(self, fault=None):
++        self.stop("controller")
++        return self.start("controller", fault)
++
++    def client(self, identity="user", role="controller", timeout=3):
++        config = self.configs[role]
++        return Client("https://127.0.0.1:" + str(config["port"]),
++                      config["identities"][identity], config["certificate"], self.runner_log, timeout)
++
++    def async_call(self, identity, operation, payload):
++        return self.executor.submit(self.client(identity, timeout=12).call, operation, payload)
++
++    def wait_barrier(self, point):
++        pid = self.processes["controller"].pid
++        deadline = time.monotonic() + 8
++        while time.monotonic() < deadline:
++            for path in (self.root / "controller" / "barriers").glob("*_" + point + ".json"):
++                if json.loads(path.read_text())["pid"] == pid:
++                    return path
++            time.sleep(0.01)
++        raise TimeoutError("BARRIER_TIMEOUT_" + point)
++
++    def snapshot_cache(self):
++        path = self.root / "cache" / "view.json"
++        return path.read_bytes()
++
++    def restore_cache(self, snapshot):
++        process = self.processes.get("controller")
++        if process is not None and process.poll() is None:
++            raise RuntimeError("OLD_CONTROLLER_STILL_ACTIVE")
++        path = (self.root / "cache" / "view.json").resolve()
++        if not path.is_relative_to(self.root / "cache"):
++            raise RuntimeError("RESTORE_PATH_OUTSIDE_CACHE")
++        path.write_bytes(snapshot)
++        self.log.emit("cache_restored", path="cache/view.json", restored_bytes=len(snapshot))
++
++    def close(self):
++        for role in ("controller", "provider", "authority"):
++            self.stop(role)
++        self.executor.shutdown(wait=True, cancel_futures=True)
++        for stream in self.streams:
++            stream.close()
++
++
++def approval(task, generation, budget=4):
++    return {"approval_op": "approve_" + task + "_" + generation,
++            "caller": "agent" + task, "task": task, "account": "account1",
++            "audience": "fake_rp", "generation": generation, "operations": ["use"],
++            "budget": budget, "material": "synthetic_initial_" + task + "_" + generation}
++
++
++def request_for(handle, task, generation, rid, value=1):
++    return {"rid": rid, "handle": handle, "task": task, "account": "account1",
++            "audience": "fake_rp", "generation": generation, "operation": "use",
++            "payload": {"value": value}}
+--- /dev/null
++++ b/src/auth_lifecycle/online_state/migration.sql
+@@ -0,0 +1,11 @@
++CREATE TABLE IF NOT EXISTS authority_state (
++    id INTEGER PRIMARY KEY CHECK (id = 1),
++    version INTEGER NOT NULL,
++    ciphertext BLOB NOT NULL
++);
++CREATE TABLE IF NOT EXISTS authority_events (
++    version INTEGER PRIMARY KEY,
++    operation TEXT NOT NULL,
++    projection TEXT NOT NULL
++);
++PRAGMA user_version = 1;
+--- /dev/null
++++ b/src/auth_lifecycle/online_state/protocol.py
+@@ -0,0 +1,136 @@
++"""Strict JSON, pinned loopback TLS, and secret-free event projections."""
++
++import hashlib
++import json
++import os
++from pathlib import Path
++import re
++import ssl
++import threading
++import time
++import urllib.error
++import urllib.request
++
++
++class InvalidInput(ValueError):
++    pass
++
++
++def canonical(value):
++    return json.dumps(value, sort_keys=True, separators=(",", ":"),
++                      ensure_ascii=True, allow_nan=False).encode("utf-8")
++
++
++def digest(value):
++    return hashlib.sha256(canonical(value)).hexdigest()
++
++
++def strict_json(raw):
++    def pairs(items):
++        result = {}
++        for key, value in items:
++            if key in result:
++                raise InvalidInput("DUPLICATE_JSON_KEY")
++            result[key] = value
++        return result
++
++    def invalid_constant(value):
++        raise InvalidInput("NONFINITE_JSON")
++
++    return json.loads(raw, object_pairs_hook=pairs, parse_constant=invalid_constant)
++
++
++def identifier(value):
++    if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", value):
++        raise InvalidInput("INVALID_IDENTIFIER")
++    return value
++
++
++def exact_fields(value, fields):
++    if not isinstance(value, dict) or set(value) != set(fields):
++        raise InvalidInput("INVALID_FIELDS")
++
++
++def normalized_request(value):
++    fields = ("rid", "handle", "task", "account", "audience", "generation",
++              "operation", "payload")
++    exact_fields(value, fields)
++    result = {key: identifier(value[key]) for key in fields if key != "payload"}
++    exact_fields(value["payload"], ("value",))
++    number = value["payload"]["value"]
++    if type(number) is not int or not -1000000 <= number <= 1000000:
++        raise InvalidInput("INVALID_PAYLOAD")
++    result["payload"] = {"value": number}
++    return result
++
++
++def write_json(path, value):
++    path = Path(path)
++    path.parent.mkdir(parents=True, exist_ok=True)
++    temporary = path.with_name(path.name + ".tmp")
++    with temporary.open("wb") as stream:
++        stream.write(canonical(value))
++        stream.flush()
++        os.fsync(stream.fileno())
++    os.replace(temporary, path)
++
++
++class EventLog:
++    def __init__(self, path):
++        self.path = Path(path)
++        self.path.parent.mkdir(parents=True, exist_ok=True)
++        self.lock = threading.Lock()
++
++    def emit(self, event, **fields):
++        # Callers supply explicit projections; request bodies and exceptions stay out.
++        row = {"event": event, "pid": os.getpid(), "monotonic_ns": time.monotonic_ns(), **fields}
++        with self.lock, self.path.open("ab") as stream:
++            stream.write(canonical(row) + b"\n")
++            stream.flush()
++            os.fsync(stream.fileno())
++
++
++class NoRedirect(urllib.request.HTTPRedirectHandler):
++    def redirect_request(self, req, fp, code, msg, headers, newurl):
++        return None
++
++
++class Client:
++    def __init__(self, url, token, certificate, log=None, timeout=3):
++        if not re.fullmatch(r"https://127\.0\.0\.1:[0-9]+", url):
++            raise InvalidInput("LOOPBACK_TLS_REQUIRED")
++        port = int(url.rsplit(":", 1)[1])
++        if port in {18080, 18081, 8080}:
++            raise InvalidInput("NATIVE_ENDPOINT_FORBIDDEN")
++        self.url = url
++        self.token = token
++        self.log = log
++        self.timeout = timeout
++        context = ssl.create_default_context(cafile=str(certificate))
++        self.opener = urllib.request.build_opener(
++            urllib.request.ProxyHandler({}), NoRedirect(),
++            urllib.request.HTTPSHandler(context=context))
++
++    def call(self, operation, payload):
++        identifier(operation)
++        body = canonical(payload)
++        request = urllib.request.Request(
++            self.url + "/" + operation, data=body,
++            headers={"Authorization": "Bearer " + self.token,
++                     "Content-Type": "application/json"}, method="POST")
++        started = time.monotonic_ns()
++        try:
++            with self.opener.open(request, timeout=self.timeout) as response:
++                raw = response.read(1024 * 1024)
++                result = strict_json(raw)
++        except (urllib.error.URLError, TimeoutError, OSError):
++            raw = b""
++            result = {"status": "UNKNOWN", "reason": "TRANSPORT_UNAVAILABLE"}
++        except (ValueError, InvalidInput):
++            raw = b""
++            result = {"status": "UNKNOWN", "reason": "INVALID_RESPONSE"}
++        if self.log:
++            self.log.emit("rpc", operation=operation, request_json_bytes=len(body),
++                          response_json_bytes=len(raw), status=result.get("status"),
++                          elapsed_ns=time.monotonic_ns() - started)
++        return result
+--- /dev/null
++++ b/src/auth_lifecycle/online_state/services.py
+@@ -0,0 +1,272 @@
++"""Authenticated local authority, controller, and synthetic provider processes."""
++
++import base64
++import hmac
++from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
++import json
++import os
++from pathlib import Path
++import secrets
++import ssl
++import threading
++import time
++
++from cryptography.hazmat.primitives.ciphers.aead import AESGCM
++
++from .protocol import (Client, EventLog, InvalidInput, canonical, digest,
++                       exact_fields, identifier, normalized_request, strict_json, write_json)
++from .storage import AuthorityStore
++
++
++class SingleActive:
++    """OS-held lock outside the rollback cache. A process exit releases it."""
++    def __init__(self, path):
++        self.stream = open(path, "a+b")
++        try:
++            if os.fstat(self.stream.fileno()).st_size == 0:
++                self.stream.write(b"0")
++                self.stream.flush()
++            self.stream.seek(0)
++            if os.name == "nt":
++                import msvcrt
++                msvcrt.locking(self.stream.fileno(), msvcrt.LK_NBLCK, 1)
++            else:
++                import fcntl
++                fcntl.flock(self.stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
++        except OSError:
++            self.stream.close()
++            raise
++
++
++class Controller:
++    def __init__(self, root, config, fault=None):
++        self.root = Path(root)
++        self.config = config
++        self.active_lock = SingleActive(self.root / "secure" / "controller.lock")
++        self.log = EventLog(self.root / "controller" / "events.jsonl")
++        self.authority = Client(config["authority_url"], config["authority_token"],
++                                config["certificate"], self.log)
++        self.provider = Client(config["provider_url"], config["provider_token"],
++                               config["certificate"], self.log)
++        self.boot = secrets.token_hex(8)
++        self.fault = fault
++        self.fault_used = False
++        self.ready = False
++        self.recover()
++
++    def barrier(self, point):
++        if point != self.fault or self.fault_used:
++            return
++        self.fault_used = True
++        folder = self.root / "controller" / "barriers"
++        path = folder / (self.boot + "_" + point + ".json")
++        write_json(path, {"point": point, "pid": os.getpid(), "boot": self.boot})
++        self.log.emit("barrier", point=point, boot=self.boot)
++        release = path.with_suffix(".release")
++        while not release.exists():
++            time.sleep(0.01)
++
++    def recover(self):
++        result = self.authority.call("recover", {})
++        self.ready = result.get("status") == "RECOVERED"
++        if self.ready:
++            write_json(self.root / "cache" / "view.json", {
++                "authoritative_version": result["version"], "boot": self.boot,
++                "approval_count": len(result["approvals"]), "display_only": True})
++        self.log.emit("recovery", status=result.get("status"),
++                      version=result.get("version"), boot=self.boot)
++        return result
++
++    def call(self, operation, payload, identity):
++        if operation == "recover":
++            return self.recover()
++        if not self.ready and self.recover().get("status") != "RECOVERED":
++            return {"status": "UNKNOWN", "reason": "RECOVERY_INCOMPLETE"}
++        if operation == "grant":
++            return self.authority.call("grant", payload)
++        if operation == "revoke":
++            self.barrier("before_revoke")
++            result = self.authority.call("revoke", payload)
++            if result.get("status") == "LOCAL_REVOKE_COMMITTED":
++                self.barrier("after_revoke_commit")
++            return result
++        if operation == "status":
++            result = self.authority.call("recover", {})
++            if result.get("status") != "RECOVERED" or identity == "user":
++                return result
++            result["approvals"] = [x for x in result["approvals"] if x["caller"] == identity]
++            result["requests"] = [x for x in result["requests"] if x["origin"]["caller"] == identity]
++            result["obligations"] = [x["rid"] for x in result["requests"]
++                                     if x["phase"] in {"DISPATCHED_UNKNOWN", "QUARANTINED"}]
++            return result
++        if operation == "deliver":
++            exact_fields(payload, ("rid",))
++            identifier(payload["rid"])
++            known = self.authority.call("recover", {})
++            if known.get("status") != "RECOVERED":
++                return known
++            req = next((x for x in known["requests"] if x["rid"] == payload["rid"]), None)
++            if req is None or req["attempt_id"] is None:
++                return {"status": "UNKNOWN", "reason": "NO_KNOWN_ATTEMPT"}
++            lookup = {key: req[key] for key in
++                      ("rid", "digest", "origin", "attempt_id", "release_version")}
++            result = self.provider.call("lookup", lookup)
++            return self.record_result(result)
++        if operation != "call":
++            return {"status": "REJECTED", "reason": "INVALID_OPERATION"}
++        request = normalized_request(payload)
++        self.barrier("before_admit")
++        admitted = self.authority.call("admit", {"caller": identity, "request": request})
++        if admitted.get("status") not in {"ADMITTED", "DUPLICATE"}:
++            return admitted
++        self.barrier("after_admit")
++        if admitted["phase"] != "QUEUED":
++            return admitted
++        released = self.authority.call("release", {
++            "caller": identity, "rid": request["rid"], "digest": admitted["digest"]})
++        if not released.get("send"):
++            return released
++        self.barrier("after_release")
++        provider_request = {key: released[key] for key in
++                            ("rid", "digest", "origin", "attempt_id", "release_version",
++                             "material", "operation", "payload")}
++        result = self.provider.call("perform", provider_request)
++        self.barrier("after_effect")
++        return self.record_result(result)
++
++    def record_result(self, result):
++        if result.get("status") != "PROVIDER_RESULT":
++            return {"status": "UNKNOWN", "reason": "EXTERNAL_RESULT_UNCERTAIN"}
++        fields = ("rid", "digest", "origin", "attempt_id", "release_version", "material", "outcome")
++        if not all(key in result for key in fields):
++            return {"status": "UNKNOWN", "reason": "INVALID_PROVIDER_RESULT"}
++        envelope = {key: result[key] for key in fields}
++        return self.authority.call("record", envelope)
++
++
++class FakeProvider:
++    def __init__(self, root, config):
++        self.root = Path(root)
++        self.key = (self.root / "secure" / "provider.key").read_bytes()
++        self.results_path = self.root / "provider" / "encrypted_results.jsonl"
++        self.results_path.parent.mkdir(parents=True, exist_ok=True)
++        self.truth = EventLog(self.root / "provider" / "truth.jsonl")
++        self.lock = threading.Lock()
++        self.hold = False
++        self.results = {}
++        if self.results_path.exists():
++            for line in self.results_path.read_bytes().splitlines():
++                raw = base64.b64decode(line)
++                result = json.loads(AESGCM(self.key).decrypt(raw[:12], raw[12:], b"fake-provider-v1"))
++                self.results[result["attempt_id"]] = result
++
++    def call(self, operation, payload, identity):
++        with self.lock:
++            if operation == "hold":
++                exact_fields(payload, ("enabled",))
++                if type(payload["enabled"]) is not bool:
++                    raise InvalidInput("INVALID_HOLD")
++                self.hold = payload["enabled"]
++                return {"status": "CONFIGURED"}
++            if operation == "lookup":
++                exact_fields(payload, ("rid", "digest", "origin", "attempt_id", "release_version"))
++                result = self.results.get(payload["attempt_id"])
++                if result is None:
++                    return {"status": "UNKNOWN", "reason": "NO_RESULT_EVIDENCE"}
++                if any(result[key] != payload[key] for key in payload):
++                    return {"status": "CONFLICT", "reason": "LOOKUP_BINDING_CONFLICT"}
++                return {"status": "PROVIDER_RESULT", **result}
++            if operation != "perform":
++                return {"status": "REJECTED", "reason": "INVALID_OPERATION"}
++            fields = ("rid", "digest", "origin", "attempt_id", "release_version", "material", "operation", "payload")
++            exact_fields(payload, fields)
++            if not isinstance(payload["material"], str) or not payload["material"].startswith("synthetic_"):
++                return {"status": "REJECTED", "reason": "SYNTHETIC_MATERIAL_REQUIRED"}
++            # Each perform invocation records an effect, including accidental retries.
++            result = {key: payload[key] for key in
++                      ("rid", "digest", "origin", "attempt_id", "release_version")}
++            result.update(material="synthetic_result_" + secrets.token_hex(24), outcome="OK")
++            nonce = os.urandom(12)
++            sealed = nonce + AESGCM(self.key).encrypt(nonce, canonical(result), b"fake-provider-v1")
++            with self.results_path.open("ab") as stream:
++                stream.write(base64.b64encode(sealed) + b"\n")
++                stream.flush()
++                os.fsync(stream.fileno())
++            self.results[payload["attempt_id"]] = result
++            self.truth.emit("effect", **{key: result[key] for key in
++                                        ("rid", "digest", "origin", "attempt_id", "release_version")})
++            if self.hold:
++                return {"status": "PENDING"}
++            return {"status": "PROVIDER_RESULT", **result,
++                    "untrusted_extra": "synthetic_debug_secret_do_not_export"}
++
++
++def serve(role, root, fault=None):
++    root = Path(root)
++    config = json.loads((root / "secure" / (role + ".json")).read_text())
++    log = EventLog(root / role / "transport.jsonl")
++    if role == "authority":
++        implementation = AuthorityStore(root / "authority", root / "secure" / "authority.key",
++                                        config.get("operation_limit"))
++    elif role == "provider":
++        implementation = FakeProvider(root, config)
++    else:
++        implementation = Controller(root, config, fault)
++
++    class Handler(BaseHTTPRequestHandler):
++        def log_message(self, *args):
++            pass
++
++        def do_POST(self):
++            started = time.monotonic_ns()
++            request_bytes = 0
++            operation = self.path.removeprefix("/")
++            identity = None
++            supplied = self.headers.get("Authorization", "")
++            for name, token in config["identities"].items():
++                if hmac.compare_digest(supplied, "Bearer " + token):
++                    identity = name
++            allowed = config["permissions"].get(identity, [])
++            try:
++                if operation not in allowed:
++                    result = {"status": "REJECTED", "reason": "IDENTITY_OR_OPERATION_DENIED"}
++                else:
++                    length = int(self.headers.get("Content-Length", "0"))
++                    if not 0 < length <= 65536:
++                        raise InvalidInput("BODY_SIZE")
++                    raw = self.rfile.read(length)
++                    request_bytes = len(raw)
++                    payload = strict_json(raw)
++                    if role == "authority":
++                        result = implementation.call(operation, payload)
++                    else:
++                        result = implementation.call(operation, payload, identity)
++            except (ValueError, TypeError, KeyError, InvalidInput):
++                result = {"status": "REJECTED", "reason": "INVALID_INPUT"}
++            except Exception:
++                result = {"status": "UNKNOWN", "reason": "SERVICE_UNAVAILABLE"}
++            response = canonical(result)
++            # The operation logged is selected from the configured whitelist.
++            log.emit("request", operation=operation if operation in allowed else "denied",
++                     identity=identity, request_json_bytes=request_bytes,
++                     response_json_bytes=len(response), status=result.get("status"),
++                     elapsed_ns=time.monotonic_ns() - started)
++            try:
++                self.send_response(200)
++                self.send_header("Content-Type", "application/json")
++                self.send_header("Content-Length", str(len(response)))
++                self.end_headers()
++                self.wfile.write(response)
++            except (OSError, ssl.SSLError):
++                pass
++
++    server = ThreadingHTTPServer(("127.0.0.1", config["port"]), Handler)
++    server.daemon_threads = True
++    tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
++    tls.minimum_version = ssl.TLSVersion.TLSv1_2
++    tls.load_cert_chain(config["certificate"], config["tls_key"])
++    server.socket = tls.wrap_socket(server.socket, server_side=True)
++    write_json(root / "control" / (role + "_ready.json"),
++               {"role": role, "pid": os.getpid(), "port": config["port"],
++                "boot": getattr(implementation, "boot", None)})
++    server.serve_forever(poll_interval=0.05)
+--- /dev/null
++++ b/src/auth_lifecycle/online_state/storage.py
+@@ -0,0 +1,280 @@
++"""SQLite authority. All approval mutations share one BEGIN IMMEDIATE order.
++
++The small prototype stores one encrypted application snapshot per commit. Its
++linear serialization cost is explicit; the SQL transaction and event are atomic.
++"""
++
++import json
++import os
++from pathlib import Path
++import secrets
++import sqlite3
++import threading
++
++from cryptography.hazmat.primitives.ciphers.aead import AESGCM
++
++from .protocol import (EventLog, InvalidInput, canonical, digest, exact_fields,
++                       identifier, normalized_request, write_json)
++
++
++AAD = b"auth-lifecycle/online-state/schema-1"
++
++
++def request_projection(request):
++    return {key: request[key] for key in
++            ("rid", "digest", "origin", "phase", "attempt_id", "release_version")}
++
++
++def state_projection(state):
++    approvals = []
++    for grant in state["grants"].values():
++        approvals.append({key: grant[key] for key in
++                          ("grant_id", "caller", "task", "account", "audience",
++                           "generation", "active", "limit", "reserved", "spent")})
++    requests = [request_projection(req) for req in state["requests"].values()]
++    obligations = [req["rid"] for req in requests
++                   if req["phase"] in {"DISPATCHED_UNKNOWN", "QUARANTINED"}]
++    return {"approvals": approvals, "requests": requests, "obligations": obligations}
++
++
++class AuthorityStore:
++    def __init__(self, directory, key_path, operation_limit=None):
++        self.directory = Path(directory)
++        self.directory.mkdir(parents=True, exist_ok=True)
++        self.key_path = Path(key_path)
++        self.lock = threading.RLock()
++        self.metrics = EventLog(self.directory / "database_ops.jsonl")
++        self.operation_limit = operation_limit
++        self.operations = 0
++        if self.metrics.path.exists():
++            self.operations = len(self.metrics.path.read_bytes().splitlines())
++        marker = self.directory / "initialized"
++        if marker.exists() and not (self.directory / "authority.db").exists():
++            raise ValueError("EXISTING_AUTHORITY_DATA_MISSING")
++        self.connection = sqlite3.connect(self.directory / "authority.db",
++                                          isolation_level=None, check_same_thread=False)
++        self.connection.row_factory = sqlite3.Row
++        journal_mode = self.execute("PRAGMA journal_mode=WAL").fetchone()[0]
++        self.execute("PRAGMA synchronous=FULL")
++        synchronous = self.execute("PRAGMA synchronous").fetchone()[0]
++        self.execute("PRAGMA busy_timeout=5000")
++        self.execute("PRAGMA wal_autocheckpoint=1000")
++        if journal_mode != "wal" or synchronous != 2:
++            raise ValueError("DURABILITY_CONFIGURATION_MISMATCH")
++        schema_version = self.execute("PRAGMA user_version").fetchone()[0]
++        if schema_version not in {0, 1}:
++            raise ValueError("UNSUPPORTED_SCHEMA_VERSION")
++        migration = (Path(__file__).with_name("migration.sql")).read_text()
++        for statement in migration.split(";"):
++            if statement.strip():
++                self.execute(statement)
++        row = self.execute("SELECT version FROM authority_state WHERE id=1").fetchone()
++        if row is None:
++            if marker.exists():
++                raise ValueError("EXISTING_AUTHORITY_STATE_MISSING")
++            state = {"grants": {}, "requests": {}, "grant_ops": {}, "revoke_ops": {}}
++            self.execute("INSERT INTO authority_state VALUES(1,0,?)", (self.encrypt(state),))
++        marker.touch(exist_ok=True)
++        write_json(self.directory / "storage_configuration.json", {
++            "sqlite_version": sqlite3.sqlite_version, "journal_mode": journal_mode,
++            "synchronous": synchronous, "busy_timeout_ms": 5000,
++            "wal_autocheckpoint_pages": 1000, "mutation_transaction": "BEGIN IMMEDIATE",
++            "application_snapshot": "single AES-GCM encrypted row", "schema_version": 1})
++
++    def execute(self, statement, parameters=()):
++        if self.operation_limit is not None and self.operations >= self.operation_limit:
++            raise RuntimeError("DATABASE_OPERATION_BUDGET")
++        self.operations += 1
++        kind = statement.strip().split()[0].upper()
++        size = sum(len(x) if isinstance(x, (bytes, str)) else 8 for x in parameters)
++        self.metrics.emit("sqlite_statement", number=self.operations, kind=kind,
++                          bound_value_bytes=size)
++        return self.connection.execute(statement, parameters)
++
++    def cipher(self):
++        # Reloading the external key makes a missing recovery key fail closed.
++        key = self.key_path.read_bytes()
++        if len(key) != 32:
++            raise ValueError("KEY_UNAVAILABLE")
++        return AESGCM(key)
++
++    def encrypt(self, state):
++        nonce = os.urandom(12)
++        return nonce + self.cipher().encrypt(nonce, canonical(state), AAD)
++
++    def read_state(self):
++        row = self.execute("SELECT version,ciphertext FROM authority_state WHERE id=1").fetchone()
++        if row is None:
++            raise ValueError("STATE_UNAVAILABLE")
++        raw = bytes(row["ciphertext"])
++        state = json.loads(self.cipher().decrypt(raw[:12], raw[12:], AAD))
++        return row["version"], state
++
++    def call(self, operation, payload):
++        if operation not in {"grant", "admit", "release", "record", "revoke", "recover"}:
++            return {"status": "REJECTED", "reason": "INVALID_OPERATION"}
++        with self.lock:
++            try:
++                if operation == "recover":
++                    if self.operation_limit is not None and self.operations >= self.operation_limit:
++                        return {"status": "INCONCLUSIVE", "reason": "DATABASE_OPERATION_BUDGET"}
++                    version, state = self.read_state()
++                    return {"status": "RECOVERED", "version": version, **state_projection(state)}
++                if self.operation_limit is not None and self.operations + 6 > self.operation_limit:
++                    return {"status": "INCONCLUSIVE", "reason": "DATABASE_OPERATION_BUDGET"}
++                self.execute("BEGIN IMMEDIATE")
++                version, state = self.read_state()
++                result = getattr(self, operation)(state, payload, version + 1)
++                public = {key: result[key] for key in
++                          ("status", "reason", "rid", "grant_id", "phase", "send") if key in result}
++                event = {"result": public, "state": state_projection(state),
++                         "logical_state_bytes": len(canonical(state))}
++                self.execute("UPDATE authority_state SET version=?,ciphertext=? WHERE id=1",
++                             (version + 1, self.encrypt(state)))
++                self.execute("INSERT INTO authority_events VALUES(?,?,?)",
++                             (version + 1, operation, canonical(event).decode()))
++                self.execute("COMMIT")
++                return {**result, "version": version + 1}
++            except InvalidInput:
++                if self.connection.in_transaction:
++                    self.execute("ROLLBACK")
++                return {"status": "REJECTED", "reason": "INVALID_INPUT"}
++            except Exception:
++                if self.connection.in_transaction:
++                    # A budget exhaustion must still release the DB transaction.
++                    self.connection.rollback()
++                    self.operations += 1
++                    self.metrics.emit("sqlite_rollback_cleanup", kind="ROLLBACK")
++                return {"status": "UNKNOWN", "reason": "AUTHORITY_STATE_UNAVAILABLE"}
++
++    def grant(self, state, payload, version):
++        fields = ("approval_op", "caller", "task", "account", "audience",
++                  "generation", "operations", "budget", "material")
++        exact_fields(payload, fields)
++        for key in fields:
++            if key not in {"operations", "budget", "material"}:
++                identifier(payload[key])
++        if (type(payload["budget"]) is not int or not 0 <= payload["budget"] <= 1000000
++                or not isinstance(payload["operations"], list) or not payload["operations"]
++                or len(payload["operations"]) != len(set(payload["operations"]))):
++            raise InvalidInput("INVALID_APPROVAL")
++        for operation in payload["operations"]:
++            identifier(operation)
++        if not isinstance(payload["material"], str) or not 1 <= len(payload["material"]) <= 4096:
++            raise InvalidInput("INVALID_MATERIAL")
++        fingerprint = digest(payload)
++        old = state["grant_ops"].get(payload["approval_op"])
++        if old:
++            if old["digest"] != fingerprint:
++                return {"status": "CONFLICT", "reason": "APPROVAL_OPERATION_CONFLICT"}
++            grant = state["grants"][old["grant_id"]]
++            return {"status": "GRANTED", "grant_id": grant["grant_id"], "handle": grant["handle"]}
++        for grant in state["grants"].values():
++            scope = ("caller", "task", "account", "audience", "generation")
++            if all(grant[key] == payload[key] for key in scope):
++                return {"status": "CONFLICT", "reason": "GENERATION_ALREADY_EXISTS"}
++        grant_id = "grant_" + secrets.token_hex(12)
++        handle = "handle_" + secrets.token_hex(24)
++        state["grants"][grant_id] = {
++            **{key: payload[key] for key in ("caller", "task", "account", "audience", "generation", "operations", "material")},
++            "grant_id": grant_id, "handle": handle, "active": True,
++            "limit": payload["budget"], "reserved": 0, "spent": 0}
++        state["grant_ops"][payload["approval_op"]] = {"digest": fingerprint, "grant_id": grant_id}
++        return {"status": "GRANTED", "grant_id": grant_id, "handle": handle}
++
++    def admit(self, state, payload, version):
++        exact_fields(payload, ("caller", "request"))
++        caller = identifier(payload["caller"])
++        request = normalized_request(payload["request"])
++        fingerprint = digest({"caller": caller, "request": request})
++        existing = state["requests"].get(request["rid"])
++        if existing:
++            if existing["digest"] != fingerprint:
++                return {"status": "CONFLICT", "reason": "RID_BODY_CONFLICT"}
++            return {"status": "DUPLICATE", **request_projection(existing)}
++        grant = next((g for g in state["grants"].values() if g["handle"] == request["handle"]), None)
++        if grant is None or grant["caller"] != caller:
++            return {"status": "REJECTED", "reason": "BINDING_MISMATCH"}
++        if any(grant[key] != request[key] for key in ("task", "account", "audience", "generation")):
++            return {"status": "REJECTED", "reason": "BINDING_MISMATCH"}
++        if not grant["active"] or request["operation"] not in grant["operations"]:
++            return {"status": "REJECTED", "reason": "APPROVAL_INACTIVE_OR_OPERATION_DENIED"}
++        if grant["reserved"] + grant["spent"] >= grant["limit"]:
++            return {"status": "REJECTED", "reason": "BUDGET_EXHAUSTED"}
++        origin = {key: grant[key] for key in
++                  ("grant_id", "caller", "task", "account", "audience", "generation")}
++        saved = {"rid": request["rid"], "digest": fingerprint, "origin": origin,
++                 "request": request, "phase": "QUEUED", "attempt_id": None,
++                 "release_version": None, "result_digest": None, "result_material": None}
++        state["requests"][request["rid"]] = saved
++        grant["reserved"] += 1
++        return {"status": "ADMITTED", **request_projection(saved)}
++
++    def release(self, state, payload, version):
++        exact_fields(payload, ("caller", "rid", "digest"))
++        req = state["requests"].get(payload["rid"])
++        if req is None or req["origin"]["caller"] != payload["caller"] or req["digest"] != payload["digest"]:
++            return {"status": "REJECTED", "reason": "REQUEST_BINDING_MISMATCH", "send": False}
++        grant = state["grants"][req["origin"]["grant_id"]]
++        if req["phase"] != "QUEUED":
++            return {"status": "RECORDED", "send": False, **request_projection(req)}
++        if not grant["active"]:
++            req["phase"] = "CANCELLED"
++            grant["reserved"] -= 1
++            return {"status": "REJECTED", "reason": "APPROVAL_REVOKED", "send": False}
++        req["attempt_id"] = "attempt_" + secrets.token_hex(16)
++        req["release_version"] = version
++        req["phase"] = "DISPATCHED_UNKNOWN"
++        grant["reserved"] -= 1
++        grant["spent"] += 1
++        return {"status": "RELEASED", "send": True, **request_projection(req),
++                "operation": req["request"]["operation"], "payload": req["request"]["payload"],
++                "material": grant["material"]}
++
++    def record(self, state, payload, version):
++        fields = ("rid", "digest", "origin", "attempt_id", "release_version", "material", "outcome")
++        exact_fields(payload, fields)
++        req = state["requests"].get(payload["rid"])
++        if req is None or any(req[key] != payload[key] for key in
++                              ("digest", "origin", "attempt_id", "release_version")):
++            return {"status": "CONFLICT", "reason": "RESULT_SOURCE_CONFLICT"}
++        if payload["outcome"] != "OK" or not isinstance(payload["material"], str) or not 1 <= len(payload["material"]) <= 4096:
++            raise InvalidInput("INVALID_RESULT")
++        result_digest = digest(payload)
++        if req["result_digest"]:
++            if req["result_digest"] != result_digest:
++                return {"status": "CONFLICT", "reason": "RESULT_BODY_CONFLICT"}
++            return {"status": "RESULT_DUPLICATE", **request_projection(req)}
++        if req["phase"] != "DISPATCHED_UNKNOWN" or not req["attempt_id"]:
++            return {"status": "REJECTED", "reason": "RESULT_WITHOUT_RELEASE"}
++        grant = state["grants"][req["origin"]["grant_id"]]
++        req["result_digest"] = result_digest
++        req["result_material"] = payload["material"]
++        req["phase"] = "RESULT_AVAILABLE" if grant["active"] else "QUARANTINED"
++        return {"status": req["phase"], **request_projection(req)}
++
++    def revoke(self, state, payload, version):
++        exact_fields(payload, ("revoke_op", "grant_id"))
++        identifier(payload["revoke_op"])
++        identifier(payload["grant_id"])
++        old = state["revoke_ops"].get(payload["revoke_op"])
++        if old:
++            if old["grant_id"] != payload["grant_id"]:
++                return {"status": "CONFLICT", "reason": "REVOKE_OPERATION_CONFLICT"}
++            return old
++        grant = state["grants"].get(payload["grant_id"])
++        if grant is None:
++            return {"status": "REJECTED", "reason": "UNKNOWN_GRANT"}
++        grant["active"] = False
++        for req in state["requests"].values():
++            if req["origin"]["grant_id"] != grant["grant_id"]:
++                continue
++            if req["phase"] == "QUEUED":
++                req["phase"] = "CANCELLED"
++                grant["reserved"] -= 1
++            elif req["phase"] == "RESULT_AVAILABLE":
++                req["phase"] = "QUARANTINED"
++        receipt = {"status": "LOCAL_REVOKE_COMMITTED", "grant_id": grant["grant_id"],
++                   "commit_version": version}
++        state["revoke_ops"][payload["revoke_op"]] = receipt
++        return receipt
+--- /dev/null
++++ b/tests/test_online_state.py
+@@ -0,0 +1,264 @@
++"""Development regressions through the authenticated controller entry point."""
++
++from concurrent.futures import ThreadPoolExecutor
++import json
++import os
++from pathlib import Path
++import secrets
++import shutil
++import subprocess
++import sys
++import unittest
++from unittest.mock import patch
++
++from auth_lifecycle.online_state.lab import Laboratory, approval, request_for, protect_directory
++from auth_lifecycle.online_state.protocol import Client
++from auth_lifecycle.online_state.storage import AuthorityStore
++from auth_lifecycle.online_state.services import SingleActive
++from auth_lifecycle.online_state.acceptance import SCENARIOS, continuation_plan
++
++
++class OnlineStateTests(unittest.TestCase):
++    def setUp(self):
++        default = Path(__file__).resolve().parents[2] / "mainline_online_state_v1" / "dev_work"
++        self.parent = Path(os.environ.get("ONLINE_STATE_TEST_ROOT", default))
++        self.parent.mkdir(parents=True, exist_ok=True)
++        self.lab = Laboratory(self.parent / (self._testMethodName + "_" + secrets.token_hex(4)))
++        self.addCleanup(self.lab.close)
++        self.lab.start_all()
++        self.user = self.lab.client()
++        self.a = self.user.call("grant", approval("A", "g0", 3))
++        self.b = self.user.call("grant", approval("B", "g1", 3))
++        self.assertEqual(self.a["status"], "GRANTED")
++        self.assertEqual(self.b["status"], "GRANTED")
++
++    def request_a(self, rid="A1"):
++        return request_for(self.a["handle"], "A", "g0", rid)
++
++    def request_b(self, rid="B1"):
++        return request_for(self.b["handle"], "B", "g1", rid)
++
++    def revoke_a(self, operation="revokeA"):
++        return self.user.call("revoke", {"revoke_op": operation, "grant_id": self.a["grant_id"]})
++
++    def status(self):
++        result = self.user.call("status", {})
++        self.assertEqual(result["status"], "RECOVERED")
++        return result
++
++    def test_normal_entry_and_secret_projection(self):
++        result = self.lab.client("agentA").call("call", self.request_a())
++        self.assertEqual(result["status"], "RESULT_AVAILABLE")
++        public = json.dumps([self.a, self.b, result, self.status()])
++        self.assertNotIn("synthetic_initial", public)
++        self.assertNotIn("synthetic_result", public)
++        self.assertNotIn("synthetic_debug", public)
++        self.assertEqual(self.revoke_a()["status"], "LOCAL_REVOKE_COMMITTED")
++        self.assertEqual(self.lab.client("agentA").call("call", self.request_a("A2"))["status"], "REJECTED")
++        self.assertEqual(self.lab.client("agentB").call("call", self.request_b())["status"], "RESULT_AVAILABLE")
++
++    def test_binding_caller_task_account_audience_generation_operation(self):
++        request = self.request_a()
++        self.assertEqual(self.lab.client("agentB").call("call", request)["status"], "REJECTED")
++        for field in ("task", "account", "audience", "generation", "operation"):
++            with self.subTest(field=field):
++                altered = {**self.request_a(field), field: "wrong"}
++                self.assertEqual(self.lab.client("agentA").call("call", altered)["status"], "REJECTED")
++        extra = {**self.request_a("caller_field"), "caller": "agentB"}
++        self.assertEqual(self.lab.client("agentA").call("call", extra)["status"], "REJECTED")
++        config = self.lab.configs["controller"]
++        denied = Client("https://127.0.0.1:" + str(config["port"]), "wrong", config["certificate"])
++        self.assertEqual(denied.call("status", {})["status"], "REJECTED")
++        self.assertEqual(self.lab.client("agentA").call("grant", approval("A", "g2"))["status"], "REJECTED")
++
++    def test_rid_duplicate_and_body_conflict(self):
++        request = self.request_a()
++        with ThreadPoolExecutor(max_workers=5) as pool:
++            results = list(pool.map(lambda _: self.lab.client("agentA").call("call", request), range(5)))
++        self.assertTrue(any(r.get("phase") == "RESULT_AVAILABLE" for r in results))
++        conflict = {**request, "payload": {"value": 2}}
++        self.assertEqual(self.lab.client("agentA").call("call", conflict)["status"], "CONFLICT")
++        state = self.status()
++        self.assertEqual(len(state["requests"]), 1)
++        grant = next(g for g in state["approvals"] if g["task"] == "A")
++        self.assertEqual((grant["reserved"], grant["spent"]), (0, 1))
++        truth = (self.lab.root / "provider" / "truth.jsonl").read_text().splitlines()
++        self.assertEqual(len(truth), 1)
++
++    def test_concurrent_budget(self):
++        with ThreadPoolExecutor(max_workers=8) as pool:
++            results = list(pool.map(lambda i: self.lab.client("agentA").call("call", self.request_a("r" + str(i))), range(8)))
++        self.assertEqual(sum(r["status"] == "RESULT_AVAILABLE" for r in results), 3)
++        grant = next(g for g in self.status()["approvals"] if g["task"] == "A")
++        self.assertEqual((grant["reserved"], grant["spent"]), (0, 3))
++
++    def test_admission_revoke_compete_at_queue_boundary(self):
++        self.lab.restart_controller("after_admit")
++        pending = self.lab.async_call("agentA", "call", self.request_a())
++        barrier = self.lab.wait_barrier("after_admit")
++        ack = self.revoke_a()
++        self.assertEqual(ack["status"], "LOCAL_REVOKE_COMMITTED")
++        barrier.with_suffix(".release").touch()
++        self.assertFalse(pending.result(timeout=5).get("send", False))
++        state = self.status()
++        self.assertEqual(state["requests"][0]["phase"], "CANCELLED")
++        grant = next(g for g in state["approvals"] if g["task"] == "A")
++        self.assertEqual((grant["reserved"], grant["spent"]), (0, 0))
++
++    def test_release_before_revoke_is_pending_then_quarantined(self):
++        self.lab.restart_controller("after_release")
++        pending = self.lab.async_call("agentA", "call", self.request_a())
++        barrier = self.lab.wait_barrier("after_release")
++        ack = self.revoke_a()
++        self.assertEqual(ack["status"], "LOCAL_REVOKE_COMMITTED")
++        self.assertEqual(self.status()["requests"][0]["phase"], "DISPATCHED_UNKNOWN")
++        barrier.with_suffix(".release").touch()
++        result = pending.result(timeout=5)
++        self.assertEqual(result["status"], "QUARANTINED")
++        self.assertLess(result["release_version"], ack["commit_version"])
++
++    def test_revocation_ack_loss_and_idempotent_recovery(self):
++        self.lab.restart_controller("after_revoke_commit")
++        pending = self.lab.async_call("user", "revoke", {"revoke_op": "lost_ack", "grant_id": self.a["grant_id"]})
++        self.lab.wait_barrier("after_revoke_commit")
++        self.lab.restart_controller()
++        self.assertEqual(pending.result(timeout=5)["status"], "UNKNOWN")
++        first = self.revoke_a("lost_ack")
++        second = self.revoke_a("lost_ack")
++        self.assertEqual(first["commit_version"], second["commit_version"])
++        self.assertEqual(self.lab.client("agentA").call("call", self.request_a())["status"], "REJECTED")
++
++    def test_release_crash_never_automatically_resends_and_B_recovers(self):
++        self.lab.restart_controller("after_release")
++        pending = self.lab.async_call("agentA", "call", self.request_a())
++        self.lab.wait_barrier("after_release")
++        self.lab.restart_controller()
++        pending.result(timeout=5)
++        self.assertEqual(self.revoke_a()["status"], "LOCAL_REVOKE_COMMITTED")
++        repeat = self.lab.client("agentA").call("call", self.request_a())
++        self.assertEqual(repeat["phase"], "DISPATCHED_UNKNOWN")
++        self.assertFalse((self.lab.root / "provider" / "truth.jsonl").exists())
++        self.assertEqual(self.lab.client("agentB").call("call", self.request_b())["status"], "RESULT_AVAILABLE")
++        self.assertIn("A1", self.status()["obligations"])
++
++    def test_effect_crash_late_and_duplicate_result_binding(self):
++        self.lab.restart_controller("after_effect")
++        pending = self.lab.async_call("agentA", "call", self.request_a())
++        self.lab.wait_barrier("after_effect")
++        self.lab.restart_controller()
++        pending.result(timeout=5)
++        self.revoke_a()
++        first = self.user.call("deliver", {"rid": "A1"})
++        second = self.user.call("deliver", {"rid": "A1"})
++        self.assertEqual(first["status"], "QUARANTINED")
++        self.assertEqual(second["status"], "RESULT_DUPLICATE")
++        self.assertEqual(first["origin"]["generation"], "g0")
++        new_grant = self.user.call("grant", approval("A", "g2"))
++        self.assertNotEqual(new_grant["grant_id"], self.a["grant_id"])
++        self.assertEqual(self.user.call("deliver", {"rid": "A1"})["origin"]["generation"], "g0")
++
++    def test_old_cache_restore_authority_outage_and_key_unavailability(self):
++        snapshot = self.lab.snapshot_cache()
++        self.revoke_a()
++        self.lab.stop("controller")
++        self.lab.restore_cache(snapshot)
++        self.lab.stop("authority")
++        self.lab.start("controller")
++        self.assertEqual(self.user.call("recover", {})["status"], "UNKNOWN")
++        self.assertEqual(self.lab.client("agentB").call("call", self.request_b())["status"], "UNKNOWN")
++        self.lab.start("authority")
++        self.assertEqual(self.user.call("recover", {})["status"], "RECOVERED")
++        self.assertEqual(self.lab.client("agentA").call("call", self.request_a())["status"], "REJECTED")
++        key = self.lab.root / "secure" / "authority.key"
++        saved = key.with_suffix(".saved")
++        key.rename(saved)
++        try:
++            self.assertEqual(self.user.call("recover", {})["status"], "UNKNOWN")
++        finally:
++            saved.rename(key)
++        self.assertEqual(self.user.call("recover", {})["status"], "RECOVERED")
++        self.assertEqual(self.lab.client("agentB").call("call", self.request_b())["status"], "RESULT_AVAILABLE")
++
++    def test_conflicting_provider_result_and_transaction_rollback(self):
++        self.lab.client("fixture", "provider").call("hold", {"enabled": True})
++        self.lab.client("agentA").call("call", self.request_a())
++        req = self.status()["requests"][0]
++        envelope = {key: req[key] for key in ("rid", "digest", "origin", "attempt_id", "release_version")}
++        envelope.update(material="synthetic_bad", outcome="OK")
++        envelope["origin"] = {**envelope["origin"], "generation": "g1"}
++        config = self.lab.configs["authority"]
++        authority = Client("https://127.0.0.1:" + str(config["port"]), config["identities"]["controller"], config["certificate"])
++        self.assertEqual(authority.call("record", envelope)["status"], "CONFLICT")
++        self.assertEqual(self.user.call("deliver", {"rid": "A1"})["status"], "RESULT_AVAILABLE")
++        unit = self.lab.root / "transaction_regression"
++        store = AuthorityStore(unit, self.lab.root / "secure" / "authority.key")
++        original = store.execute
++        def fail_before_event(statement, parameters=()):
++            if statement.startswith("INSERT INTO authority_events"):
++                raise RuntimeError("synthetic secret must stay out of errors")
++            return original(statement, parameters)
++        store.execute = fail_before_event
++        self.assertEqual(store.call("grant", approval("A", "g0"))["status"], "UNKNOWN")
++        store.execute = original
++        self.assertEqual(store.call("recover", {})["approvals"], [])
++        store.connection.close()
++
++    def test_single_active_lock_is_held_by_running_controller(self):
++        with self.assertRaises(OSError):
++            SingleActive(self.lab.root / "secure" / "controller.lock")
++
++    @unittest.skipUnless(os.name == "nt", "Windows SID encoding regression")
++    def test_private_directory_handles_localized_whoami_bytes(self):
++        raw = b'"\xb6\xd0\xce\xc4\\user","S-1-5-21-123-456-789-1001"\r\n'
++        with patch("auth_lifecycle.online_state.lab.subprocess.check_output", return_value=raw):
++            with patch("auth_lifecycle.online_state.lab.subprocess.run") as runner:
++                runner.return_value.returncode = 0
++                result = protect_directory(self.lab.root / "secure")
++        self.assertEqual(result["allowed_sids"][0], "S-1-5-21-123-456-789-1001")
++
++    def test_continuation_only_uses_unexecuted_authorized_slots(self):
++        record = {"authorization_id": "original", "records": [
++            {"scenario": scenario, "repeat": repeat, "status": "NOT_RUN"}
++            for scenario in SCENARIOS for repeat in range(1, 4)]}
++        record["records"][0]["status"] = "ABORTED"
++        path = self.lab.root / "control" / "plan.json"
++        path.write_text(json.dumps(record))
++        selected = continuation_plan(path, "original")
++        self.assertEqual(len(selected), 20)
++        self.assertNotIn(("normal", 1), selected)
++        with self.assertRaises(ValueError):
++            continuation_plan(path, "different")
++        record["records"][0]["status"] = "SAFETY_FAILURE"
++        path.write_text(json.dumps(record))
++        with self.assertRaises(ValueError):
++            continuation_plan(path, "original")
++
++    def test_independent_scorer_detects_wrong_source(self):
++        self.lab.client("agentA").call("call", self.request_a())
++        self.revoke_a()
++        rejected = self.lab.client("agentA").call("call", self.request_a("A_after_ack"))
++        b = self.lab.client("agentB").call("call", self.request_b())
++        self.lab.close()
++        outcome = {"scenario": "normal", "post_ack_A": rejected, "B_result": b,
++                   "elapsed_seconds": 1, "B_after_recovery_seconds": 0.1}
++        (self.lab.root / "runner" / "outcome.json").write_text(json.dumps(outcome))
++        scorer = Path(__file__).resolve().parents[1] / "scripts" / "score_online_state.py"
++        command = [sys.executable, "-B", str(scorer), "--root", str(self.lab.root)]
++        result = subprocess.run(command, capture_output=True)
++        self.assertEqual(result.returncode, 0, result.stderr.decode(errors="replace"))
++        altered_root = self.parent / ("tampered_" + secrets.token_hex(6))
++        shutil.copytree(self.lab.root, altered_root)
++        truth = altered_root / "provider" / "truth.jsonl"
++        events = [json.loads(line) for line in truth.read_text().splitlines()]
++        events[0]["origin"]["generation"] = "g1"
++        truth.write_text("\n".join(json.dumps(row) for row in events) + "\n")
++        result = subprocess.run([sys.executable, "-B", str(scorer), "--root", str(altered_root)], capture_output=True)
++        scored = json.loads((altered_root / "scorer" / "result.json").read_text())
++        self.assertEqual(result.returncode, 1)
++        self.assertEqual(scored["status"], "SAFETY_FAILURE")
++        self.assertIn("every_provider_effect_has_matching_durable_release",
++                      [row["name"] for row in scored["checks"] if not row["pass"]])
++
++
++if __name__ == "__main__":
++    unittest.main()

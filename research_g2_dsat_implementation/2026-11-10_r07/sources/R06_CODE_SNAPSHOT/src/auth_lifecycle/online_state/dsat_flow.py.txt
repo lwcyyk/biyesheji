@@ -1,0 +1,131 @@
+"""Offline network construction and proof binding, with an explicit backend gate.
+
+No mature optimizer is installed in the approved environment. solve() therefore
+does NOT implement an improvised optimizer: it returns BACKEND_UNAVAILABLE.
+Hand-supplied proof vectors can be bound and independently checked separately.
+"""
+import importlib.util
+from time import perf_counter_ns
+
+from .dsat_types import (
+    DEFAULT_LIMITS, InputError, canonical, digest, fields, integer, math_digest,
+    normalize_math, packet_digest,
+)
+
+
+def backend_status():
+    return {"required": "mature integer min-cost-flow backend",
+            "candidate": "NetworkX", "locally_detected": importlib.util.find_spec("networkx") is not None,
+            "configured": False, "status": "BACKEND_UNAVAILABLE",
+            "reason": "NO_APPROVED_FROZEN_MATURE_BACKEND", "network_install_performed": False}
+
+
+def build_network(math_input, mode, limits=DEFAULT_LIMITS):
+    value = normalize_math(math_input, limits)
+    if mode not in {"m", "d"}:
+        raise InputError()
+    h = len(value["U"])
+    target = set(value["T"])
+    inactive = set(value["D_P"])
+    nodes = ["s", "t"] + ["U:" + u for u in value["U"]] + ["I:" + i for i in value["I"]]
+    arcs = []
+
+    def add(tail, head, capacity, cost):
+        arcs.append({"id": "a" + str(len(arcs)), "tail": tail, "head": head,
+                     "capacity": capacity, "cost": cost})
+
+    for u in value["U"]:
+        add("s", "U:" + u, 1, 0)
+    for u, i in value["E"]:
+        cost = int(i in target and (mode == "m" or u in inactive))
+        add("U:" + u, "I:" + i, 1, cost)
+    for i in value["I"]:
+        add("I:" + i, "t", min(value["c"][i], h), 0)
+    return {"mode": mode, "math_input": value, "math_input_digest": math_digest(value),
+            "nodes": nodes, "arcs": arcs, "demand": {n: (-h if n == "s" else h if n == "t" else 0) for n in nodes},
+            "required_flow": h, "C_T": sum(value["c"][i] for i in value["T"])}
+
+
+def solve(math_input, limits=DEFAULT_LIMITS):
+    """The missing-library branch is deliberate and never returns a solved flow."""
+    started = perf_counter_ns()
+    try:
+        mnet = build_network(math_input, "m", limits)
+        dnet = build_network(math_input, "d", limits)
+    except InputError as error:
+        return {"status": error.code, "obligation_action": "KEEP_EXISTING", "solved": False}
+    return {"status": "BACKEND_UNAVAILABLE", "solved": False, "backend": backend_status(),
+            "math_input_digest": mnet["math_input_digest"], "C_T": mnet["C_T"],
+            "network_nodes": len(mnet["nodes"]), "network_arcs": len(mnet["arcs"]),
+            "network_build_ns": perf_counter_ns() - started, "C_flow_ns": None,
+            "m_T": None, "d_T": None, "R_T": None, "H_T": None,
+            "m_network": mnet, "d_network": dnet,
+            "obligation_action": "KEEP_EXISTING", "native_admission": "SOURCE_OR_REFINEMENT_GAP"}
+
+
+def make_bindings(bundle, projection):
+    """Redacted synthetic context only; no evidence payload, handle or token is exported."""
+    if bundle.get("mode") != "SYNTHETIC_CONTRACT" or projection.get("math_input") is None:
+        raise InputError()
+    scope = projection["scope"]
+    return {
+        "evidence_bundle": sorted(digest("envelope", e) for e in bundle["history"] + bundle["envelopes"]),
+        "contract": dict(bundle["contract"]),
+        "scope": {"target_attempts": list(projection["math_input"]["T"]), "paths": list(scope["paths"]),
+                  "open_frontiers": list(projection["open_frontiers"]),
+                  "coverage_complete": projection["source_scope_preconditions_declared"], "material_scope_only": True},
+        "dependency": {"authority_version": projection["authority_version"],
+                       "source_version": bundle["contract"]["source_version"],
+                       "evidence_version": 1, "now": bundle["authority"]["now"],
+                       "valid_until": bundle["authority"]["now"]},
+        "cost_ledger": list(projection["costs_retained"]),
+        "O_before": list(projection["obligations_proposed"]),
+    }
+
+
+_BINDINGS = {"evidence_bundle": "evidence_bundle_digest", "contract": "contract_digest",
+             "scope": "scope_digest", "dependency": "dependency_digest",
+             "cost_ledger": "cost_ledger_digest", "O_before": "O_before_digest"}
+
+
+def _base_packet(math_input, bindings):
+    value = normalize_math(math_input)
+    fields(bindings, _BINDINGS)
+    # Copy via JSON-equivalent serialization to prevent caller mutation of a bound packet.
+    import json
+    bindings = json.loads(canonical(bindings))
+    return {"schema": "dsat-proof/1", "mode": "SYNTHETIC_CONTRACT", "math_input": value,
+            "bindings": bindings, "digests": {"math_input_digest": math_digest(value),
+                **{field: digest(key, bindings[key]) for key, field in _BINDINGS.items()}}}
+
+
+def assemble_optimum_packet(math_input, bindings, m_certificate, d_certificate):
+    """Serialize supplied vectors; this function neither solves nor verifies them."""
+    packet = _base_packet(math_input, bindings)
+    value = packet["math_input"]
+    total = sum(value["c"][i] for i in value["T"])
+    m = integer(m_certificate["cost"])
+    d = integer(d_certificate["cost"])
+    context = packet["bindings"]
+    contract, scope, dep = context["contract"], context["scope"], context["dependency"]
+    source_ready = (scope["coverage_complete"] and bool(scope["paths"]) and not scope["open_frontiers"]
+                    and all(contract[k] for k in ("source_complete", "capacity_complete", "frontier_complete",
+                                                  "external_writers_excluded", "derivations_covered"))
+                    and dep["now"] <= dep["valid_until"] and dep["source_version"] == contract["source_version"])
+    packet["proof"] = {"kind": "OPTIMUM", "m": m_certificate, "d": d_certificate}
+    packet["claims"] = {"C_T": total, "m_T": m, "d_T": d, "R_T": total - m, "H_T": total - d,
+                        "conditional_material_closed": bool(total == d and source_ready),
+                        "native_admission": "SOURCE_OR_REFINEMENT_GAP", "global_complete": False,
+                        "remaining_obligations": [o["id"] for o in context["O_before"]]}
+    packet["packet_digest"] = packet_digest(packet)
+    return packet
+
+
+def assemble_infeasible_packet(math_input, bindings, flow, cut, value):
+    packet = _base_packet(math_input, bindings)
+    packet["proof"] = {"kind": "INFEASIBLE", "flow": flow, "cut": cut, "value": value}
+    packet["claims"] = {"result": "EVIDENCE_CONFLICT", "conditional_material_closed": False,
+                        "native_admission": "SOURCE_OR_REFINEMENT_GAP", "global_complete": False,
+                        "remaining_obligations": [o["id"] for o in packet["bindings"]["O_before"]]}
+    packet["packet_digest"] = packet_digest(packet)
+    return packet

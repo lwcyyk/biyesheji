@@ -1,0 +1,325 @@
+--- a/scripts/measure_native_casdoor.py
++++ b/scripts/measure_native_casdoor.py
+@@ -13,6 +13,7 @@
+ 
+ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+ from auth_lifecycle.online_state.native_http import NativeHTTP, private_http_records
++from auth_lifecycle.online_state.evidence_semantics import MATERIAL_SCHEMA
+ 
+ 
+ def ref(value):
+@@ -47,6 +48,8 @@
+         accepted = answer["http"] == 200 and answer["body"].get("sub") == actor["id"]
+         determinate = answer["http"] in {200, 400, 401, 403}
+         row = {"rid": rid, "access_ref": ref(access_token), "refresh_ref": ref(body.get("refresh_token")),
++               "evidence_schema": MATERIAL_SCHEMA, "refresh_request_performed": False,
++               "rt_introspection_performed": False,
+                "userinfo_http": answer["http"], "accepted": accepted if determinate else None,
+                "runner_has_result": known.get(rid, {}).get("phase") in {"RESULT_AVAILABLE", "QUARANTINED", "DISPOSED"},
+                "userinfo_native_sequence": answer["sequence"]}
+@@ -54,22 +57,26 @@
+             attempted = http.call("refresh", actor=actor["name"], form={
+                 "client_id": profile["client_id"], "client_secret": profile["client_secret"],
+                 "grant_type": "refresh_token", "refresh_token": body["refresh_token"], "scope": "openid"})
+-            row["refresh_http"] = attempted["http"]
+-            row["refresh_rejected"] = attempted["http"] in {400, 401, 403} and not attempted["body"].get("access_token")
++            row.update(refresh_request_performed=True, refresh_request_http=attempted["http"],
++                refresh_native_sequence=attempted["sequence"],
++                refresh_response_has_new_material=any(attempted["body"].get(k) for k in ("access_token","refresh_token","id_token")),
++                refresh_response_error_present=bool(attempted["body"].get("error")),
++                refresh_transport_error_type=attempted["error_type"])
+         if stage == "final" and rid.startswith("A") and row["runner_has_result"] and profile.get("measurement_no_refresh"):
+             active_rt = http.call("introspect", actor=actor["name"], form={
+                 "client_id": profile["client_id"], "client_secret": profile["client_secret"],
+                 "token": body["refresh_token"], "token_type_hint": "refresh_token"})
+-            row["refresh_introspection_active"] = active_rt["body"].get("active") if active_rt["http"] == 200 else None
+-            row["refresh_rejected"] = row["refresh_introspection_active"] is False
+-            row["refresh_check_kind"] = "READ_ONLY_INTROSPECTION"
++            value=active_rt["body"].get("active") if active_rt["http"] == 200 else None
++            row.update(rt_introspection_performed=True,rt_introspection_http=active_rt["http"],
++                       rt_introspection_active=value if type(value) is bool else None,
++                       rt_introspection_native_sequence=active_rt["sequence"])
+         if stage == "final":
+             active = http.call("introspect", actor=actor["name"], form={
+                 "client_id": profile["client_id"], "client_secret": profile["client_secret"],
+                 "token": access_token, "token_type_hint": "access_token"})
+             value = active["body"].get("active") if active["http"] == 200 else None
+-            row["introspection_active"] = value if type(value) is bool else None
+-            row["introspection_http"] = active["http"]
++            row["at_introspection_active"] = value if type(value) is bool else None
++            row["at_introspection_http"] = active["http"]
+         rows.append(row)
+     database = Path(profile["native_database"])
+     unit_rows = []
+@@ -82,7 +89,7 @@
+                     unit_rows.append({"rid": rid, "access_ref": ref(access_token), "refresh_ref": ref(body["refresh_token"]),
+                                       "native_unit_ref": ref(name), "native_refresh_matches": rt == body["refresh_token"],
+                                       "expires_in_field": expires})
+-    result = {"stage": stage, "rows": rows, "native_units": unit_rows,
++    result = {"evidence_schema": MATERIAL_SCHEMA, "stage": stage, "rows": rows, "native_units": unit_rows,
+               "accesses": [{"path": "secure/http/*.aes", "role": "scorer_only_native_responses"},
+                            {"path": str(database), "mode": "read_only", "filter_user": actor["name"],
+                             "filter_application": profile.get("application_name", "app-l1-0"), "SQL_queries": 1}],
+--- a/scripts/score_native_casdoor.py
++++ b/scripts/score_native_casdoor.py
+@@ -6,8 +6,11 @@
+ import json
+ from pathlib import Path
+ import sqlite3
++import sys
+ 
+ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
++sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"src"))
++from auth_lifecycle.online_state.evidence_semantics import rt_inactive_or_refresh_response_rejected
+ 
+ 
+ def canonical(value):
+@@ -85,7 +88,7 @@
+     final = json.loads((case / "scorer/final_native.json").read_text())
+     check("initial_A_B_accepted", len(initial["rows"]) == 2 and all(r["accepted"] is True for r in initial["rows"]))
+     known_a = [r for r in final["rows"] if r["rid"].startswith("A") and r["runner_has_result"]]
+-    check("known_A_userinfo_and_RT_rejected", bool(known_a) and all(r["accepted"] is False and r.get("refresh_rejected") is True for r in known_a))
++    check("known_A_UserInfo_rejected_and_typed_RT_evidence", bool(known_a) and all(r["accepted"] is False and rt_inactive_or_refresh_response_rejected(r) for r in known_a))
+     check("B_kept_before_account_cleanup", any(r["rid"] == "B0" and r["accepted"] is True for r in final["rows"])
+           and outcome["B_continue"]["status"] == "RESULT_AVAILABLE")
+     if outcome["scenario"] == "M2-02":
+--- a/scripts/score_native_isolation.py
++++ b/scripts/score_native_isolation.py
+@@ -13,6 +13,7 @@
+ 
+ sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"src"))
+ from auth_lifecycle.online_state.native_http import private_http_records, budget_path
++from auth_lifecycle.online_state.evidence_semantics import rt_inactive_or_refresh_response_rejected
+ 
+ 
+ def load(path):return json.loads(Path(path).read_text())
+@@ -146,7 +147,7 @@
+         check('independent_native_B_accepts',any(r['rid']=='B0' and r['accepted'] is True for r in final['rows']))
+         a=[r for r in final['rows'] if r['rid'] in {'A0','A1'}]
+         if closure in {'CLOSED','KNOWN_MATERIALS_DISPOSED'}:
+-            check('independent_native_A_rejects',len(a)==2 and all(r['accepted'] is False and r.get('refresh_rejected') is True for r in a))
++            check('independent_native_A_rejects',len(a)==2 and all(r['accepted'] is False and rt_inactive_or_refresh_response_rejected(r) for r in a))
+     # Full secret set comes from private audit and decrypted authoritative state.
+     secrets_to_scan=[]
+     for record in private:
+--- a/scripts/score_reconciliation.py
++++ b/scripts/score_reconciliation.py
+@@ -6,8 +6,11 @@
+ import json
+ from pathlib import Path
+ import sqlite3
++import sys
+ 
+ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
++sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"src"))
++from auth_lifecycle.online_state.evidence_semantics import rt_inactive_or_refresh_response_rejected
+ 
+ 
+ def score(root):
+@@ -59,7 +62,7 @@
+     verify("initial_materials_accepted", len(initial["rows"]) == 2 and all(r["accepted"] is True for r in initial["rows"]))
+     if receipt["claim"] == "CLOSED":
+         known_a = [r for r in final["rows"] if r["rid"].startswith("A")]
+-        verify("closed_A_units_native_inactive", len(known_a) == 2 and all(r["accepted"] is False and r.get("refresh_rejected") is True for r in known_a))
++        verify("closed_A_units_native_inactive", len(known_a) == 2 and all(r["accepted"] is False and rt_inactive_or_refresh_response_rejected(r) for r in known_a))
+         verify("closed_remaining_effects_zero", receipt["remaining_creation_bound"] == 0 and points >= 1 and target["phase"] == "DISPOSED")
+         verify("closed_no_attempt_obligation", "A1" not in outcome["final_state"]["obligations"])
+     else:
+--- a/scripts/score_unidentified.py
++++ b/scripts/score_unidentified.py
+@@ -11,6 +11,7 @@
+ 
+ sys.path.insert(0,str(Path(__file__).resolve().parents[1]/"src"))
+ from auth_lifecycle.online_state.native_http import private_http_records
++from auth_lifecycle.online_state.evidence_semantics import rt_inactive_or_refresh_response_rejected
+ 
+ 
+ def score(root):
+@@ -69,7 +70,7 @@
+     verify('native_B_acceptance',any(r['rid']=='B0' and r['accepted'] is True for r in final['rows']))
+     if receipt['claim']=='CLOSED':
+         a=[r for r in final['rows'] if r['rid'].startswith('A')]
+-        verify('native_A_units_inactive',len(a)==2 and all(r['accepted'] is False and r.get('refresh_rejected') is True for r in a))
++        verify('native_A_units_inactive',len(a)==2 and all(r['accepted'] is False and rt_inactive_or_refresh_response_rejected(r) for r in a))
+         verify('remaining_effects_and_obligations_closed',receipt['remaining_creation_bound']==0 and 'A1' not in outcome['final_state']['obligations'])
+     else:
+         verify('unknown_obligation_retained','A1' in outcome['final_state']['obligations'])
+--- /dev/null
++++ b/src/auth_lifecycle/online_state/evidence_semantics.py
+@@ -0,0 +1,81 @@
++"""Pure, versioned evidence views. No network, state changes, or token inputs.
++
++Legacy booleans remain observations with their original scope. Introspection
++never implies that a refresh was sent or that future creation is impossible.
++"""
++from copy import deepcopy
++
++MATERIAL_SCHEMA = "native-material-observation/2"
++QUERY_SCHEMA = "native-enumeration-observation/2"
++
++
++def boolean(value):
++    return value if type(value) is bool else None
++
++
++def normalize_material(row, provenance=None):
++    """Normalize a secret-free measurement row, preserving missing evidence."""
++    mode = row.get("refresh_check_kind")
++    rt_active = row.get("rt_introspection_active", row.get("refresh_introspection_active"))
++    rt_performed = row.get("rt_introspection_performed") is True or mode == "READ_ONLY_INTROSPECTION"
++    rt_http = row.get("rt_introspection_http")
++    rt_http_valid = rt_http is None or rt_http == 200
++    at_http = row.get("at_introspection_http", row.get("introspection_http"))
++    at_http_valid = at_http is None or at_http == 200
++    refresh_performed = row.get("refresh_request_performed") is True or (
++        mode != "READ_ONLY_INTROSPECTION" and "refresh_http" in row)
++    refresh_http = row.get("refresh_request_http", row.get("refresh_http")) if refresh_performed else None
++    material = boolean(row.get("refresh_response_has_new_material"))
++    # Old active-probe producer set refresh_rejected only after a 4xx response
++    # with no access token. It did not record all returned material fields.
++    legacy_rejected = row.get("refresh_rejected") is True
++    old_active_rejection = refresh_performed and refresh_http in {400, 401, 403} and legacy_rejected and material is None
++    response_rejected = refresh_performed and refresh_http in {400, 401, 403} and (
++        material is False or old_active_rejection) and not row.get("refresh_transport_error_type")
++    ambiguous = "refresh_rejected" in row and not rt_performed and not refresh_performed
++    return {"schema": MATERIAL_SCHEMA, "rid": row.get("rid"),
++        "userinfo": {"http": row.get("userinfo_http"), "accepted": boolean(row.get("accepted")),
++                     "scope": "configured cookie-free UserInfo and expected account"},
++        "access_token_introspection": {"performed": "at_introspection_active" in row or "introspection_active" in row,
++            "http": at_http,
++            "active": boolean(row.get("at_introspection_active", row.get("introspection_active"))) if at_http_valid else None},
++        "refresh_token_introspection": {"performed": rt_performed,
++            "http": rt_http, "active": boolean(rt_active) if rt_performed and rt_http_valid else None,
++            "inconsistent_http_active": rt_performed and not rt_http_valid and type(rt_active) is bool,
++            "native_sequence": row.get("rt_introspection_native_sequence"),
++            "http_not_explicitly_recorded": rt_performed and "rt_introspection_http" not in row},
++        "refresh_attempt": {"performed": refresh_performed, "http": refresh_http,
++            "response_rejects_request": bool(response_rejected), "new_material_in_response": material,
++            "legacy_only_no_access_token": old_active_rejection,
++            "response_error_present": boolean(row.get("refresh_response_error_present")),
++            "transport_error_type": row.get("refresh_transport_error_type"),
++            "native_sequence": row.get("refresh_native_sequence"),
++            "creation_effect_excluded": None},
++        "legacy_ambiguous_boolean": ambiguous, "provenance": deepcopy(provenance or {}),
++        "does_not_establish": ["arbitrary RP rejection", "future creation cutoff", "all descendants closed"]}
++
++
++def rt_inactive_or_refresh_response_rejected(row):
++    view = normalize_material(row)
++    intro = view["refresh_token_introspection"]
++    return ((intro["performed"] and intro["active"] is False)
++            or view["refresh_attempt"]["response_rejects_request"])
++
++
++def normalize_query(query, provenance=None):
++    records = query.get("returned_records")
++    new_count = query.get("native_reported_count")
++    old_count = query.get("reported_pages")
++    count = new_count if "native_reported_count" in query else old_count
++    return {"schema": QUERY_SCHEMA, "native_reported_count": count if type(count) is int else None,
++        "returned_record_count": len(records) if isinstance(records, list) else query.get("returned_record_count"),
++        "requested_page_capacity": query.get("page_capacity"), "requested_page_number": query.get("page_number"),
++        "native_reported_page_count": None,
++        "count_and_rows_share_snapshot": False,
++        "complete_at_find_snapshot": boolean(query.get("collection_complete")),
++        "completeness_basis": {"snapshot_scope": query.get("snapshot_scope"),
++                               "lifetime_record_upper_bound": query.get("record_upper_bound")},
++        "future_creation_cutoff_established_by_count": False,
++        "legacy_field_mapping": "reported_pages -> native_reported_count (Casdoor data2)",
++        "conflicting_count_fields": "native_reported_count" in query and "reported_pages" in query and new_count != old_count,
++        "provenance": deepcopy(provenance or {})}
+--- a/src/auth_lifecycle/online_state/native_provider.py
++++ b/src/auth_lifecycle/online_state/native_provider.py
+@@ -210,7 +210,8 @@
+             return {"status": "SAFETY_FAILURE", "reason": "QUERY_SCOPE_ESCAPED"}
+         evidence.update(query_ref="native-http-" + str(answer["sequence"]), enumeration_ref=digest(rows),
+             authorized_scope_ref=digest({"organization": self.profile["organization"], "scope": "ALL_TOKEN_RECORDS"}),
+-            input_context=known, input_context_ref=digest(known), reported_pages=answer["body"].get("data2"))
++            input_context=known, input_context_ref=digest(known), query_evidence_schema="native-enumeration-observation/2",
++            native_reported_count=answer["body"].get("data2"), returned_record_count=len(rows), native_reported_page_count=None)
+         if not evidence["origin_bound"]:
+             return {"status": "UNKNOWN", "reason": "COLLECTION_OR_ATTRIBUTION_UNRESOLVED", "evidence": evidence}
+         selected = next(row for row in rows if row["owner"] + "/" + row["name"] == evidence["selected_unit_id"])
+--- /dev/null
++++ b/tests/test_evidence_semantics.py
+@@ -0,0 +1,68 @@
++"""Offline evidence meaning and non-promotion regressions."""
++from copy import deepcopy
++import unittest
++from auth_lifecycle.online_state.evidence_semantics import (
++    normalize_material, normalize_query, rt_inactive_or_refresh_response_rejected)
++
++
++class EvidenceSemanticsTests(unittest.TestCase):
++    def test_legacy_introspection_does_not_become_refresh_attempt(self):
++        row={"refresh_rejected":True,"refresh_check_kind":"READ_ONLY_INTROSPECTION","refresh_introspection_active":False}
++        value=normalize_material(row)
++        self.assertFalse(value['refresh_attempt']['performed'])
++        self.assertIsNone(value['refresh_attempt']['creation_effect_excluded'])
++        self.assertFalse(value['refresh_token_introspection']['active'])
++        self.assertTrue(rt_inactive_or_refresh_response_rejected(row))
++
++    def test_untyped_legacy_boolean_stays_ambiguous(self):
++        value=normalize_material({'refresh_rejected':True})
++        self.assertTrue(value['legacy_ambiguous_boolean'])
++        self.assertFalse(rt_inactive_or_refresh_response_rejected({'refresh_rejected':True}))
++
++    def test_actual_refresh_response_scope(self):
++        row={'refresh_request_performed':True,'refresh_request_http':400,'refresh_response_has_new_material':False}
++        value=normalize_material(row)
++        self.assertTrue(value['refresh_attempt']['response_rejects_request'])
++        self.assertIsNone(value['refresh_attempt']['creation_effect_excluded'])
++
++    def test_response_with_material_or_parse_error_is_not_clean_rejection(self):
++        for update in [{'refresh_response_has_new_material':True},{'refresh_transport_error_type':'ResponseParseFailure'}]:
++            row={'refresh_request_performed':True,'refresh_request_http':400,'refresh_response_has_new_material':False,**update}
++            self.assertFalse(rt_inactive_or_refresh_response_rejected(row))
++
++    def test_http_error_does_not_become_inactive(self):
++        row={'rt_introspection_performed':True,'rt_introspection_http':500,'rt_introspection_active':False}
++        value=normalize_material(row)
++        self.assertIsNone(value['refresh_token_introspection']['active'])
++        self.assertTrue(value['refresh_token_introspection']['inconsistent_http_active'])
++        self.assertFalse(rt_inactive_or_refresh_response_rejected(row))
++        at=normalize_material({'at_introspection_http':500,'at_introspection_active':False})
++        self.assertIsNone(at['access_token_introspection']['active'])
++
++    def test_nonboolean_active_is_unknown(self):
++        row={'rt_introspection_performed':True,'rt_introspection_http':200,'rt_introspection_active':'false'}
++        self.assertIsNone(normalize_material(row)['refresh_token_introspection']['active'])
++
++    def test_resource_and_token_statement_are_separate(self):
++        row={'accepted':True,'userinfo_http':200,'rt_introspection_performed':True,'rt_introspection_active':False}
++        value=normalize_material(row)
++        self.assertTrue(value['userinfo']['accepted'])
++        self.assertFalse(value['refresh_token_introspection']['active'])
++
++    def test_count_is_not_page_count_or_completeness(self):
++        q={'reported_pages':4,'returned_records':[{},{}],'page_capacity':100,'page_number':1,'collection_complete':False}
++        value=normalize_query(q)
++        self.assertEqual(value['native_reported_count'],4)
++        self.assertEqual(value['returned_record_count'],2)
++        self.assertIsNone(value['native_reported_page_count'])
++        self.assertFalse(value['complete_at_find_snapshot'])
++        self.assertFalse(value['future_creation_cutoff_established_by_count'])
++
++    def test_conflicting_aliases_visible_and_input_unchanged(self):
++        q={'reported_pages':4,'native_reported_count':5,'returned_records':[]}
++        before=deepcopy(q);value=normalize_query(q)
++        self.assertTrue(value['conflicting_count_fields'])
++        self.assertEqual(q,before)
++
++
++if __name__=='__main__':unittest.main()
+--- a/tests/test_native_casdoor.py
++++ b/tests/test_native_casdoor.py
+@@ -181,7 +181,8 @@
+         store.call("record_disposal", {"disposal_op": "d", "rid": "A0", "http": 200,
+                    "userinfo_http": 401, "userinfo_accepted": False, "introspection_active": False})
+         initial = {"rows": [{"rid": "A0", "accepted": True}, {"rid": "B0", "accepted": True}], "native_units": []}
+-        final = {"rows": [{"rid": "A0", "accepted": False, "runner_has_result": True, "refresh_rejected": True},
++        final = {"rows": [{"rid": "A0", "accepted": False, "runner_has_result": True,
++                          "refresh_request_performed": True, "refresh_request_http": 400, "refresh_response_has_new_material": False},
+                           {"rid": "B0", "accepted": True, "runner_has_result": True}], "native_units": []}
+         for obj in (initial, final):
+             for row in obj["rows"]:row.update(access_ref=row["rid"] + "at", refresh_ref=row["rid"] + "rt")
