@@ -1,0 +1,952 @@
+
+
+
+
+Web Authorization Protocol                                   D. O. Watts
+Internet-Draft                                       GoodShyt Group Inc.
+Intended status: Informational                           30 October 2026
+Expires: 3 May 2027
+
+
+      Revocation Closure and Authority Epochs for Agent Delegation
+             draft-watts-oauth-agent-revocation-closure-03
+
+Abstract
+
+   Automated agents can exercise OAuth-derived authority through
+   delegated credentials, child agents, asynchronous work, and
+   operations spanning multiple administrative domains.  Invalidating an
+   individual token does not necessarily establish that the authority
+   represented by that token can no longer cause a new consequential
+   operation.
+
+   This document defines authority epochs, delegation-lineage
+   requirements, admission fencing, and revocation-closure states for
+   OAuth-based agent delegation.  It distinguishes token invalidation
+   from authority closure and specifies that unresolved in-scope state
+   produces UNKNOWN or PARTIAL rather than CLOSED.  The profile composes
+   with OAuth Token Revocation, Token Exchange, Token Introspection,
+   proof-of-possession mechanisms, Transaction Tokens, and workload-
+   identity systems such as WIMSE.
+
+Status of This Memo
+
+   This Internet-Draft is submitted in full conformance with the
+   provisions of BCP 78 and BCP 79.
+
+   Internet-Drafts are working documents of the Internet Engineering
+   Task Force (IETF).  Note that other groups may also distribute
+   working documents as Internet-Drafts.  The list of current Internet-
+   Drafts is at https://datatracker.ietf.org/drafts/current/.
+
+   Internet-Drafts are draft documents valid for a maximum of six months
+   and may be updated, replaced, or obsoleted by other documents at any
+   time.  It is inappropriate to use Internet-Drafts as reference
+   material or to cite them other than as "work in progress."
+
+   This Internet-Draft will expire on 3 May 2027.
+
+Copyright Notice
+
+   Copyright (c) 2026 IETF Trust and the persons identified as the
+   document authors.  All rights reserved.
+
+
+
+Watts                      Expires 3 May 2027                   [Page 1]
+
+Internet-Draft          Agent Revocation Closure            October 2026
+
+
+   This document is subject to BCP 78 and the IETF Trust's Legal
+   Provisions Relating to IETF Documents (https://trustee.ietf.org/
+   license-info) in effect on the date of publication of this document.
+   Please review these documents carefully, as they describe your rights
+   and restrictions with respect to this document.  Code Components
+   extracted from this document must include Revised BSD License text as
+   described in Section 4.e of the Trust Legal Provisions and are
+   provided without warranty as described in the Revised BSD License.
+
+Table of Contents
+
+   1.  Introduction  . . . . . . . . . . . . . . . . . . . . . . . .   3
+     1.1.  Requirements Language . . . . . . . . . . . . . . . . . .   3
+     1.2.  Non-Goals . . . . . . . . . . . . . . . . . . . . . . . .   3
+   2.  Terminology . . . . . . . . . . . . . . . . . . . . . . . . .   4
+   3.  Problem Statement and OAuth Boundary  . . . . . . . . . . . .   5
+   4.  Relationship to Adjacent OAuth Agent Revocation Work  . . . .   5
+   5.  Authority Epochs  . . . . . . . . . . . . . . . . . . . . . .   6
+   6.  Delegation Lineage  . . . . . . . . . . . . . . . . . . . . .   6
+   7.  Revocation Closure State Machine  . . . . . . . . . . . . . .   6
+   8.  Admission and Queue Fencing . . . . . . . . . . . . . . . . .   7
+   9.  Outstanding Consequential Operations  . . . . . . . . . . . .   8
+   10. Closure Evaluation Algorithm  . . . . . . . . . . . . . . . .   8
+   11. Closure Receipt . . . . . . . . . . . . . . . . . . . . . . .   9
+   12. Integration with Existing OAuth Mechanisms  . . . . . . . . .  10
+     12.1.  OAuth Token Revocation . . . . . . . . . . . . . . . . .  10
+     12.2.  OAuth Token Exchange . . . . . . . . . . . . . . . . . .  10
+     12.3.  OAuth Token Introspection  . . . . . . . . . . . . . . .  10
+     12.4.  Proof of Possession  . . . . . . . . . . . . . . . . . .  11
+     12.5.  Transaction Tokens . . . . . . . . . . . . . . . . . . .  11
+     12.6.  WIMSE and Agent Workload Identity  . . . . . . . . . . .  11
+   13. Resource Server Processing  . . . . . . . . . . . . . . . . .  11
+   14. Multiple Administrative Domains . . . . . . . . . . . . . . .  11
+   15. Failure and Unknown-State Handling  . . . . . . . . . . . . .  12
+   16. Worked Example  . . . . . . . . . . . . . . . . . . . . . . .  12
+   17. Conformance and Falsification Cases . . . . . . . . . . . . .  13
+   18. Privacy Considerations  . . . . . . . . . . . . . . . . . . .  13
+   19. Security Considerations . . . . . . . . . . . . . . . . . . .  14
+   20. IANA Considerations . . . . . . . . . . . . . . . . . . . . .  14
+   21. Changes Since Version -01 . . . . . . . . . . . . . . . . . .  14
+   22. Normative References  . . . . . . . . . . . . . . . . . . . .  15
+   23. Informative References  . . . . . . . . . . . . . . . . . . .  15
+   Appendix A.  Changes since -02  . . . . . . . . . . . . . . . . .  16
+   Author's Address  . . . . . . . . . . . . . . . . . . . . . . . .  17
+
+
+
+
+
+
+
+Watts                      Expires 3 May 2027                   [Page 2]
+
+Internet-Draft          Agent Revocation Closure            October 2026
+
+
+1.  Introduction
+
+   OAuth is a delegation framework.  In conventional deployments,
+   invalidating an access token, refresh token, or authorization grant
+   can be sufficient to prevent future use of that artifact.  Agentic
+   and multi-workload systems add another layer: authority can be
+   exchanged into new tokens, delegated to child agents, cached at
+   intermediaries, attached to transaction context, or used to admit
+   asynchronous work that executes after the initiating credential is
+   invalidated.
+
+   [RFC7009] defines OAuth 2.0 Token Revocation.  It allows a client to
+   request invalidation of a token and, where applicable, related tokens
+   or the underlying authorization grant.  This document addresses a
+   different question: after invalidation begins, when may a deployment
+   claim that the revoked authority can no longer cause a new
+   consequential operation within a declared scope?
+
+   The core distinction is:
+
+         revocation request
+                 !=
+         token or grant invalidation
+                 !=
+         delegated-authority closure
+
+   The model is intentionally fail-closed.  Unknown evidence is not
+   successful closure.  The profile is scoped to prospective authority:
+   it prevents new effects attributable to a revoked authority epoch.
+   It does not reverse effects that were irreversibly committed before
+   closure.
+
+1.1.  Requirements Language
+
+   The key words "MUST", "MUST NOT", "REQUIRED", "SHALL", "SHALL NOT",
+   "SHOULD", "SHOULD NOT", "RECOMMENDED", "NOT RECOMMENDED", "MAY", and
+   "OPTIONAL" in this document are to be interpreted as described in BCP
+   14 [RFC2119] [RFC8174] when, and only when, they appear in all
+   capitals, as shown here.
+
+1.2.  Non-Goals
+
+   This document does not define a new OAuth grant type, token format,
+   revocation endpoint, proof-of-possession mechanism, queue protocol,
+   or workload-identity protocol.  It does not infer model intent,
+   cognition, or deception.  It does not claim global closure outside
+   the enforcement and observation boundary declared by an
+   implementation.
+
+
+
+Watts                      Expires 3 May 2027                   [Page 3]
+
+Internet-Draft          Agent Revocation Closure            October 2026
+
+
+2.  Terminology
+
+   Authority Epoch  An opaque identifier for a bounded lifetime of
+      authority rooted in one authorization event or explicit
+      reauthorization.  Derived authority remains associated with the
+      originating epoch unless a new independent authorization event
+      creates a new epoch.
+
+   Authority Root  The authorization event, grant, or policy state from
+      which authority in an epoch originates.
+
+   Derived Authority  Authority obtained from, delegated by, exchanged
+      from, cached from, or otherwise causally dependent on authority in
+      an existing epoch.
+
+   Consequential Sink  A protected resource, queue, executor, storage
+      operation, external API, credential use, payment, actuator, or
+      other operation whose admission can create an externally relevant
+      effect.
+
+   Pending Operation  An operation associated with an authority epoch
+      that was admitted before invalidation but has not yet reached its
+      declared irreversible commit point.
+
+   Closure Barrier  An independently enforceable control point that
+      prevents authority in an epoch from producing a new effect across
+      a declared authority-to-sink path.
+
+   Closure Receipt  An integrity-protected, non-bearer statement
+      describing an authority epoch, declared scope, closure status,
+      relevant evidence, and unresolved limitations.
+
+   Authority Graph  A deployment model whose directed paths represent
+      authority-bearing transitions from an authority root to
+      consequential sinks within a declared scope.
+
+   Declared Scope  The set of authority roots, descendants, enforcement
+      points, pending operations, and consequential sinks covered by a
+      closure determination.  A closure claim applies only to this
+      scope.
+
+   Normal-Path Witness  Evidence that, before closure enforcement, at
+      least one modeled authority-root-to-sink path existed in ordinary
+      operation.  This prevents a vacuous CLOSED result from an empty or
+      disconnected model.
+
+
+
+
+
+
+Watts                      Expires 3 May 2027                   [Page 4]
+
+Internet-Draft          Agent Revocation Closure            October 2026
+
+
+3.  Problem Statement and OAuth Boundary
+
+   Token revocation and delegated-authority closure are related but
+   distinct.  A successful response from the revocation endpoint
+   specified by [RFC7009] is evidence that the authorization server
+   accepted a revocation request.  It is not, by itself, evidence that
+   every resource server, exchanged token, delegated agent, queue,
+   cached decision, or asynchronous executor can no longer admit a new
+   action derived from the revoked authority.
+
+   [RFC8693] permits security-token exchange.  Token exchange can
+   intentionally change token format, audience, issuer, or trust domain
+   while preserving delegated authority.  For the purposes of closure,
+   those changes MUST NOT be treated as automatically breaking authority
+   lineage.
+
+   [RFC7662] lets a protected resource query token state.  An inactive
+   token is relevant to authorization invalidation, but an inactive-
+   token result does not prove that work previously admitted elsewhere
+   has been fenced or discharged.
+
+   [RFC9449] sender-constrains tokens and mitigates replay.  Proof of
+   possession does not, by itself, provide closure semantics for queued
+   or derived authority.
+
+4.  Relationship to Adjacent OAuth Agent Revocation Work
+
+   [I-D.chen-oauth-agent-revocation] defines an agent-oriented explicit
+   revocation extension with batch and cascade revocation, request and
+   response structures, propagation behavior, and audit information.
+   This document does not define a competing revocation endpoint.  It
+   defines the post-propagation completion condition for a bounded
+   authority epoch and declared enforcement scope.
+
+   A deployment can therefore use an explicit or cascade revocation
+   mechanism to initiate invalidation and use this profile to determine
+   whether the resulting state is CLOSED, PARTIAL, FAILED, or UNKNOWN.
+   A successful cascade request or acknowledgement is relevant evidence,
+   but it is not by itself a CLOSED result when derived credentials,
+   queued work, cached decisions, or downstream enforcement state remain
+   unresolved.
+
+
+
+
+
+
+
+
+
+
+Watts                      Expires 3 May 2027                   [Page 5]
+
+Internet-Draft          Agent Revocation Closure            October 2026
+
+
+5.  Authority Epochs
+
+   An implementation of this profile MUST associate a revocation-closure
+   determination with exactly one authority epoch.  The identifier is
+   opaque to this specification.  It MAY be maintained as authorization-
+   server state, carried in a protected transaction context, associated
+   with token-exchange lineage, or represented by another integrity-
+   protected mechanism.
+
+   When authority from epoch E is used to derive another credential,
+   delegate, transaction context, or queued operation, the derived
+   object remains in the closure scope of E unless an independent
+   authorization decision creates a new authority epoch E2.
+
+   A closure receipt for E MUST NOT be accepted as evidence that E2 is
+   closed.  A fresh authorization event MUST therefore create a
+   distinguishable epoch or equivalent lineage boundary.
+
+   Where an epoch identifier crosses a trust boundary, its integrity and
+   issuer authenticity MUST be protected by the enclosing protocol.  An
+   epoch identifier is not a bearer credential and MUST NOT itself grant
+   access.
+
+6.  Delegation Lineage
+
+   A deployment claiming closure MUST maintain a deterministic method
+   for associating in-scope derived authority with its originating
+   epoch.  This method can use authorization-server records, token-
+   exchange lineage, transaction identifiers, workload identities,
+   delegated-agent identifiers, queue ownership, or equivalent protected
+   state.
+
+   When [RFC8693] is used, the resulting token remains attributable to
+   the originating authority epoch unless the token exchange is
+   accompanied by an independent authorization event that creates a new
+   epoch.  A change of issuer, audience, subject representation, or
+   token format alone does not create a new epoch.
+
+   Deployments MUST NOT claim CLOSED if known derived authority cannot
+   be attributed to either the revoked epoch or a separately authorized
+   epoch.
+
+7.  Revocation Closure State Machine
+
+   Implementations exposing closure status SHOULD provide semantics
+   equivalent to the following states:
+
+   REQUESTED  A revocation request has been accepted.  No closure claim
+
+
+
+Watts                      Expires 3 May 2027                   [Page 6]
+
+Internet-Draft          Agent Revocation Closure            October 2026
+
+
+      is made.
+
+   PROPAGATING  One or more invalidation or fencing operations are in
+      progress.
+
+   CLOSED  All required closure barriers are enforced for the declared
+      scope, no in-scope pending operation attributable to the epoch can
+      create a new consequential effect, and no relevant state remains
+      unknown.
+
+   PARTIAL  Some authority paths are closed but one or more known in-
+      scope paths or pending operations remain unresolved.
+
+   FAILED  A required enforcement action failed, or a deployment-defined
+      closure deadline expired without satisfying the CLOSED predicate.
+
+   UNKNOWN  Available evidence is insufficient to determine closure.
+
+         REQUESTED
+             |
+             v
+         PROPAGATING
+           / | | \
+          /  | |  \
+         v   v v   v
+      PARTIAL UNKNOWN FAILED CLOSED
+
+   PARTIAL, FAILED, and UNKNOWN MUST NOT be interpreted as CLOSED.  A
+   relying component that requires closure before continuing a sensitive
+   transition SHOULD fail closed when presented with any of those
+   states.
+
+8.  Admission and Queue Fencing
+
+   After closure processing begins for epoch E, a participating
+   enforcement point MUST prevent E from creating new in-scope
+   authority-bearing descendants that bypass the declared closure
+   barriers.
+
+   Queues and delayed executors participating in this profile MUST
+   retain enough protected context to determine the effective authority
+   epoch of admitted work.  New work associated with a revoked epoch
+   MUST NOT be admitted after the relevant admission barrier is active.
+
+   Cancellation is not equivalent to fencing.  If a cancellation request
+   can race with dequeue, retry, timer expiry, batch execution, or sink
+   commit, the implementation MUST account for the commit-time behavior
+   before reporting CLOSED.
+
+
+
+Watts                      Expires 3 May 2027                   [Page 7]
+
+Internet-Draft          Agent Revocation Closure            October 2026
+
+
+9.  Outstanding Consequential Operations
+
+   Pending operations that can create a new effect after a closure
+   boundary remain in scope even if their original token has expired or
+   been revoked.  Examples include delayed jobs, retries, scheduled
+   tasks, previously admitted API calls, delegated child-agent actions,
+   and asynchronous writes.
+
+   A deployment MUST define the point at which an operation becomes
+   irreversibly committed for the purposes of this profile.  Closure is
+   prospective and does not reverse effects that crossed that commit
+   point before closure.
+
+   An implementation claiming CLOSED MUST establish one of the following
+   for every in-scope pending operation attributable to the revoked
+   epoch: the operation was canceled before commit; the sink fenced the
+   operation; the operation completed before the closure boundary and is
+   recorded as a pre-closure effect; or the operation was independently
+   reauthorized under a new epoch.
+
+10.  Closure Evaluation Algorithm
+
+   Let E be the authority epoch under revocation, S the declared
+   enforcement scope, Q the nonempty set of consequential sinks in S,
+   and K the set of closure barriers.  Let Reachable(E,q,t) mean that
+   authority from E can still cause admission of a new operation at sink
+   q at time t.  Let Outstanding(E,S,t) be the set of admitted but not
+   irreversibly committed operations attributable to E.  Let
+   UnknownRelevant(E,S,t) be the set of in-scope authority or execution
+   states whose closure status cannot be established.
+
+   A CLOSED result at time t requires all of the following:
+
+   1.  The authority-root set for E is nonempty.
+
+   2.  Q is nonempty.
+
+   3.  A Normal-Path Witness establishes that at least one authority-
+       root-to-sink path existed before closure enforcement, preventing
+       a vacuous closure claim.
+
+   4.  Every declared authority-root-to-sink path crosses an enforced
+       member of K, or the implementation establishes an equivalent
+       sink-side denial condition.
+
+   5.  For every q in Q, Reachable(E,q,t) is false for new admissions.
+
+   6.  Outstanding(E,S,t) is empty.
+
+
+
+Watts                      Expires 3 May 2027                   [Page 8]
+
+Internet-Draft          Agent Revocation Closure            October 2026
+
+
+   7.  UnknownRelevant(E,S,t) is empty.
+
+   8.  The revoked epoch cannot create a new in-scope descendant that
+       bypasses K.
+
+   Formally, a necessary closure predicate is:
+
+     CLOSED(E,S,t) only if
+
+       CoverageKnown(E,S,t)
+         AND for every q in Q: NOT Reachable(E,q,t)
+         AND Outstanding(E,S,t) is empty
+         AND UnknownRelevant(E,S,t) is empty
+         AND NoNewBypassDescendant(E,S,t)
+
+   If UnknownRelevant(E,S,t) is not empty, the status MUST NOT be
+   CLOSED.
+
+   The graph formulation is a model of the closure obligation.  It is
+   not proof that an implementation has discovered every real-world
+   dependency.  A deployment MUST bound its closure claim to the
+   coverage it can establish.
+
+11.  Closure Receipt
+
+   This document defines receipt semantics but does not define a new
+   wire encoding.  A future profile can encode a Closure Receipt using a
+   signed JWT, COSE object, SCITT statement, protocol response, or
+   another integrity-protected container.
+
+   A receipt asserting CLOSED SHOULD contain or cryptographically bind
+   at least the following information:
+
+   *  the authority epoch;
+
+   *  the declared enforcement scope and sink classes;
+
+   *  the closure status;
+
+   *  the request time and closure time or monotonic sequence
+      information;
+
+   *  a digest or identifier for the barrier/cut-set evaluation;
+
+   *  an evidence digest or reference;
+
+   *  any unresolved paths or excluded dependencies; and
+
+
+
+
+Watts                      Expires 3 May 2027                   [Page 9]
+
+Internet-Draft          Agent Revocation Closure            October 2026
+
+
+   *  the authorized issuer of the receipt.
+
+   A Closure Receipt MUST NOT contain bearer secrets or itself function
+   as an authorization credential.  Receipt validity MUST NOT be
+   interpreted as proof that the underlying topology model was globally
+   complete.
+
+   {
+     "version": 1,
+     "closure_id": "urn:uuid:9c314870-1e76-4aa6-a287-bf2a10c21909",
+     "authority_epoch": "urn:example:epoch:42",
+     "status": "CLOSED",
+     "coverage": {
+       "sink_classes": ["api", "queue", "credential"],
+       "policy_id": "urn:example:policy:closure-v2"
+     },
+     "barrier_digest": "sha256:...",
+     "evidence_digest": "sha256:...",
+     "unresolved_paths": []
+   }
+
+12.  Integration with Existing OAuth Mechanisms
+
+12.1.  OAuth Token Revocation
+
+   [RFC7009] can initiate token or grant invalidation.  An
+   implementation of this profile MUST NOT report CLOSED solely because
+   a token has been revoked, expired, invalidated, or rejected.  CLOSED
+   requires evaluation of the in-scope derived authority and outstanding
+   consequential operations identified by this profile.
+
+12.2.  OAuth Token Exchange
+
+   [RFC8693] can create a token representing delegated or exchanged
+   authority.  Where that authority derives from a revoked epoch, the
+   exchanged token remains in the closure scope unless independent
+   reauthorization created a distinct epoch.
+
+12.3.  OAuth Token Introspection
+
+   [RFC7662] can inform a resource server that a token is inactive.
+   Inactive-token status can contribute to closure evidence but does not
+   establish that previously admitted work or independently cached
+   authorization decisions are closed.
+
+
+
+
+
+
+
+Watts                      Expires 3 May 2027                  [Page 10]
+
+Internet-Draft          Agent Revocation Closure            October 2026
+
+
+12.4.  Proof of Possession
+
+   [RFC9449] can reduce replay risk by sender-constraining tokens.
+   Sender constraint does not replace authority-epoch lineage or closure
+   evaluation.
+
+12.5.  Transaction Tokens
+
+   [I-D.ietf-oauth-transaction-tokens] propagates user, workload, and
+   authorization context through a call chain.  Where a deployment maps
+   a transaction to an authority epoch, transaction-scoped enforcement
+   points can participate in closure.  This profile does not modify the
+   Transaction Token format.
+
+12.6.  WIMSE and Agent Workload Identity
+
+   [I-D.ietf-wimse-arch] and [I-D.ietf-wimse-aims] provide workload and
+   agent identity architecture.  Identity establishes who or what is
+   acting; OAuth determines delegated authority; this profile determines
+   when withdrawal of that authority has reached a bounded closure
+   condition.
+
+13.  Resource Server Processing
+
+   A resource server or consequential sink participating in this profile
+   SHOULD enforce revocation as close as practical to the point where a
+   new consequential operation is admitted.
+
+   If the server has authoritative local knowledge that the effective
+   authority epoch is revoked, it MUST deny new admission under that
+   epoch.  If the server relies on introspection, token state,
+   transaction context, or another upstream source, it MUST apply the
+   freshness and failure policy established by the deployment.
+
+   Where policy requires verified closure before a sensitive transition,
+   an unavailable or indeterminate closure state MUST NOT be promoted to
+   CLOSED.  The server SHOULD deny or defer the transition according to
+   local policy.
+
+14.  Multiple Administrative Domains
+
+   Agent delegation can cross administrative domains.  A closure claim
+   that spans multiple domains requires either coordinated enforcement
+   evidence or an explicit statement that a dependency is outside the
+   declared closure scope.
+
+
+
+
+
+
+Watts                      Expires 3 May 2027                  [Page 11]
+
+Internet-Draft          Agent Revocation Closure            October 2026
+
+
+   If domain A cannot establish the state of a known downstream
+   dependency in domain B, A MUST NOT claim global CLOSED for a scope
+   that includes B.  It can report PARTIAL, UNKNOWN, or a narrower
+   CLOSED result whose scope excludes B.
+
+   This preserves the distinction between bounded evidence and global
+   claims while allowing each administrative domain to retain its own
+   enforcement mechanisms.
+
+15.  Failure and Unknown-State Handling
+
+   Implementations MUST preserve uncertainty.  Missing acknowledgements,
+   unavailable queues, unresolved descendants, stale topology, or lost
+   lineage MUST NOT be interpreted as successful closure.
+
+   A known enforcement failure SHOULD produce FAILED.  A known remaining
+   path SHOULD produce PARTIAL while closure work can continue.
+   Insufficient evidence to classify a relevant path SHOULD produce
+   UNKNOWN.  These distinctions allow relying parties to select policy
+   without manufacturing certainty.
+
+   Closure computation SHOULD be idempotent and monotonic with respect
+   to evidence: losing evidence MUST NOT transform a previously
+   unresolved state into CLOSED.
+
+16.  Worked Example
+
+   A user authorizes Agent A under authority epoch E7.  Agent A uses
+   Token Exchange to obtain a token for Service B.  Service B creates a
+   delayed job in Queue Q.  The job can later invoke Resource Server R.
+
+   The user requests revocation of Agent A.  The authorization server
+   revokes Agent A's access token using [RFC7009].  That transition
+   alone is REQUESTED or PROPAGATING, not CLOSED.  The deployment must
+   also prevent the exchanged token from admitting new work and prevent
+   the queued job from committing a new effect at R.
+
+   If the exchanged token is denied and Q confirms that the E7 job was
+   canceled before its commit point, and no relevant state remains
+   unknown, the deployment can report CLOSED for the declared scope.  If
+   Q is unreachable or outside the enforcement boundary, the deployment
+   reports UNKNOWN, PARTIAL, or a narrower scoped result rather than
+   global CLOSED.
+
+
+
+
+
+
+
+
+Watts                      Expires 3 May 2027                  [Page 12]
+
+Internet-Draft          Agent Revocation Closure            October 2026
+
+
+17.  Conformance and Falsification Cases
+
+   The following constructed cases are intended to make the semantics
+   independently testable.  They are not deployment-performance
+   measurements.
+
+   1.  RFC 7009 revocation succeeds, but an exchanged token derived from
+       the same epoch still authorizes a new in-scope request.  CLOSED
+       is false.
+
+   2.  Root and derived tokens are invalid, but a queued operation
+       attributable to the epoch commits after the claimed closure
+       boundary.  CLOSED is false.
+
+   3.  A known cross-domain descendant cannot be observed or fenced.
+       The result is UNKNOWN or PARTIAL, not CLOSED.
+
+   4.  A receipt for epoch E7 is replayed while the relying party
+       evaluates independently authorized epoch E8.  The receipt is
+       inapplicable.
+
+   5.  All in-scope new-admission paths are fenced and all pending
+       operations are discharged with no relevant unknown state.  CLOSED
+       is permitted for that declared scope.
+
+   6.  An effect committed before closure remains visible afterward.
+       That fact alone does not falsify closure because closure is
+       prospective.
+
+   7.  An independently reauthorized operation commits under a new
+       epoch.  Its effect does not reopen the old epoch.
+
+   8.  An implementation advertises no root-to-sink path and therefore
+       trivially reports no surviving path.  The claim is insufficient
+       and MUST NOT be promoted to CLOSED.
+
+   An independent observer can falsify a CLOSED result by demonstrating
+   an in-scope post-closure consequential admission that derives from
+   the closed epoch or by identifying relevant state that was known to
+   be unresolved when CLOSED was asserted.
+
+18.  Privacy Considerations
+
+   Authority graphs, epoch identifiers, workload identities, queue
+   relationships, and closure receipts can expose organizational
+   structure and behavioral linkage.  Implementations SHOULD disclose
+   only the minimum information required to evaluate a closure claim.
+
+
+
+
+Watts                      Expires 3 May 2027                  [Page 13]
+
+Internet-Draft          Agent Revocation Closure            October 2026
+
+
+   Opaque epoch identifiers, scoped evidence references, hashed barrier
+   descriptions, and selective disclosure can reduce unnecessary
+   topology exposure.  An epoch identifier SHOULD NOT be reused as a
+   durable correlation identifier across unrelated authorization
+   contexts.
+
+19.  Security Considerations
+
+   A forged CLOSED result is security-critical because it can cause a
+   relying party to act under the false assumption that revoked
+   authority can no longer produce consequences.  Closure evidence
+   crossing a trust boundary MUST therefore be integrity protected and
+   authenticated.
+
+   Receipts are vulnerable to replay and substitution if they are not
+   bound to the authority epoch, declared scope, issuer, and freshness
+   context.  A relying party MUST reject a receipt that is inapplicable
+   to the epoch or scope being evaluated.
+
+   Implementations MUST consider stale-token replay, epoch substitution,
+   lineage laundering through Token Exchange, queue and commit-time
+   races, cached authorization decisions, delayed acknowledgements,
+   graph incompleteness, and denial-of-service amplification through
+   large delegation trees.
+
+   Proof-of-possession mechanisms such as [RFC9449] can reduce token
+   replay but do not eliminate stale authorization or queued-work
+   hazards.  Deployments SHOULD follow the OAuth security guidance in
+   [RFC9700].
+
+   Closure evidence can itself become sensitive.  Evidence stores SHOULD
+   be access controlled and SHOULD provide tamper evidence appropriate
+   to the deployment threat model.
+
+20.  IANA Considerations
+
+   This document has no IANA actions.
+
+21.  Changes Since Version -01
+
+   This revision narrows the document around OAuth complex delegation
+   and preserves the protocol-neutral closure model from version -01
+   while making OAuth composition more explicit.
+
+   *  Changed the title to emphasize agent delegation and authority
+      epochs.
+
+
+
+
+
+Watts                      Expires 3 May 2027                  [Page 14]
+
+Internet-Draft          Agent Revocation Closure            October 2026
+
+
+   *  Defined authority-epoch inheritance across derived credentials,
+      Token Exchange, child agents, cached decisions, and queued work.
+
+   *  Added explicit non-vacuity requirements before CLOSED can be
+      asserted.
+
+   *  Strengthened admission fencing and commit-time handling for
+      queues, retries, timers, and asynchronous executors.
+
+   *  Added direct composition guidance for RFC 7009, RFC 8693, RFC
+      7662, DPoP, Transaction Tokens, WIMSE, and AIMS.
+
+   *  Added multiple-administrative-domain handling consistent with the
+      OAuth working group's complex-delegation problem space.
+
+   *  Clarified that Closure Receipts are non-bearer evidence and that
+      this revision defines no new token format or IANA registry.
+
+22.  Normative References
+
+   [RFC2119]  Bradner, S., "Key words for use in RFCs to Indicate
+              Requirement Levels", BCP 14, RFC 2119, March 1997,
+              <https://www.rfc-editor.org/rfc/rfc2119>.
+
+   [RFC8174]  Leiba, B., "Ambiguity of Uppercase vs Lowercase in RFC
+              2119 Key Words", BCP 14, RFC 8174, May 2017,
+              <https://www.rfc-editor.org/rfc/rfc8174>.
+
+   [RFC7009]  Lodderstedt, T., Dronia, S., and M. Scurtescu, "OAuth 2.0
+              Token Revocation", RFC 7009, August 2013,
+              <https://www.rfc-editor.org/rfc/rfc7009>.
+
+   [RFC8693]  Jones, M., Nadalin, A., Campbell, B., Bradley, J., and C.
+              Mortimore, "OAuth 2.0 Token Exchange", RFC 8693, January
+              2020, <https://www.rfc-editor.org/rfc/rfc8693>.
+
+   [RFC9700]  Lodderstedt, T., Bradley, J., Labunets, A., and D. Fett,
+              "Best Current Practice for OAuth 2.0 Security", BCP 240,
+              RFC 9700, January 2025,
+              <https://www.rfc-editor.org/rfc/rfc9700>.
+
+23.  Informative References
+
+   [RFC7662]  Richer, J., "OAuth 2.0 Token Introspection", RFC 7662,
+              October 2015, <https://www.rfc-editor.org/rfc/rfc7662>.
+
+
+
+
+
+
+Watts                      Expires 3 May 2027                  [Page 15]
+
+Internet-Draft          Agent Revocation Closure            October 2026
+
+
+   [RFC9449]  Fett, D., Campbell, B., Bradley, J., Lodderstedt, T.,
+              Jones, M., and D. Waite, "OAuth 2.0 Demonstrating Proof of
+              Possession (DPoP)", RFC 9449, September 2023,
+              <https://www.rfc-editor.org/rfc/rfc9449>.
+
+   [I-D.ietf-oauth-transaction-tokens]
+              Tulshibagwale, A., Fletcher, G., and P. Kasselman,
+              "Transaction Tokens", Work in Progress, Internet-Draft,
+              draft-ietf-oauth-transaction-tokens-11, July 2026,
+              <https://datatracker.ietf.org/doc/draft-ietf-oauth-
+              transaction-tokens/>.
+
+   [I-D.ietf-wimse-arch]
+              Salowey, J., Rosomakho, Y., and H. Tschofenig, "Workload
+              Identity in a Multi System Environment (WIMSE)
+              Architecture", Work in Progress, Internet-Draft, draft-
+              ietf-wimse-arch-08, July 2026,
+              <https://datatracker.ietf.org/doc/draft-ietf-wimse-arch/>.
+
+   [I-D.ietf-wimse-aims]
+              Kasselman, P., Lombardo, J., Rosomakho, Y., Campbell, B.,
+              Steele, N., and A. Parecki, "AI Identity Management
+              System", Work in Progress, Internet-Draft, draft-ietf-
+              wimse-aims-00, September 2026,
+              <https://datatracker.ietf.org/doc/draft-ietf-wimse-aims/>.
+
+   [I-D.chen-oauth-agent-revocation]
+              Chen, M. and L. Su, "OAuth 2.0 Agent Authorization
+              Explicit Revocation", Work in Progress, Internet-Draft,
+              draft-chen-oauth-agent-revocation-01, October 2026,
+              <https://datatracker.ietf.org/doc/draft-chen-oauth-agent-
+              revocation/>.
+
+Appendix A.  Changes since -02
+
+   This section is to be removed before publishing as an RFC.
+
+   Editorial and tooling-conformance changes only; no technical content
+   was changed.
+
+   *  Added submissionType="IETF" to <rfc>
+
+   *  Updated outdated reference draft-chen-oauth-agent-revocation-00 to
+      current -01
+
+   *  Normalized author metadata (full name with ASCII form, initials,
+      organization GoodShyt Group Inc., San Francisco CA postal, email,
+      ORCID URI)
+
+
+
+Watts                      Expires 3 May 2027                  [Page 16]
+
+Internet-Draft          Agent Revocation Closure            October 2026
+
+
+   *  Updated document date and revision number.
+
+Author's Address
+
+   Deonté O'dell Watts
+   GoodShyt Group Inc.
+   San Francisco, CA
+   United States of America
+   Email: deonte@goodshyt.fun
+   URI:   https://orcid.org/0009-0005-8586-3650
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Watts                      Expires 3 May 2027                  [Page 17]
