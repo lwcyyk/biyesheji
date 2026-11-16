@@ -141,7 +141,7 @@ class ExplicitIO:
     MAX = (1 << 63) - 1
     FIELDS = ("attempts", "successes", "failures", "refusals", "read_requested",
               "read_returned", "write_requested", "write_accepted", "files_opened",
-              "metadata_attempts", "unknown_read_returns", "unknown_write_returns")
+              "metadata_attempts", "unknown_read_returns", "unknown_write_returns", "result_unconfirmed")
 
     def __init__(self):
         self.phase = "PRE_QPC_COST"
@@ -200,15 +200,21 @@ class ExplicitIO:
                 counts["failures"] += 1
                 if direction is not None: counts["unknown_" + direction + "_returns"] += 1
             raise
-        if direction is not None:
-            amount = result_bytes(value) if result_bytes is not None else len(value)
-            require(type(amount) is int and 0 <= amount <= requested, "IO_RETURN_INVALID")
-            label = "read_returned" if direction == "read" else "write_accepted"
-            row[label] += amount
-            total[label] += amount
         for counts in (row, total):
             counts["successes"] += 1
             if operation == "open": counts["files_opened"] += 1
+        if direction is not None:
+            try:
+                amount = result_bytes(value) if result_bytes is not None else len(value)
+                require(type(amount) is int and 0 <= amount <= requested, "IO_RETURN_INVALID")
+            except BaseException:
+                for counts in (row, total):
+                    counts["result_unconfirmed"] += 1
+                    counts["unknown_" + direction + "_returns"] += 1
+                raise
+            label = "read_returned" if direction == "read" else "write_accepted"
+            row[label] += amount
+            total[label] += amount
         return value
 
     def snapshot(self, pre_qpc=False):
@@ -264,10 +270,10 @@ class PolicyValidator:
         row = {"read_id": len(self.source_reads) + 1, "kind": kind,
                "path_sha256": hashlib.sha256(str(path).encode("utf-8")).hexdigest(),
                "file_identity": "PATH_CHECKS_ONLY_NATIVE_FILE_ID_UNKNOWN",
-               "declared_bytes": None, "read_calls": 0, "read_requested": 0,
+               "file_size_before": None, "read_calls": 0, "read_requested": 0,
                "read_returned": 0, "hashed_bytes": 0, "eof": False,
                "hash_complete": False, "metadata_matched": False,
-               "sha256": "UNKNOWN", "state": "ENTERED"}
+               "sha256": "UNKNOWN", "state": "ENTERED", "close_status": "NOT_OPENED"}
         self.source_reads.append(row)
         return row
 
@@ -279,17 +285,21 @@ class PolicyValidator:
             before = self.io.call("source.stat_before", "metadata", path.stat)
             size = before.st_size
             require(type(size) is int and 0 <= size <= size_limit, "SOURCE_SIZE_LIMIT")
-            row["declared_bytes"] = size
+            row["file_size_before"] = size
+            if kind == "runtime": require(size == size_limit, "RUNTIME_SOURCE_SIZE_CHANGED")
             digest = hashlib.sha256()
             chunks = [] if kind == "control" else None
             stream = self.io.call("source.open", "open", lambda: path.open("rb", buffering=0))
+            row["close_status"] = "PENDING"
+            def read_block(request):
+                row["read_calls"] += 1
+                row["read_requested"] += request
+                return stream.read(request)
             while True:
                 request = min(65536, size + 1 - row["read_returned"])
                 require(request > 0, "SOURCE_GREW")
                 row["state"] = "READ_ATTEMPT"
-                row["read_calls"] += 1
-                row["read_requested"] += request
-                block = self.io.call("source.read", "read", stream.read, request,
+                block = self.io.call("source.read", "read", read_block, request,
                                      requested=request, direction="read")
                 row["read_returned"] += len(block)
                 if not block:
@@ -316,7 +326,12 @@ class PolicyValidator:
             raise
         finally:
             if stream is not None:
-                self.io.call("source.close", "close", stream.close)
+                try:
+                    self.io.call("source.close", "close", stream.close)
+                    row["close_status"] = "RETURNED_SUCCESS"
+                except BaseException:
+                    row["close_status"] = "UNCONFIRMED"
+                    raise
 
     def read(self, path, expected=None):
         path = Path(path)
@@ -336,23 +351,26 @@ class PolicyValidator:
                 or path.name in {"METADATA", "RECORD", "WHEEL"},
                 "RUNTIME_FILE_KIND")
         self.read_hashed(path, expected, "runtime", declared_size)
-        require(self.source_reads[-1]["declared_bytes"] == declared_size, "RUNTIME_SOURCE_SIZE_CHANGED")
+        require(self.source_reads[-1]["file_size_before"] == declared_size, "RUNTIME_SOURCE_SIZE_CHANGED")
 
     def read_pe_header(self):
         row = self.source_record(PYTHON, "pe")
         stream = None
         try:
-            row["declared_bytes"] = 70
             stream = self.io.call("pe.open", "open", lambda: PYTHON.open("rb", buffering=0))
+            row["close_status"] = "PENDING"
+            def read_part(size):
+                row["read_calls"] += 1
+                row["read_requested"] += size
+                return stream.read(size)
             values = []
             for index, size in enumerate((64, 6)):
                 if index:
                     self.io.call("pe.seek", "seek", stream.seek, int.from_bytes(values[0][60:64], "little"))
-                row["read_calls"] += 1
-                row["read_requested"] += size
-                data = self.io.call("pe.read", "read", stream.read, size, requested=size, direction="read")
+                data = self.io.call("pe.read", "read", read_part, size, requested=size, direction="read")
                 row["read_returned"] += len(data)
                 require(len(data) == size, "PYTHON_PE_HEADER")
+                if index == 0: require(data[:2] == b"MZ", "PYTHON_PE_HEADER")
                 values.append(data)
             require(values[0][:2] == b"MZ" and values[1][:4] == b"PE\x00\x00"
                     and values[1][4:6] == b"\x64\x86", "AMD64_PYTHON_REQUIRED")
@@ -362,7 +380,13 @@ class PolicyValidator:
             row["state"] = "PE_HEADER_UNCONFIRMED"
             raise
         finally:
-            if stream is not None: self.io.call("pe.close", "close", stream.close)
+            if stream is not None:
+                try:
+                    self.io.call("pe.close", "close", stream.close)
+                    row["close_status"] = "RETURNED_SUCCESS"
+                except BaseException:
+                    row["close_status"] = "UNCONFIRMED"
+                    raise
 
     def validate(self, policy_path):
         policy_path = checked_path(policy_path, audit=self.io)
@@ -823,8 +847,8 @@ class OutputController:
                                  requested=len(data), direction="write", result_bytes=lambda result: result)
             require(count == len(data), "WITNESS_SHORT_WRITE")
             if raw_name is not None:
-                self.raw_prefixes[raw_name].update(accepted_bytes=raw_frame["end"],
-                    accepted_frames=raw_frame["stream_seq"], accepted_sha256=raw_frame["sha256"])
+                self.raw_prefixes[raw_name] = {**self.raw_prefixes[raw_name], "accepted_bytes": raw_frame["end"],
+                    "accepted_frames": raw_frame["stream_seq"], "accepted_sha256": raw_frame["sha256"]}
                 self.raw_prefixes[raw_name]["pending"]["stage"] = "RAW_WRITE_ACCEPTED_PREFIX"
             self.deadline.admit(cleanup=final)
             self.io.call("witness.flush", "flush", self.stream.flush)
@@ -836,8 +860,8 @@ class OutputController:
             self.io.persisted_serialized += len(data)
             committed_raw = {name: dict(prefix) for name, prefix in self.witness_prefix["raw"].items()}
             if raw_name is not None:
-                self.raw_prefixes[raw_name].update(persisted_bytes=raw_frame["end"],
-                    persisted_frames=raw_frame["stream_seq"], persisted_sha256=raw_frame["sha256"])
+                self.raw_prefixes[raw_name] = {**self.raw_prefixes[raw_name], "persisted_bytes": raw_frame["end"],
+                    "persisted_frames": raw_frame["stream_seq"], "persisted_sha256": raw_frame["sha256"]}
                 self.raw_prefixes[raw_name]["pending"].update(
                     fsync="RETURNED_SUCCESS", stage="RAW_PERSISTENCE_CONFIRMED_PREFIX")
                 committed_raw[raw_name] = {"bytes": raw_frame["end"], "frames": raw_frame["stream_seq"],
@@ -854,7 +878,8 @@ class OutputController:
             if write_attempted and not persisted: self.io.uncertain_serialized += len(data)
             if raw_name is not None and self.raw_prefixes[raw_name]["pending"] is not None:
                 self.raw_prefixes[raw_name]["pending"]["stage"] = (
-                    "WITNESS_COMMIT_UNCONFIRMED" if persisted else "RAW_PERSISTENCE_UNCERTAIN")
+                    "POST_COMMIT_ACCOUNTING_UNCONFIRMED" if self.sequence == event["seq"] and self.head == digest
+                    else "WITNESS_COMMIT_UNCONFIRMED" if persisted else "RAW_PERSISTENCE_UNCERTAIN")
             self.poisoned = True
             raise
 
@@ -1113,7 +1138,7 @@ def supervise(policy):
                 "run_id": policy["_policy_sha256"],
                 "unobserved_startup": ["Python_initialization", "module_imports", "DLL_lazy_loading",
                                        "native_loader_IO", "elapsed_time_before_QPC"],
-                "completeness_status": "SOURCE_READ_BYTES_UNPROVEN_UNTIL_APPROVED_CATALOGUE"}})
+                "completeness_status": "EXPLICIT_READS_ACCOUNTED_BOOTSTRAP_AND_NATIVE_IO_UNPROVEN"}})
         job.create(policy["job"])
         output.append("LAUNCH_INTENT", {"executable": str(PYTHON), "argv": policy["child_argv"], "launches": 1})
         child.create(policy, output)
