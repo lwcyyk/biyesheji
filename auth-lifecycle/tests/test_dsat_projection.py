@@ -1,0 +1,263 @@
+"""Only pure synthetic S1/network tests; no runtime/native imports."""
+import ast
+import copy
+import json
+from pathlib import Path
+import socket
+from time import perf_counter_ns
+import tracemalloc
+import unittest
+from unittest.mock import patch
+
+from auth_lifecycle.online_state.dsat_projection import project_evidence
+from auth_lifecycle.online_state.dsat_types import (
+    AuthoritySnapshot, EvidenceEnvelope, Limits, canonical, normalize_math, InputError,
+)
+from auth_lifecycle.online_state.dsat_flow import build_network, solve, BackendUnavailable
+from dsat_test_support import load_case, rebind_fixture, CASE_RESULTS, ROOT
+
+
+class ProjectionCases(unittest.TestCase):
+    pass
+
+
+def _case_test(case_id):
+    def run(self):
+        load_start = perf_counter_ns()
+        case = load_case(case_id)
+        input_read_ns = perf_counter_ns() - load_start
+        bundle, manifest, expected = case["bundle"], case["trusted_manifest"], case["expected"]
+        before = canonical(bundle)
+        parse_start = perf_counter_ns()
+        AuthoritySnapshot.parse(bundle["authority"], Limits())
+        for e in bundle["history"] + bundle["envelopes"]:
+            EvidenceEnvelope.parse(e, Limits())
+        parse_ns = perf_counter_ns() - parse_start
+        tracemalloc.start()
+        start = perf_counter_ns()
+        result = project_evidence(bundle, manifest)
+        compile_ns = perf_counter_ns() - start
+        _, peak = tracemalloc.get_traced_memory()
+        tracemalloc.stop()
+        graph_ns = None
+        graph_arcs = None
+        if result["math_input"] is not None:
+            start = perf_counter_ns()
+            net_m = build_network(result["math_input"], "m")
+            build_network(result["math_input"], "d")
+            graph_ns = perf_counter_ns() - start
+            graph_arcs = len(net_m["arcs"])
+        CASE_RESULTS[case_id] = {"case_id": case_id, "projection_status": result["status"],
+            "math_ready": result["math_ready"], "native_admission": result["native_admission"],
+            "C_input_read_ns": input_read_ns, "standalone_typed_parse_ns": parse_ns,
+            "C_compile_ns": compile_ns, "C_network_build_ns": graph_ns, "C_flow_ns": None,
+            "flow_backend": "BACKEND_UNAVAILABLE", "input_bytes": len(before),
+            "projection_bytes": len(canonical(result)), "compile_traced_peak_bytes": peak,
+            "work_counts": result.get("work_counts"), "network_arcs": graph_arcs,
+            "global_complete": result["global_complete"], "actual_native_cost": "NOT_MEASURED",
+            "assertions_completed": False}
+        self.assertEqual(result["status"], expected["status"])
+        self.assertEqual(result["math_ready"], expected["math_ready"])
+        self.assertEqual(len(result["units"]), expected["unit_count"])
+        self.assertEqual(result["partial_math"]["D_P"], expected["D"])
+        self.assertEqual(result["native_admission"], "SOURCE_OR_REFINEMENT_GAP")
+        self.assertIs(result["global_complete"], False)
+        old = {o["id"] for o in bundle["obligations"]}
+        proposed = {o["id"] for o in result["obligations_proposed"]}
+        self.assertTrue(old <= proposed)
+        if "audit" in expected:
+            self.assertIn(expected["audit"], proposed)
+        if "quarantined" in expected:
+            self.assertIn(expected["quarantined"], [x["unit_id"] for x in result["quarantined"]])
+        self.assertEqual(canonical(bundle), before)
+        CASE_RESULTS[case_id]["assertions_completed"] = True
+    return run
+
+
+for _id in [f"A{i:02d}" for i in range(1, 25)]:
+    setattr(ProjectionCases, "test_" + _id, _case_test(_id))
+
+
+class ProjectionAdversarialTests(unittest.TestCase):
+    def test_no_external_io_in_projection(self):
+        case = load_case("A06")
+        with patch("builtins.open", side_effect=AssertionError("file access")), \
+             patch.object(Path, "open", side_effect=AssertionError("path access")), \
+             patch.object(socket, "socket", side_effect=AssertionError("network access")):
+            result = project_evidence(case["bundle"], case["trusted_manifest"])
+        self.assertTrue(result["math_ready"])
+
+    def test_projection_output_does_not_alias_frozen_input(self):
+        case = load_case("A06")
+        before = canonical(case["bundle"])
+        result = project_evidence(case["bundle"], case["trusted_manifest"])
+        result["scope"]["paths"].append("synthetic_extra_path")
+        result["scope"]["target_attempts"].clear()
+        self.assertEqual(canonical(case["bundle"]), before)
+
+    def test_projection_imports_are_pure(self):
+        for name in ("dsat_projection.py", "dsat_types.py"):
+            tree = ast.parse((ROOT / "src" / "auth_lifecycle" / "online_state" / name).read_text(encoding="utf-8"))
+            imported = []
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Import):
+                    imported.extend(a.name for a in node.names)
+                elif isinstance(node, ast.ImportFrom):
+                    imported.append(node.module)
+            self.assertTrue(set(imported) <= {"dataclasses", "hashlib", "json", "re", "dsat_types"})
+
+    def test_missing_capacity_is_not_zero_or_one(self):
+        case = load_case("A06")
+        case["bundle"]["capacity_contracts"][0]["capacity"] = None
+        result = project_evidence(case["bundle"], rebind_fixture(case["bundle"]))
+        self.assertFalse(result["math_ready"])
+        self.assertIn("i_p", result["partial_math"]["capacity_unknown"])
+        self.assertTrue(result["obligations_proposed"])
+
+    def test_untrusted_snapshot_cannot_reassign_origin(self):
+        case = load_case("A06")
+        case["bundle"]["authority"]["requests"][2]["origin"]["grant_id"] = "gV"
+        r = project_evidence(case["bundle"], case["trusted_manifest"])
+        self.assertEqual(r["status"], "REJECT_UNAUTHORIZED")
+        self.assertIsNone(r["obligations_proposed"])
+        self.assertEqual(r["obligation_action"], "KEEP_EXISTING")
+
+    def test_true_flag_does_not_authenticate_payload(self):
+        case = load_case("A06")
+        case["bundle"]["source_confirmed"] = True
+        r = project_evidence(case["bundle"], case["trusted_manifest"])
+        self.assertEqual(r["status"], "INVALID_INPUT")
+        self.assertFalse(r["global_complete"])
+
+    def test_secret_fields_are_rejected_without_echo(self):
+        case = load_case("A06")
+        case["bundle"]["authority"]["password"] = "SYNTHETIC_SECRET_MUST_NOT_ESCAPE"
+        r = project_evidence(case["bundle"], rebind_fixture(case["bundle"]))
+        self.assertIn(r["status"], {"INVALID_INPUT", "REJECT_UNAUTHORIZED"})
+        self.assertNotIn("SYNTHETIC_SECRET", json.dumps(r))
+
+    def test_unknown_birth_stays_alias_uncertain(self):
+        case = load_case("A06")
+        case["bundle"]["envelopes"][1]["payload"]["birth_ref"] = None
+        r = project_evidence(case["bundle"], rebind_fixture(case["bundle"]))
+        self.assertEqual(len(r["units"]), 4)
+        self.assertEqual(len(r["unknown_aliases"]), 1)
+        self.assertFalse(r["source_scope_preconditions_declared"])
+
+    def test_conflicting_exact_sources_are_retained(self):
+        case = load_case("A02")
+        e = copy.deepcopy(case["bundle"]["envelopes"][1])
+        e["id"] = "syn:conflict"
+        req = case["bundle"]["authority"]["requests"][3]
+        e["payload"]["source_candidates"] = ["i2"]
+        e["payload"]["request_binding"] = {k: req[k] for k in
+            ("rid", "request_digest", "origin", "attempt_id", "release_version")}
+        case["bundle"]["envelopes"].append(e)
+        r = project_evidence(case["bundle"], rebind_fixture(case["bundle"]))
+        self.assertEqual(r["status"], "EVIDENCE_CONFLICT")
+        self.assertFalse(r["math_ready"])
+        self.assertTrue(r["obligations_proposed"])
+
+    def test_unknown_source_not_silently_removed(self):
+        case = load_case("A06")
+        case["bundle"]["envelopes"][1]["payload"]["source_candidates"].append("external_unknown")
+        r = project_evidence(case["bundle"], rebind_fixture(case["bundle"]))
+        self.assertFalse(r["math_ready"])
+        self.assertEqual(r["status"], "INSUFFICIENT_COVERAGE")
+
+    def test_history_survives_current_deletion(self):
+        case = load_case("A15")
+        r = project_evidence(case["bundle"], case["trusted_manifest"])
+        c1 = next(u for u in r["units"] if u["unit_id"] == "c1")
+        self.assertTrue(c1["historically_deleted"])
+        self.assertIn(["c1", "i1"], r["math_input"]["E"])
+
+    def test_zero_local_http_reservation_not_used_as_capacity_zero(self):
+        # No H/actual_sends field is promoted to total capacity by this interface.
+        case = load_case("A03")
+        r = project_evidence(case["bundle"], case["trusted_manifest"])
+        self.assertEqual(r["math_input"]["c"]["i1"], 1)
+        self.assertNotIn("m_T", r)
+
+    def test_readonly_unknown_B_adds_execution_not_creation(self):
+        case = load_case("A09")
+        case["bundle"]["authority"]["requests"][-1]["phase"] = "DISPATCHED_UNKNOWN"
+        r = project_evidence(case["bundle"], rebind_fixture(case["bundle"]))
+        self.assertEqual(len(r["units"]), 2)
+        self.assertIn("exec:rB1", [o["id"] for o in r["obligations_proposed"]])
+        self.assertIn("settle:i1", [o["id"] for o in r["obligations_proposed"]])
+
+    def test_resource_limit_preserves_existing_obligations(self):
+        case = load_case("A06")
+        r = project_evidence(case["bundle"], case["trusted_manifest"], Limits(records=1))
+        self.assertEqual(r["status"], "UNKNOWN_RESOURCE_LIMIT")
+        self.assertEqual(r["obligation_action"], "KEEP_EXISTING")
+
+    def test_bool_and_float_capacities_rejected(self):
+        for bad in (True, 1.0, -1):
+            with self.subTest(bad=bad):
+                case = load_case("A06")
+                case["bundle"]["capacity_contracts"][0]["capacity"] = bad
+                r = project_evidence(case["bundle"], rebind_fixture(case["bundle"]))
+                self.assertEqual(r["status"], "INVALID_INPUT")
+
+    def test_bad_legacy_request_digest_rejected(self):
+        case = load_case("A06")
+        case["bundle"]["authority"]["requests"][0]["request_digest"] = "0" * 64
+        r = project_evidence(case["bundle"], rebind_fixture(case["bundle"]))
+        self.assertEqual(r["status"], "REJECT_UNAUTHORIZED")
+
+    def test_http_failure_does_not_become_inactive_observation(self):
+        case = load_case("A16")
+        point = next(e for e in case["bundle"]["envelopes"] if e["kind"] == "MATERIAL")
+        point["payload"]["http"] = 500
+        r = project_evidence(case["bundle"], rebind_fixture(case["bundle"]))
+        self.assertEqual(r["status"], "INSUFFICIENT_COVERAGE")
+        self.assertIsNone(r["point_observations"][0]["active"])
+        self.assertIs(r["point_observations"][0]["reported_active"], False)
+        self.assertEqual(r["math_input"]["D_P"], [])
+
+    def test_unperformed_query_does_not_become_inactive(self):
+        case = load_case("A16")
+        point = next(e for e in case["bundle"]["envelopes"] if e["kind"] == "MATERIAL")
+        point["payload"]["performed"] = False
+        r = project_evidence(case["bundle"], rebind_fixture(case["bundle"]))
+        self.assertEqual(r["status"], "INSUFFICIENT_COVERAGE")
+        self.assertIsNone(r["point_observations"][0]["active"])
+        self.assertEqual(r["math_input"]["D_P"], [])
+
+    def test_duplicate_e_and_bad_endpoints_rejected(self):
+        case = load_case("A06")
+        m = project_evidence(case["bundle"], case["trusted_manifest"])["math_input"]
+        for edge in (m["E"][0], ["missing", "i1"]):
+            bad = copy.deepcopy(m); bad["E"].append(edge)
+            with self.assertRaises(InputError):
+                normalize_math(bad)
+
+    def test_original_capacity_retained_when_network_clips(self):
+        m = {"I": ["s"], "T": ["s"], "c": {"s": 2 ** 80}, "U": [], "E": [], "D_P": []}
+        net = build_network(m, "m")
+        self.assertEqual(net["C_T"], 2 ** 80)
+        self.assertEqual(net["arcs"][0]["capacity"], 0)
+        self.assertIn("I:s", net["nodes"])
+
+    def test_network_demands_modes_and_namespaces(self):
+        case = load_case("A06")
+        m = project_evidence(case["bundle"], case["trusted_manifest"])["math_input"]
+        net = build_network(m, "m")
+        self.assertEqual(net["demand"]["s"], -5)
+        self.assertEqual(net["demand"]["t"], 5)
+        self.assertEqual(net["required_flow"], 5)
+        self.assertEqual(len(net["nodes"]), 12)
+        self.assertEqual(len(net["arcs"]), 21)
+        self.assertTrue(all(a["cost"] in {0, 1} for a in net["arcs"]))
+
+    def test_backend_missing_is_not_a_zero_flow_solution(self):
+        case = load_case("A06")
+        m = project_evidence(case["bundle"], case["trusted_manifest"])["math_input"]
+        with patch("auth_lifecycle.online_state.dsat_flow._load_backend", side_effect=BackendUnavailable("TEST_MISSING_BACKEND")):
+            r = solve(m)
+        self.assertEqual(r["status"], "BACKEND_UNAVAILABLE")
+        self.assertIsNone(r["m_T"])
+        self.assertIsNone(r["H_T"])
+        self.assertFalse(r["solved"])
