@@ -1,0 +1,2376 @@
+[PDF_PAGE 1]
+SUDP: Secret-Use Delegation Protocol
+for Agentic Systems
+Xiaohang Yu
+Imperial College London
+x.yu21@imperial.ac.uk
+Hejia Geng
+University of Oxford
+genghejia0530@gmail.com
+Xinmeng Zeng
+Stanford University
+xinzeng@stanford.edu
+William Knottenbelt∗
+Imperial College London
+w.knottenbelt@imperial.ac.uk
+Abstract—Agentic systems now act with user secrets for
+APIs, messaging platforms, and cloud services. Today’s agent
+runtimes typically implementauthorization by exposure: enabling
+action means placing a reusable secret, or a reusable artifact
+derived from it, inside the runtime, so a transient prompt-
+injection or tool-side compromise becomes durable account
+compromise. Existing defenses cover adjacent pieces such as
+secret storage, scoped delegation, sender-constrained tokens, and
+runtime monitoring, but none states the combined requirement:
+an untrusted autonomous requester should be able to cause a
+user-authorized secret-backed operation without gaining reusable
+authority over it. We formalize this as theAgent Secret Use(ASU)
+problem and identify seven security properties any solution must
+satisfy, spanning authorization integrity and secret confidentiality.
+We propose theSecret-Use Delegation Protocol(SUDP), in which
+a requester proposes a canonical operation, the user authorizes
+it with a fresh authenticator-backed grant, and a custodian
+redeems the grant to perform the bounded use; reusable authority
+never crosses the requester boundary. We specialize SUDP for
+LLM-driven agents, where it applies whenever a tool call would
+exercise user-enrolled authority-bearing material. Under standard
+cryptographic assumptions, SUDP satisfies six of the seven
+properties; the seventh, runtime-memory confidentiality, is closed
+by composition with a hardware-rooted runtime. A reference
+implementation, available at https://github.com/xhyumiracle/sudp,
+adds sub-millisecond protocol overhead per mediated call.
+I. INTRODUCTION
+A coding agent holding a GitHub token can be steered by
+an injected README into pushing code to a public repository:
+once a reusable secret is inside the agent runtime, indirect
+prompt injection becomes durable account compromise [ 1, 2].
+Tool-augmented language-model agents now routinely perform
+such authority-bearing actions: they call model and platform
+APIs [ 3–5], send messages, and authenticate to third-party
+tools [ 6, 7], backed by API keys, OAuth tokens, or signing
+keys held in environment variables, databases, or secret
+managers [8, 9] and handed to the agent for ad-hoc use. Across
+successive agent-safety benchmarks [ 10–13], agent runtimes
+have continued to fall to prompt injection and tool misuse,
+including on secret-adjacent tasks, despite improving base
+models; under the bearer-secret pattern, every such failure
+becomes durable authority compromise.
+The question for agentic systems is:how can an agent be
+authorized to cause a secret-backed operation without ever
+gaining reusable authority over it?Today’s model bundles
+∗Corresponding author.
+Authorizer U
+reviews o, approves in
+one authenticator ceremony
+Operation o
+o = (act, bind, valid)
+Grant G
+signature + unwrap key,
+bound to o, use-bounded
+Requester R
+agent runtime
+holds no secret
+Custodian T
+decrypts and uses s on o,
+only under G
+secret s
+sealed at rest
+Environment E
+external servicepropose
+review issue
+submit
+execute(o; s)
+result only
+Fig. 1. Schematic of SUDP. The requester R proposes the operation o; the
+authorizer U reviews o and issues the grant G, signature-bound to H(o) and
+freshness r, carrying the unwrap key for the secret s; the custodian T redeems
+G and spends s at the environment E. Only the result returns to R: reusable
+authority never crosses the requester boundary (§V).
+capability and possession into a single artifact, a pattern we
+callauthorization by exposure. Existing approaches address
+neighboring dimensions: capability-based authority [ 14, 15],
+scoped delegation [ 16, 17], sender-constrained bearers [ 18],
+user-mediated authenticators with derivable material [ 19, 20],
+and standardized cryptographic components [ 21–26]; none
+provides a common specification forauthorization without
+giving the requester reusable authority. We compose these
+elements into a unified protocol whose unit of delegation is
+one authorized operation rather than the secret itself. The safety
+of this authorization layer, as much as reasoning ability, bounds
+what agents can be allowed to do autonomously.
+a) Contributions.:(i) The Agent Secret Use problem
+(§III). We formalize Agent Secret Use and define seven security
+properties that any solution must satisfy. The taxonomy admits
+uniform evaluation of secret-mediation, delegation-token, and
+TEE-backed systems, which §IV carries out.
+(ii) The SUDP protocol(§V). We propose the Secret-Use
+Delegation Protocol as a solution to ASU, with one authorized
+operation rather than the secret as the unit of delegation,
+and prove, under standard cryptographic assumptions, that
+it satisfies six of the seven properties natively; the seventh is
+closed by composition with a hardware-rooted runtime (§VIII).
+(iii) Agentic application and instantiation(§VI–VII). We
+describe how SUDP applies in an LLM-based agent system,
+where even a fully prompt-injected agent can at most propose
+operations subject to explicit authorization, and instantiate the
+arXiv:2604.24920v4  [cs.CR]  21 Oct 2026
+
+[PDF_PAGE 2]
+protocol with standard cryptographic components, introducing
+no new assumption. A reference implementation of the protocol
+core accompanies the paper.
+II. RELATEDWORK
+a) Agent systems and external capabilities.:AutoGPT
+and AutoGen made long-horizon, tool-using agents a concrete
+software pattern rather than only a prompting style [ 27, 28].
+Recent products push the same pattern toward browser, desktop,
+and multi-step task execution: Manus, OpenAI Operator, and
+Anthropic’s computer-use interface [29–31].
+b) Secret management, authorization, and delegation.:
+Capability-based access control [14, 15], OAuth 2.0 bearers [16,
+32], DPoP [ 18], OAuth Rich Authorization Requests [ 33],
+GNAP [34], MCP authorization [ 35], and Macaroons [ 17] ad-
+dress scoped delegation but pass possession-bearing or reusable
+artifacts through the requester. WebAuthn [ 19] and its PRF
+extension [20] provide phishing-resistant user authentication
+and authenticator-bound key derivation, primitives that SUDP
+builds on (§V). Secret managers and KMS services [ 8, 9]
+provide mature storage, access control, and rotation, but
+their privileged backend assumes the authorization decision is
+upstream of the requester; SUDP complements them at the
+authorization layer. A recent line of agentic delegation work
+extends web-identity and provenance constructs to agent princi-
+pals: Authenticated Delegation [36] binds agent credentials to a
+verified human delegator; SAGA [ 37] gates inter-agent contact
+through a user-registered provider that distributes one-time
+access-control keys; Agentic JWT [ 38] binds each agent action
+to verifiable user intent and, optionally, to a workflow step;
+HDP [39] targets multi-hop human-delegation provenance; and
+OIDC-A [40] extends OIDC with agent identity. Each touches
+a different subset of the ASU axes; the per-axis comparison is
+in §IV-B.
+c) Runtime defenses, monitors, and benchmarks.:A
+large body of work hardens the agent or contains the con-
+sequences of misbehavior: instruction-data separation and
+prompt-engineering defenses [ 41–43], capability-tracking in-
+terpreters [44], per-tool policy engines [ 45–47], verify-before-
+commit mitigations [ 48], guardrail stacks [ 49, 50], and execu-
+tion sandboxes [ 51]. These approaches reason about what the
+agent does or contain where it does it; SUDP constrains what
+a secret can be used for and composes with them rather than
+substituting. Recent adaptive evaluations show that stronger
+attacks bypass published behavioral defenses [ 52], motivating
+protocol-level guarantees beyond behavioral filtering, and
+an empirical audit of 17,022 deployed LLM agent skills
+finds exploitable and persistent credential leakage in 520 of
+them [53]. Agent-safety benchmarks across model generations
+report nontrivial failure rates: attack success under prompt
+injection [10, 12, 54], unsafe tool use [ 13, 55, 56], and privacy
+leakage across tool and inter-agent channels [ 57, 58]. Surveys
+identify ad-hoc secret handling and least-privilege maintenance
+over credentials as an open gap [ 59, 60]; lifecycle analyses
+place capability enforcement at the execution stage [ 61, 62].
+(a) Native interfaces: authorization by exposure
+Setting.  The user holds a reusable secret; the requester must cause an operation; the environment
+accepts only secret-backed calls.
+Path 1.  transfer the secret s to the requester
+User
+authorizer
+holds the secret
+Requester
+agent runtime
+receives the secret
+Environment
+external service
+requires s on every call
+transfer s execute w/ s
+✓  functionally works✗  reusable secret s reaches the requester
+Path 2.  keep the secret s out of the requester
+boundary
+User
+authorizer
+holds the secret
+Requester
+agent runtime
+no secret
+Environment
+external service
+requires s on every call
+execute w/o s
+✓  secret s never left the authorizer ✗  native execution fails
+(b) Agent Secret Use: authorization without exposing reusable
+authority
+ASU decouples authorization from exposure: R proposes an operation, U authorizes it, and a
+mediator spends the secret internally so that reusable authority is never exposed to R.
+User
+authorizer
+authorizes the
+operation
+Requester
+agent runtime
+proposes the operation
+Mediator
+consumes the secret
+internally
+Environment
+external service
+requires s on every call
+authorize
+propose
+execute w/ s
+The requester never receives reusable secret s
+✓  authorized use ✓  operation-specific✓  no reusable authority to the requester
+✗
+✗
+✗
+Fig. 2.Agent Secret Use as a structural problem. (a)Native secret-backed
+interfaces implementauthorization by exposure: handing s to R functionally
+works but gives R reusable authority over operations at E; keeping s outside R
+preserves confidentiality but the native call is rejected by E.(b)ASU decouples
+authorization from exposure: R proposes the operation, U authorizes it, and s
+stays inside a trust boundary outside R, so R never gains reusable authority
+over operations atE.
+III. AGENTSECRETUSE
+Agent Secret Use(ASU) arises when an autonomous re-
+quester must cause a user-authorized operation without ever
+gaining reusable authority over that operation.
+A. The Problem
+Agent Secret Use poses a conflict between three parties.
+A user U holds authority at an external environment E,
+exercised through authority-bearing material s (Definition 1)
+that E accepts on U’s behalf for operations in a space
+OE. An autonomous requester R, acting on U’s behalf, lies
+outside U’s trust boundary: R must never gain reusable
+authority (Definition 2) over those operations. The unmediated
+native interface cannot satisfy both requirements (Figure 2);
+Definition 3 states the resulting problem.
+Definition 1 (Authority-bearing material).Material s is
+authority-bearing at E if possession of s, or of material derived
+from s that E accepts, enables operations at E under the
+authority of the party that enrolleds.
+Definition 2 (Reusable authority).Reusable authorityover
+operations at E is the capability to cause more than one
+invocation of operations at E, whether via direct possession
+of authority-bearing material (Definition 1) or via any derived
+artifactEaccepts.
+Definition 3 (Agent Secret Use Problem).Agent Secret Use
+is the problem of enabling an untrusted autonomous requester
+R, acting on U’s behalf, to cause operations in OE to be
+executed at E, without ever exposing R to reusable authority
+(Definition 2) over whatUexplicitly authorizes.
+B. Adversary Model
+We parameterize the adversaryAby capability:
+•A R: controlsR.
+•A net: controls the network (observes, modifies, drops, re-
+plays, and reorders any message).
+•A state: reads at rest the persistent state of any component a
+solution introduces to hold authority-bearing material.
+2
+
+[PDF_PAGE 3]
+•A mem: reads the runtime memory of such a component
+during an in-progress operation.
+A may also query U on any o∈ O E; U returns either a
+decision attributable to U or a refusal, per a policy the model
+leaves abstract.
+The ASU problem (Definition 3) is stated against the base-
+line (AR,A net); Astate and Amem are robustness extensions
+targeted by the corresponding axes of §III-C.
+a) Goal.: A wins by eitherextraction, obtaining authority-
+bearing material (Definition 1) and thereby reusable authority
+(Definition 2) over operations at E, ormisuse, causing E to
+execute some o that U did not explicitly authorize. § III-C
+formalizes the security properties that rule these out.
+C. Security Properties
+We formalize the Agent Secret Use problem (Definition 3)
+via seven security properties, grouped along the classical
+confidentiality / integrity distinction [ 63, 64]. The fourcore
+properties (A V , OB, UB, CRC) together preclude the two
+adversarial wins of § III-B: A V , OB, and UB rule outmisuse;
+CRC rules outextraction. We say a mechanismsolves the
+ASU problemif it enforces these four core properties under the
+baseline adversary (AR,A net). The threerobustness extensions
+(CSB, CMC, RFS) target the stronger adversaries Astate and
+Amem; they are not required for the baseline solution, and a
+mechanism that holds secret material only within U satisfies
+them trivially. For the protocol of §V, Appendix B restates these
+properties as adversarial games and proves them by reduction.
+a) Authorization integrity.:
+• A V: Authorization Verifiability.Any successful execution in-
+duced through the mechanism is covered by an authorization
+event attributable to U under the mechanism’s stated identity
+and trust assumptions. An authenticator-bound assertion U
+produces for a specific operation provides stronger direct
+evidence than an identity provider’s assertion aboutU.
+• OB: Operation Binding.An authorization is bound to
+a specific operation o; the mechanism does not induce
+execution of any operation semantically distinct fromo.
+• UB: Use Boundedness.Execution induced through the
+mechanism cannot exceed the boundsUauthorized.
+b) Secret confidentiality.:
+• CRC: Confidentiality under Requester Compromise.
+Compromise of the requester does not expose authority-
+bearing material (Definition 1).
+• CSB: Confidentiality under Storage Breach.Compromise
+of the persistent state of a secret-holding component does
+not expose the secret. Encryption whose unlock key resides
+in the same compromised state does not satisfy CSB.
+• CMC: Confidentiality under Runtime-Memory Com-
+promise.Compromise of the runtime memory of a secret-
+processing component does not expose the secret. Hardware-
+rooted TEEs may satisfy CMC within their threat model [ 65];
+software-only schemes relying on OS process isolation
+generally do not.
+• RFS: Rotation Forward Secrecy.Compromise of secret
+material in one rotation epoch does not expose material in any
+other epoch (forward and post-compromise secrecy [ 66, 67]).
+Rotating only the wrapping key while reusing the same
+authority-bearing secret is epoch-key isolation, not authority-
+level forward secrecy.
+Deployment concerns (client or authenticator compromise, logs
+and telemetry, IPC, crash dumps, supply-chain code injection,
+side channels, out-of-band copying) lie outside the seven
+security axes.
+IV. POSITIONING
+A. Relation to Prior Paradigms
+Agent Secret Use is a confused-deputy setting [ 68] with
+an added confidentiality constraint: the deputy must not
+gain reusable authority it could be induced to misuse. Prior
+paradigms place the authority-holding boundary at different
+points; ASU prescribes no location, only the negative condition
+that R stay outside any boundary containing authority-bearing
+material accepted atE.
+a) Prior paradigms, by boundary placement.:
+• Token-based authorization(OAuth 2.0 bearer [ 16, 32] and
+sender-constrained [18] tokens) places the boundary at the
+token itself: possession or proof-of-possession material is
+passed to the requester, which remains trusted with reusable
+authority.
+•Authorization-server delegation(OAuth Rich Authorization
+Requests [33], GNAP [ 34], MCP authorization [ 35]) places
+the boundary at an authorization server, but the minted token
+still lands at the requester.
+• Centralized secret storage(Vault, KMS services [ 8, 9])
+places the boundary at the storage system and addresses
+access control and rotation, but the authorization decision
+sits upstream of the requester rather than being bound to
+specific operations.
+• Hardware-rooted boundaries(HSMs, secure enclaves, TEE-
+backed runtimes [ 65, 69]) place the boundary inside tamper-
+resistant hardware that confines signing keys or code; this
+addresses host-memory confidentiality but does not by itself
+authorize specific agentic operations.
+• Transaction authentication ceremonies(closest analogue),
+exemplified by PSD2 dynamic linking, banking 2FA, Se-
+cure Payment Confirmation [ 70], and WebAuthn UV [ 19]
+ceremonies, place the boundary at a trusted user-facing
+client cooperating with a relying party. This is the prior
+paradigm closest to ASU’s operation-bound user approval,
+but it assumes the user interacts directly with a trusted client
+rather than through an autonomous agentic requester.
+A separate body of concurrent work targets the same agentic
+setting as SUDP:agentic delegation protocols(Authenticated
+Delegation [36], SAGA [37], OIDC-A [40], HDP [39], Agentic
+JWT [38]). These are not prior paradigms but contemporary
+peers; we compare them per-axis in §IV-B.
+3
+
+[PDF_PAGE 4]
+TABLE I
+POSITIONING ALONG THE SEVEN SECURITY AXES OF§III-CPLUSFI.
+SYMBOL SEMANTICS AND ROW NOTES FOLLOW THE TABLE. RATINGS
+REFLECT STRICTASUDEFINITIONS AGAINST PUBLIC DOCUMENTATION AT
+THE TIME OF WRITING;THEY ARE NOT A GENERAL SECURITY RANKING OF
+THESE SYSTEMS.
+Secret conf. Authz. integ. Dep.
+CRC CSB CMC RFS A V OB UB FI
+Bearer-token baseline× × × × × × ×✓
+HashiCorp Vault AI-agent
+identity pattern [72]
+× △ × × △ × ×✓
+Aegis [73]✓△ × × × × ×✓
+Claude Agent SDK
+proxy [74]
+△ × × × × × ×✓
+IronClaw [75]✓ ✓△ × × × × ×
+Authenticated
+Delegation [36]
+× × × × △ × ×✓
+SAGA [37]× × × ×✓△ × △
+OIDC-A [40]× × × × △ × ×✓
+HDP [39]× × × ×✓× △✓
+Agentic JWT [38]× × × × △ △ △✓
+SUDP (this paper)✓ ✓△✓ ✓ ✓ ✓ ✓
+B. Comparison Along the Security Axes
+a) Framework Independence (FI).:Alongside the seven
+security axes we add one deployability axis: a defense isFI-
+positiveif any LLM-agent runtime can adopt its specification
+without a specific agent SDK, planner, tool scheduler, or TEE-
+backed execution architecture. FI is an adoption property, not
+a security outcome.
+b) What the table evaluates.:Table I restricts attention to
+systems that make secret-confidentiality or authorization claims.
+Behavioral monitors and safety evaluators [ 49, 71], policy
+DSLs [45–47], taint-tracking interpreters [ 44], and execution
+sandboxes [51] operate at orthogonal layers (prompt / tool-call
+/ data-flow / cross-app isolation) and are not captured by our
+axes; they compose with SUDP rather than compete.
+c) Rating criteria.:Each system is rated at the strongest
+configuration its public documentation commits to, uniformly
+across rows. ✓: natively satisfied in that configuration; △:
+claimed but delivered only via an external substrate or an
+uncommitted deployment mode; ×: not established under
+our definition. A × is a statement about scope, not value:
+many cited systems are well-designed answers to neighboring
+problems.Bearer-token baselinecharacterizes the prevalent
+agent-framework pattern (LangChain [ 6], AutoGen [ 28], Cre-
+wAI [ 76], OpenAI Agents SDK [ 7]) rather than ranking
+specific frameworks. SUDP’s RFSat the authority level
+additionally depends on the deployment honouring § V-H’s
+rotation/revocation cadence atE.
+d) Landscape andSUDP’s position.:The table shows
+two neighboring clusters.Secret managers and credential
+proxies(Vault, Aegis, Claude Agent SDK proxy, IronClaw)
+keep reusable authority outside the requester and cover Secret
+Confidentiality to varying degrees, but issue no operation-
+bound U-rooted authorization.Agentic delegation protocols
+(Authenticated Delegation, SAGA, OIDC-A, HDP, Agentic
+JWT) build authorization, scoping, and provenance for agent
+principals, some as OAuth/OIDC extensions and others as
+standalone token schemes, but leave reusable authority inside
+the requester boundary. SUDP natively satisfies A V , OB, UB,
+CRC, CSB, and RFS and is FI-positive; CMC holds only inside
+a hardware-rooted runtime.
+V. SECRET-USEDELEGATIONPROTOCOL
+SUDP is a protocol-level answer to capability-constrained
+secret use. The unit of delegation is theuseof a secret for
+one specific authorized operation o, not the secret itself: the
+requester is delegated the right tocausean authorized use,
+the custodian is delegated the right toperformthe use within
+U’s signed bounds, and reusable authority never crosses the
+requester boundary. This section fixes SUDP’s roles and trust
+model (§V-A), then defines SUDP as an abstract protocol over
+generic cryptographic interfaces (§ V-B–V-G) together with the
+rotation discipline that delivers per-credential forward secrecy
+(§V-H).
+A. Roles and Trust Model
+SUDP solves the Agent Secret Use problem (§ III-A) by
+introducing one new protocol role: acustodian T that holds
+authority-bearing material as sealed state Σ, issues freshness,
+verifies U-rooted operation-bound grants, and performs the
+authorized secret-backed action within the bounds U signed.
+The custodian is a protocol role, not necessarily a deployment
+component: realizations include a local proxy, a hosted proxy,
+an OS-level credential mediator, an HSM- or TEE-backed
+service, or, in cooperative settings, the environment itself. The
+agentic specialization (how R is drawn around the LLM-context
+exposure surface and how native calls are bound to canonical
+operations) is deferred to §VI.
+a)SUDPentities.:Three parties run the protocol:
+•U : theauthorizer, governing whether a secret-backed opera-
+tion may proceed.
+•R : therequester, initiating an operation request, typically
+an agent.
+•T : thecustodian, holding the sealed state Σ, validating
+authorization, redeeming operation-bound grants, and using
+protected authority material to perform the secret-backed
+operation; distinct fromU.
+We sayauthorizerrather thanuserbecause the role is
+functional, not human: U is typically a person signing on
+a personal device, but may equally be an agent holding further-
+rooted authority in a chained delegation. The environment
+E is as in Agent Secret Use: the execution target, outside
+the protocol, assumed only to accept its existing credential
+interface.
+b)SUDP-specific trust assumptions.:Beyond authorizer-
+controlled authorization (§III-A), SUDP adds two assumptions.
+Restricted trust in the custodian: T is trusted only to validate
+authorization, redeem grants, and transiently use secret material
+during valid consumption; R is never trusted with secret
+access.Sealed persistent state: Σ alone does not suffice for
+4
+
+[PDF_PAGE 5]
+Autc:skc, PRF key
+yc ←PRFc(ηc)
+Wc ←KDF(yc;ηc,DSwrap∥cidc∥ver)
+[K]c ←WrapWc(K)
+C←EncK(M)
+authorizer credential
+credential-scoped PRF output
+per-credential wrapping key (transitU→T)
+wrapped state key
+encrypted protected state
+Authorizer-held credential
+Transit
+Custodian-held sealed state
+authorizer secret / non-extractabletransit (confidential) persistent sealed state
+Fig. 3. SUDP key hierarchy, organized in three trust zones.Authorizer-held
+credentialmaterial (blue) is held on the authorizer side: skc and the PRF
+key never leave Autc, and the PRF output yc is released only within U’s
+trusted client.Transit(gray) is the wrapping key Wc that U derives from yc
+and sends to T under confidentiality.Custodian-held sealed state(red) is the
+persistent wrapping/encryption chain stored in Σ: [K]c and C. Arrows trace
+the unlock chain downward; the figure shows one credential branch, with the
+acting-credential instance denotedW ⋆ in Phase II (§V-F).
+standalone recovery, and any authorized extraction leaves T
+only in recipient-protected form.
+B. Key Hierarchy
+SUDP uses the standard envelope-encryption pattern (Fig-
+ure 3). The protected state M (the contents of Σ the protocol
+secures) is sealed once under a state-encryption keyK;Kis
+in turn wrapped separately under each authorizer credential’s
+wrapping key Wc. This separation is deliberate: rotating K does
+not require interacting with every credential (each Wc simply
+rewraps the new K), and registering a new credential does
+not require re-encrypting M (only a new [K] c is appended).
+Formally,
+C←Enc K(M), M←Dec K(C),
+and for each enrolled credentialc,
+[K] c ←Wrap Wc(K), K←Unwrap Wc([K] c).
+The persistent cryptographic state consists of C and {[K] c};
+{Wc} defines the recoverability structure of K. By construction,
+the requester never receives K, any Wc, or any value from
+which either can be efficiently derived.
+C. Authorized Operation
+Rather than authorizing decryption in the abstract, SUDP
+authorizes a specific secret-backed operation together with its
+redemption binding and validity conditions. A well-formed
+authorization object encodes three aspects: (i)authorization
+semantics: what is approved; (ii)redemption binding: who
+may redeem and, if extracting, who receives; and (iii)validity
+constraints: how long the authorization is valid and how it
+resists replay and substitution. Each component corresponds to
+a distinct security obligation: the semantics must be reviewable
+at U, the binding must resist substitution, and the validity must
+resist replay. Freshness is supplied by the Phase II freshness
+token r (§V-F) rather than carried inside o; o commits to r
+implicitly through the Phase II binding.
+Definition 4 (Authorized operation).Anauthorized operation
+is a canonical protocol tuple
+o:= (act,bind,valid),
+where act:= (type,target,scope) , bind:=
+(redeemer,recipient) , and valid:= (expiry,multiplicity) .
+Here type specifies the semantic class of the secret-backed
+action (e.g., use, export, write, rotate, enroll, revoke); target
+identifies the protected object; scope carries canonicalized
+operation-specific constraints; redeemer identifies the party
+entitled to redeem; recipient identifies the intended recipient
+of any extracting delivery; expiry bounds the validity window;
+and multiplicity∈Z + ∪ {∞} sets the grant’s execution
+budget: T admits at most multiplicity Phase III executions
+under the grant before expiry; 1 consumes the grant at first
+redemption (high-authority transaction-style actions), and ∞
+yields astanding grant( U-declared low-risk repeat patterns
+such as inbox reads). Freshness for the Phase II verification
+is enforced separately, via the single-use token r issued at
+Phase II.1 and consumed at Phase II.3.
+We reserve specific terms: agrant G is the protocol artifact
+representing U’s authorization ofo; it commits to o and conveys
+for redemption both the authorization signature and the acting
+credential’s wrapping key (the full structure is in § V-F). The
+wrapping key is secret: G is therefore not a public bearer
+token, and the U→T leg carrying it requires end-to-end
+confidentiality. Aredeemed grant ρ is G’s custodian-internal
+post-validation form. SUDP binds G and ρ to the same β
+commitment in Phase II so that the artifact T redeems matches
+the oneUauthorized.
+SUDP’s cryptographic binding attaches to the canonical
+bytes of o. Two deployment obligations anchor those bytes at
+the endpoints of the authorization; A V and OB hold when both
+are met.
+a) Render at U.: Render(o) is deterministic, complete,
+and confined to U’s trusted client, so U approves exactly what
+H(o)commits.
+b) Execution at E.:The action performed at E is a
+deterministic function of o, the material T unwraps, and any
+auxiliary content that o commits by hash. No authority-relevant
+input enters betweenU’s authorization and the action.
+D. Cryptographic Primitives
+We fix primitive interfaces here; concrete algorithm choices
+appear in §VII.
+•H: collision-resistant hash.
+•KDF(ikm;salt,info) : HKDF-style extract-then-expand
+with explicit domain separation ininfo.
+•(Enc,Dec) , c←Enc k(m;ad) : IND-CCA AEAD with
+associated-data authentication.
+•(Sig,Vrfy): EUF-CMA secure.
+•(Encap,Decap): IND-CCA2 secure.
+5
+
+[PDF_PAGE 6]
+•CSPRNG: cryptographically secure randomness source.
+•(Wrap,Unwrap) , E←Wrap W (K): key-wrap interface
+specialized to key material.
+•PRF c: authenticator-bound pseudo-random function, invoked
+only inside the moduleAut c (specified below).
+The Wrap interface binds wrapping context through the
+derivation of W rather than through a separate parameter:
+because W is produced by a domain-separated KDF keyed to
+the credential, salt, and version (§ V-B), any attempt to unwrap
+under a W derived from different context material fails by
+construction, and the interface accommodates both associated-
+data-free wrap constructions (such as AES-KW/KWP) and
+AEAD-as-wrap profiles that additionally authenticate the same
+domain-separation labels.
+a) Authenticator module Aut c.:Each authorizer-side
+credential c is modeled as a tamper-resistant module Aut c
+with non-extractable internal keys. Under a single U-verified
+invocation, Aut c produces one signature σ←Sig sk c(µ) over
+an externally supplied challenge µ, and evaluates PRFc on
+one or more caller-supplied salts ηi, returning the outputs
+yi ←PRF c(ηi). The number of PRF evaluations admissible per
+invocation is a parameter of Aut c’s interface; the rotation-class
+operations of § V-G require at least two. The signing key and
+the PRF key never leave the module. Enrollment releases public
+material (cid c,pk c). Every info or ad argument carrying a
+domain-separation label DS⋆ uses a stable, context-disjoint
+string; labels are pairwise disjoint and no label is ever reused.
+The protocol equations explicitly name DSbind and DSwrap;
+concrete profiles may use additional disjoint labels for sealing,
+delivery, and transport without affecting the abstract contract.
+b) Canonical serialization.: H(o) presumes a determin-
+istic encoding of the structured value o that is also identical
+at U and T . A concrete profile must fix this serialization (for
+instance, a canonical CBOR or RFC 8785 JCS encoding of
+the (act,bind,valid) fields) and enforce it at both endpoints.
+Ambiguity in the encoding can defeat operation binding without
+violating collision resistance of H: two semantically distinct
+descriptors may serialize to the same bytes (so that an adversary
+substitutes o′ ̸=o with the same H-input), or the same
+descriptor may serialize differently at U and T (so that U
+authorizes an operation whose canonical form at T differs
+from the one Render presented at authorization time). Both
+failures collapse OB regardless of H’s strength. The specific
+serialization is a profile parameter, not a protocol choice.
+Pairwise communication runs over a pre-established au-
+thenticated channel; transport is assumed, not re-specified.
+Confidentiality is required on the U→T leg (which carries
+W ⋆) and on the final response leg (which may carry the delivery
+artifact π or a use-result ρout). This requirement is on the
+logical U→T leg end-to-end and is not in general satisfied by
+hop-by-hop transport security; a deployment with a plaintext-
+inspecting intermediary between U and T must supply end-to-
+end confidentiality at the application layer (§ VII-B). Integrity
+is required on every leg. The T→U conveyance (Phase II.1)
+carries only public material (o, r,{(cid c, ηc)}) and does not
+require confidentiality; its only protection need is against denial-
+of-service tampering, which is detected at redemption through
+the signature onβ.
+E. Phase I: Setup
+Setup initializes the persistent cryptographic state required
+by the remaining phases. Its structural outcome is that, after
+the setup phase completes and transient values are erased, no
+persistent state held by any single party contains both K and
+any wrapping key Wc, and every enrolled credential is on an
+independent authorization path to K. The requester R is not
+involved.
+a) I.1 Credential enrollment.: U registers one or more
+authenticator credentials with T . Each credential creation
+generates Aut c’s internal PRF key and signing key (neither
+of which ever leaves the module) and releases a credential
+identifiercid c together with the public verification keypk c:
+(cid c,pk c)←Enroll(Aut c).
+T records the registration map Reg:={cid c 7→pk c}c∈Creds,
+which Phase II.3 will use to verify authorization evidence.
+b) I.2 Protected-state sealing.: T generates a fresh state-
+encryption key and seals the initial protected state:
+K
+$
+←CSPRNG, C←Enc K(M0;ver).
+For each enrolled credential c, U and T jointly derive a
+credential-specific wrapping key through a single U-verified
+invocation of Aut c. The authenticator evaluates its PRF under
+a freshly sampled salt ηc to produce yc; U derives the wrapping
+key Wc and transmits it to T , which produces the wrapped
+entry[K] c:
+ηc
+$
+←CSPRNG, y c ←PRF c(ηc),
+Wc ←KDF(y c;η c,DS wrap ∥cid c ∥ver),
+[K] c ←Wrap Wc(K).
+The authenticator-internal PRF key never leaves Aut c; only
+Wc crosses the U→T channel, and is zeroized at T once [K] c
+is persisted. The domain-separation info binds cid c and ver,
+so derivations for distinct credentials and distinct wrapping
+epochs remain independent even when the same authenticator
+hosts several credentials.
+c) I.3 Freshness state.: T initializes a bounded single-use
+pool S of freshness tokens (r, τr). Each token is issued and
+consumed exactly once in Phase II and has short lifetime τr
+(on the order of minutes), which bounds the set of outstanding
+authorizations.
+d) I.4 Output.:Phase I leaves the persistent state
+Σ0 :=
+ 
+C,{(cid c, ηc,[K] c)}c∈Creds,Reg,ver
+
+.
+Two invariants close the phase.Persistent-state separation:after
+transient values from I.2 are zeroized, no persistent state held
+by any party contains both K and any Wc; U’s client stores
+no extractable persistent key material, the authenticator retains
+non-extractable credential keys, and Σ0 alone is insufficient
+for plaintext recovery of M0.Uniform recoverability:every
+6
+
+[PDF_PAGE 7]
+RequesterR AuthorizerU CustodianT EnvE
+II.1 request authorization foro
+(o, r,{(cidc, ηc)})
+II.2
+β:=H(DSbind∥r∥H(o));
+invokeAut; with responding credentialc⋆:
+σ⋆ ←Sigskc⋆(β)
+W⋆ ←KDF(PRFc⋆(ηc⋆);ηc⋆,DSwrap∥cidc⋆∥ver)
+(o, r,cidc⋆,W⋆, σ⋆,opt)
+II.3
+consumerfromS;
+recomputeβ′, verifyVrfypkc⋆(β′, σ⋆) = 1;
+confirmo.bind.redeemer=Tid, expiry
+Phase III K←UnwrapW⋆([K]c⋆);M←DecK(C);
+so ←M[o.act.target]
+III.1use
+III.2export
+III.3lifecycle
+execute(o;so)resultρout
+π=KEMSeal(pkrcp, so)
+too.bind.recipient
+update sealed stateΣ
+Fig. 4. End-to-end SUDP flow across requester R, authorizer U, custodian T , and environment E. Phase II issues a U-signed grant G committing to o;
+Phase III unwraps K with W ⋆ and dispatches on o.act.type touse,export, orlifecycle. The U→T leg carries W ⋆ under confidentiality. Solid arrows
+carry messages, dashed arrows return results, and shaded boxes are internal computation.
+enrolled credential c can reach K via one U-verified invocation
+ofAut c together withΣ 0 alone.
+F . Phase II: Authorization Grant
+The grant phase converts an authorization decision into a
+U-signed grant G that commits cryptographically to o; T ’s
+post-validation record of G is the redeemed grant ρ (Figure 4).
+a) II.1 Grant request.: R initiates by requesting authoriza-
+tion for o= (act,bind,valid) , with bind.redeemer=T and,
+for extracting operations, bind.recipient set to the intended
+recipient’s public key. The descriptor o is the cryptographic
+contract between T and U: T binds to H(o) in the channel
+binding β, and U reviews Render(o) before signing. T issues
+a fresh freshness token r
+$
+←CSPRNG , stores (r, τr) in S,
+and prepares the conveyance payload (o, r,{(cid c, ηc)}c∈Creds).
+The (cid c, ηc) entries are public; U needs them to invoke the
+correct authenticator. The T→U conveyance is a logical
+authenticated channel; its realization is a deployment dimension
+(§VI). Confidentiality is not required on this leg: o is not
+sensitive, and any in-transit substitution will be detected at
+redemption against the signature on β (II.4). In direct execution
+(R=U), the conveyance collapses into the same session.
+b) II.2 Authorizer signing.: U renders o inside its trusted
+boundary and decides whether to approve. On approval, U
+selects an acting credential c⋆ ∈Creds and, in a single U-
+verified invocation of Aut c⋆, produces a signature over β and
+a PRF-derived value forη c⋆.
+Operation- and freshness-bound assertion. U computes the
+binding
+β:=H(DS bind ∥r∥H(o)),
+passesβtoAut c⋆ as the signing challenge, and obtains
+σ⋆ ←Sig sk c⋆ (β).
+The binding β commits to the session (via r), the domain-
+separated context label, and the operation (via H(o)): any
+change to o between II.2 and II.3 causes the β′ recomputed at
+redemption to diverge from theβsigned intoσ ⋆.
+Derived wrapping material.The same invocation evaluates
+Aut c⋆’s PRF and derives the per-credential wrapping key for
+c⋆:
+y⋆ :=PRF c⋆(ηc⋆),
+W ⋆ ←KDF(y ⋆;η c⋆ ,DS wrap ∥cid c⋆ ∥ver).
+For rotation-class operations (§ V-G), U additionally samples
+a fresh next-salt ηnext
+c⋆ , places it inside o.act.scope so that β
+commits to it via H(o), and derives W ⋆
+next analogously from
+PRFc⋆(ηnext
+c⋆ ) in the same invocation ( Aut c⋆ admits two PRF
+evaluations per invocation, §V-D).
+Utransmits the grant
+G:= (o, r,cid c⋆ , W ⋆, σ ⋆,opt),
+to T over an end-to-end authenticated and confidential channel;
+here opt= (W ⋆
+next) appears only for rotation-class o. Channel
+confidentiality is required end-to-end on this leg: any party
+that observes W ⋆ can unwrap [K] c⋆, and the confidentiality
+of W ⋆ is not protected by the signature. The realization may
+be a direct U→T session or an opaque relay through any
+intermediary (including R) under the cross-device envelope of
+§VII-B, which keeps W ⋆ hidden from the relay; the two carrier
+topologies are catalogued in § A-0g. The asymmetry between
+the T→U conveyance (public payload, no confidentiality
+needed) and the U→T transmission (carries W ⋆, end-to-end
+confidentiality required) is a security-critical part of the channel
+model.
+c) II.3 Grant redemption.:On receipt ofG,Tvalidates
+the grant by:
+1. consume(r,·)fromS(reject if absent or expired);
+2. check o.valid.expiry, o.bind.redeemer, and act-specific
+shape conditions (rotation-class operations require W ⋆
+next
+in opt and multiplicity= 1 ; extracting operations require
+o.bind.recipient);
+3. recomputeβ ′ :=H(DS bind ∥r∥H(o))from the receivedo;
+4. verifyVrfy Reg[cid c⋆](β′, σ⋆) = 1.
+r is consumed regardless of which step fails, preventing reuse of
+the same freshness token. As standard hygiene against timing
+7
+
+[PDF_PAGE 8]
+custodianTboundary
+input:ρ,Σ,o
+III.0 unwrapK; selectso:=M[o.act.target]
+III.1use III.2export III.3lifecycle
+ρout=Release(o)TpresentssotoE;Rgets only the response
+sealedπopens only underskrcp
+committedΣ′
+Krotated;ηc⋆advanced
+Fig. 5. Phase III dispatch inside the custodian T boundary. III.0 unwraps
+K and selects the authority-bearing service secret so :=M[o.act.target] ;
+dispatch on o.act.type then selects the consumption mode.Use: T may present
+so to E’s native interface but never to R; R receives only Release(o) =ρ out.
+Export: T emits a sealed delivery π that opens only under sk rcp.Lifecycle:
+T commits a new sealed state Σ′ with rotated K and advanced authenticator-
+credential salt ηc⋆ . In all three modes, reusable authority never crosses the T
+boundary towardR.
+side channels, the comparison inside Vrfy is performed in
+constant time. On success,Temits the redeemed grant
+ρ:= (o,cid c⋆ , W ⋆,opt).
+ρ is custodian-internal: R never sees it. r’s single-use con-
+sumption at II.3 prevents the same (o, r, σ⋆) triple from being
+re-redeemed; ρ’s Phase III lifecycle is governed by o.valid
+(§V-C).
+d) II.4 Anti-substitution.:Substitution, tampering, or
+injection of a modified o′ between approval and redemption
+changes β′ and fails verification at II.3 under EUF-CMA of
+Sig; together with the trusted rendering of Render(o) inside
+U’s boundary, this ensures the o that T validates is the o that
+Ureviewed.
+e) Batch extension.:The grant generalizes from a single
+operation to an ordered list ops:= (o 1, . . . , on) authorized
+under one signature by substituting H(ops) for H(o) in the
+binding,
+β:=H(DS bind ∥r∥H(ops)),
+where H(ops) is computed over a canonical concatenation of
+the oi. U’s trusted rendering obligation extends to Render(ops)
+as a single decision surface, and T validates each oi under
+the II.3 obligations. The single-operation case is the n= 1
+instance; the cryptographic core, redemption sequence, and
+security properties are unchanged.
+G. Phase III: Consumption
+Consumption executes o against the sealed persistent state
+under ρ, in a form determined by o.act.type. SUDP distin-
+guishes three semantic cases of Phase III (not deployment
+APIs):non-extracting use(III.1) spends the secret inside T
+and releases only the authorized result form to R;recipient-
+protected export(III.2) releases protected material only to the
+recipient named in o.bind and is ASU-preserving only when
+that recipient lies outside R’s trust boundary; andstate-update
+/ lifecycleoperations (III.3) mutate protected state and are
+coupled to rotation. All three begin with the same access step
+(Figure 5).
+a) III.0 Access to protected state.:We write so :=
+M[o.act.target] for the authority-bearing service secret selected
+by an accepted operation (e.g., the API key, OAuth token, or
+signing key referenced by o.act.target); so is the only secret
+T materializes for o, and the symbol s (Definition 1) is its
+abstract counterpart. Given ρ, T uses the acting credential’s
+wrapping key W ⋆ carried in ρ to unwrap K, decrypts M, and
+selectss o:
+K←Unwrap W ⋆([K] c⋆), M←Dec K(C).
+The Unwrap succeeds only under the W ⋆ bound to the
+matching salt, credential identifier, and version at Phase I.2; the
+Dec call binds its AEAD associated data to the protected-state
+context; any failure aborts the phase without releasing plaintext.
+ρ’s lifetime in S is governed by o.valid (§V-C). On success,
+T holds K and M within its trusted execution boundary and
+dispatches ono.act.type.
+b) III.1 Non-extracting consumption ( type=use ).: T
+applies the authorized action to M inside its own boundary
+and never releases secret material from M to R. We write
+Release(o) =ρ out for the result form returned to R. The pro-
+tocol guarantees that Release(o) contains no plaintext element
+of M; the substantive content of Release(o) is released under
+o.act.scope, since the downstream environment’s response may
+itself carry sensitive or authority-amplified data. For signing
+operations specifically, the scope must bind the exact message
+or transaction digest, the intended verifier/domain/audience,
+and the replay domain, so that a Release(o) signature is not
+usable outside the authorized context.
+c) III.2 Recipient-protected extracting delivery ( type=
+export).:Some operations inherently require extraction: mi-
+grating a secret between devices, provisioning a downstream
+service, or handing off to a specialized sub-agent. SUDP admits
+these under the constraint that the extracted value leaves T only
+in a form cryptographically protected for a named recipient.
+For ASU-preserving execution, a well-formed export operation
+requires bind.recipient to denote a party outside R’s trust
+boundary; if U authorizes an export with bind.recipient=R ,
+the operation is a deliberate ownership-transfer that falls outside
+SUDP’s CRC and ASU non-disclosure guarantees and must
+be surfaced as such at authorization time. Given pk rcp from
+o.bind, T uses a key-encapsulation mechanism to produce an
+ephemeral encapsulated key, derives a delivery key bound to
+the specific operation viaH(o), and seals the target:
+(Kd,ct d)←Encap(pk rcp),
+kd ←KDF(K d;⊥,H(o)),
+δ←Enc kd(so;H(o)).
+T emits the delivery artifact π:= (ct d, δ); we abbreviate this
+sealing asπ=KEMSeal(pk rcp, s o). Only the holder ofsk rcp
+can Decap to recover Kd, rederive kd, and open δ. Binding both
+the KDF info and the AEAD associated data to H(o) prevents
+an adversary from substituting a captured π into the transcript
+of a different authorized operation: any such substitution would
+change H(o) and fail the AEAD integrity check. When the
+8
+
+[PDF_PAGE 9]
+recipient is a third party, R may act as a relay and gains no
+additional capability because π transits R only in sealed form.
+d) III.3 State-update / lifecycle consumption ( type∈
+{write,rotate,enroll,revoke} ).:Operations that mutate M
+(writes, pure K-rotations, and lifecycle events such as credential
+enrollment or revocation) are structurally coupled to key
+rotation. A single consumption applies o to M to obtain M ′,
+samples a fresh state key K ′ under which M ′ is re-sealed, and
+replaces the acting credential’s wrapping material using W ⋆
+next
+carried inopt:
+K ′ $
+←CSPRNG,
+C ′ ←Enc K′(M ′;ver),
+E′
+c⋆ ←Wrap W ⋆
+next
+(K ′).
+The update must be atomic as a protocol invariant: either
+(C,{[K] c}) is replaced by (C ′,{E ′
+c}) in its entirety or neither
+is written. As an implementation requirement for atomicity,
+the new wrapping material {E′
+c} must be persisted durably
+before the old entries are retired; any crash between the two
+steps must leave the old (C,{[K] c}) recoverable, never a state
+in which both sides have been partially overwritten. Violating
+this order leaves the only decryption path to K unreachable
+and produces an unrecoverable Σ. Multi-path recoverability
+requires rewrapping K ′ under each Wc for c̸=c ⋆; the structure
+of this rewrap is part of the security argument and is addressed
+in §V-H.
+H. Rotation and Forward Secrecy
+Rotation is aprotocol invariantof SUDP: every SUDP-
+conformant deployment advances both the wrapping epoch
+on every state-update and, on a deployment-defined cadence,
+the underlying authority-bearing secret at E together with
+revocation of the retired secret. The first part is enforced
+by Phase III.3 below; the second part is mandated by the
+protocol’s type=rotate operation class (Phase III.3, § V-G)
+and its compliance requirement that authority-bearing secrets
+never persist beyond their rotation epoch. This section specifies
+the wrapping-side mechanism; the authority-side cadence is a
+deployment policy parameter.
+a) Rotation triggers.:Every state-update consumption
+(III.3) generates a fresh K ′ and rotates the acting credential’s
+salt ηc⋆ →η next
+c⋆ . Two specialized rotation modes arise as
+sub-cases:
+• Rewrappreserves the authority-bearing plaintext entries
+in M but reseals state under a fresh K ′ and fresh acting-
+credential wrapping material. Its purpose is credential hy-
+giene: advancing a credential’s salt independently of write
+traffic, or migrating it to new domain-separation parameters.
+Formally, rewrap is a III.3 execution in which the non-peer
+contents of M are unchanged and the Peer[cid c] entry is
+updated as described below.
+• Full rotationrotates K and the acting credential’s W , and
+rewraps all other credentials under the same K ′. Formally,
+this is the ordinary III.3 execution with o.act.type=rotate
+andM ′ =M.
+Coupling rotation to every write tightens the wrapping-epoch
+forward-secrecy profile without introducing a new ceremony:
+any adversary who has transiently obtained pre-rotation key
+material is locked out of wrapped state produced after the next
+write. Authority-level forward secrecy additionally requires
+that retired authority-bearing secrets at E be revoked on
+the deployment’s rotation cadence; without that revocation,
+compromise of the current epoch confers the same authority as
+compromise of any prior epoch and the wrapping-side forward
+secrecy is meaningless againstE.
+b) Forward secrecy.:Let rotc⋆(t) denote the most recent
+time t′ ≤t at which credential c⋆ performed a state-update. The
+following claim is instantiated by SUDP’s per-write discipline.
+Lemma 1 (Per-authenticator-credential wrapping forward
+secrecy).For any credential c⋆ and any t′ <rot c⋆(t),
+compromise of the tuple (y(t′)
+c⋆ , W(t′)
+c⋆ ) does not enable recovery
+of K or M from Σt, under the PRF security of Aut c⋆ and of
+theKDF, and the key-wrap security ofWrap.
+Proof sketch. At rotc⋆(t), the next-salt ηnext
+c⋆ is sampled inside
+the rotation invocation from a fresh CSPRNG draw, indepen-
+dent of all prior salts. Under the PRF security of Aut c⋆,
+the PRF output on ηnext
+c⋆ is indistinguishable from random
+given any number of PRF outputs under distinct prior salts;
+hence the compromised y(t′)
+c⋆ carries no information about the
+post-rotation ynew
+c⋆ . The domain-separated KDF propagates this
+indistinguishability to W new
+c⋆ . Finally, the wrapped entry in Σt is
+under W new
+c⋆ , so no efficient adversary holding only pre-rotation
+state can unwrap.
+Lemma 1 is per-credential and activates only after a
+credential rotates; the residual gap for dormant credentials
+is catalogued as L3 in §VIII-D.
+c) Default rewrap: in-state peer map.:In multi-credential
+SUDP deployments, Phase III.3 by credential c⋆ must rewrap
+K ′ under {Wc}c̸=c⋆. The default construction adopts anin-
+state peer map
+Peer:={cid c 7→W c}c∈Creds ⊆M,
+which III.0’s decryption of C transiently exposes to T . Under
+this policy, III.3 completes by rewrapping E′
+c ←Wrap Wc(K ′)
+for eachc̸=c ⋆, updatingPeer[cid c⋆] :=W ⋆
+new, and sealing:
+Σ′ := (C ′,{(cid c, η′
+c, E′
+c)}c∈Creds,Reg,ver),
+with η′
+c⋆ =η next
+c⋆ and η′
+c =η c for c̸=c ⋆. ρ is marked
+consumed; as an implementation hardening note, T zeroizes K,
+K ′, all W values, and M after persistence. The cross-credential
+exposure entailed by the in-state peer map is catalogued as
+L4 in § VIII-D; alternative rewrap policies (all-present rotation,
+append-only catch-up chain) are discussed in §A.
+d) Lifecycle extensions: enrollment and revocation.:
+Credential addition and removal are ordinary III.3 executions
+with o.act naming the credential affected and M ′ encoding the
+change.Enrollinga credential c+ proceeds in two coupled U-
+verified invocations bundled into one operation: an enrollment
+invocation of Aut c+ that yields (cid c+ ,pk c+ , ηc+ , Wc+), and
+9
+
+[PDF_PAGE 10]
+AuthorizerU+ authenticatorAutc
+reviewso, signsβ
+CustodianT
+redeemsG, spendss
+sealed stateΣ
+EnvironmentE
+(outside protocol)
+tool runtime
+LLM
+tool call observation
+RequesterRmodel-influenced boundary grantG(cross-device)
+proposeo
+resultρout
+execute(o;s)
+Fig. 6. The agentic secret-use interface.
+the acting-credential rotation invocation of Aut c⋆ that autho-
+rizes the write. T computes [K] c+ ←Wrap Wc+ (K ′), adds
+(cid c+ , ηc+ ,[K] c+) to Σ′, and updates Peer[cid c+] :=W c+.
+Revocationremoves the target credential from Reg, from the
+wrapping set, and from Peer, and reseals M ′ under a fresh K ′.
+Neither operation requires machinery beyond what has already
+been specified.
+VI. SECRET-USEINTERFACES FORAGENTICSYSTEMS
+Applying SUDP to an agent system requires identifying the
+trust boundaries and mapping the protocol roles accordingly.
+This section describes how SUDP is applied in an LLM-based
+agent system; Figure 6 illustrates the interface.
+A. The Agentic Requester Boundary
+In an agentic system, the agent’s actions are driven by the
+output of the LLM, which is in turn shaped by whatever enters
+its context. Retrieved documents, tool outputs, and memory
+reads can carry injected instructions, and the model may
+hallucinate even on benign input; model output is thus untrusted,
+as is any component acting on it. Therefore, the requester
+boundary must enclose every component whose behavior model
+output can steer, including the LLM runtime, the tool scheduler
+and tool clients (MCP-style runtimes among them), and agent-
+visible memory. The custodian T and the authenticator Aut c
+must accordingly remain outside this boundary; hosting either
+within model-influenced code would reinstate authorization by
+exposure.
+B. Where SUDP Applies in an Agentic System
+A single criterion determines whether a call enters the SUDP
+path: its execution must exercise authority-bearing material
+(Definition 1) that U has enrolled at an external environment
+E. Calls that exercise no enrolled authority, such as a public
+web search or a local file read, pass through unmodified. The
+criterion applies at both layers of an agent’s secret use.
+a) Tool-call layer.:Tool calls reach external environments
+such as code hosts and payment rails, and meet the criterion
+whenever execution would present a credential enrolled by U,
+for instance a mailbox token or a cloud key. These calls are
+the motivating workload of the agentic specialization; § VI-C
+describes their mediation.
+b) LLM-API layer.:The agent authenticates to its model
+provider with an API key. Once U enrolls that key, it routes
+through SUDP like any other credential; since these calls are
+frequent and uniform, the authorizer will typically cover them
+with a standing grant of broad scope, which preserves the
+confidentiality properties (CRC, CSB) and avoids a ceremony
+per call.
+c) Scope.:SUDP addresses authorization integrity and
+secret confidentiality. Behavioral safety, the question of which
+operations an agent chooses to propose, is a separate concern;
+runtime monitors, policy DSLs, taint tracking, and sandboxes
+constrain proposals and compose with SUDP (§IV). The
+protocol likewise fixes the authorization mechanism while
+leaving approval policy to the deployment. The authorizer
+chooses the scope, validity window, and execution budget
+of each grant, from single-use to standing (§ V-C), and A V ,
+OB, and UB hold at every granularity. Per-request approval is
+therefore the narrowest policy setting rather than a protocol
+obligation.
+C. From Native Calls to Canonical Operations
+R needs no protocol integration. It issues the native call it
+would issue without the protocol, with an opaquecredential
+referencein place of the secret: the reference names an enrolled
+credential but confers no authority, and can therefore reside
+inside R. At the mediation boundary the call is canonicalized
+into o (target credential, method, authority-relevant fields, body
+digest) and rendered to U (§V-C); after the grant, T executes
+the accepted call with the secret substituted for the reference.
+Mediation is thus transparent to the agent: any tool capable of
+issuing its native call participates unmodified. The completeness
+condition (P1 in §VIII) fixes the canonicalization obligation:
+every field that can affect the authority exercised at E must
+be bound ino.
+VII. STANDARDCONSTRUCTION
+This section gives the standards-based cryptographic instan-
+tiation of the protocol: each abstract interface of §V is fixed
+to a standardized component. The construction introduces no
+new cryptographic assumption.
+A. Primitives
+a) Authenticator Aut c.:The abstract protocol requires a
+tamper-resistant module Aut c that (i) signs a challenge under
+user verification and (ii) emits an authenticator-bound pseudo-
+random value scoped per credential. We instantiate Aut c with
+WebAuthn credentials using the PRF extension [19, 20].
+The abstract σ←Sig sk c(β) interface is realized by a
+WebAuthnassertionproduced with challenge =β , using
+ES256/P-256 as the profile-selected COSE signing algorithm.
+The corresponding Vrfy check covers the assertion signature to-
+gether with the assertion’s rpId hash, origin, user-verification
+flag, and credential-ID binding; a signature-verification success
+without these structural checks does not satisfy the Sig interface
+in this profile.
+10
+
+[PDF_PAGE 11]
+The authenticator-bound pseudo-random value is real-
+ized by the WebAuthn PRF extension, backed by CTAP
+hmac-secret where available, with a per-credential salt;
+credentials or assertions whose response does not contain
+the PRF output are rejected by the profile. Two compliance
+implications follow: (a) binding PRF output to a passkey means
+deletion of the passkey implies loss of access to any data
+encrypted under the derived key; (b) per-credential PRF salts
+support domain separation across credentials.
+b) Key derivation.:The abstract protocol requires a
+KDF that supports extract-then-expand semantics and domain
+separation. We instantiate KDF with HKDF-SHA-256 [ 21],
+following NIST SP 800-56C key-derivation guidance [ 77].
+Domain separation is achieved by encoding a disjoint DS⋆
+label in the info argument of each derivation; this is sufficient
+to ensure that distinct derivations produce independent keys
+under the hash-function random-oracle idealization.
+c) Sealing and key wrapping.: Enc/Dec is instantiated
+with a standard AEAD scheme such as AES-GCM [ 78]
+or ChaCha20-Poly1305 [ 79], including its extended-nonce
+XChaCha20 variant [ 80]; profiles must enforce nonce unique-
+ness/freshness required by the selected AEAD. The AEAD’s
+associated-data input carries the DS⋆ label together with the
+version identifier ver. For (Wrap,Unwrap) , SUDP binds
+wrapping context through the derivation of W rather than
+through an explicit parameter to Wrap. Because Wc ←
+KDF(yc;η c,DS wrap ∥cid c ∥ver) already embeds the creden-
+tial identifier, salt, and version (§ V-B), the interface can be
+instantiated directly as AES-KW/KWP [ 22–24] wrapping K
+under Wc without associated data. Profiles that prefer AEAD-as-
+wrap may additionally authenticate the same domain-separation
+labels as associated data, yielding the same abstract contract.
+d) Recipient-protected export.:For Phase III.2, the ab-
+stract protocol requires a KEM that admits a recipient-specific
+encapsulation. We instantiate (Encap,Decap) with HPKE [ 25]
+rather than an ECIES-style construction such as DHIES [ 81]:
+HPKE provides a standardized hybrid encryption interface
+with clear security properties and parameter choices, and it
+composes cleanly with HKDF-based domain-separation labels.
+e) Transport.:Pairwise communication runs over
+TLS 1.3 [ 26]. TLS supplies the authenticated and confidential
+channel assumed by Phase II on the U→T leg, not a
+cryptographic layer we extend. Neither TLS session keys
+nor TLS peer identities enter the protocol’s cryptographic
+commitments: all protocol-level binding is at the application
+layer. When U and T do not share a live TLS session,
+Phase II’s channel assumptions are realized by the cross-device
+HPKE profile of § VII-B. The same profile applies end-to-end
+whenever a plaintext-inspecting intermediary, such as an L7
+proxy or a TLS-terminating load balancer, sits between U
+and T , since hop-by-hop TLS does not realize the U→T
+confidentiality assumption (§V-D).
+The grant G itself is a sender-constrained authorization token
+in the sense of DPoP [ 18], with σ⋆ binding operation and
+freshness to the acting credential. Table II maps each abstract
+cryptographic primitive of §V-D to its concrete realization.
+TABLE II
+SUDPCRYPTOGRAPHIC PROFILE:ABSTRACT PRIMITIVE INTERFACES AND
+THEIR STANDARD-COMPONENT INSTANTIATIONS.
+Abstract primitive Realization Reference
+Tamper-resistant module
+Autc;U-verifiedSig,
+PRF
+WebAuthn with PRF extension;
+ES256/P-256 in this profile
+[19, 20]
+HashHSHA-256 n/a
+KDF
+(extract-and-expand,
+domain separation)
+HKDF-SHA-256 [21, 77]
+AEADEnc/DecAES-GCM or
+(X)ChaCha20-Poly1305
+[78–80]
+Key wrap
+Wrap/Unwrap
+AES-KW / AES-KWP (or
+AEAD-as-wrap)
+[22–24]
+KEMEncap/DecapHPKE (DHKEM-P256 /
+HKDF-SHA-256 / AEAD)
+[25]
+B. Cross-Device Channel via HPKE
+When U and T do not share a live TLS session (the agent
+runs on hosted infrastructure while U is on a phone, for
+example), Phase II’s channel assumptions (authenticity and
+confidentiality) must be realized by an alternative transport.
+This profile is transport-only: it does not modify the abstract
+Phase II grant (§V-F); it only provides a confidential channel
+that deliversGintact fromUtoT.
+Authenticity of pkT is required.Confidentiality of W ⋆
+(carried inside G) is security-critical: any party that observes
+W ⋆ can directly unwrap [K] c⋆ from Σ and decrypt M. Without
+an authentic pkT , HPKE Base admits an active man-in-the-
+middle: an adversary substituting its own pkM for pkT causes
+U to seal G to a key the adversary holds. U must therefore
+verify that pkT belongs to the intended custodian. A concrete
+profile may obtain this authenticity through a signature on
+pkT under a long-term T -instance key provisioned to U’s
+trusted client at registration; through binding pkT to an
+authenticated session with the orchestration service that issued
+the cross-device link, which requires trusting that service
+for custodian-key binding; through an out-of-band channel
+integrity-protected against substitution, such as a QR code
+on a console authenticated to U [82]; or through a mutually
+authenticated PAKE.
+Construction.Given an authentic pkT , U seals the abstract
+grant G= (o, r,cid c⋆ , W ⋆, σ ⋆,opt) to T using HPKE Base
+mode [25]:
+(enc,ct G)←HPKE.SealBase
+ 
+pkT ,info, ε, G
+
+,
+with info=DS xd ∥r binding the freshness token into
+HPKE’s key schedule (empty AAD). U transmits (enc,ct G)
+to T as a CBOR envelope or equivalent, and T recovers
+G←HPKE.OpenBase(sk T ,enc,info, ε,ct G) before run-
+ning Phase II.3 redemption againstσ ⋆ andβunchanged.
+Under (A2, A5), HPKE Base provides IND-CCA2 sealed
+delivery to pkT ; the info-bound r commits the channel to the
+freshness token, complementing the protocol-level single-use
+consumption of r at Phase II.3. The channel does not supply
+authorization, which remains σ⋆ inside G: a relay that captures
+11
+
+[PDF_PAGE 12]
+TABLE III
+PER-OPERATION LATENCY OVER LOOPBACKHTTP (MEAN±STD, 100
+ITERATIONS AFTER WARMUP;SOFTWARE-EMULATED AUTHENTICATOR).
+Operation Latency [ms]
+Direct bearer call (baseline)0.45±0.23
+II.1 proposal and freshness issuance0.54±0.46
+II.2 binding and signing (authorizer side)0.15±0.15
+II.3+III.1 redemption and use0.52±0.19
+End-to-end mediated call1.21±0.61
+(enc,ct G) cannot reuse it because r is consumed at T on first
+redemption (step 1), and substitution of o inside G fails σ⋆
+verification (step 3). Under the authenticity precondition on
+pkT , the profile does not require a live TLS tunnel between
+UandT.
+C. Implementation and Evaluation
+The reference implementation accompanying this paper
+implements the three protocol roles: a custodian library in
+Rust (about 4,500 lines) covering sealed-state management,
+grant validation, and consumption, and authorizer and requester
+libraries in TypeScript (about 1,600 lines) covering authentica-
+tor invocation and grant composition, exercised by conformance
+and protocol-flow test suites. The custodian realizes the profile
+of §VII-A with XChaCha20-Poly1305 sealing and HKDF-SHA-
+256 derivation. An end-to-end demonstration runs Phases I–III
+across separate custodian and requester processes.
+a) Microbenchmark.:Table III reports per-operation la-
+tency measured by the artifact’s benchmark harness (Intel Xeon
+Platinum 8581C, loopback). A fully mediated call completes
+in 1.21 ms and adds 0.76 ms over a direct bearer-authenticated
+call on the same HTTP stack; under a standing grant (§ V-C),
+the recurring per-call cost is bounded by the redemption-and-
+use leg (0.52 ms). The grant request carries 509 B more than
+the direct call. The authenticator is emulated in software,
+so real WebAuthn authenticator and user-interaction latency
+is excluded; custodian-side cryptography runs the reference
+library. Protocol overhead is thus negligible against network
+and ceremony latency.
+VIII. SECURITYANALYSIS
+We state SUDP’s security as one main theorem over explicit
+assumptions and three interface preconditions (§ VIII-A), dis-
+charged by five propositions; Appendix B defines the security
+games, proves each proposition by reduction, and gives the axis-
+coverage table (Table V). Mechanized analysis (Tamarin [ 83],
+ProVerif [84]) is left to future work.
+A. Assumptions and Interface Preconditions
+a) Assumptions.:
+(A1)EUF-CMA security of the signature schemeSig.
+(A2) Authenticated-encryption security of the AEAD scheme
+and key-wrap security of(Wrap,Unwrap).
+(A3) PRF security of the authenticator Aut c (WebAuthn PRF
+extension) and of theKDF.
+(A4) Collision resistance of H combined with deterministic,
+injective canonical serialization ofo.
+(A5)IND-CCA2 security of the KEM (HPKE).
+(A6) Authenticated and confidential channel U→T for the
+Phase I setup legs (credential enrollment and Wc trans-
+port) and for the Phase II leg carrying W ⋆ (TLS 1.3, or
+the cross-device profile of §VII-B under its authenticated-
+key precondition).
+(A7) Single-use freshness-state integrity at T : r is consumed
+exactly once, and S, including the redeemed-grant record
+ρ, is not adversarially modified between issuance and
+the end of the grant’s validity window (no T memory
+compromise during this interval).
+(A8) (Conditional, used only by Proposition 5.) E supports
+rotation and revocation of authority-bearing secrets on
+the deployment’s rotation cadence.
+(A9) Runtime hygiene at T : fresh draws are CSPRNG-quality,
+and retired epoch keys ( K, W ⋆, peer wrapping keys)
+are erased after every wrap-epoch advance (§V-H).
+(A10) (Conditional, used only by the in-state peer map of
+§V-H.) Key-dependent-message security [ 85, 86] of
+(Enc,Wrap) for that policy’s key cycle (Appendix B-D).
+b) Interface preconditions.:
+(P1) Canonical Operation Completeness.Every authority-
+relevant field of the action exercised at E is represented
+ino.act.scope,o.bind, oro.valid(§V-C).
+(P2) Trusted Rendering Faithfulness. Render(o) at U is deter-
+ministic, complete with respect to the fields in o, and
+produced insideU’s trusted client (§V-C).
+(P3) Execution Determinism.The native call performed at
+E by T is a deterministic function of accepted o,
+the protected material released inside T , and any o-
+committed payload; R cannot supply authority-relevant
+fields after redemption (§V-C).
+B. Main Theorem
+Theorem 1 (SUDP solves the Agent Secret Use problem).
+Under (A1–A7, A9) and interface preconditions (P1–P3),
+SUDPenforces the four core security properties of § III-C: AV ,
+OB, UB, and CRC. By the criterion of § III-C,SUDPtherefore
+solves the Agent Secret Use problem (Definition 3) against the
+baseline adversary(A R,A net)of §III-B. Concretely:
+1) Every Phase III execution admitted by T is covered by a
+fresh, U-rooted, operation-bound, use-bounded grant (AV ,
+OB, UB);
+2) For ASU-preserving operations (§V-G), R’s view across all
+sessions consists of public proposal material, Release(o),
+and recipient-sealed deliveries π, and contains no artifact
+that confers reusable authority (CRC).
+SUDPadditionally satisfies CSB under (A2, A3) and RFS-wrap
+under (A2, A3, A9), each plus (A10) under the in-state peer
+map; authority-level forward secrecy (RFS-auth) holds under
+the further assumption (A8). Runtime-memory confidentiality
+of T during the unwrap-use-zeroize window (CMC) is out of
+12
+
+[PDF_PAGE 13]
+scope; it is the natural composition target for TEE-backed
+custodians.
+C. Supporting Propositions
+Proposition 1 (Authorization Integrity: A V ∧ OB ∧ UB).
+Under (A1, A4, A6, A7) and (P1–P3), every Phase III
+execution that T admits carries a signature σ⋆ verifiable
+as a U-rooted authenticator assertion under Reg[cid c⋆] over
+β=H(DS bind ∥r∥H(o)) (AV); no valid grant admits any
+o′ ̸≡E o (OB); and every Phase III execution stays within the
+boundso.valid= (expiry,multiplicity)signed byσ ⋆ (UB).
+Proposition 2 (Secret Confidentiality: CRC ∧ CSB).In
+the trust model of § III-A: under (A2, A3, A6), for ASU-
+preserving operations (§ V-G), R’s view across all sessions
+is bounded by public proposal material, the authorized result
+form Release(o), and sealed deliveries π (Proposition 3); it
+contains no value from which s, K, Wc, or so can be recovered
+(CRC). Independently, under (A2, A3; A10 for the in-state peer
+map), an adversary obtaining the full persistent state Σ without
+a liveU-verifiedAut c invocation cannot recoverM(CSB).
+Proposition 3 (Recipient-Protected Export).Given an ac-
+cepted operation o satisfying Proposition 1, and under (A5, A2),
+for any ASU-preserving Phase III.2 execution (a well-formed
+o whose bind.recipient identifies a principal outside R’s trust
+boundary), the delivery π reveals nothing about so to any party
+other than the holder ofsk rcp.
+Proposition 4 (Wrapping-Epoch Key Isolation).Under (A2,
+A3, A9; A10 for the in-state peer map), a Phase III.3 update
+yields wrapping-epoch key isolation: the post-rotation keys
+(K ′, W ⋆
+new) are computationally independent of the pre-rotation
+keys (K, Wc⋆); compromise of one epoch’s keys yields neither
+the other epoch’s keys nor its retained ciphertexts.
+a) Plaintext caveat.:Wrapping-epoch key isolation does
+not by itself protect plaintext carried forward across rotations.
+The rewrap and pure-rotate sub-cases of Phase III.3 explicitly
+preserve M ′ =M (§V-H), so an adversary who decrypts
+either epoch’s ciphertext recovers the same M. Plaintext-level
+forward secrecy of authority-bearing material requires either
+(i) a Phase III.3 update that retires the prior secret in M, or
+(ii) composition with E-side authority rotation (Proposition 5).
+Proposition 5 (Authority-Level Forward Secrecy under
+E-side rotation).Under (A8) and the assumptions of Proposi-
+tion 4, compromise of one epoch’s authority-bearing secret at
+Econfers no authority over operations in any other epoch.
+D. Residual Limitations
+Five residual limitations (L1–L5) are explicit in the design.
+(L1) Runtime compromise during consumption.A fully com-
+promised T runtime during legitimate consumption exfiltrates
+plaintext by construction: III.0 materializes K and M inside
+T ’s memory, and no protocol-level mechanism prevents code
+executing inside T from reading them. Composition with
+confidential-computing runtimes is the natural remediation;
+zeroizing K, W ⋆, and derived plaintext immediately after use
+narrows the window.
+(L2) Authenticator compromise.A fully compromised au-
+thenticator Aut c⋆ reduces Phase II.2 to adversary-controlled
+authorization; authenticator security (A3) is an assumption, not
+a protocol-level property.
+(L3) Dormant-credential forward-secrecy gap.Lemma 1’s
+forward secrecy is per-credential and activates only after a
+credential rotates. A credential that is registered but never
+participates in a state-update retains its initial salt indefinitely;
+historical PRF capture remains useful against its wrapping entry
+until the credential is exercised. This is intrinsic to any-of- N
+authorization without a global ceremony; deployments should
+drive scheduled rewraps for dormant credentials (§V-H).
+(L4) Peer-map cross-credential exposure.Under the in-state
+peer-map construction, Phase III.0 by any credential transiently
+exposes the current {Wc}c∈Creds to T ; a captured Wc′ con-
+tinues to unwrap subsequent rewraps until c′ itself rotates.
+Deployments requiring stronger cross-credential isolation may
+substitute the all-present alternative of §V-H.
+(L5) Authorization is bounded by U’s judgment.SUDP
+enforces the operations U signs; a dangerous but correctly
+rendered descriptor approved by U is executed. The semantic
+content of a conformant Release(o) is similarly a deployment-
+policy concern outside protocol scope.
+IX. CONCLUSION
+Agents that act autonomously on a user’s behalf must be
+able to use the user’s secrets without ever gaining reusable
+authority over them. We formalize this as theAgent Secret Use
+problem and decompose it into seven security properties (A V ,
+OB, UB for authorization integrity; CRC, CSB, CMC, RFS
+for secret confidentiality).
+SUDP solves the problem by fusing authorization and access
+in a single authenticator ceremony: the invocation that signs
+the operation-bound grant is the same one that releases the key
+material unwrapping the secret, so no execution path reaches the
+secret without a reviewed operation. Six of the seven properties
+hold natively under standard cryptographic assumptions; the
+seventh, CMC, is closed by composition with a hardware-
+rooted runtime. Instantiated with commodity passkeys and
+standard primitives, the reference implementation adds sub-
+millisecond overhead per mediated call. In an LLM-based
+agent, the protocol mediates a call exactly when its execution
+would exercise user-enrolled authority-bearing material; the
+mediation is transparent to the agent.
+Four directions remain open: formal verification under
+active adversaries; empirical evaluation of approval cost under
+realistic agent workloads; reconciling agent autonomy with
+grant granularity, by data-driven grant bounds or composition
+with policy systems; and authenticator primitives for non-
+human principals, allowing chains whose authorizer is itself
+an agent under further-rooted authority.
+Generative AI disclosure.Generative AI tools assisted in
+drafting and editing the prose; all technical content and claims
+originate with the authors, who take full responsibility for the
+final text.
+13
+
+[PDF_PAGE 14]
+ETHICSCONSIDERATIONS
+This work specifies and analyzes a defensive authorization
+protocol; it involves no human-subjects research and no
+collection of personal data. The weaknesses discussed are
+structural properties of mechanism classes, stated from public
+specifications and documentation; the paper discloses no
+vulnerability in an identifiable deployment, so coordinated
+disclosure was not applicable.
+REFERENCES
+[1] K. Greshake, S. Abdelnabi, S. Mishra, C. Endres, T. Holz,
+and M. Fritz, “Not what you’ve signed up for: Compromis-
+ing real-world LLM-integrated applications with indirect
+prompt injection,” inACM AISec Workshop, 2023.
+[2] OW ASP Foundation, “OW ASP Top 10 for large language
+model applications,”OWASP Project, 2024. [Online].
+Available: https://owasp.org/www-project-top-10-for-
+large-language-model-applications/
+[3] T. Schick, J. Dwivedi-Yu, R. Dessì, R. Raileanu,
+M. Lomeli, E. Hambro, L. Zettlemoyer, N. Cancedda,
+and T. Scialom, “Toolformer: Language models can teach
+themselves to use tools,”Advances in Neural Information
+Processing Systems, vol. 36, 2023.
+[4] G. Mialon, R. Dessì, M. Lomeli, C. Nalmpantis, R. Pa-
+sunuru, R. Raileanu, B. Rozière, T. Schick, J. Dwivedi-Yu,
+A. Celikyilmazet al., “Augmented language models: a
+survey,”Transactions on Machine Learning Research,
+2023.
+[5] S. Yao, J. Zhao, D. Yu, N. Du, I. Shafran, K. Narasimhan,
+and Y . Cao, “ReAct: Synergizing reasoning and acting in
+language models,”International Conference on Learning
+Representations (ICLR), 2023.
+[6] LangChain, “LangChain: Building applications with
+LLMs through composability,” https://github.com/lan
+gchain-ai/langchain, 2024.
+[7] OpenAI, “OpenAI Agents SDK,” https://github.com/ope
+nai/openai-agents-python, 2025.
+[8] HashiCorp, “HashiCorp Vault: Secrets management and
+data protection,” inHashiCorp Documentation, 2024.
+[Online]. Available: https://www.vaultproject.io/docs
+[9] Amazon Web Services, “AWS Secrets Manager: Rotate,
+manage, and retrieve secrets,” inAWS Documentation,
+2024. [Online]. Available: https://docs.aws.amazon.com/
+secretsmanager/
+[10] Q. Zhan, Z. Liang, Z. Ying, and D. Kang, “Injecagent:
+Benchmarking indirect prompt injections in tool-
+integrated large language model agents,” inFindings of
+the Association for Computational Linguistics: ACL 2024.
+Bangkok, Thailand: Association for Computational
+Linguistics, 2024, pp. 10 471–10 506. [Online]. Available:
+https://aclanthology.org/2024.findings-acl.624/
+[11] Z. Zhang, S. Cui, Y . Lu, J. Zhou, J. Yang, H. Wang, and
+M. Huang, “Agent-safetybench: Evaluating the safety of
+LLM agents,”arXiv preprint arXiv:2412.14470, 2024.
+[Online]. Available: https://arxiv.org/abs/2412.14470
+[12] E. Debenedetti, J. Zhang, M. Balunovi ´c, L. Beurer-
+Kellner, M. Fischer, and F. Tramèr, “Agentdojo: A
+dynamic environment to evaluate prompt injection
+attacks and defenses for LLM agents,” inThe Thirty-
+eighth Conference on Neural Information Processing
+Systems Datasets and Benchmarks Track, 2024. [Online].
+Available: https://openreview.net/forum?id=m1YYAQjO
+3w
+[13] X. Zhou, H. Kim, F. Brahman, L. Jiang, H. Zhu, X. Lu,
+F. F. Xu, B. Y . Lin, Y . Choi, N. Mireshghallah, R. Le Bras,
+and M. Sap, “Haicosystem: An ecosystem for sandboxing
+safety risks in interactive AI agents,” inConference on
+Language Modeling (COLM), 2025. [Online]. Available:
+https://openreview.net/forum?id=KI1WQ6rLiy
+[14] J. B. Dennis and E. C. Van Horn, “Programming semantics
+for multiprogrammed computations,” Communications of
+the ACM, Tech. Rep. 3, 1966.
+[15] M. S. Miller, “Robust composition: Towards a unified
+approach to access control and concurrency control,” in
+Ph.D. Dissertation, Johns Hopkins University, 2006.
+[16] D. Hardt, “The OAuth 2.0 authorization framework,”RFC
+6749, 2012.
+[17] A. Birgisson, J. G. Politz, U. Erlingsson, A. Taly,
+M. Vrable, and M. Lentczner, “Macaroons: Cookies with
+contextual caveats for decentralized authorization in the
+cloud,” in21st Annual Network and Distributed System
+Security Symposium (NDSS), 2014.
+[18] D. Fett, B. Campbell, J. Bradley, T. Lodderstedt, M. B.
+Jones, and D. Waite, “OAuth 2.0 demonstrating proof
+of possession (DPoP),”RFC 9449, 2023. [Online].
+Available: https://www.rfc-editor.org/rfc/rfc9449
+[19] J. Hodges, J. Jones, M. B. Jones, A. Kumar, and
+E. Lundberg, “Web Authentication: An API for
+accessing Public Key Credentials level 2,” W3C
+Recommendation, 2021. [Online]. Available: https:
+//www.w3.org/TR/webauthn-2/
+[20] W3C, “Web authentication: An API for accessing public
+key credentials, level 3: Pseudo-random function exten-
+sion (prf),” https://www.w3.org/TR/webauthn-3/, 2026,
+w3C Candidate Recommendation, Section 10.1.4.
+[21] H. Krawczyk and P. Eronen, “HMAC-based extract-and-
+expand key derivation function (HKDF),”RFC 5869,
+2010.
+[22] M. J. Dworkin, “Recommendation for block cipher modes
+of operation: Methods for key wrapping,”NIST Special
+Publication 800-38F, 2012.
+[23] J. Schaad and R. Housley, “Advanced encryption standard
+(AES) key wrap algorithm,”RFC 3394, 2002.
+[24] R. Housley and M. Dworkin, “Advanced encryption
+standard (AES) key wrap with padding algorithm,”
+Internet Engineering Task Force, Tech. Rep. RFC
+5649, 2009. [Online]. Available: https://www.rfc-
+editor.org/rfc/rfc5649
+[25] R. Barnes, K. Bhargavan, B. Lipp, and C. A. Wood,
+“Hybrid public key encryption,”RFC 9180, 2022. [Online].
+Available: https://www.rfc-editor.org/rfc/rfc9180
+14
+
+[PDF_PAGE 15]
+[26] E. Rescorla, “The transport layer security (TLS) protocol
+version 1.3,”RFC 8446, 2018.
+[27] Significant Gravitas, “AutoGPT,” https://github.com/Sig
+nificant-Gravitas/AutoGPT, 2023.
+[28] Q. Wu, G. Bansal, J. Zhang, Y . Wu, B. Li, E. Zhu, L. Jiang,
+X. Zhang, S. Zhang, J. Liu, A. H. Awadallah, R. W.
+White, D. Burger, and C. Wang, “AutoGen: Enabling
+next-gen LLM applications via multi-agent conversation,”
+https://arxiv.org/abs/2308.08155, 2023.
+[29] Manus Team, “Manus: What we saw in the past three
+months and what we see in the future,” https://manus.im
+/blog/what-we-saw-in-the-past-three-months-and-what-
+we-see-in-the-future, 2025.
+[30] OpenAI, “Introducing Operator,” https://openai.com/ind
+ex/introducing-operator/, 2025.
+[31] Anthropic, “Introducing computer use, a new Claude 3.5
+Sonnet, and Claude 3.5 Haiku,” https://www.anthropic.co
+m/news/3-5-models-and-computer-use, 2024.
+[32] M. Jones and D. Hardt, “The OAuth 2.0 authorization
+framework: Bearer token usage,” Internet Engineering
+Task Force, Tech. Rep. RFC 6750, 2012. [Online].
+Available: https://www.rfc-editor.org/rfc/rfc6750
+[33] T. Lodderstedt, J. Richer, and B. Campbell, “OAuth 2.0
+rich authorization requests,” https://www.rfc-editor.org/r
+fc/rfc9396, 2023.
+[34] J. E. Richer, “GNAP: Grant negotiation and authorization
+protocol,” https://www.rfc-editor.org/rfc/rfc9635, 2024.
+[35] Anthropic and MCP Working Group, “Model context
+protocol authorization specification,” Model Context
+Protocol, Tech. Rep., 2025. [Online]. Available: https:
+//modelcontextprotocol.io/specification/2025-06-18/bas
+ic/authorization
+[36] T. South, S. Marro, T. Hardjono, R. Mahari, C. D.
+Whitney, D. Greenwood, A. Chan, and A. Pentland,
+“Authenticated delegation and authorized AI agents,”arXiv
+preprint arXiv:2501.09674, 2025. [Online]. Available:
+https://arxiv.org/abs/2501.09674
+[37] G. Syros, A. Suri, J. Ginesin, C. Nita-Rotaru,
+and A. Oprea, “SAGA: A security architecture
+for governing AI agentic systems,”arXiv preprint
+arXiv:2504.21034, 2025. [Online]. Available: https:
+//arxiv.org/abs/2504.21034
+[38] A. Goswami, “Agentic JWT: A secure delegation
+protocol for autonomous AI agents,”arXiv preprint
+arXiv:2509.13597, 2025. [Online]. Available: https:
+//arxiv.org/abs/2509.13597
+[39] A. Dalugoda, “HDP: A lightweight cryptographic
+protocol for human delegation provenance in agentic
+AI systems,”arXiv preprint arXiv:2604.04522, 2026.
+[Online]. Available: https://arxiv.org/abs/2604.04522
+[40] S. Nagabhushanaradhya, “OpenID Connect for Agents
+(OIDC-A) 1.0: A standard extension for LLM-based
+agent identity and authorization,”arXiv preprint
+arXiv:2509.25974, 2025, individual proposal; not an
+official OpenID Foundation specification. [Online].
+Available: https://arxiv.org/abs/2509.25974
+[41] S. Chen, J. Piet, C. Sitawarin, and D. Wagner, “StruQ:
+Defending against prompt injection with structured
+queries,”arXiv preprint arXiv:2402.06363, 2024. [Online].
+Available: https://arxiv.org/abs/2402.06363
+[42] S. Chen, A. Zharmagambetov, S. Mahloujifar,
+K. Chaudhuri, D. Wagner, and C. Guo, “SecAlign:
+Defending against prompt injection with preference
+optimization,”arXiv preprint arXiv:2410.05451, 2024.
+[Online]. Available: https://arxiv.org/abs/2410.05451
+[43] K. Hines, G. Lopez, M. Hall, F. Zarfati, Y . Zunger,
+and E. Kıcıman, “Defending against indirect prompt
+injection attacks with spotlighting,”arXiv preprint
+arXiv:2403.14720, 2024. [Online]. Available: https:
+//arxiv.org/abs/2403.14720
+[44] E. Debenedetti, I. Shumailov, T. Fan, J. Hayes,
+N. Carlini, D. Fabian, C. Kern, C. Shi, A. Terzis, and
+F. Tramèr, “Defeating prompt injections by design,”arXiv
+preprint arXiv:2503.18813, 2025. [Online]. Available:
+https://arxiv.org/abs/2503.18813
+[45] T. Shi, J. He, Z. Wang, H. Li, L. Wu, W. Guo, and
+D. Song, “Progent: Securing AI agents with privilege
+control,”arXiv preprint arXiv:2504.11703, 2025. [Online].
+Available: https://arxiv.org/abs/2504.11703
+[46] H. Wang, C. M. Poskitt, and J. Sun, “AgentSpec:
+Customizable runtime enforcement for safe and reliable
+LLM agents,”arXiv preprint arXiv:2503.18666, 2025.
+[Online]. Available: https://arxiv.org/abs/2503.18666
+[47] L. Tsai and E. Bagdasarian, “Contextual agent security:
+A policy for every purpose,” inWorkshop on Hot Topics
+in Operating Systems (HotOS), 2025.
+[48] J. Lin, Z. Zhou, Z. Zheng, S. Liu, T. Xu, Y . Chen,
+and E. Chen, “VIGIL: Defending LLM agents against
+tool stream injection via verify-before-commit,”arXiv
+preprint arXiv:2601.05755, 2026. [Online]. Available:
+https://arxiv.org/abs/2601.05755
+[49] S. Chennabasappa, C. Nikolaidis, D. Song, D. Molnar,
+S. Ding, S. Wan, S. Whitman, L. Deason, N. Doucette,
+A. Montilla, A. Gampa, B. de Paola, D. Gabi,
+J. Crnkovich, J.-C. Testud, K. He, R. Chaturvedi,
+W. Zhou, and J. Saxe, “LlamaFirewall: An open source
+guardrail system for building secure AI agents,”arXiv
+preprint arXiv:2505.03574, 2025. [Online]. Available:
+https://arxiv.org/abs/2505.03574
+[50] S. Liu, C. Li, C. Wang, J. Hou, Z. Chen, L. Zhang, Z. Liu,
+Q. Ye, Y . Hei, X. Zhang, and Z. Wang, “ClawKeeper:
+Comprehensive safety protection for OpenClaw agents
+through skills, plugins, and watchers,”arXiv preprint
+arXiv:2603.24414, 2026. [Online]. Available: https:
+//arxiv.org/abs/2603.24414
+[51] Y . Wu, F. Roesner, T. Kohno, N. Zhang, and U. Iqbal,
+“IsolateGPT: An execution isolation architecture for
+LLM-based systems,” inNetwork and Distributed System
+Security Symposium (NDSS), 2025. [Online]. Available:
+https://arxiv.org/abs/2403.04960
+[52] M. Nasr, N. Carlini, C. Sitawarin, S. V . Schulhoff,
+J. Hayes, M. Ilie, J. Pluto, S. Song, H. Chaudhari,
+15
+
+[PDF_PAGE 16]
+I. Shumailov, A. Thakurta, K. Y . Xiao, A. Terzis,
+and F. Tramèr, “The attacker moves second: Stronger
+adaptive attacks bypass defenses against LLM jailbreaks
+and prompt injections,”arXiv preprint arXiv:2510.09023,
+2025. [Online]. Available: https://arxiv.org/abs/2510.090
+23
+[53] Z. Chen, Y . Zhang, Y . Liu, G. Deng, Y . Li, Y . Zhang,
+J. Ning, L. Y . Zhang, L. Ma, and Z. Li, “How your
+credentials are leaked by LLM agent skills: An empirical
+study,”arXiv preprint arXiv:2604.03070, 2026. [Online].
+Available: https://arxiv.org/abs/2604.03070
+[54] H. Zhang, J. Huang, K. Mei, Y . Yao, Z. Wang, C. Zhan,
+H. Wang, and Y . Zhang, “Agent security bench (ASB):
+Formalizing and benchmarking attacks and defenses
+in LLM-based agents,” inInternational Conference
+on Learning Representations (ICLR), 2025. [Online].
+Available: https://arxiv.org/abs/2410.02644
+[55] Y . Ruan, H. Dong, A. Wang, S. Pitis, Y . Zhou,
+J. Ba, Y . Dubois, C. J. Maddison, and T. Hashimoto,
+“Identifying the risks of LM agents with an LM-emulated
+sandbox,”arXiv preprint arXiv:2309.15817, 2023.
+[Online]. Available: https://arxiv.org/abs/2309.15817
+[56] S. Vijayvargiya, A. B. Soni, X. Zhou, Z. Z. Wang,
+N. Dziri, G. Neubig, and M. Sap, “OpenAgentSafety: A
+comprehensive framework for evaluating real-world AI
+agent safety,” inInternational Conference on Learning
+Representations (ICLR), 2026. [Online]. Available:
+https://arxiv.org/abs/2507.06134
+[57] Y . Qiao, D. Liu, H. Yang, W. Zhou, and S. Hu, “Agent
+tools orchestration leaks more: Dataset, benchmark,
+and mitigation,”arXiv preprint arXiv:2512.16310, 2025.
+[Online]. Available: https://arxiv.org/abs/2512.16310
+[58] F. El Yagoubi, G. Badu-Marfo, and R. Al Mallah,
+“AgentLeak: A benchmark for internal-channel privacy
+leakage in multi-agent LLM systems,”arXiv preprint
+arXiv:2602.11510, 2026. [Online]. Available: https:
+//arxiv.org/abs/2602.11510
+[59] J. Kim, X. Liu, Z. Wang, S. Qiu, B. Li, W. Guo,
+and D. Song, “The attack and defense landscape
+of agentic AI: A comprehensive survey,”USENIX
+Security Symposium, 2026. [Online]. Available: https:
+//arxiv.org/abs/2603.11088
+[60] N. Li, K. Zhang, K. Polley, and J. Ma, “Security
+considerations for artificial intelligence agents,”arXiv
+preprint arXiv:2603.12230, 2026. [Online]. Available:
+https://arxiv.org/abs/2603.12230
+[61] X. Deng, Y . Zhang, J. Wu, J. Bai, S. Yi, Z. Zou, Y . Xiao,
+R. Qiu, J. Ma, J. Chen, X. Du, X. Yang, S. Cui, C. Meng,
+W. Wang, J. Song, K. Xu, and Q. Li, “Taming OpenClaw:
+Security analysis and mitigation of autonomous LLM
+agent threats,”arXiv preprint arXiv:2603.11619, 2026.
+[Online]. Available: https://arxiv.org/abs/2603.11619
+[62] Z. Ying, X. Yang, S. Wu, Y . Song, Y . Qu, H. Li,
+T. Li, J. Wang, A. Liu, and X. Liu, “Uncovering
+security threats and architecting defenses in autonomous
+agents: A case study of OpenClaw,”arXiv preprint
+arXiv:2603.12644, 2026. [Online]. Available: https:
+//arxiv.org/abs/2603.12644
+[63] J. McCumber, “Information systems security: A com-
+prehensive model,” inProceedings of the 14th National
+Computer Security Conference, 1991, pp. 328–337.
+[64] J. H. Saltzer and M. D. Schroeder, “The protection of
+information in computer systems,”Proceedings of the
+IEEE, vol. 63, no. 9, pp. 1278–1308, 1975.
+[65] V . Costan and S. Devadas, “Intel SGX explained,” IACR
+Cryptology ePrint Archive 2016/086, 2016.
+[66] N. Unger, S. Dechand, J. Bonneau, S. Fahl, H. Perl,
+I. Goldberg, and M. Smith, “SoK: Secure messaging,” in
+IEEE Symposium on Security and Privacy (S&P), 2015,
+pp. 232–249.
+[67] K. Cohn-Gordon, C. Cremers, and L. Garratt, “On post-
+compromise security,” inIEEE 29th Computer Security
+Foundations Symposium (CSF), 2016, pp. 164–178.
+[68] N. Hardy, “The confused deputy: (or why capabilities
+might have been invented),”ACM SIGOPS Operating
+Systems Review, vol. 22, no. 4, pp. 36–38, 1988.
+[69] M. Sabt, M. Achemlal, and A. Bouabdallah, “Trusted
+execution environment: what it is, and what it is not,”
+inIEEE Trustcom/BigDataSE/ISPA. IEEE, 2015, pp.
+57–64.
+[70] W3C Web Payments Working Group, “Secure payment
+confirmation,” https://www.w3.org/TR/secure-payment-
+confirmation/, 2026.
+[71] H. Luo, S. Dai, C. Ni, X. Li, G. Zhang, K. Wang, T. Liu,
+and H. Salam, “AgentAuditor: Human-level safety and
+security evaluation for LLM agents,” inAdvances in
+Neural Information Processing Systems (NeurIPS), 2025.
+[Online]. Available: https://arxiv.org/abs/2506.00641
+[72] HashiCorp, “Secure AI agent authentication using
+HashiCorp Vault dynamic secrets,” https://developer.
+hashicorp.com/validated-patterns/vault/ai-agent-identity-
+with-hashicorp-vault, 2025, accessed 2026-08-18.
+[73] Aegis Project, “Aegis: A credential isolation proxy for
+AI agents,” https://github.com/getaegis/aegis, 2026.
+[74] Anthropic, “Claude Agent SDK: Secure deployment
+patterns,” https://code.claude.com/docs/en/agent-
+sdk/secure-deployment, 2026, accessed 2026-08-18.
+[75] NEAR AI, “IronClaw: An open-source secure runtime
+for AI agents,” https://github.com/nearai/ironclaw, 2026.
+[76] CrewAI, “CrewAI: Framework for orchestrating role-
+playing, autonomous AI agents,” https://github.com/cre
+wAIInc/crewAI, 2024.
+[77] E. Barker, L. Chen, and R. Davis, “Recommendation for
+key-derivation methods in key-establishment schemes,”
+National Institute of Standards and Technology, Tech.
+Rep. NIST Special Publication 800-56C Rev. 2, 2020.
+[78] M. J. Dworkin, “Recommendation for block cipher modes
+of operation: Galois/Counter Mode (GCM) and GMAC,”
+NIST Special Publication 800-38D, 2007.
+[79] Y . Nir and A. Langley, “ChaCha20 and Poly1305 for
+IETF protocols,” RFC Editor, Tech. Rep. RFC 8439, 2018.
+[Online]. Available: https://www.rfc-editor.org/rfc/rfc8439
+16
+
+[PDF_PAGE 17]
+[80] S. Arciszewski, “XChaCha: eXtended-nonce ChaCha and
+AEAD_XChaCha20_Poly1305,” https://datatracker.ietf
+.org/doc/html/draft-irtf-cfrg-xchacha-03, 2020, internet-
+Draft (expired).
+[81] M. Abdalla, M. Bellare, and P. Rogaway, “The oracle
+Diffie-Hellman assumptions and an analysis of DHIES,”
+inTopics in Cryptology—CT-RSA 2001. Springer, 2001,
+pp. 143–158.
+[82] J. M. McCune, A. Perrig, and M. K. Reiter, “Seeing-
+is-believing: Using camera phones for human-verifiable
+authentication,” in2005 IEEE Symposium on Security
+and Privacy (S&P). IEEE, 2005, pp. 110–124.
+[83] S. Meier, B. Schmidt, C. Cremers, and D. Basin, “The
+TAMARIN prover for the symbolic analysis of security
+protocols,” inComputer Aided Verification (CAV), 2013,
+pp. 696–701.
+[84] B. Blanchet, “An efficient cryptographic protocol verifier
+based on Prolog rules,” in14th IEEE Computer Security
+Foundations Workshop (CSFW), 2001, pp. 82–96.
+[85] J. Black, P. Rogaway, and T. Shrimpton, “Encryption-
+scheme security in the presence of key-dependent mes-
+sages,” inSelected Areas in Cryptography (SAC), 2002,
+pp. 62–75.
+[86] J. Camenisch and A. Lysyanskaya, “An efficient system
+for non-transferable anonymous credentials with optional
+anonymity revocation,” inAdvances in Cryptology (EU-
+ROCRYPT), 2001, pp. 93–118.
+[87] H. Krawczyk, “HMQV: A high-performance secure Diffie-
+Hellman protocol,” inAdvances in Cryptology – CRYPTO
+2005. Springer, 2005, pp. 546–566.
+[88] M. Bellare and P. Rogaway, “Entity authentication and
+key distribution,” inAdvances in Cryptology (CRYPTO),
+1993, pp. 232–249.
+[89] V . Shoup, “Sequences of games: A tool for taming
+complexity in security proofs,” Cryptology ePrint Archive,
+Report 2004/332, 2004.
+[90] M. Bellare and P. Rogaway, “The security of triple
+encryption and a framework for code-based game-playing
+proofs,” inAdvances in Cryptology (EUROCRYPT), 2006,
+pp. 409–426.
+APPENDIXA
+DESIGNRATIONALE
+Several SUDP design decisions are consequential but other-
+wise scattered across the construction. This section consolidates
+the architectural-level choices to make their rationale visible
+together; smaller decisions (domain-separation strings, concrete
+primitive selections) are discussed inline at the point of
+construction.
+a) Per-grant U-signed authorization committed to H(o).:
+The redeemed grant ρ is cryptographically bound to a specific
+operation via H(o) at the authenticator, not to a stored consent
+reused across token lifetimes. This lifts anti-replay and anti-
+substitution from engineering discipline (TTLs, revocation lists,
+nonce tracking in each tool) to protocol-level guarantees: any
+captured artifact, within any time window, is redeemable only
+against the operation it was signed for. SUDP carries the
+execution budget in o.valid.multiplicity∈Z + ∪ {∞}, which
+U signs as part of the grant.Single-usegrants ( multiplicity=1)
+match transaction-confirmation ceremonies (PSD2 dynamic
+linking, banking 2FA): consumed on first use, suited to high-
+authority actions whose misuse already warrants per-action hu-
+man oversight.TTL-bounded standinggrants ( multiplicity=∞,
+bounded by expiry) match a multi-entry visa with a fixed
+validity window: U explicitly opts into repeated use within a
+U-declared rule, suited to low-risk repeat patterns (e.g., inbox
+reads) where per-action confirmation is operationally untenable.
+In both modes, the bounds are committed by U’s per-grant
+signature, not delegated to an authorization server’s policy.
+b) Authenticator-bound PRF for wrapping material.:
+Wrapping keys are derived from authenticator-bound PRF
+outputs ( yc =PRF c(ηc) inside Aut c) rather than from pass-
+words, server-held master keys, or envelope-encryption KMS
+services. The unlock material therefore lives exclusively in U’s
+authenticator hardware: neither the server’s persistent state nor
+its runtime memory can reconstruct a wrapping key without a
+live U-verified invocation. This is what distinguishes SUDP’s
+satisfaction of CSB from schemes whose “encrypted at rest”
+claim collapses when an attacker captures the server together
+with its unlock material (§IV). The cost is a WebAuthn PRF-
+capable authenticator, or an equivalent authenticator-bound PRF,
+as a deployment prerequisite. Ordinary passkey availability is
+broad, but PRF support remains a profile requirement that
+deployments must check.
+c) Rewrap policy at rotation.:A SUDP profile inherits
+the recoverability semantics of its authenticator family: if
+all enrolled credentials are lost, M becomes unrecoverable
+through SUDP. Deployments that need recovery must provision
+it as an additional enrolled credential (a recovery passkey,
+a second hardware authenticator, or an enterprise-controlled
+escrow credential whose use is itself an SUDP-authorized
+lifecycle operation), and never as a backend master-key bypass,
+which would surrender CSB. Each enrolled credential therefore
+holds its own wrapping key Wc, and every Phase III.3 state-
+update by one credential must rewrap the new K ′ under all
+peers (§ V-H). Three rewrap policies meet this requirement,
+summarized in Table IV.In-state peer map(default) keeps
+each rewrap single-invocation, at the cost of a transient {Wc}
+exposure to T during III.0, a per-peer forward-secrecy gap until
+that peer itself rotates, and the key-cycle assumption (A10) of
+§VIII-A.All-present rotationremoves the exposure but forces
+every credential online at each rewrap, which is ill-suited
+to continuous agent workflows.Append-only chainsupports
+offline catch-up at unbounded chain storage but is not forward-
+secret: a captured Kj walks the chain forward. The default
+favors single-invocation rewrap for agent workflows that rotate
+on every write; deployments needing stronger cross-credential
+isolation may substitute all-present, or adopt append-only as
+an offline-catchup auxiliary with the FS caveat above.
+17
+
+[PDF_PAGE 18]
+TABLE IV
+REWRAP POLICIES FOR MULTI-CREDENTIALSUDPROTATION.
+Policy Online invocations Extra storage Peer-key exposure FS profile
+In-state peer map (default) 1 (single-invocation)O(|Creds|)inMtransient during III.0 Lemma 1 per credential, aftercrotatesAll-present rotation all credentials none none Lemma 1 per credential, independentlyAppend-only chain 1 (single-invocation) unbounded (chain grows) nonenotFS: oldKjwalks forward
+d) Minimality of the binding hash.:The binding hash
+commits only to freshness and the operation:
+β=H(DS bind ∥r∥H(o)).
+The credential identifier is intentionally omitted: cid c⋆ is deliv-
+ered in G alongside σ⋆, and verification through Reg[cid c⋆]→
+pk c⋆ already enforces credential binding under EUF-CMA;
+restating it inside β would be redundant. The custodian’s
+identity and the server’s TLS certificate hash are likewise
+omitted: those are bound by the authenticated channel carrying
+the grant rather than by the application-layer authorization
+challenge. Re-binding fields already bound elsewhere trades
+clarity for bloat, and β follows standard key-exchange transcript
+discipline of carrying only what the surrounding structure does
+not already commit [87].
+e) Per-write rotation by design.:Wrapping-epoch rotation
+is mandated by the protocol rather than left to operator
+discipline: every Phase III.3 state-update samples a fresh K ′
+and a fresh next-salt ηnext
+c⋆ (§V-H). Coupling rotation to every
+write removes the need for a separate rotation ceremony and
+delivers wrapping-epoch forward secrecy unconditionally under
+key-erasure assumptions (Proposition 4, Lemma 1). Authority-
+level rotation (rotating the underlying secret at E) is kept
+separate, runs on a deployment-defined cadence, and depends
+on E-side revocation support (Proposition 5); the separation
+lets wrap-side FS hold independently of E’s rotation API. The
+per-write cost is one CSPRNG draw, one key derivation, and
+|Creds| rewraps, which is marginal for agent workflows whose
+write volumes are typically low per user.
+f) Extensibility of the dispatch vocabulary.:The vocabu-
+lary {use,export,lifecycle} covers the canonical consumption
+modes; concrete profiles MAY define additional dispatch types
+provided each new type (i) preserves the channel binding
+β=H(DS bind ∥r∥H(o)) and the grant-validation steps of II.3
+unchanged, (ii) inherits or explicitly restates its A V/OB/UB
+stance, and (iii) specifies its non-disclosure stance against R,
+stating what plaintext-bearing material, if any, leaves T . Profile-
+defined dispatch types remain within the abstract protocol when
+they meet these conditions and do not require modification of
+Phases I or II. Extensions that weaken non-disclosure relative
+to the canonical modes are admissible at the profile level only
+as deliberate trade-offs and must be surfaced as such, both
+at authorization time to U and in the profile’s stated security
+claims.
+g) Submission topologies.:The sealed grant may reach
+T directly, over TLS 1.3 or the envelope above, or through
+a relay that forwards the ciphertext. The natural relay in an
+agentic deployment is R itself, which lets the agent retry, batch,
+or schedule submission while observing nothing beyond the
+HPKE ciphertext sealed to pkT . Both topologies carry the same
+guarantees, since σ⋆ binds the operation independently of the
+carrier and r is single-use. Direct submission keeps the session
+under U’s control but requires T to be reachable at signing
+time; relayed submission decouples signing from delivery at
+the cost of routing throughR’s trust boundary.
+APPENDIXB
+FORMALSECURITYMODEL ANDPROOFS
+This appendix restates the guarantees of §VIII as adversarial
+games and proves the supporting propositions by reduction
+to the assumptions of § VIII-A, in the game-based tradition
+of entity authentication [ 88] and the game-sequence proof
+style [89, 90]. Appendix B-A fixes the execution model shared
+by all games. Theorem 2 proves Proposition 1; Lemma 2
+and Theorem 3 prove the CRC clause of Proposition 2 and
+Proposition 3; Theorem 4 proves the CSB clause; Theorem 5
+proves Proposition 4 by giving Lemma 1 its game form. Table V
+maps the taxonomy axes to these results.
+Throughout, λ is the security parameter, all algorithms run in
+probabilistic polynomial time (PPT) in λ, and freshness tokens
+are λ-bit strings. Each assumption of § VIII-A contributes an
+advantage term: ϵsig for the EUF-CMA experiment of Sig (A1),
+ϵae and ϵwrap for the AEAD and key-wrap experiments (A2),
+ϵprf and ϵkdf for the PRF experiments of Aut c and KDF (A3),
+ϵcr for collision resistance of H (A4), ϵkem for the IND-CCA2
+experiment of the KEM (A5), and ϵkdm for the key-dependent-
+message experiment of (A10), stated in Appendix B-D. Each
+ϵ denotes the maximum advantage over adversaries with
+resources comparable to the reductions constructed below. The
+model covers one custodian and one protected state; batch
+grants substitute H(ops) for H(o) throughout (§V-F) and change
+no argument.
+A. Execution Model
+A challenger runs the authorizer U, its authenticator modules
+Aut c, and the custodian T honestly, following Phases I–III.
+At enrollment, each Aut c samples its signing key and PRF
+key independently (Phase I.1); the reductions below use this to
+simulate one half of the module while embedding a challenge
+in the other. The adversary A plays the baseline (AR,A net)
+of § III-B: it controls R and every network leg except the
+U→T grant leg, which A6 models as authenticated and
+confidential, so the challenger delivers grants internally and A
+observes only their public part. The Phase I setup legs of A6
+are likewise challenger-internal. T ’s code and bookkeeping are
+honest, per the restricted custodian trust of § V-A; A7 states
+the same boundary in deployment terms, and A9 supplies the
+uniformity of fresh draws. The interface preconditions enter as
+modeling conventions: o is the canonical tuple of Definition 4
+and carries every authority-relevant field (P1); the rendering
+U approves is the canonical o itself (P2); execution at E is an
+abstract deterministic map Rel, a parameter of the game, with
+Release(o) =Rel(o, s o) (P3). Time is a counter A advances;
+Treads it when enforcingo.valid.
+18
+
+[PDF_PAGE 19]
+The challenger keeps an authorization log Lauth of triples
+(o, r, c) signed by U and an acceptance log Lacc of triples
+accepted at II.3. A may invoke, in any order and polynomially
+often:
+ENROLL() enrolls a fresh credential c (Phase I.1–I.2) and
+returns the public(cid c,pk c, ηc).
+REQ(o) runs Phase II.1 with A as R: T draws r
+$
+← {0,1} λ,
+stores it in S, and returns the conveyance (o, r,{(cid c, ηc)}).
+GRANT(o, r, c) runs Phase II.2 on an adversary-chosen con-
+veyance, modeling tampering on the T→U leg,
+with acting credential c: U approves, computes β=
+H(DSbind ∥r∥H(o)) , obtains σ⋆, W ⋆, and (for rotation-class
+o) opt from Aut c, and sends the grant toward T on the
+A6 channel. The challenger appends (o, r, c) to Lauth and
+returns the public grant part (o, r,cid c, σ⋆); W ⋆ and opt
+are withheld. U approves every query: authorization policy
+lies outside the model (L5), and a restrictive U only shrinks
+A’s options.
+DELIVER(i) delivers the i-th grant unmodified to T , which
+runs II.3; on acceptance the challenger appends the grant’s
+(o, r, c) to Lacc. The oracle returns T ’s decision; A chooses
+delivery order, delay, and omission.
+REDEEM( ˜G) submits a grant ˜G= (˜o,˜r,cid˜c, ˜W ,˜σ, ˜opt) of
+A’s own construction to T , with the same acceptance
+bookkeeping; this models injection toward T from any
+network position.
+EXEC(j) runs one Phase III execution under the j-th accepted
+grant: T executes III.0 and the arm selected by oj.act.type,
+enforcing oj.valid and aborting on Unwrap or Dec failure.
+The oracle returns Release(oj) for use, the sealed delivery πj
+for export, and an acknowledgment for lifecycle operations.
+B. Authorization Soundness: AV , OB, UB
+Definition 5 (Authorization-soundness game). Expauth(A)
+runs the model of Appendix B-A. A wins if at any point (i) T
+accepts a grant whose triple (˜o,˜r,˜c)is absent from Lauth,
+(ii) T accepts two grants carrying the same token value ˜r, or
+(iii) a Phase III execution violates the accepted grant’s o.valid
+bounds. The advantageAdv auth(A)isPr[Awins].
+Condition (i) is stated at acceptance rather than execution:
+every Phase III execution runs under an accepted grant
+(III.0), so acceptance-level soundness is the stronger statement.
+Condition (iii) has probability zero, because the challenger’s
+T enforces o.valid by bookkeeping; the game’s cryptographic
+content is (i) and (ii).
+Theorem 2 (Authorization soundness).For every PPT A
+making at most qg REQqueries against a model with at most
+Nenrolled credentials,
+Advauth(A)≤N ϵ sig +ϵ cr +q 2
+g/2λ.
+Proof. We bound each win condition; the bounds sum by a
+union bound.
+Condition (ii).Each acceptance consumes its token from
+S, so two acceptances of the same value ˜rrequire T to have
+drawn ˜rtwice among at most qg draws. Under A9 the draws
+are uniform λ-bit strings, so this event has probability at most
+q2
+g/2λ.
+Condition (i).Suppose T accepts (˜o,˜r,˜c)/∈ L auth.
+Acceptance includes VrfyReg[cid ˜c]( ˜β,˜σ) = 1 for ˜β=
+H(DSbind ∥˜r∥H(˜o)). Let B˜cdenote the set of challenges Aut˜c
+signed duringGRANTqueries.
+Case ˜β /∈B˜c.The reduction B1 samples an index uniformly
+from the at most N credentials, embeds its EUF-CMA chal-
+lenge key as that credential’s pk, and simulates the module’s
+two halves independently: signing via its signing oracle, and
+the PRF via a key B1 samples itself, which is sound because
+the module’s two keys are independent draws (Appendix B-A).
+All other credentials run honestly. If the win occurs at the
+guessed credential, ( ˜β,˜σ)verifies under the challenge key and
+˜β was never queried to the signing oracle, so B1 outputs it as
+a forgery. This case occurs with probability at mostN ϵ sig.
+Case ˜β∈B ˜c.Some (o, r,˜c)∈ L auth satisfies
+H(DSbind ∥r∥H(o)) = ˜β with (o, r)̸= (˜o,˜r). If (r,H(o))̸=
+(˜r,H(˜o)), the two outer inputs are distinct and the reduction
+B2 outputs them as an H-collision. Otherwise r= ˜r and
+H(o) =H(˜o) with o̸= ˜o; canonical serialization is injective
+(A4), so the serializations of o and ˜oare distinct and form an
+inner H-collision. This case occurs with probability at most
+ϵcr.
+Proof of Proposition 1. By Theorem 2, except with the stated
+advantage, every acceptance at T carries a triple of Lauth.AV:
+the matching log entry is an authorization event produced by
+U’s authenticator overβ, and Reg binds cid c⋆ to a key enrolled
+over the authenticated Phase I channel (A6), so the event is
+attributable to U and re-verifiable from the public transcript.
+OB: the accepted ˜oequals the o of its matching log entry,
+which by P2 is the operation U rendered and approved; by P3,
+no authority-relevant field enters between authorization and
+execution.UB: each token supports one acceptance (condition
+ii), and T enforces expiry and multiplicity at every execution
+(condition iii), so execution stays within the o.valid that σ⋆
+committed to.
+C. Requester View and Export Hiding: CRC
+Lemma 2 (View determination).In the model of Ap-
+pendix B-A, A’s view consists of its own coins and the se-
+quence V:=⟨ enrollment outputs (cid c,pk c, ηc), conveyances
+(o, r,{(cid c, ηc)}), public grant parts (o, r,cid c, σ⋆), accep-
+tance decisions, Release outputs, sealed deliveries π, lifecycle
+acknowledgments⟩. In particular, no oracle returns W ⋆, opt,
+K, any Wc, or any function of M other than Release(o) and
+π.
+Proof. By inspection of the six oracle interfaces of Ap-
+pendix B-A: each return value is listed there, the A6 channel
+withholds W ⋆ and opt from the public grant part, Σ is
+challenger-internal, and III.0’s intermediate values K, M, and
+so are consumed insideT’s arm ofEXEC.
+Lemma 2 reduces CRC to the two components of V that
+depend on protected material: Release outputs, whose content is
+19
+
+[PDF_PAGE 20]
+the authorized result form and whose semantics are U’s decision
+(L5), and sealed deliveries, which Theorem 3 shows carry no
+information about their payload. The remaining components
+are public protocol material: in particular σ⋆ binds only the
+public β, is produced by the signing key, which is independent
+of the PRF key inside Aut c⋆ (Appendix B-A), and its replay
+is excluded by Theorem 2.
+Definition 6 (Export-hiding game). Expexp-b(A) extends the
+model of Appendix B-A with a challenger-generated recipient
+key pair; A receives pk rcp and may name it in o.bind.recipient.
+For b= 0 ,EXECon an export with recipient pk rcp returns
+π=KEMSeal(pk rcp, so) as in Phase III.2; for b= 1 , it returns
+KEMSeal(pk rcp,0 |so|). A outputs a bit, and its advantage is
+|Pr[1←Exp exp-0(A)]−Pr[1←Exp exp-1(A)]|.
+Theorem 3 (Export hiding).For every PPT A triggering
+at most qx export executions to pk rcp, the advantage in
+Definition 6 is at mostq x(ϵkem +ϵ kdf +ϵ ae).
+Proof. A hybrid over the qx exports; each hop replaces one real
+sealing with a sealing of 0|so| through three game steps. First,
+replace the encapsulated key Kd by an independent uniform
+key: sk rcp is never used in the game, so the reduction needs
+no decapsulation oracle and the CPA fragment of A5 suffices,
+at cost ϵkem; A5’s full IND-CCA2 strength covers deployments
+in which sk rcp also answers decapsulation queries outside the
+game. Second, replace kd =KDF(K d;⊥,H(o)) by a uniform
+key, at cost ϵkdf. Third, with kd uniform and used only as the
+AEAD key of δ, swap the plaintext so for 0|so| under the same
+associated data H(o), at cost ϵae. Summing over the qx hops
+gives the bound.
+Proof of Proposition 2, CRC clause. By Lemma 2, A’s view
+across all sessions is the public sequence V; by Theorem 3,
+replacing every sealed delivery for a recipient outside R’s
+trust boundary with a sealing of a constant string changes the
+view distribution by at most qx(ϵkem +ϵ kdf +ϵ ae). The view
+therefore reveals nothing about s, K, Wc, or so beyond what
+the authorized Release outputs disclose, which is the CRC
+clause for ASU-preserving operations.
+Proof of Proposition 3. Secrecy of π against every party ex-
+cept the holder of sk rcp is Theorem 3. Recipient substitution
+is excluded by Theorem 2: pk rcp lies in o.bind, so an export
+toward a different recipient is a different o and requires its
+own authorization event. Splicing a captured π into another
+operation’s transcript fails because both the delivery-key
+derivation and the associated data of δ bind H(o) (Phase III.2).
+A grant naming R itself as recipient is a deliberate ownership
+transfer outside ASU non-disclosure (§V-G).
+D. Storage Breach: CSB
+Definition 7 (Storage-breach game).In Expcsb-b(A), the
+adversary outputs two protected states (M0, M1) of equal
+shape (the same entry set, with entries of equal lengths)
+and a credential count N; the challenger runs Phase I
+over M b with N credentials and hands A the resulting
+Σ = (C,{(cid c, ηc,[K] c)},Reg,ver) ; A outputs a bit. The
+advantage is |Pr[1←Exp csb-1(A)]−Pr[1←Exp csb-0(A)]|.
+The game is offline: it grants no protocol oracles after
+the breach, matching CSB’s condition that no live U-verified
+invocation occurs (§ III-C). Epoch interleavings, where key
+material from one epoch meets state from another, are the
+subject of Appendix B-E. Under the all-present rewrap policy
+(§V-H, §A), M carries no in-state wrapping material and The-
+orem 4 applies as stated. The default in-state peer map stores
+Peer⊆M (§V-H), closing a key cycle between EncK(M)
+and WrapWc(K) that A2 does not cover; A10 asserts that
+(Enc,Wrap) remains secure for exactly this cycle. The A10 ex-
+periment: for adversary-chosen N, uniform K and {Wc}c∈[N] ,
+and adversary-chosen equal-shape (M0, M1) whose peer-map
+entries the challenger overwrites with the Wc identically in both
+states, the tuple
+ 
+{WrapWc(K)} c,Enc K(M b;ver)
+
+hides b
+with advantage at most ϵkdm. Under A10, Theorem 4 extends to
+the in-state peer map: the first two hybrid steps of its proof make
+every Wc uniform without touching the cycle, after which A’s
+remaining M b-dependent input is the A10 tuple, so the wrap
+and encryption steps collapse into a single A10 reduction and
+the bound becomes 2N(ϵ prf+ϵkdf)+ϵ kdm; the same substitution
+extends Theorem 5 with bound 2(ϵprf +ϵ kdf) +ϵ kdm + 21−λ.
+Cycles of this shape are routine in deployed designs such as
+full-disk encryption and password managers, with no known
+attack on practical AEAD schemes; the all-present policy avoids
+A10 entirely.
+Theorem 4 (Storage-breach indistinguishability).For every
+PPT A, the advantage in Definition 7 is at most 2N(ϵ prf +
+ϵkdf +ϵ wrap) +ϵ ae.
+Proof. A sequence of games from Expcsb-0 to Expcsb-1.
+The public components Reg, {cid c}, {ηc}, and ver are
+generated independently of M b and are identically distributed
+throughout. Starting from the real game over M0: first, for
+each credential in turn, replace yc =PRF c(ηc) by a uniform
+value; each authenticator’s PRF key is distinct and evaluated
+once here, so the N hops cost N ϵprf. Second, replace each
+Wc =KDF(y c;η c,·) by a uniform key, at cost N ϵkdf. Third,
+with each Wc uniform and used only to produce [K] c, replace
+each [K] c by the wrap of an independent key, at cost N ϵwrap;
+after this step K appears in A’s input only as the key of
+C. Fourth, replace C=Enc K(M0;ver) by EncK(M1;ver) ,
+at cost ϵae. Walking the first three steps back with M1 in
+place restores the real game over M1 and costs the same
+N(ϵ prf +ϵ kdf +ϵ wrap)again, giving the stated bound.
+Proof of Proposition 2, CSB clause. An adversary that recov-
+ers M from Σ distinguishes Expcsb-0 from Expcsb-1 by
+comparing the recovered value against its own (M0, M1),
+so Theorem 4 bounds its success probability.
+E. Rotation Forward Secrecy: RFS
+Definition 8 (Epoch-isolation game).In Exprfs-b(A), the
+adversary outputs equal-shape (M0, M1); the challenger runs
+Phase I over M b with credential c⋆, hands A the epoch-0 key
+20
+
+[PDF_PAGE 21]
+TABLE V
+TAXONOMY-AXIS COVERAGE.
+Axis Established by Assumptions
+A V Prop. 1, Thm. 2 A1, A4, A6, P1–P2
+OB Prop. 1, Thm. 2 A1, A4, P1–P3
+UB Prop. 1, Thm. 2 A1, A4, A7, A9
+CRC Props. 2, 3; Thm. 3 A2, A3, A5, A6
+CSB Prop. 2, Thm. 4 A2, A3 (+A10)
+RFS Props. 4, 5; Thm. 5 A2, A3, A9 (+A8, +A10)
+CMC out of scope (L1) n/a
+Each axis (§III-C) is stated as a proposition in § VIII-C and proved by the named result of
+this appendix; assumptions and preconditions refer to § VIII-A. Parenthesized assumptions
+are conditional: A8 only for authority-level forward secrecy, A10 only under the in-state
+peer map (§V-H). CMC is closed by composition with a hardware-rooted runtime.
+material (ηc⋆ , yc⋆ , Wc⋆ , K), performs one honest Phase III.3
+full rotation under c⋆ (fresh K ′, fresh ηnext
+c⋆ , M ′ =M b), and
+hands A the post-rotation Σ′; A outputs a bit. The advantage is
+defined as in Definition 7, and the game covers the all-present
+rewrap policy, as in Appendix B-D.
+The game captures transit capture of one epoch’s wrapping
+material: A holds the full pre-rotation derivation chain of c⋆
+and the post-rotation state, and receives no pre-rotation Σ,
+whose compromise is the subject of Theorem 4.
+Theorem 5 (Epoch isolation).For every PPT A, the advan-
+tage in Definition 8 is at most 2(ϵprf +ϵ kdf +ϵ wrap)+ϵ ae +21−λ.
+Proof. The chain of Theorem 4 restricted to the post-rotation
+entries of c⋆, with one adjustment in the PRF step: the reduction
+must produce yc⋆ =PRF c⋆(ηc⋆) for A while replacing
+PRFc⋆(ηnext
+c⋆ ) by a uniform value, which is the standard two-
+query PRF experiment with one output revealed; it is sound
+whenever ηnext
+c⋆ ̸=η c⋆, an event that fails with probability
+at most 2−λ per direction of the hybrid. The revealed Wc⋆
+unwraps only the retired entry [K] c⋆, which Σ′ no longer
+contains, and the revealed K is an independent draw that no
+component of Σ′ depends on, so the remaining steps carry
+over unchanged.
+Proof of Proposition 4. Theorem 5 is the game form of
+Lemma 1: the post-rotation keys (K ′, W ⋆
+new) are computation-
+ally independent of the revealed pre-rotation tuple, since K ′ is
+a fresh draw and the derivation chain of W ⋆
+new is rooted in the
+fresh ηnext
+c⋆ ; the reverse direction, revealing the post-rotation key
+material against the pre-rotation state, is the same hybrid with
+the epochs swapped. The claim applies to credentials that have
+rotated; the dormant-credential and peer-map limitations are
+catalogued as L3 and L4 (§ VIII-D), and the plaintext caveat
+of §VIII-C is in force whenM ′ =M.
+Proof sketch of Proposition 5. Authority-level forward se-
+crecy is a semantic property of E’s credential interface and
+needs no computational game. By (A8), each epoch executes
+against an authority-bearing secret issued for that epoch and
+revoked at the next rotation, so authority over a retired epoch
+requires a secret E no longer accepts; the same argument runs
+in reverse for a current-epoch operation under a retired secret.
+Combined with Theorem 5, authority is bounded to its issuing
+epoch.
+F . Coverage and Scope
+Three boundaries of the model remain informal, each named
+where it is assumed. The equivalence ≡E and the injectivity
+of canonical serialization are taken as given (A4, P1); the
+environment E and the semantics of Release are abstract
+parameters (P3), so what a conformant result form discloses is a
+deployment question (L5); and the model covers one custodian
+and one protected state, with multi-state deployments running
+independent instances. Mechanized analysis of the games in a
+tool such as Tamarin or ProVerif is left to future work (§VIII).
+21
