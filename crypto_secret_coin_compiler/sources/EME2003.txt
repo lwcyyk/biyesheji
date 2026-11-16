@@ -1,0 +1,1446 @@
+                   A Parallelizable Enciphering Mode
+
+                               Shai Halevi∗            Phillip Rogaway†
+
+                                             June 17, 2003
+
+
+
+                                                Abstract
+          We describe a block-cipher mode of operation, EME, that turns an n-bit block cipher into
+      a tweakable enciphering scheme that acts on strings of mn bits, where m ∈ [1..n]. The mode is
+      parallelizable, but as serial-eﬃcient as the non-parallelizable mode CMC [6]. EME can be used
+      to solve the disk-sector encryption problem. The algorithm entails two layers of ECB encryption
+      and a “lightweight mixing” in between. We prove EME secure, in the reduction-based sense of
+      modern cryptography. We motivate some of the design choices in EME by showing that a few
+      simple modiﬁcations of this mode are insecure.
+
+      Key words: Block-cipher usage, cryptographic standards, disk encryption, modes of operation,
+      provable security, sector-level encryption, symmetric encryption.
+
+
+
+
+   ∗
+     IBM T.J. Watson Research Center, P.O. Box 704, Yorktown Heights, NY 10598, USA, shaih@watson.ibm.com
+http://www.research.ibm.com/people/s/shaih/
+   †
+     Department of Computer Science, University of California, Davis, CA 95616, USA, and Department
+of Computer Science, Faculty of Science, Chiang Mai University, 50200 Thailand, rogaway@cs.ucdavis.edu
+http://www.cs.ucdavis.edu/~rogaway
+Contents
+
+1 Introduction                                                                                      1
+
+2 Preliminaries                                                                                     2
+
+3 Speciﬁcation of EME                                                                               3
+
+4 Security of EME                                                                                   3
+
+5 Proof Ideas                                                                                       5
+
+6 Some Insecure Modiﬁcations                                                                        6
+  6.1 The “extra” block-cipher call is needed . . . . . . . . . . . . . . . . . . . . . . . . . .   6
+  6.2 Necessity of the Length Restriction . . . . . . . . . . . . . . . . . . . . . . . . . . . .   7
+
+References                                                                                          8
+
+A Extending EME to Longer Messages                                                                  9
+
+B Proof of Theorem 1 — Security of EME                                                           11
+  B.1 The game-substitution sequence . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 11
+  B.2 Analysis of the non-interactive game . . . . . . . . . . . . . . . . . . . . . . . . . . . 18
+1   Introduction
+Tweakable enciphering schemes and their use. A tweakable enciphering scheme is a func-
+tion E that maps a plaintext P into a ciphertext C = ETK (P ) under the control of a key K and
+tweak T . The ciphertext must have the same length as the plaintext and there must be an in-
+verse DTK to ETK . We are interested in schemes that are secure in the sense of a tweakable, strong
+pseudorandom-permutation (±    prp): an oracle that maps (T, P ) into ETK (P ) and maps (T, C) into
+  T
+DK (C) must be indistinguishable (when the key K is random and secret) from an oracle that
+realizes a T -indexed family of random permutations and their inverses. A tweakable enciphering
+scheme that is secure in the ±
+                              prp-sense makes a desirable tool for solving the disk-sector encryption
+problem: one stores at disk-sector location T the ciphertext C = ETK (P ) for plaintext P . The IEEE
+Security in Storage Working Group [8] plans to standardize a ±   prp-secure enciphering scheme.
+Our contribution. This paper speciﬁes EME, which is a simple and parallelizable tweakable
+enciphering scheme. The scheme is built from a block cipher, such as AES. By making EME par-
+allelizable we accommodate ultra-high-speed mass-storage devices to the maximal extent possible
+given our security goals. When based on a block cipher E: {0, 1}k × {0, 1}n → {0, 1}n our mode
+uses a k-bit key and 2m+1 block-cipher calls to encipher an mn-bit plaintext in a way that depends
+on an n-bit tweak. We require that m ∈ [1..n].
+    The name EME is meant to suggest ECB-Mix-ECB, as enciphering under EME involves ECB-
+encrypting the plaintext, a lightweight mixing step, and another ECB-encryption. For a description
+of EME look ahead to Figures 1 and 2.
+    We prove that EME is secure, assuming that the underling block cipher is secure. The proof
+is in the standard, provable-security tradition: an attack on EME (as a ±     prp with domain M =
+                                    2
+{0, 1}n ∪ {0, 1}2n ∪ · · · ∪ {0, 1}n ) is shown to imply an attack on the underlying block cipher (as a
+strong PRP with domain {0, 1}n ).
+    We go on to motivate some of the choices made in EME by showing that other choices would
+result in insecure schemes. Finally, we suggest an extension to EME that operates on sectors that
+are longer than mn bits.
+Cmc mode. The EME algorithm is follow-on work to the CMC method of Halevi and Rogaway [6].
+Both modes are tweakable enciphering schemes built from a block cipher E: {0, 1}k × {0, 1}n →
+{0, 1}n . But CMC is inherently sequential, as it is built around CBC encryption and decryption.
+EME was designed to overcome this limitation, which was seen as potentially problematic for high-
+speed encryption devices. The change does not increase the serial complexity; both modes use
+2m + 1 block-cipher calls (and little additional overhead) to act on an mn-bit messages.
+Further history. Naor and Reingold gave an elegant approach for making a strong PRP on N
+bits from a block cipher on n < N bits [13, 14]. Their approach involves a hashing step, a layer
+of ECB encryption (say), and another hashing step. They do not give a fully-speciﬁed mode, but
+they do show how to carry out the hashing step given an xor-universal hash-function that maps N
+bits to n bits [13]. In practice, instantiating this object is problematic: to compare well with CMC
+or EME one should ﬁnd a construction that is simple and has a collision bound of about 2−128 and
+is more eﬃcient, in both hardware and software, than AES. No such construction is known.
+    An early, unpublished version of the CMC paper contained buggy versions of the CMC and
+EME algorithms. Joux discovered the problem [9] and thereby played a key role in our arriving
+at a correct solution. CMC was easily ﬁxed in response to Joux’s attack, but EME did not admit
+a simple ﬁx. (Indeed, Section 6.1 eﬀectively proves that no “simple ﬁx” is possible for the earlier
+buggy EME construction).
+
+
+                                                  1
+    Eﬀorts to construct a block cipher with a large blocksize from one with a smaller blocksize go
+back to Luby and Rackoﬀ [12], who also put forward the notion of a PRP and a strong PRP. The
+concrete-security treatment of PRPs that we use begins with Bellare, Kilian, and Rogaway [2]. The
+notion of a tweakable block-cipher is due to Liskov, Rivest, and Wagner [11]. The ﬁrst attempt
+to directly construct an mn-bit block cipher from an n-bit one is due to Zheng, Matsumoto, and
+Imai [15]. A diﬀerent approach is to build a wide-blocksize block-cipher from scratch, as with
+BEAR, LION, and Mercy [1, 4].
+Discussion. EME has some advantages over CMC beyond its parallelizability. First, it uses a
+single key for the underlying block cipher, instead of two keys. All block-cipher calls are keyed by
+this one key. Second, enciphering under EME uses only the forward direction of the block cipher,
+while deciphering now uses only the backwards direction. This is convenient when using a cipher
+such as AES, where the two directions are substantially diﬀerent, as a piece of hardware or code
+might need only to encipher or only to decipher. Finally, we prove EME secure as a variable-input-
+length (VIL) cipher and not just as a ﬁxed-input-length (FIL) one. This means that, in an attack,
+the adversary may intermix plaintexts and ciphertexts of various lengths.
+    We comment that the parallelizability goal is arguably of less utility for a ±    prp-secure enci-
+phering scheme than for some other cryptographic goals. This is because, parallelizable or not,
+a ±prp-secure encryption scheme cannot avoid having latency that grows with the length of the
+message being processed (to achieve the ±   prp security notion one cannot output a single bit of
+ciphertext until the entire plaintext has been seen). Still, parallelizability is useful even here, and
+the user community wants it [7]. More broadly, EME continues a tradition of trying to make
+modes of operation (like CTR mode and PMAC [3]) that achieve parallelizability at near-zero
+added computational cost compared to their intrinsically serial counterparts.
+
+2   Preliminaries
+Basics. We use the same notions and notation        as in [6]. A tweakable enciphering scheme is a
+function E: K × T × M → M where M = i∈I {0, 1}i is the message space (for some nonempty
+index set I ∈ N) and K = ∅ is the key space and T = ∅ is the tweak space. We require that for every
+K ∈ K and T ∈ T we have that E(K, T, ·) = ETK (·) is a length-preserving permutation on M. The
+inverse of an enciphering scheme E is the enciphering scheme D = E−1 where X = DTK (Y ) if and
+only if ETK (X) = Y . A block cipher is the special case of a tweakable enciphering scheme where the
+message space is M = {0, 1}n (for some n ≥ 1) and the tweak space is T = {ε} (the empty string).
+The number n is called the blocksize.
+    An adversary A is a (possibly probabilistic) algorithm with access to some oracles. Oracles are
+written as superscripts. By convention, the running time of an algorithm includes its description
+size. The notation A ⇒ 1 describes the event that the adversary A outputs the bit one.
+Security measure. For a tweakable enciphering scheme E: K × T × M → M we consider the
+advantage that the adversary A has in distinguishing E and its inverse from a random tweakable
+permutation and its inverse:
+                                                                                                
+      ±
+       prp               $      EK (·,·) E−1                  $     T         π(·,·) π −1 (·,·)
+ AdvE (A) = Pr K ← K : A                  K  (·,·)
+                                                   ⇒ 1 − Pr π ← Perm (M) : A                    ⇒1
+
+The notation show, in the brackets, an experiment to the left of the colon and an event to the
+right of the colon. We are looking at the probability of the indicated event after performing the
+                              $
+speciﬁed experiment. By X ← X we mean to choose X at random from the ﬁnite set X . By
+PermT (M) we mean the set of all functions π: T × M → M where π(T, ·) is a length-preserving
+
+                                                  2
+permutation. By Perm(n) we mean all permutations on {0, 1}n . In writing ±        prp the tilde serves
+as a reminder that the PRP is tweakable and the ± symbol is a reminder that this is the “strong”
+(chosen plaintext/ciphertext attack) notion of security. For a block cipher, we omit the tilde.
+    Without loss of generality we assume that an adversary never repeats an encipher query, never
+repeats a decipher query, never queries its deciphering oracle with (T, C) if it got C in response to
+some (T, M ) encipher query, and never queries its enciphering oracle with (T, M ) if it earlier got M
+in response to some (T, C) decipher query. We call such queries pointless because the adversary
+“knows” the answer that it should receive.
+    When R is a list of resources and Advxxx                                              xxx
+                                             Π (A) has been deﬁned, we write AdvΠ (R) for the
+maximal value of AdvxxxΠ (A) over all adversaries A that use resources at most R. Resources of
+interest are the running time t and the number of oracle queries q and the query complexity σn
+(where n ≥ 1 is a number). The query complexity σn is measured as follows. A string X contributes
+max{|X|/n, 1} to the query complexity; a tuple of strings (X1 , X2 , . . .) contributes the sum of
+the contributions of each string; and the query complexity of an adversary is the sum of the
+contributions from all oracle queries plus the contribution from the adversary’s output. So, for
+example, an adversary that asks oracle queries (T1 , P1 ) = (0n , 02n ) and then (T2 , P2 ) = (0n , ε) and
+then outputs a bit b has query complexity 3 + 2 + 1 = 6. The name of an argument (e.g., t or σn )
+will be enough to make clear what resource it refers to.
+Finite fields. We interchangeably view an n-bit string as: a string; a nonnegative integer less
+than 2n (msb ﬁrst); a formal polynomial over GF(2) (with the coeﬃcient of xn−1 ﬁrst and the free
+term last); and an abstract point in the ﬁnite ﬁled GF(2n ). To do addition on ﬁeld points, one xors
+their string representations. To do multiplication on ﬁeld points, one must ﬁx a degree-n irreducible
+polynomial. We choose to use the lexicographically ﬁrst primitive polynomial of minimum weight.
+For n = 128 this is the polynomial x128 +x7 +x2 +x+1. See [5] for a list of the indicated polynomials.
+We note that with this choice of ﬁeld-point representations, the point x = 0n−2 10 = 2 will always
+                                                                                                 n
+have order 2n − 1 in the multiplicative subgroup of GF(2n ), meaning that 2, 22 , 23 , . . . , 22 −1 are
+all distinct. Finally, we note that given L = Ln−1 · · · L1 L0 ∈ {0, 1}n it is easy to compute 2L.
+We illustrate the procedure for n = 128, in which case 2L = L<      <1 if ﬁrstbit(L) = 0, and 2L =
+(L< <1) ⊕ Const87 if ﬁrstbit(L) = 1. (Here Const87 = 0120 104 13 and ﬁrstbit(L) means Ln−1 and
+L< <1 means Ln−2 Ln−3 · · · L1 L0 0.)
+
+3   Speciﬁcation of EME
+We construct from block cipher E: K × {0, 1}n → {0, 1}n a tweakable enciphering scheme that we
+denote by EME[E] or EME-E. The enciphering scheme has key space K, the same as the underlying
+                                                                                                        2
+cipher, and tweak space is T = {0, 1}n . The message space M = {0, 1}n ∪ {0, 1}2n ∪ · · · {0, 1}n
+contains any string having any number m of n-bit blocks, where m ∈ [1..n]. An illustration of
+EME mode is given in Figure 2. In the ﬁgures, all capitalized variables except for K are n-bit strings
+(key K is an element of the key-space K). Variable names P and C are meant to suggest plaintext
+and ciphertext. When we write ETK (P1 · · · Pm ) we mean that the incoming plaintext P = P1 · · · Pm
+is silently partitioned into n-bit strings P1 , . . . , Pm and when we write DTK (C1 · · · Cm ) we mean
+that the incoming ciphertext C = C1 · · · Cm is partitioned into n-bit strings C1 , . . . , Cm . It is an
+error to provide E with a plaintext that is not mn bits for some m ∈ [1 .. n], or to supply D with
+a ciphertext that is not mn bits for some m ∈ [1..n].
+
+4   Security of EME
+The following theorem relates the advantage an adversary can get in attacking EME[E] to the
+advantage that an adversary can get in attacking the block cipher E.
+
+                                                    3
+   Algorithm ETK (P1 · · · Pm )                                    Algorithm DTKt (C1 · · · Cm )
+   100   L ← 2EK (0n )                                             200    L ← 2EK (0n )
+   101   for i ∈ [1 .. m] do                                       201    for i ∈ [1 .. m] do
+   102         PP i ← 2i−1 L ⊕ Pi                                  202          CC i ← 2i−1 L ⊕ Ci
+                                                                                            −1
+   103         PPP i ← EK (PP i )                                  203          CCC i ← EK     (CC i )
+   110   SP ← PPP 2 ⊕ · · · ⊕ PPP m                                210    SC ← CCC 2 ⊕ · · · ⊕ CCC m
+   111   MP ← PPP 1 ⊕ SP ⊕ T                                       211    MC ← CCC 1 ⊕ SC ⊕ T
+                                                                                    −1
+   112   MC ← EK (MP )                                             212    MP ← EK      (MC )
+   113   M ← MP ⊕ MC                                               213    M ← MC ⊕ MP
+   114   for i ∈ [2 .. m] do CCC i ← PPP i ⊕ 2i−1 M                214    for i ∈ [2 .. m] do PPP i ← CCC i ⊕ 2i−1 M
+   115   SC ← CCC 2 ⊕ · · · ⊕ CCC m                                215    SP ← PPP 2 ⊕ · · · ⊕ PPP m
+   116   CCC 1 ← MC ⊕ SC ⊕ T                                       216    PPP 1 ← MP ⊕ SP ⊕ T
+   120   for i ∈ [1 .. m] do                                       220    for i ∈ [1 .. m] do
+                                                                                           −1
+   121         CC i ← EK (CCC i )                                  221          PP i ← EK     (PPP i )
+   122         Ci ← CC i ⊕ 2i−1 L                                  222          Pi ← PP i ⊕ 2i−1 L
+   130   return C1 · · · Cm                                        230    return P1 · · · Pm
+
+
+Figure 1: Enciphering (left) and deciphering (right) under E = EME[E], where E: K × {0, 1}n → {0, 1}n is a
+block cipher. The tweak is T ∈ {0, 1}n and the plaintext is P = P1 · · · Pm and the ciphertext is C = C1 · · · Cm .
+
+                        P1                        P2                          P3                     P4
+
+                 L                           2L                          4L                    8L
+                             PP 1                      PP 2                        PP 3                   PP 4
+
+
+
+                             PPP 1                     PPP 2                       PPP 3                  PPP 4
+
+                                    SP ⊕ T
+                             MP
+
+                                         2M                          4M                        8M
+
+                             MC
+                                    SC ⊕ T
+                             CCC 1                     CCC 2                       CCC 3                  CCC 4
+
+
+
+                             CC 1                      CC 2                        CC 3                   CC 4
+                 L                           2L                          4L                    8L
+
+                        C1                        C2                          C3                     C4
+
+
+Figure 2: Enciphering a four-block message P1 P2 P3 P4 under EME. The boxes represent EK and L = 2EK (0n ).
+We set SP = PPP 2 ⊕ PPP 3 ⊕ PPP 4 and M = MP ⊕ MC and SC = CCC 2 ⊕ CCC 3 ⊕ CCC 4 .
+
+                                                               4
+Theorem 1 [EME security] Fix n, t, σn ∈ N and a block cipher E: K × {0, 1}n → {0, 1}n . Then
+
+                              ±
+                               prp                            7 σn2
+                           AdvEME[Perm(n)] (σn ) ≤                   and                                           (1)
+                                                               2n
+                                  ±                          7 σn2
+                                   prp
+                               AdvEME[E] (t, σn ) ≤                 + 2 Adv±prp
+                                                                           E    (t , σn )                         (2)
+                                                               2n
+where t = t + O(σn ).                                                                                              2
+
+The heart of Theorem 1 is Equation (1), which is given in Appendix B. Equation (2) embodies the
+standard way to pass from the information-theoretic setting to the complexity-theoretic one.
+
+5       Proof Ideas
+Since the proof in Appendix B is quite long we give a brief sketch here of some of its ideas. We
+consider an attack against EME as a game between the attacker and the mode itself, where the
+cipher is replaced by a truly random permutation and this permutation is chosen “on the ﬂy”
+during this game. We give names to all of the internal blocks that occur in the game, where an
+internal block is any of the n-bit values PP i , PPP i , MP , MC , CCC i , CC i that arise as the game
+is played. For example, PPP si is the PPP i -block of the sth query of the attacker.
+    As usual with such modes, the core of the proof is to show that “accidental collisions” are
+unlikely. An accidental collision is an equality between two internal blocks which is not obviously
+guaranteed due to the structure of the mode. Speciﬁcally, an equality between the ith blocks
+in two diﬀerent encipher queries Pis = Pit implies that we also have the equalities PP si = PP ti
+and PPP si = PPP ti and so these do not count as collisions. (And likewise for decipher queries.)
+Most other collisions are considered accidental collisions and we show that those rarely happen.1
+Showing that accidental collisions are rare is ultimately done by case analysis (but, as usual, it takes
+a non-trivial argument to get there). For example, in one case we show that with high probability
+PP si = PP tj ; in another case we show that with high probability PPP si = MC t .
+    The analysis of most of the cases is standard. Below we illustrate one of the more interesting
+cases. We show that for an encipher query P s the block MP s does not collide with any of the
+previous MP r blocks(cf. Claim 7 in Appendix B). This is easily seen if any of the plaintext blocks
+Pis is a “new blocks” (i.e., diﬀerent than Pir for all r < s). But we need to show it also for the
+case where the plaintext P s was obtained by “mix-and-matching” blocks from previous plaintext
+vectors. So let r < s be the last plaintext that share some blocks with P s , i.e., Pir = Pis for some
+index i. This means that all the blocks Pis appeared in queries no later than r (and some of them
+appeared in the r’th query). If queries s and r sport the same plaintext vectors, P r = P s , and diﬀer
+only in the tweak values, T r = T s , then we clearly have MP r ⊕ MP s = T r ⊕ T s = 0. So assume
+that P r = P s , let Eq be the set of indexes where they are equal, and denote Dr = {1..mr } − Eq
+and Ds = {1..ms } − Eq. That is, Pir = Pis exactly for all i ∈ Eq, which means that all the blocks
+Pis for i ∈ Ds appeared in queries before query r. This, in turn, implies that the value of PPP si for
+any i ∈ Ds depends only on things that were determined before query r.
+    Assume that query r was decipher and that MC r did not accidentally collide with anything,
+so MP r was chosen “almost at random” during the processing of query r. We show that the sum
+MP s ⊕ MP r can be expressed as aMP r + β, where a = 0 is a constant and β is some expression that
+    1
+      Actually, we only care about collisions between two values in the domain of π or between two values in its range;
+collisions between a domain value and a range value, such as PP si = CC ri , are inconsequential and we ignore those.
+
+
+
+
+                                                          5
+only depends on things that were determined before the choice of MP r . Thus, the sum MP s ⊕ MP r
+is rarely zero. If ms and mr are the lengths (in blocks) of queries r and s we can write this sum as
+                             m s                   m  r
+                                                                                                
+         s      r        s
+    MP ⊕ MP         = T ⊕          PPP si      r
+                                            ⊕T ⊕          PPP ri = T r ⊕ T s ⊕          PPP si ⊕          PPP ri
+                             i=1                    i=1                          i∈Ds              i∈Dr
+                                                                             
+                    = things-that-were-determined-before-query-r ⊕                 PPP ri
+                                                                            i∈Dr
+                                                                          
+Assuming that Dr is non-empty, it is suﬃcient to show that we can express i∈Dr PPP ri = aMP r +β
+where a is non-zero and β only depends on things that were determined before the choice of
+MP r (cf. Claim 2 in Appendix B). There are two cases in this proof, depending on whether 1 ∈ Dr
+or not, but they both boil down to the same point: since we use the value 2i−1 (MC s ⊕ MP s ) to
+mask the CCC i block, the sum of PPP ri ’s can be written as
+                                                                                
+                                                                         
+               PPP ri = some-expression-in-the-CCC ri ’s-and-MC r ⊕          2i−1 MP r
+             i∈Dr                                                                  i∈D
+
+where D is also a non-empty set, D ⊆ [1..mr ], and so the coeﬃcient of MP r in this expression is
+non-zero. The case where query r is encipher is a bit longer, but it uses similar observations.
+    One last “trick” that is worth mentioning is the way we handle an adaptive adversary. To bound
+the probability of accidental collisions we analyze this probability in the presence of an augmented
+adversary, that can specify both the queries and their answers. That is, we let the adversary specify
+the entire transcript (with some minor restrictions) then choose some “permutation” π that maps
+the given queries to the given answers, and then consider the probability of accidental collisions.
+Clearly, this augmented adversary is no longer adaptive, hence the analysis becomes more tractable.
+
+6       Some Insecure Modiﬁcations
+In this section we justify two of our design choices by showing that changing them would result in
+insecure schemes. Speciﬁcally, we show that the block-cipher call that sits in between the two ECB
+layers is eﬀectively unavoidable, and we show that that the length restriction m < n also is needed.
+6.1      The “extra” block-cipher call is needed
+The EME construction has three block-cipher invocations in its “critical path” (that is, the con-
+struction is depth-3 in block-cipher gates). We now show that, in some sense, this is the best that
+you can do for a constructions of this type. Speciﬁcally, we show that for a construction of the type
+ECB-Mix-ECB, implementing the intermediate mixing layer by any linear transformation always
+results in a insecure scheme. This remains true even for an untweakable scheme, even when one
+considers only ﬁxed-input-length inputs, even when each block-cipher call in each ECB encryption
+layer uses an independent key, and even if the linear transformation in the middle is key-dependent.
+This result implies that, as opposed to the Hash-Encrypt-Hash approach that was proven secure
+by Naor and Reingold [14], the “dual” approach of Encrypt-Hash-Encrypt will not secure under
+typical assumptions.2
+    Formally, ﬁx m, n ∈ N with m ≥ 2, and let E: K × {0, 1}n → {0, 1}n be a block cipher. The
+scheme E = BrokenEME is deﬁned on message space {0, 1}mn and key space K2m × K where K is
+a set of invertible linear transformations on {0, 1}mn . BrokenEME is keyed with 2m independent
+                                       ∈ K, and with an invertible (possibly secret) linear transformation3
+keys K1 , . . . , Km , K1 , . . . , Km
+    2
+     This may seem somewhat surprising, as one may think that Encrypt-Hash-Encrypt should be at least as secure
+since it uses “more cryptography”.
+   3
+     In fact, it is easy to see that the attack described below works also when T is an aﬃne transformation.
+
+
+                                                      6
+T : {0, 1}mn → {0, 1}mn . To encipher a plaintext P = P1 · · · Pm ∈ {0, 1}mn we do the following:
+      Set PPP i = Eki (Pi ) for i = 1 . . . m. Let PPP = PPP 1 · · · PPP m be the concatenation of the
+      PPP i blocks (PPP ∈ {0, 1}mn ).
+      Apply the linear transformation T to obtain CCC = CCC 1 · · · CCC m = T (PPP ).
+      Set Ci = Eki (CCC i ) for i = 1 . . . m. The ciphertext is the concatenation of all the Ci blocks,
+      C = C1 · · · Cm ∈ {0, 1}mn .
+Deciphering is done in the obvious way.
+    We now give an adversary A that attacks the mode, distinguishing it from a truly random
+permutation and its inverse using only four queries. Denote the adversary with it’s oracles as
+AE D . The adversary A picks two mn-bit plaintexts that diﬀer only in their ﬁrst block, namely
+P 1 = P1 P2 · · · Pm and P 2 = P1 P2 · · · Pm (with P1 = P1 ). Then A queries its oracle as follows:
+(1) Let C 1 = C11 · · · Cm1 ← E(P 1 ) and let C 2 = C 2 · · · C 2 ← E(P 2 ).
+                                                     1         m
+(2) Create two “complementing mixes” of the two ciphertexts, for example C 3 = C12 C21 · · · Cm
+                                                                                              1 and
+
+    C = C1 C2 · · · Cm .
+     4      1 2         2
+
+(3) Let P 3 = P13 · · · Pm3 ← D(C 3 ) and let P 4 = P 4 · · · P 4 ← D(C 4 ).
+                                                     1         m
+
+If the plaintext vectors P 3 and P 4 agree in all but their ﬁrst block then A outputs 1 (“real”)
+while otherwise it outputs 0 (“random”). To see that this works, we denote the intermediate
+variables in the four queries by PPP ij and CCC ij (i = 1..4 and j = 1..m) and denote the “vector
+                                                                         def
+of diﬀerences” between PPP 1 and PPP 2 by DP = DP 1 · · · DP m = PPP 1 ⊕ PPP 2 . Since P 1
+and P 2 agree everywhere except in their ﬁrst block, it follows that also the “vector of diﬀerences”
+DP is zero everywhere except in the ﬁrst block. Similarly, we denote the “vector of diﬀerences”
+                                                            def
+between CCC 1 and CCC 2 by DC = DC 1 · · · DC m = CCC 1 ⊕ CCC 2 and since we computed
+CCC i = T (PPP i ) and T is a linear transformation, it follows that DC = T (PPP 1 ) ⊕ T (PPP 2 ) =
+T (PPP 1 ⊕ PPP 2 ) = T (DP ). Recall now that for any j ∈ [1..m] we have either Cj3 = Cj1 and Cj4 =
+Cj2 , or Cj3 = Cj2 and Cj4 = Cj1 . It follows that for all j, CCCj3 ⊕ CCCj4 = CCCj1 ⊕ CCCj2 = DC j ,
+namely CCC 3 ⊕ CCC 4 = DC . Putting this together we now compute PPP 3 ⊕ PPP 4 as:
+
+          PPP 3 ⊕ PPP 4 = T −1 (CCC 3 ) ⊕ T −1 (CCC 4 )
+                           = T −1 (CCC 3 ⊕ CCC 4 ) = T −1 (DC ) = T −1 (T (DP )) = DP
+
+This means that PPP 4j = PPP 3j for j = 2..m, and therefore also Pj4 = Pj3 for all but the ﬁrst block.
+
+6.2    Necessity of the Length Restriction
+                                                             
+Recall that EME is deﬁned on message space M = m∈[1..n] {0, 1}mn . Here we show that the
+restriction m ≤ n is justiﬁed. In fact, we do not know whether allowing m = n + 1 breaks the
+security of EME, but we can show that allowing m = n + 2 permits easy distinguishing attacks.
+The details of the attack depend somewhat on the representation of the ﬁeld GF(2n ). Below
+we demonstrate it for n = 128, where the ﬁeld GF(2128 ) is represented using the polynomial
+P128 (x) = x128 + x7 + x2 + x + 1.
+    Assume that m ≥ n + 2 and let J be a nonempty proper subset          of the indexes from 2 to m,
+J ⊂ {2, 3, . . . , m}, J = ∅, such that in the ﬁeld GF(2n ) we have j∈J 2j−1 = 0. For example, when
+GF(2128 ) is represented using P128 , we have
+
+                     2129 + 28 + 23 + 22 + 21 = 2(2128 + 27 + 22 + 21 + 20 ) = 0
+
+so we can set J = {130, 9, 4, 3, 2}. The attack proceeds as follows:
+
+                                                    7
+(1) Pick an arbitrary tweak T . All the queries in the attack will use the same tweak T . (In
+    other words, the attack works also when EME is used as an untweakable scheme.) Pick two
+    plaintext vectors that diﬀer only in their ﬁrst block, P 1 = P1 P2 . . . Pm and P 2 = P1 P2 · · · Pm
+    (with P1 = P1 ).
+(2) Encipher both plaintext vectors to get C 1 = E(T, P 1 ) and C 2 = E(T, P 2 ).
+                                                         Cj1 if j ∈ J
+(3) Create a ciphertext vector C 3 such that Cj3 =                    .
+                                                                  /J
+                                                         Cj2 if j ∈
+(4) Decipher C 3 to get P 3 = D(T, C 3 ).
+Output 1 (“real”) if P 3 and P 2 agree in all the blocks j ∈ ([2..m] \ J) and output 0 (“random”)
+otherwise. To see that this works we denote the intermediate variables in the three queries by
+PPP ij and CCC ij and MP i and MC i and M i (i = 1..3 and j = 1..m).
+   We note that PPP 1j = P P Pj2 for all j ∈ [2..m], and in particular for all j ∈ J. Also, from the
+construction of C 3 we get that CCCj3 = CCCj1 for j ∈ J and CCCj3 = CCCj2 for j ∈     / J. Thus
+                                                                     
+                                      m                      m
+            M C 2 ⊕ M C 3 = T ⊕          CCCj2  ⊕ T ⊕          CCCj3 
+                                        j=1                     j=1
+                                                             
+                             =   CCCj2 ⊕ CCCj3 =    CCCj2 ⊕ CCCj1
+                                 j∈J                          j∈J
+                                                                            
+                             =   (P P Pj2 ⊕ 2j−1 M 2 ) ⊕ (P P Pj1 ⊕ 2j−1 M 1 )
+                                 j∈J
+                                                                 
+                             =   2j−1 M 2 + 2j−1 M 1 = (M 2 + M 1 )   2j−1 = 0
+                                 j∈J                                         j∈J
+
+So we have MC 3 = MC 2 and therefore also MP 3 = MP 2 and M 3 = M 2 . Thus for any j ∈ / J, j > 1
+we have PPP 3j = CCC 3j ⊕ 2j−1 M 3 = CCC 2j + 2j−1 M 2 = PPP 2j and therefore also Pj3 = Pj2 .
+
+References
+ [1] R. Anderson and E. Biham. Two practical and provably secure block ciphers: BEAR and
+     LION. In Fast Software Encryption, Third International Workshop, volume 1039 of Lecture
+     Notes in Computer Science, pages 113–120, 1996. www.cs.technion.ac.il/∼biham/.
+
+ [2] M. Bellare, J. Kilian, and P. Rogaway. The security of the cipher block chaining mes-
+     sage authentication code. Journal of Computer and System Sciences, 61(3):362–399, 2000.
+     www.cs.ucdavis.edu/∼rogaway.
+
+ [3] J. Black and P. Rogaway. A block-cipher mode of operation for parallelizable message authen-
+     tication. In L. Knudsen, editor, Advances in Cryptology – EUROCRYPT ’01, volume 2332 of
+     Lecture Notes in Computer Science. Springer-Verlag, 2001.
+
+ [4] P. Crowley. Mercy: A fast large block cipher for disk sector encryption. In B. Schneier,
+     editor, Fast Software Encryption: 7th International Workshop, volume 1978 of Lecture
+     Notes in Computer Science, pages 49–63, New York, USA, Apr. 2000. Springer-Verlag.
+     www.ciphergoth.org/crypto/mercy.
+
+ [5] S. Duplichan. A primitive polynomial search program. Web document. Available at
+     http://users2.ev1.net/∼sduplichan/primitivepolynomials/primivitePolynomials.htm, 2003.
+
+                                                   8
+ [6] S. Halevi and P. Rogaway. A tweakable enciphering mode. In D. Boneh, editor, Advances
+     in Cryptology – CRYPTO ’03, volume 2729 of Lecture Notes in Computer Science. Springer-
+     Verlag, 2003. Full version available on the ePrint archive, http://eprint.iacr.org.
+ [7] J. Hughes. Personal communication, 2002.
+ [8] IEEE. Security in Storage Working Group (SISWG). See www.siswg.org. Call for algorithms
+     at www.mail-archive.com/cryptography@wasabisystems.com/msg02102.html, May 2002.
+ [9] A. Joux. Cryptanalysis of the EMD mode of operation. In Advances in Cryptology – EURO-
+     CRYPT ’03, volume 2656 of Lecture Notes in Computer Science. Springer-Verlag, 2003.
+[10] J. Kilian and P. Rogaway. How to protect DES against exhaustive key search. Journal of
+     Cryptology, 14(1):17–35, 2001. Earlier version in CRYPTO ’96. www.cs.ucdavis.edu/∼rogaway.
+[11] M. Liskov, R. Rivest, and D. Wagner.   Tweakable block ciphers.   In Advances in
+     Cryptology – CRYPTO ’02, Lecture Notes in Computer Science. Springer-Verlag, 2002.
+     www.cs.berkeley.edu/∼daw/.
+[12] M. Luby and C. Rackoﬀ. How to construct pseudorandom permutations from pseudorandom
+     functions. SIAM J. of Computation, 17(2), April 1988.
+[13] M. Naor and O. Reingold. A pseudo-random encryption mode. Manuscript, available from
+     www.wisdom.weizmann.ac.il/∼naor/.
+[14] M. Naor and O. Reingold. On the construction of pseudo-random permutations: Luby-Rackoﬀ
+     revisited. Journal of Cryptology, 12(1):29–66, 1999. (Earlier version in STOC ’97.) Available
+     from www.wisdom.weizmann.ac.il/∼naor/.
+[15] Y. Zheng, T. Matsumoto, and H. Imai. On the construction of block ciphers provably secure
+     and not relying on any unproved hypotheses. In Advances in Cryptology – CRYPTO ’89,
+     volume 435 of Lecture Notes in Computer Science, pages 461–480. Springer-Verlag, 1989.
+
+A    Extending EME to Longer Messages
+The restriction on the message size of EME, m ≤ n, means, for example, that when using AES
+as the underlying cipher one cannot encrypt messages longer than 2KB. In some applications this
+restriction could be problematic. We now describe EME+ , an extension of EME that can be used
+to handle message of practically any length (as long as it is an integral number of blocks).
+    The idea is to divide the m-block input into “chunks” of at most n blocks each such that in
+each “chunk” we use construction similar to EME. Speciﬁcally, in the ﬁrst “chunk” we use exactly
+the same construction as in EME. In all the other “chunks” we use a similar construction, except
+that we replace the addition of SP ⊕ T and SC ⊕ T (before and after the block encryption on the
+“special line”) by addition of the ﬁrst mask M1 (both before and after the block encryption).
+    We specify in Figure 3 both the forward direction of our construction, E = EME+ [E], and its
+inverse D. An illustration of EME+ mode is given in Figure 4. One observes that EME+ is a
+“proper extension” of EME in that when we use it on a message of length m ≤ n blocks, we get
+back the original EME mode.
+    Although we have not written a proof of security for EME+ we expect that such proof can be
+written. One would follow the arguments in the proof for the basic EME in Appendix B, except
+that one needs to analyze a few more cases in the case analysis(speciﬁcally in the proof of Claim 7)
+.
+
+                                                 9
+ Algorithm ETK (P1 · · · Pm )                                   Algorithm DTKt (C1 · · · Cm )
+ 100   L ← 2EK (0n )                                            200    L ← 2EK (0n )
+ 101   for i ∈ [1 .. m] do                                      201    for i ∈ [1 .. m] do
+                                                                                                        −1
+ 102      PP i ← 2i−1 L ⊕ Pi , PPP i ← EK (PP i )               202       CC i ← 2i−1 L ⊕ Ci , CCC i ← EK  (CC i )
+ 110   MP 1 ← PPP 1 ⊕ PPP 2 ⊕ · · · ⊕ PPP m ⊕ T                 210    MC 1 ← CCC 1 ⊕ CCC 2 ⊕ · · · ⊕ CCC m ⊕ T
+                                                                                  −1
+ 111   MC 1 ← EK (MP 1 ), M1 ← MP 1 ⊕ MC 1                      211    MP 1 ← EK     (MC 1 ), M1 ← MC 1 ⊕ MP 1
+ 112   for i ∈ [2..n] do CCC i ← PPP i ⊕ 2i−1 M1                212    for i ∈ [2..n] do PPP i ← CCC i ⊕ 2i−1 M1
+ 113   for j ∈ [2 .. m/n] do                                  213    for j ∈ [2 .. m/n] do
+ 114      MP j ← PPP (j−1)n+1 ⊕ M1                              214       MC j ← CCC (j−1)n+1 ⊕ M1
+                                                                                      −1
+ 115      MC j ← EK (MP j ), Mj ← MP j ⊕ MC j                   215       MP j ← EK      (MC j ), Mj ← MC j ⊕ MP j
+ 116      CCC 1+(j−1)n ← MC j ⊕ M1                              216       PPP 1+(j−1)n ← MP j ⊕ M1
+ 117      for i ∈ [2 + (j − 1)n .. jn] do                       217       for i ∈ [2 + (j − 1)n .. jn] do
+ 118          CCC i ← PPP i ⊕ 2i−1 mod n Mj                     218           PPP i ← CCC i ⊕ 2i−1 mod n Mj
+ 119   CCC 1 ← MC 1 ⊕ CCC 2 ⊕ · · · ⊕ CCC m ⊕ T                 219    PPP 1 ← MP 1 ⊕ PPP 2 ⊕ · · · ⊕ PPP m ⊕ T
+ 120   for i ∈ [1 .. m] do                                      220    for i ∈ [1 .. m] do
+ 121      CC i ← EK (CCC i ), Ci ← CC i ⊕ 2i−1 L                221       PP i ← EK   −1
+                                                                                         (PPP i ), Pi ← PP i ⊕ 2i−1 L
+ 130   return C1 · · · Cm                                       230    return P1 · · · Pm
+
+
+Figure 3: Enciphering (left) and deciphering (right) under E = EME+ [E], where E: K × {0, 1}n → {0, 1}n is a
+block cipher. The tweak is T ∈ {0, 1}n and the plaintext is P = P1 · · · Pm and the ciphertext is C = C1 · · · Cm .
+
+                            P1               P2                        Pn               Pn+1             Pn+2
+
+                     L                  2L                  2n−1 L             2n L         2n+1 L
+                                 PP 1             PP 2                      PP n          PP n+1           PP n+2
+
+                                                     ...
+                                 PPP 1            PPP 2                     PPP n         PPP n+1          PPP n+2
+
+               SP ⊕ T                                                              M1
+                                 MP 1                                                     MP 2
+
+                                    2M1                   2n−1 M1                              2M2
+
+                                 MC 1                                                     MC 2
+
+               SC ⊕ T                                                              M1
+                                 CCC 1            CCC 2                     CCC n         CCC n+1          CCC n+2
+
+                                                     ...
+                                 CC 1             CC 2                      CC n          CC n+1           CC n+2
+                                                             n−1                   n           n+1
+                     L                  2L                  2      L           2 L             2     L
+                            C1               C2                        Cn               Cn+1             Cn+2
+
+
+Figure 4: Enciphering an (n + 2)-block message under EME+ . The boxes represent EK and L = 2EK (0n ).
+We set SP = PPP 2 ⊕ · · · PPP m , Mi = MP i ⊕ MC i , and SC = CCC 2 ⊕ · · · ⊕ CCC m .
+
+                                                            10
+B     Proof of Theorem 1 — Security of EME
+Our proof of security for EME is divided into two parts: in Section B.1 we carry out a game-
+substitution argument, reducing the analysis of EME to the analysis of a simpler probabilistic
+game. In Section B.2 we analyze that simpler game. Before we begin we ﬁrst recall a little lemma,
+saying that a (tweakable) truly random permutation looks very much like an oracle that just returns
+random bits (as long as you never ask pointless queries). So instead of analyzing indistinguishability
+from a random permutation we can analyze indistinguishability from random bits.
+    Let E: K × T × M → M be a tweaked block-cipher and let D be its inverse. Deﬁne the
+                                                          
+advantage of distinguishing E from random bits, Adv±    E
+                                                          rnd
+                                                              , by
+                   
+             Adv±     (A) = Pr[K ← K : AEK (·,·) DK (·,·) ⇒ 1 ] − Pr[ A$(·,·) $(·,·) ⇒ 1 ]
+                  rnd                  $
+                E
+
+where $(T, M ) returns a random string of length |M |. We insist that A makes no pointless queries,
+regardless of oracle responses, and A asks no query (T, M ) outside of T × M. We extend the
+deﬁnition above in the usual way to its resource-bounded versions. We have the following lemma,
+whose (standard) proof can be found, for example, in the full version of [6].
+
+                          
+          prp-security ≈ ±rnd-security]
+Lemma 2 [±                             Let E: K ×T ×M → M be a tweaked block-cipher
+                                    ±                      
+and let q ≥ 1 be a number. Then |AdvE prp
+                                          (q) − Adv±
+                                                   E
+                                                     rnd
+                                                         (q)| ≤ q(q − 1)/2N +1 where N is the
+length of a shortest string in M.                                                          2
+
+B.1    The game-substitution sequence
+Fix n, σn , and q. Let A be an adversary that asks q oracle (none pointless) and has query
+                                                                                        qσn
+complexity σn . Our goal is to show that Adv± EME[Perm(n)] (A) ≤ 2 Pr[ NON2 sets bad ] + 2n where
+                                               rnd
+
+NON2 is some probability space and “ NON2 sets bad ” is an event deﬁned there. Later we bound
+Pr[ NON2 sets bad ], and, putting that together with Lemma 2, we get Equation (1) of Theorem 1.
+    Game NON2 is obtained by a game-substitution argument, as carried out in works like [10].
+The goal is to simplify the rather complicated setting of A adaptively querying its oracles, and to
+arrive at a simpler setting where there is no adversary and no interaction—just a program that
+ﬂips coins and a ﬂag bad that does or does not get set.
+Game EME1. We begin by describing the attack scenario of A against EME[Perm(n)] as a
+probabilistic game in which the permutation π is chosen “on the ﬂy”, as needed to answer the
+queries of A. Initially, the partial function π: {0, 1}n → {0, 1}n is everywhere undeﬁned. When we
+need π(X) and π isn’t yet deﬁned at X we choose this value randomly among the available range
+values. When we need π −1 (Y ) and there is no X for which π(X) has been set to Y we likewise
+choose X at random from the available domain values. As we ﬁll in π its domain and its range thus
+grows. In the game we keep track of the domain and range of π by maintaining two sets, Domain
+and Range, that include all the points for which π is already deﬁned. We let Domain and Range be
+the complement of these sets relative to {0, 1}n . The game, denoted EME1, is shown in Figure 5.
+Since game EME1 accurately represent the attack scenario, we have that
+
+                               Pr[ AEπ Dπ ⇒ 1 ] = Pr[ AEME1 ⇒ 1 ]                                 (3)
+
+Game RND1. We next modify game EME1 by omitting the statements that immediately follow
+the setting of bad to true. (This is the usual trick under the game-substitution approach.) Namely,
+                                                                                        $
+before we were making some consistency checks after each random choice π(X) = Y ← {0, 1}n to
+
+                                                  11
+            Subroutine Choose-π(X):
+                     $                                                   $
+            010   Y ← {0, 1}n ; if Y ∈ Range then bad ← true , Y ← Range
+            011   if X ∈ Domain then bad ← true , Y ← π(X)
+            012   π(X) ← Y , Domain ← Domain ∪ {X}, Range ← Range ∪ {Y }; return Y
+            Subroutine Choose-π −1 (Y ):
+                     $                                                       $
+            020   X ← {0, 1}n ; if X ∈ Domain then bad ← true , X ← Domain
+            021   if Y ∈ Range then bad ← true , X ← π −1 (Y )
+            022   π(X) ← Y , Domain ← Domain ∪ {X}, Range ← Range ∪ {Y }; return X
+
+            Initialization:
+            030   bad ← false; for all X ∈ {0, 1}n do π(X) ← undef
+                       $
+            031   EZ ← {0, 1}n ; L ← 2EZ
+            032   π(0n ) ← EZ ; Domain ← {0n }; Range ← {EZ }
+
+            Respond to the s-th adversary query as follows:
+                                                    s
+            An encipher query, Enc(T s ; P1s · · · Pm s ):
+                                s
+            110 for i ← 1 to m do
+            111       Let r = r[s, i] be the smallest index s.t. Pis = Pir
+            112       if r < s then PP si ← PP ri , PPP si ← PPP ri
+            113       else PP si ← Pis ⊕ 2i−1 L; PPP si ← Choose-π(PP si )
+            120   MP s ← PPP s1 ⊕ PPP s2 ⊕ · · · ⊕ PPP sms ⊕ T s
+            121   MC s ← Choose-π(MP s )
+            122   for i ∈ [2 .. m] do CCC si ← PPP si ⊕ 2i−1 (MP s ⊕ MC s )
+            123   CCC s1 ← MC s ⊕ CCC s2 ⊕ · · · ⊕ CCC sm ⊕ T
+            130   for i ← 1 to ms do
+            131         CC si ← Choose-π(CCC si );       Cis ← CC si ⊕ 2i−1 L
+            140   return C1 · · · Cms
+                                                   s
+            A decipher query, Dec(T s ; C1s · · · Cm s) :
+                                s
+            210 for i ← 1 to m do
+            211       Let r = r[s, i] be the smallest index s.t. Cis = Cir
+            212       if r < s then CC si ← CCir , CCC si ← CCC ri
+            213       else CC si ← Cis ⊕ 2i−1 L; CCC si ← Choose-π −1 (CC si )
+            220   MC s ← CCC s1 ⊕ CCC s2 ⊕ · · · ⊕ CCC sms ⊕ T s
+            221   MP s ← Choose-π −1 (MC s )
+            222   for i ∈ [2 .. m] do PPP si ← CCC si ⊕ 2i−1 (MP s ⊕ MC s )
+            223   PPP s1 ← MP s ⊕ PPP s2 ⊕ · · · ⊕ PPP sm ⊕ T
+            230   for i ← 1 to ms do
+            231         PP si ← Choose-π −1 (PPP si );    Pis ← PP si ⊕ 2i−1 L
+            240   return P1 · · · Pms
+
+
+Figure 5: Game EME1 describes the attack of A on EME[Perm(n)], where the permutation π is chosen “on the
+ﬂy” as needed. Game RND1 is the same as game EME1, except we do not execute the shaded statements.
+
+
+
+
+                                                     12
+         Initialization:
+                                     $
+         000   bad ← false;   EZ ← {0, 1}n ; Domain ← Range ← {0n , EZ }; L ← 2EZ
+
+         Respond to the s-th adversary query as follows:
+                                                 s
+         An encipher query, Enc(T s ; P1s · · · Pm s ):
+
+                             s
+         110 for i ← 1 to m do
+         111       Let r = r[s, i] be the smallest index s.t. Pis = Pir
+         112       if r < s then PP si ← PP ri , PPP si ← PPP ri
+         113       else PP si ← Pis ⊕ 2i−1 L; if PP si ∈ Domain then bad ← true
+                         PPP si ← {0, 1}n ; if PPP si ∈ Range then bad ← true
+                                 $
+         115
+         116             Domain ← Domain ∪ {P Pis }, Range ← Range ∪ {PPP si }
+         120   MP s ← PPP s1 ⊕ PPP s2 ⊕ · · · ⊕ PPP sms ⊕ T s ; if MP s ∈ Domain then bad ← true
+               MC s ← {0, 1}n ; if MC s ∈ Range then bad ← true
+                      $
+         121
+         122   Domain ← Domain ∪ {MP s }, Range ← Range ∪ {MC s }
+         123   for i ∈ [2 .. m] do CCC si ← PPP si ⊕ 2i−1 (MP s ⊕ MC s )
+         124   CCC s1 ← MC s ⊕ CCC s2 ⊕ · · · ⊕ CCC sm ⊕ T s
+         130   for i ← 1 to ms do
+                          $
+         131         Cis ← {0, 1}n ;
+         132         CC si ← Cis ⊕ 2i−1 L; if CC si ∈ Range then bad ← true
+         133         if CCC si ∈ Domain then bad ← true
+         134         Domain ← Domain ∪ {CCC si }, Range ← Range ∪ {CC si }
+         140   return C1 · · · Cms
+                                                s
+         A decipher query, Dec(T s ; C1s · · · Cm s ), is treated symmetrically
+
+
+
+
+Figure 6: Game RND2 is indistinguishable from Game RND1 but chooses some of its variables in diﬀerent order.
+
+see if this value of Y was already in use, or if π was already deﬁned at X, and we reset out choice
+of Y as needed. Now we still make these checks and set the ﬂag bad, but we do not reset the chosen
+value of Y . This means that π may end up not being a permutation, and moreover we may reset
+its value on previously chosen points.
+    Still, the games EME1 and RND1 are syntactically identical apart from what happens after
+the setting of the ﬂag bad to true. Once the ﬂag bad is set to true the subsequent behavior of the
+game does not impact the probability that an adversary A interacting with the game can set the
+ﬂag bad to true. This is exactly the setup used in the game-substitution method to conclude that
+
+                    Pr[ AEME1 ⇒ 1 ] − Pr[ ARND1 ⇒ 1 ] ≤ Pr[ ARND1 sets bad ]                            (4)
+
+Game RND2. We now make three adversarially-invisible changes to game RND1. First, we note
+that the function π (and its inverse) are never used in game RND1, so we just remove them from
+the code. Next, instead of choosing CC si ← {0, 1}n and then setting Cis ← CC si ⊕ 2i L (in encipher
+                                           $
+
+
+queries, line 131), we will now choose Cis ← {0, 1}n and then set CC si ← Cis ⊕ 2i L. Clearly, this
+                                             $
+
+
+change preserves the distribution of all these variables. The analogous comments apply to the
+choice of PP si and Pis in decipher queries; we could just as well have chosen Pis at random and
+deﬁned PP si using it. The last change that we make is to artiﬁcially add 0n also to the Range set,
+and the value EZ (which was meant to represent π(0n )) to the Domain set. This last change is
+meant to make the encipher and decipher directions completely symmetric, so that we can reduce
+the number of cases that we need to handle in the analysis to come. Note that this last change has
+
+
+                                                    13
+no eﬀect on the answers that are returned to the adversary. Its only eﬀect is to slightly increase
+the probability that the ﬂag bad is set.
+    The resulting game RND2 is described in Figure 6. (In that ﬁgure we did not bother describing
+the decipher queries, as they are completely symmetric to the encipher queries.) It is clear that
+the changes we made do has no eﬀect on the probability that A returns one (as they do not change
+anything in the interaction between A and its oracles), and they can only increase the probability
+of setting ﬂag bad. Hence we conclude that
+
+      Pr[ ARND1 ⇒ 1 ] = Pr[ ARND2 ⇒ 1 ] and Pr[ ARND1 sets bad ] ≤ Pr[ ARND2 sets bad ]              (5)
+
+We note that in game RND2 we respond to any m-block Enc-query by returning nm random bits,
+C1 · · · Cm . Similarly, we respond to any m-block Dec-query by returning nm random bits, P1 · · · Pm .
+Thus RND2 provides an adversary with an identical view to a pair of random-bit oracles,
+                                                               
+                                Pr[ ARND2 ⇒ 1 ] = Pr[ A±rnd ⇒ 1 ]                                    (6)
+
+Combining Equations 3, 4, 5, and 6, we thus have that
+                          
+                    Adv±
+                       EME[Perm(n)] (A) = Pr[ A
+                         rnd                   EME1
+                                                    ⇒ 1 ] − Pr[ ARND2 ⇒ 1 ]
+                                           = Pr[ AEME1 ⇒ 1 ] − Pr[ ARND1 ⇒ 1 ]
+                                           ≤ Pr[ ARND1 sets bad ]
+                                           ≤ Pr[ ARND2 sets bad ]                                    (7)
+
+Our task is thus to bound Pr[ ARND2 sets bad ].
+Game RND3. Next we reorganize game RND2 so as to separate out (i) choosing random values
+to return to the adversary, (ii) deﬁning intermediate variables, and (iii) setting the ﬂag bad.
+    We remarked that game RND2 returns mn random bits in response to any m-block query.
+Now, in game RND3, shown in Figure 7, we make that even more clear by choosing the necessary
+                 s or P s = P s · · · P s response just as soon as the sth query is made. Nothing else is
+C s = C1s · · · Cms          1         ms
+done at that point except for recording if the adversary made an Enc query or a Dec query.
+    When the adversary ﬁnishes all of its oracle queries and halts, we execute the “ﬁnalization”
+step of game RND3. First, we go over all the variables of the game and determine their values, just
+as we do in game RND2. While doing so, we collect all the values in the sets Domain and Range,
+this time viewing them as multisets D and R, respectively. When we are done setting values to all
+the variables, we go back and look at D and R. The ﬂag bad is set if (and only if) any of these
+multisets contains some value more than once. This procedure is designed to set bad under exactly
+the same conditions as in game RND2. The following is thus clear:
+
+                           Pr[ ARND2 sets bad ] = Pr[ ARND3 sets bad ]                               (8)
+
+Game NON1. So far we have not changed the structure of the games at all: it has remained an
+adversary asking q questions to an oracle, our answering those questions, and the internal variable
+bad either ending up true or false. The next step, however, actually gets rid of the adversary, as
+well as all interaction in the game.
+    We want to bound the probability that bad gets set to true in game RND3. We may assume that
+                                                                                      $         s
+the adversary is deterministic, and so the probability is over the random choices P s ← {0, 1}nm and
+    $           s
+C s ← {0, 1}nm that are made while answering the queries (in lines 011 and 021), and the random
+
+                                                   14
+          Respond to the s-th adversary query as follows:
+                                                  s
+          An encipher query, Enc(T s ; P1s · · · Pm s ):
+                 s
+          010 ty ← Enc
+                                   $       nms
+          011                  s
+              C s = C1s · · · Cm s ← {0, 1}
+
+          012 return C s
+                                                 s
+          A decipher query, Dec(T s ; C1s · · · Cm s ):
+                 s
+          020 ty ← Dec
+                                   $       nms
+          021                  s
+              P s = P1s · · · Pm s ← {0, 1}
+
+          022 return P s
+
+          Finalization:
+          First phase
+                    $
+          050  EZ ← {0, 1}n ; L ← 2EZ ; D ← R ← {0n , EZ }                          // D, R are multisets
+          051       for s ← 1 to q do
+          100             if ty s = Enc then
+          110                    for i ← 1 to ms do
+          111                          Let r = r[s, i] be the smallest index s.t. Pis = Pir
+          112                          if r < s then PP si ← PP ri , PPP si ← PPP ri
+          113                          else PP si ← Pis ⊕ 2i−1 L; D ← D ∪ {PP si }
+                                             PPP si ← {0, 1}n ; R ← R ∪ {PPP si }
+                                                     $
+          114
+
+          120                   MP s ← PPP s1 ⊕ PPP s2 ⊕ · · · ⊕ PPP sms ⊕ T s ; D ← D ∪ {MP s }
+                                MC s ← {0, 1}n ; R ← R ∪ {MC s }
+                                       $
+          121
+          122                   for i ∈ [2 .. m] do CCC si ← PPP si ⊕ 2i−1 (MP s ⊕ MC s )
+          123                   CCC s1 ← MC s ⊕ CCC s2 ⊕ · · · ⊕ CCC sm ⊕ T s
+          130                   for i ← 1 to ms do
+          131                         CC si ← Cis ⊕ 2i−1 L; R ← Range ∪ {CC si }
+          132                         D ← Domain ∪ {CCC si }
+          200             The case ty s = Dec is treated symmetrically
+
+          Second phase
+          300 bad ← (some value appears more than once in D)
+                    or (some value appears more than once in R)
+
+
+   Figure 7: Game RND3 is adversarially indistinguishable from game RND2 but defers the setting of bad.
+
+choices EZ ← {0, 1}n , PPP si ← {0, 1}n , MP s ← {0, 1}n , MC s ← {0, 1}n , and CCC si ← {0, 1}n that
+                $                    $                  $                  $                         $
+
+
+are made in the ﬁrst ﬁnalization phase (lines 050, 113, 120, 213, and 220). We will now eliminate
+the coins associated to lines 011 and 021. Recall that the adversary asks no pointless queries.
+    We would like to make the stronger statement that for any set of values that might be returned
+to the adversary at lines 011 and 021, and for any set of queries (none pointless) associated to
+them, the ﬁnalization step of game RND3 rarely sets bad. However, this statement isn’t quite true.
+For example, assume that r-th and s-th queries (r < s) are both encipher queries, and that the
+random choices in line 011 specify that the i’th ciphertext block in the two answers is the same,
+Cir = Cis . Then the ﬂag bad is sure to be set, since we will have a “collision” between CC ri and CC si .
+Formally, since in line 131 we set CC ri = Cir ⊕ 2i−1 L = Cis ⊕ 2i−1 L = CC s1 , and since both CC ri
+and CC si are added to R we would set bad when we examine their values in line 300. A similar
+example can be shown for decipher queries. We call such collisions immediate collisions. Formally,
+an immediate collision happens whenever we have Cir = Cis (r < s) and query s is an encipher
+
+
+                                                            15
+                      $
+           050   EZ ← {0, 1}n ; L ← 2EZ ; D ← R ← {0n , EZ }                       // D, R are multisets
+           051   for s ← 1 to q do
+           100         if tys = Enc then
+           110                for i ← 1 to ms do
+           111                      Let r = r[s, i] be the smallest index s.t. Psi = Pri
+           112                      if r < s then PP si ← PP ri , PPP si ← PPP ri
+           113                      else PP si ← Psi ⊕ 2i−1 L; D ← D ∪ {PP si }
+                                          PPP si ← {0, 1}n ; R ← R ∪ {PPP si }
+                                                  $
+           114
+
+           120                  MP s ← PPP s1 ⊕ PPP s2 ⊕ · · · ⊕ PPP sms ⊕ Ts ; D ← D ∪ {MP s }
+                                MC s ← {0, 1}n ; R ← R ∪ {MC s }
+                                       $
+           121
+           122                  for i ∈ [2 .. m] do CCC si ← PPP si ⊕ 2i−1 (MP s ⊕ MC s )
+           123                  CCC s1 ← MC s ⊕ CCC s2 ⊕ · · · ⊕ CCC sm ⊕ Ts
+           130                  for i ← 1 to ms do
+           131                        CC si ← Csi ⊕ 2i−1 L; R ← Range ∪ {CC si }
+           132                        D ← D ∪ {CCC si }
+           200            else (tys = Dec)
+           210                  for i ← 1 to ms do
+           211                        Let r = r[s, i] be the smallest index s.t. Csi = Cri
+           212                        if r < s then CC si ← CC ri , CCC si ← CCC ri
+           213                        else CC si ← Csi ⊕ 2i−1 L; R ← R ∪ {CC si }
+                                            CCC si ← {0, 1}n ; D ← D ∪ {CCC si }
+                                                     $
+           214
+
+           220                  MC s ← CCC s1 ⊕ CCC s2 ⊕ · · · ⊕ CCC sms ⊕ Ts ; R ← R ∪ {MC s }
+                                MP s ← {0, 1}n ; D ← D ∪ {MP s }
+                                       $
+           221
+           222                  for i ∈ [2 .. m] do PPP si ← CCC si ⊕ 2i−1 (MP s ⊕ MC s )
+           223                  PPP s1 ← MP s ⊕ PPP s2 ⊕ · · · ⊕ PPP sm ⊕ Ts
+           230                  for i ← 1 to ms do
+           231                        PP si ← Psi ⊕ 2i−1 L; D ← D ∪ {PP si }
+           232                        R ← Range ∪ {PPP si }
+           300   bad ← (some value appears more than once in D)
+                       or (some value appears more than once in R)
+
+
+  Figure 8: Game NON1 is based on game RND3 but now τ = (ty, T, P, C) is a ﬁxed, allowed transcript.
+
+query, and whenever we have Pir = Pis (r < s) and query s is a decipher query. The probability of
+an immediate collision in game RND3 is at most
+                                      q
+                                                                 q
+                                        ms (s − 1)            q  s qσn
+                                                        <        m = n
+                                               2n            2n      2
+                                      s=1                        s=1
+
+We make from the Finalization part of game RND3 a new game, game NON1 (for “noninteractive”).
+This game silently depends on a ﬁxed transcript τ = ty, T, P, C with ty = (ty1 , · · · , tyq ), T =
+(T1 , · · · , Tq ), and P = (P1 , · · · , Pq ), and C = (C1 , · · · , Cq ) where tys ∈ {Enc, Dec}, Ts ∈ {0, 1}n ,
+and Ps = Ps1 · · · Psms and Cs = Cs1 · · · Csms for |Pri | = |Cri | = n. This ﬁxed transcript may not specify
+any immediate collisions or pointless queries; we call such a transcript allowed. Thus saying that τ
+is allowed means that for all r < s we have the following: if tys = Enc then (i) (Ts , Ps ) = (Tr , Pr )
+and (ii) Csi = Cri for any i ∈ [1..m]; while if tys = Dec then (i) (Ts , Cs ) = (Tr , Cr ) and (ii) Psi = Pri
+for any i ∈ [1..m]. Now ﬁx an allowed transcript τ that maximizes the probability of the ﬂag bad
+
+
+
+                                                            16
+                       $
+            050   EZ ← {0, 1}n ; L ← 2EZ ; D ← {0n , EZ }
+            051   for s ← 1 to q do
+            100         if tys = Enc then
+            110                for i ← 1 to ms do
+            111                      Let r = r[s, i] be the smallest index s.t. Psi = Pri
+            112                      if r < s then PP si ← PP ri , PPP si ← PPP ri
+            113                      else PP si ← Psi ⊕ 2i−1 L; D ← D ∪ {PP si }
+                                           PPP si ← {0, 1}n
+                                                   $
+            114
+
+            120                MP s ← PPP s1 ⊕ PPP s2 ⊕ · · · ⊕ PPP sms ⊕ Ts ;    D ← D ∪ {MP s }
+                                MC s ← {0, 1}n
+                                      $
+            121
+            122                for i ∈ [2 .. m] do CCC si ← PPP si ⊕ 2i−1 (MP s ⊕ MC s )
+            123                CCC s1 ← MC s ⊕ CCC s2 ⊕ · · · ⊕ CCC sm ⊕ Ts
+            130                for i ← 1 to ms do D ← D ∪ {CCC si }
+            200         else (tys = Dec)
+            210               for i ← 1 to ms do
+            211                     Let r = r[s, i] be the smallest index s.t. Csi = Cri
+            212                     if r < s then CCC si ← CCC ri
+                                    else CCC si ← {0, 1}n ;      D ← D ∪ {CCC si }
+                                                    $
+            213
+
+            220                MC s ← CCC s1 ⊕ CCC s2 ⊕ · · · ⊕ CCC sms ⊕ Ts
+                                MP s ← {0, 1}n ; D ← D ∪ {MP s }
+                                      $
+            221
+            222                for i ∈ [2 .. m] do PPP si ← CCC si ⊕ 2i−1 (MP s ⊕ MC s )
+            223                PPP s1 ← MP s ⊕ PPP s2 ⊕ · · · ⊕ PPP sm ⊕ Ts
+            230                for i ← 1 to ms do PP si ← Psi ⊕ 2i−1 L;     D ← D ∪ {PP si }
+            300   bad ← (some value appears more than once in D)
+
+
+Figure 9: Game NON2. Twice the probability that bad gets set in this game bounds the probability that bad
+gets set in game NON1. We highlight random selection by shading, and statements that grow D by boxing.
+
+being set. This one transcript τ is hardwired into game NON1. We have that
+                                                                                   qσn
+                           Pr[ ARND3 sets bad ] ≤ Pr[ NON1 sets bad ] +                              (9)
+                                                                                    2n
+This step can be viewed as conditioning on the presence or absence of an immediate collision,
+followed by the usual argument that an average of a collection of real numbers is at most the
+maximum of those numbers. One can also view the transition from game RND3 to game NON1 as
+augmenting the adversary, letting it specify not only the queries to the game, but also the answers
+to these queries (as long as it does not specify immediate collisions or pointless queries). In terms of
+game RND3, instead of having the oracle choose the answers to the queries at random in lines 011
+and 021, we let the adversary supply both the queries and the answers. The oracle just records
+these queries and answers. When the adversary is done, we execute the ﬁnalization step as before
+to determine the bad ﬂag. Clearly such an augmented adversary does not interact with the oracle
+at all, it just determines the entire transcript, giving it as input to the oracle. Now maximizing
+the probability of setting bad over all such augmented adversaries is the same as maximizing this
+probability over all allowed transcripts.
+
+
+                                                        17
+Game NON2. Before we move to analyze the non-interactive game, we make one last change,
+aimed at reducing the number of cases that we need to handle in the analysis. We observe that due
+to the complete symmetry between D and R, it is suﬃcient to analyze the collision probability in
+just one of them. Speciﬁcally, because of this symmetry we can assume w.l.o.g. that in game NON1
+
+  Pr[some value appears more than once in D] ≥ Pr[some value appears more than once in R]
+
+and therefore Pr[ NON1 sets bad ] ≤ 2 · Pr[some value appears more than once in D].
+    We therefore replace the game NON1 by game NON2, in which we only set the ﬂag bad if there
+is a collision in D. We now can drop the code that handles R, as well as anything else that doesn’t
+aﬀect the multiset D. The resulting game is described in Figure 9, and we have
+
+                         Pr[ NON1 sets bad ] ≤ 2 · Pr[ NON2 sets bad ]                           (10)
+
+B.2   Analysis of the non-interactive game
+In the analysis we view the multiset D as a set of formal variables (rather than a multiset containing
+the values that these variables assume). Namely, whenever we set D ← D∪{X} for some variable X
+we think of it as setting D ← D ∪ {“X”} where “X” is the name of that formal variable. Viewed
+in this light, our goal now is to bound the probability that two formal variables in D assume the
+same value in the execution of NON2. We observe that the formal variables in D are uniquely
+determined by τ —they don’t depend on the random choices made in the game NON2; speciﬁcally,
+
+      D = {Zero, EZ } ∪ {MP s | s ≤ q}
+              ∪ {PP si | tys = Dec, i ≤ ms } ∪ {PP si | tys = Enc, i ≤ ms , s = r[s, i]}
+              ∪ {CCC si | tys = Enc, i ≤ ms } ∪ {CCC si | tys = Dec, i ≤ ms , s = r[s, i]}
+
+(where “Zero” is a formal constant that always assumes the value 0n ). We view the formal variables
+in D as ordered according to when they are assigned a value in the execution of game NON2. This
+ordering too is ﬁxed, depending only on the ﬁxed transcript τ . Our goal is to show the following:
+    Throughout the remainder of this section, in all probability claims, the implicit experiment is
+that of game NON2. We adopt the convention that in an arithmetic or probability expression, a
+formal variable implicitly refers to its value. For example, Pr[X = X  ] means the probability that
+the value assigned to X is the same as the value assigned to X  . (At times we may still write “X”
+to stress that we refer to the name of the formal variable X, or value(X) to stress that we refer to
+the value of X.) The rest of this section is devoted to case analysis, proving the following claim:
+
+Claim 1 For any two distinct variable X, X  ∈ D we have that Pr[X = X  ] ≤ 2−n .
+
+Before proving Claim 1, we show how to use it to complete the proof of Theorem 1. Due to our
+conventions on how to measure the query complexity there are no more than 2σn + 1 variables in D
+so the union bound gives us that
+                                                            
+                                                     2σn + 1
+                              Pr[ NON2 sets bad ] ≤           /2n                            (11)
+                                                        2
+Combining Lemma 2 with Equations 7, 8, 9, 10 and 11 we are done:
+               ±                             
+                prp
+            AdvEME[Perm(n)] (A) ≤ Adv±
+                                     EME[Perm(n)] (A) + q(q − 1)/2
+                                       rnd                        n+1
+
+
+                                   ≤ 2 · Pr[NON2 sets bad] + qσn /2n + q(q − 1)/2n+1
+
+                                                  18
+                                                        
+                                                  2σn + 1
+                                          ≤ 2·            /2n + qσn /2n + q(q − 1)/2n+1
+                                                     2
+                                            (2σn + 1)(2σn ) + σn2 + 0.5σn2
+                                          ≤
+                                                          2n
+                                            7 σn2
+                                          ≤
+                                             2n
+Since A was an arbitrary adversary with query complexity of σn we are done.
+The case analysis. We now need to prove Claim 1. We ﬁrst prove a few claims (Claims 4
+through 7 below), each covering some special cases of collisions, and then go through a systematic
+case analysis, showing that all possible cases are indeed covered by these claims.
+    Inspecting the code of game NON2 we see that the only random choices in the game are the
+selection EZ ← {0, 1}n in line 050, the selections PPP si ← {0, 1}n and MC s ← {0, 1}n on encipher
+               $                                             $                   $
+
+
+(lines 114, 121), and the selections CCC si ← {0, 1}n and MP s ← {0, 1}n on decipher (lines 213, 221).
+                                             $                   $
+
+
+Speciﬁcally, the variables that are directly chosen at random are EZ , the variables PPP si from
+encipher queries such that s = r[s, i], the variables CCC si from decipher queries such that s = r[s, i],
+the variables MP s from encipher queries, and the variables MC s from decipher queries. Hereafter
+we refer to these variables as the free variables of the game, and we let F denote the set of them:
+
+                     F = {EZ } ∪ {MP s | tys = Dec} ∪ {MC s | tys = Enc}
+                              ∪ {PPP si | tys = Enc, i ≤ ms , s = r[s, i]}
+                              ∪ {CCC si | tys = Dec, i ≤ ms , s = r[s, i]}
+
+The value of any other variable in the game can be expressed as a function in these free variables.
+In fact, the bulk of the argument below is to show that for any pair of variables in D, either their
+sum is some non-zero constant, or else it depends linearly on at least one free variable. We ﬁrst
+prove a little helpful observation.
+
+Claim 2 If r is an encipher query (ty r = Enc) and I ⊆ [1..mr ] is a non-empty set, then we have
+          r          r
+  i∈I CCC i = aMC + β, where a = 0 is a constant (that depends on the set I) and β is an
+expression involving only constants and free variables that are determined before MC r in the game
+NON2.
+ Likewise,   if r is a decipher query (ty r = Dec) and I ⊆ [1..mr ] is a non-empty set, then
+          r         r
+  i∈I PPP i = aMP + β, where a = 0 is a constant and β is an expression involving only constants
+and free variables that are determined before MP r in the game NON2.
+
+Proof : We prove here only the ﬁrst assertion. The proof of the other assertion is completely
+symmetric. Since r is an encipher query, then the values of all the CCC ri ’s except the ﬁrst (i.e.,
+i ∈ [2..mr ]), are set in line 122, CCC ri ← PPP ri ⊕ 2i−1 (MP r ⊕ MC r ). If 1 ∈
+                                                                                / I then we have
+                             
+                CCC ri =          PPP ri ⊕ 2i−1 (MP r ⊕ MC r )
+             i∈I               i∈I
+                                                                                            
+                                                                                  
+                                                                        r              i−1
+                          = things-that-were-determined-before-MC            ⊕         2         MC r
+                                                                                 i∈I
+
+and the coeﬃcient of MC r is non-zero since I is non-empty.4
+  4
+      Here we use the fact that mr ≤ n.
+
+
+                                                       19
+                                                                                       mr
+For the case where 1 ∈ I, since in line 123 we set CCC r1 ← MC r ⊕                                 r
+                                                                                           i=2 CCC i , we get
+                               
+        CCC ri = CCC r1 ⊕             CCC ri
+       i∈I                           i∈I, i=1
+                                   m  r            
+                                                             
+                    =      MC r ⊕          CCC ri       ⊕               CCC ri
+                                     i=2                    i∈I, i=1
+                                      
+                    = MC r ⊕                     CCC ri
+                                   / 2≤i≤mr
+                                  i∈I,
+                                      
+                    = MC r ⊕                     PPP ri ⊕ 2i−1 (MP r ⊕ MC r )
+                                   / 2≤i≤mr
+                                  i∈I,
+                                                                                                            
+                                                                                                
+                    = things-that-were-determined-before-MC r ⊕ 1 ⊕                                     2i−1  MC r
+                                                                                              / 2≤i≤mr
+                                                                                             i∈I,
+
+and again, the coeﬃcient of MC r is non-zero.
+    To simplify the case analysis to come, we consider, for each variable X ∈ D, the last free
+variable (in the ordering of the game NON2) that X depends on, denoted φ(X). Formally, we have
+a function φ: D → F ∪ {none} that is deﬁned as follows:
+
+      • As “Zero” is a constant, we denote φ(Zero) = none.
+
+      • For the formal variables EZ , PP si ∈ D, this last free variable is EZ , φ(EZ ) = φ(PP si ) = EZ .
+
+      • For a formal variable CCC si ∈ D this last free variable φ(CCC si ) is either CCC si itself (on
+        decipher)5 or MC s (on encipher). (The last assertion is a corollary of Claim 2 for I = {i}.)
+
+      • The rules for MP s are a bit more involved. Clearly, on decipher
+                                                                        we have φ(MP s ) = MP s . For
+                                                                   m
+                                                       s
+        encipher, recall that we set (in line 120) MP ← Ts ⊕ i=1 PPP si , so the last free variable
+        that MP s depends on, is the “last of the free variables that any PPP si depends on”.
+        Each of these PPP si ’s can either be a free variable itself (if this is a “new block”, s = r[s, i]),
+        or it can be set equal to some prior PPP ri (if r = r[s, i] < s). In the latter case, PPP ri is either
+        a free variable (if query r is encipher), or else it depends on MP r (if query r is decipher). To
+        deﬁne φ(MP s ), we therefore denote
+                        def                                                      def
+               rmax[s] = max{ r[s, i] | 1 ≤ i ≤ m} ,                     imax[s] = max{ i | r[s, i] = rmax[s]}
+
+        and then, on encipher (tys = Enc) we have
+
+                                                        MP rmax[s]         if tyrmax[s] = Dec
+                                     φ(MP s ) =                rmax[s]
+                                                        PPP imax[s]        if tyrmax[s] = Enc
+
+   A summary of all these cases appears in Figure 10. We stress that just like the sets D and F,
+the function φ too depends only on the ﬁxed transcript τ and not on the random choices in the
+game NON2. Justifying the name “last free variable” we observe the following, which follows from
+the preceding discussion:
+  5
+      Note that CCC si ∈ D, which means that Csi is “a new block”, s = r[s, i].
+
+
+                                                              20
+                φ(Zero) = none                                                          Z
+
+
+
+                 φ(EZ ) = EZ                                                            EZ
+
+
+
+                φ(PP si ) = EZ                   if tys = Dec or s = r[s, i]            PP
+
+
+
+                                 CCC si          if tys = Dec and s = r[s, i]           CCC1
+              φ(CCC si ) =
+                                 MC s            if tys = Enc                           CCC2
+
+                              s
+                          
+                           MP                   if tys = Dec                           MM1
+               φ(MP s ) =   MP rmax[s]           if tys = Enc and tyrmax[s] = Dec       MM2
+                          
+                                rmax[s]
+                            PPP imax[s]          if tys = Enc and tyrmax[s] = Enc       MM3
+
+
+Figure 10: Deﬁning the last free variable, φ(X), associated to formal variable X ∈ D. Transcript τ =
+(ty, T, P, C) has been ﬁxed and it determines r[·, ·], rmax[·] and imax[·].
+
+
+Claim 3 Let X ∈ D be a formal variable, and let Y = φ(X). If Y = none then the value
+that X assumes in game NON2 can be expressed as value(X) = a · value(Y ) ⊕ β where a = 0 is
+a constant (that depends on the name of the formal variable X and the ﬁxed transcript τ ) and β
+is an expression involving only constants and free variables that are determined before Y in the
+game NON2.                                                                                    2
+
+As an immediate corollary of Claim 3, we get the following.
+
+Claim 4 Let X, X  ∈ D be formal variables such that φ(X) = φ(X  ). Then Pr[X = X  ] = 2−n .
+
+Proof : let Y = φ(X) and let Y  = φ(X  ), and assume that Y  occurs before Y in NON2. By Claim 3
+above, we have X ⊕ X  = a · Y ⊕ β ⊕ a · Y  ⊕ β  where a = 0 is a constant, and β ⊕ a · Y  ⊕ β 
+is an expression involving only constants and free variables that are determined before Y . As the
+value of Y is chosen at random from GF(2n ), independently of the other free variables, it follows
+that Pr[X = X  ] = 2−n .
+Claim 4 leaves us with the task of analyzing collisions between variables that depend on the same
+last free variable. These are handled in the next three propositions.
+
+Claim 5 Let X, X  ∈ D be two distinct formal variables, such that φ(X) = φ(X  ) = EZ . Then
+Pr[X = X  ] ≤ 2−n .
+
+Proof : Recall that L = 2EZ . The types of collisions that we need to analyze are either EZ vs. PP si
+                                                        
+for some PP si ∈ D, or PP si vs. PP si for PP si , PP si ∈ D. We start with collisions of the type PP si
+         
+vs. PP si . If i = i then we have
+                                                                                    
+              PP si ⊕ PP si = (Psi ⊕ 2i−1 L) ⊕ (Ps i ⊕ 2i −1 L) = Psi ⊕ Ps i ⊕ (2i ⊕ 2i )EZ
+                                                                                    
+and as i = i , the coeﬃcient of EZ is non-zero, and therefore Pr[PP si ⊕ PP si = 0n ] = 2−n . If i = i
+                                      
+and s < s then necessarily Psi = Psi . (Otherwise, either query s is encipher, in which case r[s, i] < s
+
+                                                       21
+and PP si ∈ / D, or query s is encipher, which means that the transcript τ speciﬁes an immediate
+                                                                                        
+collision.) Therefore, with probability one we have PP si ⊕ PP si = (Psi ⊕ 2i−1 L) ⊕ (Ps i ⊕ 2i−1 L) =
+         
+Psi ⊕ Ps i = 0. For the other type of collisions, EZ vs. PP si , we have
+
+             PP si ⊕ EZ = (Psi ⊕ 2i−1 L) ⊕ EZ = (Psi ⊕ 2i EZ ) ⊕ EZ = Psi ⊕ (1 ⊕ 2i )EZ
+
+and again, since i ≥ 1 the coeﬃcient of EZ is non-zero.
+
+                                                                                                
+Claim 6 For any two distinct variables CCC si , CCC si ∈ D with φ(CCC si ) = φ(CCC si ), Pr[CCC si =
+      
+CCC si ] = 2−n .
+
+                                                                                           
+Proof : By inspecting Figure 10, we see that for two variable CCC si , CCC si ∈ D, the equality
+                     
+φ(CCC si ) = φ(CCC si ) implies that s = s , and that this is a encipher query, tys = Enc (in which
+                           
+case φ(CCC si ) = φ(CCC si ) = MC s ).
+By Claim 2 (with I = {i, i }), we can write CCC si ⊕ CCC si = aMC s + β where a is a non-zero
+constant and β is an expression involving only constants and variables that were determined before
+MC s . Hence we have
+                                 
+            Pr[CCC si = CCC si ] = Pr[aMC s + β = 0n ] = Pr[MC s = a−1 β] = 2−n
+
+since MC s is a free variable.
+    The most involved case to analyze (indeed, the one that embodies the “real reason” that EME
+                                                
+is secure) is collisions of the type MP s = MP s . These are analyzed in Claim 7 below.
+
+Claim 7 For any two distinct variables MP s , MP t ∈ D with φ(MP s ) = φ(MP t ), it holds that
+Pr[MP s = MP t ] ≤ 2−n .
+
+Proof : Fix some s < t such that φ(MP t ) = φ(MP s ). In Figure 10 we see that the equality
+φ(MP s ) = φ(MP t ) implies that the later query t must be encipher (i.e., tyt = Enc), and either
+query s is decipher with rmax[t] = s, or query s is encipher with rmax[t] = rmax[s].
+If the plaintext vectors in both queries are the same (i.e., they have Ps = Pt ) then it must be that
+the tweaks diﬀer between them, Ts = Tt (since the transcript τ does not specify pointless queries).
+From Ps = Pt it follows that PPP si = PPP ti for all i, and therefore with probability one we have
+MP s ⊕ MP t = Ts ⊕ Tt = 0.
+So from now on we assume that Ps = Pt . Let E be the set of indexes where Ps , Pt are equal,
+E = { i ≤ min(ms , mt ) | Psi = Pti }. We note that the sum MP s ⊕ MP t can be written as
+  def
+
+
+                                             m s                     mt
+                                                                    
+                       s         t      s
+                   MP ⊕ MP           = T ⊕         PPP si   ⊕T ⊕ t
+                                                                           PPP ti
+                                             i=1                     i=1
+                                                                              
+                                        s     s
+                                     = T ⊕T ⊕                    PPP si ⊕               PPP ti       (12)
+                                                     i≤ms ,i∈E
+                                                            /               i≤mt ,i∈E
+                                                                                   /
+
+where the last equality is justiﬁed since Psi = Pti implies PPP si = PPP ti .
+We ﬁrst analyze the case where query s is decipher, tys = Dec, and furthermore Ps is not a proper
+preﬁx of Pt . Since query s is decipher, we have in this case rmax[t] = s, which means that all the
+blocks Pti already appeared in queries no later than s, namely r[t, i] ≤ s for all i ∈ [1..mt ]. Since for
+
+                                                     22
+any i ∈/ E we have Psi = Pti , it follows that for these indexes we have r[t, i] < s (if r[t, i] is deﬁned
+at all). Thus we get
+                                                             
+          MP s ⊕ MP t = Ts ⊕ Tt ⊕                 PPP si ⊕          PPP ti
+                                           i≤ms ,i∈E
+                                                  /                  i≤mt ,i∈E
+                                                                            /
+                                                                                     r[t,i]
+                            = Ts ⊕ Tt ⊕                PPP si ⊕                  PPP i
+                                           i≤ms ,i∈E
+                                                  /                  i≤mt ,i∈E
+                                                                            /
+                                                                                                        
+                            = things-that-were-determined-before-query-s ⊕                                     PPP si          (13)
+                                                                                                   i≤ms ,i∈E
+                                                                                                          /
+
+                                                                                      def
+Since Ps is not a proper preﬁx of Pt , it follows that the set Ds = {1..m     s
+                                                                           } − E s is non-empty.
+And since query s is decipher, we can apply Claim 2 to conclude that i∈D PPP i = aMP s + β
+where a = 0 and β depends only on things that were determined before MP s . Combining this with
+Equation (13) we conclude that MP s ⊕ MP t = aMP s + β  for the same non-zero constant a, where
+β  is a diﬀerent expression, but it still depends only on things that were determined before MP s .
+Therefore, Pr[MP s = MP t ] = 2−n .
+Next we analyze the cases where wither query s is encipher, tys = Enc, or Ps is a proper preﬁx of
+Pt . Recall that query t is encipher, so each PPP ti is either a free variable (if it is a “new block”,
+                                                        r[t,i]
+r[t, i] = t) or else it is identically set to equal PPP i      (if r[t, i] < t). And in the case where query s
+is encipher, then the same holds for each PPP si . Either way, we can re-write Equation (12) as
+                                 
+                                                                    r[s,i]
+                                                                                           r[t,i]
+                   MP s ⊕ MP s = Ts ⊕ Tt ⊕                     PPP i        ⊕          PPP i              (14)
+                                                       i≤ms ,i∈E
+                                                              /                      i≤mt ,i∈E
+                                                                                            /
+
+(In the case that query s is decipher and Ps is a proper preﬁx of Pt , the equality follows since
+the summation on i ≤ ms , i ∈      / E ranges over an empty set.) Recall that by deﬁnition we have
+r[s, i] = r[t, i] if and only if i ∈ E. Let query r be “the last query that MP s ⊕ MP t depends on”,
+and let Is , It be the sets of indexes of PPP si ’s and P P Pit ’s that “come from query r”. That is, we
+deﬁne
+          def                                                                                def
+                                 / E} ∪ {r[t, i] | i ≤ mt , i ∈
+       R = {r[s, i] | i ≤ ms , i ∈                            / E},                         r = max(R)
+                      def                                               def
+                                  / E, r[s, i] = r }, It = { i ≤ mt | i ∈
+       and then Is = { i ≤ ms | i ∈                                     / E, r[t, i] = r }
+                                                                                                  / E), and
+From this deﬁnition it follows that the sets Is , It are disjoint (since r[s, i] = r[t, i] for i ∈
+their union is non-empty (since R is non-empty). Using these notation we can rewrite Equation (14)
+                                                                                                  
+                                                      r[s,i]
+                                                                                            r[s,i] 
+   MP s ⊕ MP t = Ts ⊕ Tt           ⊕             PPP i         ⊕                    PPP i                                     (15)
+                                          i∈Is                      i≤ms ,i∈(E∪I
+                                                                           /    s)
+                                                                                                  
+                                             r[t,i]
+                                                                                            r[t,i] 
+                                   ⊕     PPP        ⊕                               PPP i
+                                                       i
+                                           i∈It                     i≤mt ,i∈(E∪I
+                                                                           /    t)
+                                                                                                                
+                                   =   things-that-were-determined-before-query-r ⊕                                       PPP ri
+                                                                                                               i∈Is ∪It
+                                                                                  r      r  
+If query r is decipher, tyr = Dec, we can use Claim 2 to conclude that
+                                                                     i∈Is ∪It PPP i = aMP + β
+            n                                                             r              r
+where a = 0 and β only depends on things that are determined before MP , and since MP is a
+free variable, it follows that Pr[MP s = MP t ] = 2−n . If query r is encipher, tyr = Enc, then all the
+variables PPP ri , i ∈ Is ∪ It , ar free variables, and again we have Pr[MP s = MP t ] ≤ 2−n .
+
+
+                                                           23
+Proof of Claim 1. All that is left now is to verify that Claims 4 through 7 above indeed cover
+all the possible types of collisions between X, X  ∈ D. So let X, X  ∈ D be two distinct variables.
+We partition the analysis to four cases, depending on the “type” of the variable X.
+
+X = “Zero”. Here X is the only variable in D with φ(X) = none, so φ(X) = φ(X  ). By Claim 4,
+    we have Pr[X = X  ] = 2−n .
+
+X = “EZ ” or X = “P Pis ”. In this case we have φ(X) = EZ . If φ(X  ) = EZ then again we get
+    Pr[X = X  ] = 2−n from Claim 4. On the other hand, if φ(X  ) = φ(X) = EZ then Claim 5
+    gives us Pr[X = X  ] ≤ 2−n .
+
+X = “CCCis ”. In this case φ(X) ∈ {CCC si , MC s }. Again, if φ(X  ) = φ(X) then we get the usual
+    Pr[X = X  ] = 2−n from Claim 4. So assume that φ(X  ) = φ(X) ∈ {CCC si , MC s }. This
+    means that X  is also of the form “CCC tj ”, so from Claim 6 we have Pr[X = X  ] ≤ 2−n .
+
+X = “MP s ”. In this case φ(X) ∈ {MP r : r ≤ q} ∪ {PPP ri : r ≤ q, i ≤ mr }. As usual, if
+    φ(X  ) = φ(X) then we have Pr[X = X  ] = 2−n from Claim 4. So assume that φ(X  ) = φ(X).
+    This means that X  is also of the form “MP t ”, so from Claim 7 we have Pr[X = X  ] ≤ 2−n .
+
+This completes the proof of Claim 1.
+
+
+
+
+                                                 24
+

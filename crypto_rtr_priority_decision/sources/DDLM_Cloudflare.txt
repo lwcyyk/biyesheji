@@ -1,0 +1,2741 @@
+    Strong Post-Compromise Secure Proxy Re-Encryption
+
+               Alex Davidson1,2,† , Amit Deo1,† , Ela Lee1,†,∗ , and Keith Martin1
+                           1
+                               ISG, Royal Holloway University of London, UK
+                                           2
+                                             Cloudflare, London
+
+
+
+         Abstract. Proxy Re-Encryption (PRE), introduced by Blaze et. al in [BBS98], allows
+         a ciphertext encrypted using a key pki to be re-encrypted by a third party so that
+         it is an encryption of the same message under a new key pkj , without revealing
+         the message. Post-Compromise Security (PCS) was first introduced for messaging
+         protocols, and ensures that a ciphertext remains confidential even when past keys
+         have been corrupted. We define PCS in the context of PRE, which ensures that
+         an adversary cannot distinguish which ciphertext a re-encryption was created from
+         even given the old secret key, potential old ciphertexts and update token used to
+         perform the re-encryption. We argue that this formal notion accurately captures the
+         most intuitive form of PCS. We give separating examples demonstrating how our
+         definition is stronger than existing ones, before showing that PCS can be met using a
+         combination of existing security definitions from the literature. In doing so, we show
+         that there are existing PRE schemes that satisfy PCS. We also show that natural
+         modifications of more practical PRE schemes can be shown to have PCS without
+         relying on this combination of existing security definitions. Finally, we discuss the
+         relationship between PCS with selective versus adaptive key corruptions, giving a
+         theorem that shows how adaptive security can be met for certain re-encryption graphs.
+
+
+
+
+1       Introduction
+
+Cloud storage has become increasingly popular in recent years, evolving from acting as a
+source of backup data to becoming the default storage for many applications and systems.
+For example, popular media streaming platforms such as Netflix and Spotify allow clients
+to subscribe to on-demand access for media files as opposed to storing them locally. This
+has increased the number for devices which no longer need much in-built storage as long as
+they have an internet connection.
+     Since the cloud is usually a third party, to ensure confidentiality clients should encrypt
+their files. This poses problems when a client wants to change the key for their encrypted
+files as a means of satisfying compliance directives or to enforce access control policies. For
+the former, NIST recommends regular key rotation [BBB+ 12], as does the Payment Card
+Industry Data Security Standard [PCI18] and the Open Web Application Security Project
+(OWASP) [OWA18]. For the latter, an organisation can choose which of its employees can
+access specific files by having those files encrypted under those keys. Should access need to be
+granted or revoked from someone, the files should be re-encrypted to a new key accordingly.
+One trivial solution has the client download, decrypt, encrypt using the new key, then re-
+upload the file. However, this can be very expensive, particularly for modern applications
+involving large databases, or if the client has limited processing capability.
+    ∗
+    Contact author: Ela.Lee.2010@live.rhul.ac.uk
+     †
+       Author was supported by the EPSRC and the UK government as part of the Centre for
+Doctoral Training in Cyber Security at Royal Holloway, University of London (EP/K035584/1).
+    The primitive of Proxy Re-Encryption (PRE), introduced by Blaze et al. [BBS98],
+presents a more elegant solution. In a PRE scheme, the client creates an update token ∆i,j
+using the current secret key ski and a new public key pkj . The server can then use this token
+to re-encrypt the ciphertext, transforming it into an encryption of the same message which
+can now be decrypted using skj . The most basic security notion for PRE states that the
+server performing the re-encryption learns nothing about the underlying message.
+Post-Compromise Security (PCS). The notion of PCS was first used in [CCG16] for
+messaging protocols and is informally defined as follows:
+
+Definition 1 ( [CCG16]). A protocol between Alice and Bob provides Post-Compromise
+Security (PCS) if Alice has a security guarantee about communication with Bob, even if
+Bob’s secrets have already been compromised.
+
+As this definition only provides the bare intuition, the ‘security guarantee’ is left open so
+that it can be tailored to the application, which is what we will for for PCS in PRE in this
+work. Note that PCS differs from forward security, which conveys that the compromise of
+future states does not affect the security of past ones. PCS conveys a scheme’s ability to
+regain security after a session or party has been compromised, which has clear applications
+involving revocation and key rotation (key life-cycles), where having access to the old key
+should not affect the security of a re-encrypted ciphertext.
+Motivation for PCS PRE. One particular application of post-compromise PRE of in-
+terest is to complement PCS of messages in transit, by giving PCS security to backed-up
+messages stored in the cloud. The Signal Protocol for encrypting messages in transit between
+two devices provides strong, modern, provable security guarantees including PCS [CCG16].
+However, most users expect to keep their messages when they lose their device or buy a new
+one; thus, popular Signal implementations such as WhatsApp back up client messages to
+public cloud services. Unfortunately, this backup is encrypted using a static encryption key.
+This means that while messages in transit have PCS, these properties are lost once messages
+are backed up. If an adversary compromises a device and obtains the static cloud backup
+key, they can retain this to compromise future messages once they are backed up.
+    Assuming that all message history is stored locally, the updated message history could
+be encrypted under a new key and re-uploaded at regular time intervals, but this will have
+a huge cost both in terms of computation and bandwidth, particularly as much messaging
+is done via smart-phones. A PRE scheme with PCS could be used instead, so that the PCS
+of messages in transit is extended to message backups.
+
+
+1.1   Contributions
+
+In this paper we set out the first formalisation of PCS for PRE schemes. In our model, the
+adversary cannot distinguish a re-encrypted ciphertext given the old key, old ciphertexts
+and the token used to perform the re-encryption. In other words, we view a compromise as
+the loss of all previous public and secret states associated with a given ciphertext, and limit
+the information that must remain secret to the current secret key alone. To date there is
+no security definition that gives the adversary the update token used in the challenge re-
+encryption. Our definition implies unidirectionality (meaning update tokens can only be used
+to re-encrypt from pki to pkj and not from pkj to pki ) as opposed to treating unidirectional
+and bidirectional schemes differently, and that additional randomness beyond that given in
+the update token is added upon re-encryption. Since we do not make as many assumptions
+concerning which algorithms are deterministic or on the flow of re-encryption operations, our
+
+
+                                              2
+security model can be applied to more general PRE schemes and applications than similar
+definitions in the literature (see Section 3).
+     We analyse our model, proving several results that associate PCS with existing security
+models for PRE and related primitives such as updatable encryption [LT18], and provide
+separating examples that distinguish PCS as a separate security characteristic in its own
+right. One of our major contributions is to show that a PRE scheme that is both source-
+hiding and secure against chosen plaintext attacks also has PCS, meaning that one of the
+PRE schemes given by Fuchsbauer et al. [FKKP18] immediately satisfies PCS.
+     In particular, the only known technique used to make a scheme source-hiding also signifi-
+cantly reduces the correctness bound – the number of times a ciphertext can be re-encrypted
+and still decrypt correctly. This means the lattice-based source-hiding schemes of [FKKP18]
+are forced into sub-optimal parameter choices that render their assumptions much stronger
+(with respect to the approximation factors of solving worst-case lattice problems) and much
+less efficient. We therefore give a new PRE scheme, pcBV-PRE, adapted from BV-PRE – the
+practical RLWE-based scheme of Polyakov et al. [PRSV17]. Our new scheme is much more
+efficient than those given in [FKKP18] since we leverage the speed of the original construction
+in [PRSV17] with minimal changes. Whilst our adaptation is not source-hiding, we prove that
+it achieves PCS and is Indistinguishable against Chosen Plaintext Attacks (PRE-IND-CPA)
+(often referred to as IND-CPA security) via a tighter reduction than using the combination
+of properties previously mentioned, meaning this combination of properties, particularly
+source-hiding, is sufficient, but not necessary for achieving PCS.
+     Finally, we show that achieving PCS with adaptive key compromises is possible via
+the transformation of [FKKP18] using adaptive PRE-IND-CPA security (commonly called
+IND-CPA1 ) and source-hiding PRE schemes, where sub-exponential security loss is restricted
+to certain re-encryption graphs (particularly trees and chains).
+Paper structure. We begin by reviewing necessary preliminaries in Section 2 before re-
+viewing related work in Section 3. In Section 4 we define Post-Compromise Security (PCS)
+and show how our definition relates to those already in the literature. In particular, in Sec-
+tion 4.4 we demonstrate how a combination of properties already defined in the literature
+can be used to demonstrate that a PRE scheme has PCS. In Section 5, we give an explicit,
+efficient construction, pcBV-PRE, by modifying the lattice-based BV-PRE scheme [PRSV17]
+to show that our notion of PCS can be satisfied by natural extensions of current practi-
+cal PRE schemes. Finally, in Section 6 we discuss the relationship between selective and
+adaptive security for PCS using the work of [FKKP18].
+     Changes w. r. t the ACISP 2019 version. The security proofs for our construction,
+pcBV-PRE, have been updated to correct some errors. We also revert to the single-challenge
+definition of source-hiding presented in [FKKP18] for easier comparison, which has affected
+the security bound of some of our theorems but not the overall correctness of those theorems.
+Clear comments as to what has changed are provided in the appropriate sections.
+
+
+2       Preliminaries
+In this section, we give the preliminaries for Proxy Re-Encryption (PRE), including some
+common security definitions and an explanation of directed re-encryption graphs. Whilst
+we stick to the asymmetric setting in the body of this work, we give symmetric variants
+
+    1
+     We use different terminology to avoid confusion with CPA security for PKE schemes, which we
+refer to as Indistinguishable against Chosen Plaintext Attacks (PKE-IND-CPA)
+
+
+                                               3
+for important definitions in Appendix A for easier comparison with related work in the
+symmetric setting such as updatable encryption [BLMR13,LT18] and key rotation [EPRS17].
+    In general, we use y ← F(x) to indicate that y is the output of a deterministic algorithm F
+                           $
+with input x, we use y ← F(x) to indicate that F is probabilistic (samples some randomness)
+      ($)
+and y ← F(x) for the general case where F may or may not be deterministic.
+
+Definition 2. A Proxy Re-Encryption (PRE) scheme consists of the following algorithms:
+ – Setup(1λ ) → params: Outputs a set of public parameters, including the message space
+   and ciphertext space. Note that params is input to every subsequent algorithm, but we
+   leave it out for compactness of notation. We often omit the Setup algorithm for the same
+   reason.
+ – KeyGen(1λ ) → (pk, sk): Generates a public-private key pair.
+                 $
+ – Enc(pk, m) → C: Encrypts a message m using a public key pk, producing a ciphertext
+   C.2
+ – Dec(sk, C) → m0 ∪ ⊥: Decrypts a ciphertext C to produce either an element of the
+   message space m0 or an error symbol ⊥.
+                           ($)
+ – ReKeyGen(ski , pkj ) → ∆i,j ∪ ⊥: Takes a secret key ski and public key pkj and outputs an
+   update token ∆i,j , or ⊥ when i = j. This last condition is often left out of constructions
+   for compactness.
+                     ($)
+ – ReEnc(∆i,j , C) → C 0 : Takes a ciphertext C under pki and outputs a new ciphertext C 0
+   under pkj .
+                                                              $
+A PRE scheme is correct if, for all m ∈ M, (pk, sk) ← KeyGen(1λ ), then:
+
+                                       Dec(sk, Enc(pk, m)) → m
+
+and if, for all C ∈ C such that Dec(ski , C) → m, then:
+
+                                     Dec(skj , ReEnc(∆i,j , C)) → m
+
+                                 $                      ($)
+where (pki , ski ), (pkj , skj ) ← KeyGen(1λ ) and ∆i,j ← ReKeyGen(ski , pkj ).
+
+Note that some PRE constructions have a correctness bound – a limit on the number of
+re-encryptions that are possible before the resulting ciphertext fails to decrypt properly. We
+shall see this in Section 5.
+                                              ($)
+Definition 3. If an update token ∆i,j ← PRE.ReKeyGen(ski , pkj ) computed using a PRE
+scheme PRE can be used to derive a token ∆j,i that can re-encrypt ciphertexts from pkj
+to pki then we say the scheme PRE is bidirectional. If PRE is not bidirectional then it is
+unidirectional.
+
+Directionality is often used in security games to determine the adversary’s limitations.
+    We note that in some existing work including [BBS98, ID03, AFGH06, LV08], new ele-
+ments are added to a ciphertext when it is re-encrypted. In such schemes, decryption is
+different depending on whether (or how many times) a ciphertext has been re-encrypted.
+This motivates the following definition:
+    2
+      Note that some definitions of a PRE scheme have an additional input ` to indicate a level the
+ciphertext should be at. In this work, we leave out ` unless discussing schemes and results that use
+levelling explicitly.
+
+
+                                                    4
+Definition 4. A PRE scheme has transparency if ciphertexts have the same format regard-
+less of how many times they have been re-encrypted.
+Transparency is considered advantageous since it means that decryption is the same for
+re-encrypted ciphertexts as it is for fresh ciphertexts.
+    We now move on to giving definitions for message confidentiality in PRE. Indistinguisha-
+bility against Chosen Plaintext Attacks (IND-CPA) is a well-known notion in public-key
+encryption which states that given a ciphertext, an adversary cannot distinguish which of
+two messages it is an encryption of. In this work we refer to it as PKE-IND-CPA, to make
+the distinction between this and what is commonly referred to as IND-CPA for PRE in the
+literature.
+
+
+         PKE-IND-CPAb,PKE
+                    A     (1λ )                OKeyGen (1λ )               OPKE-IND-CPA
+                                                                            challenge   (i, m0 , m1 )
+
+         κ=0                                   κ=κ+1                       if |m0 | 6= |m1 | : return ⊥
+                 OKeyGen ,OPKE-IND-CPA
+             0 ($)                                         $         λ        $
+         b    ← A1         challenge
+                                       (1λ )   (pkκ , skκ ) ← KeyGen(1 )   C ← Enc(pki , mb )
+                   0                           return pkκ                  return C
+         return b
+
+Fig. 1: The PKE-CPA game. This is essentially the same as the IND-CPA game for PKE
+schemes, but we make the distinction here for indistinguishability of chosen-plaintext attacks
+for PKE schemes and PRE schemes. We give a multi-key, multi-challenge version.
+
+
+Definition 5. A Public Key Encryption (PKE) scheme PKE is -Indistinguishable against
+Chosen Plaintext Attacks (-PKE-IND-CPA-secure) if for all Probabilistic Polynomial-Time
+(PPT) adversaries A:
+           h                              i      h                          i
+        Pr PKE-IND-CPA0,PKE
+                          A    (1 λ
+                                    ) = 1   − Pr   PKE-IND-CPA1,PKE λ
+                                                              A    (1 ) = 1   ≤
+
+where PKE-IND-CPA is defined in Figure 1. If  is negligible as parameterised by the security
+parameter λ, then we say the scheme is Indistinguishable against Chosen Plaintext Attacks
+(PKE-IND-CPA-secure).
+A PRE scheme PRE is -PKE-IND-CPA secure if the PKE scheme given by PKE =
+{PRE.KeyGen, PRE.Enc, PRE.Dec} is -PKE-IND-CPA-secure.
+
+2.1    Re-encryption graphs
+We often use a directed re-encryption graph (DRG) when discussing the security of PRE
+schemes. A DRG tracks queries the adversary A makes during a security game to represent
+re-encryptions that A can make locally. Using update tokens, the adversary can locally re-
+encrypt ciphertexts. Therefore, if a challenge ciphertext is an encryption under pki , and there
+exists a sequence of tokens going from i to j, then both ski and skj are considered challenge
+                                                                                     →
+keys. The DRG consists of nodes vi that represent key pairs, and directed3 edges e i,j which
+represent re-encryptions from pki to pkj . The DRG is often used to enforce the condition
+that A cannot query oracles in such a way that reveals a challenge under a corrupted key,
+which we call the trivial win condition. This is a standard condition in all PRE security
+definitions. If DRG contains a path from vi to vj and ski is a challenge key, then so is skj .
+Figure 2 gives a pictorial representation of this.
+   3
+    If a scheme is bidirectional, then edges added would be directionless. In this work we mainly
+focus on unidirectional schemes.
+
+
+                                                               5
+                                        3                                                               3
+                                 2            4                                                 2           4
+
+
+                             1                    5                                         1                   5
+
+
+                                 8            6                                                 8           6
+                                        7                                                               7
+
+     Fig. 2: An example directed re-encryption graph, DRG. If a challenge is learned under pk6
+     and A has learned tokens ∆6,5 and ∆6,7 , then pk5 , pk6 are also considered challenge keys.
+     Therefore, token queries that lead to paths from challenge keys to corrupted ones such as
+     ∆6,1 or ∆5,2 result in a trivial win. The graph on the right gives some examples of what
+     tokens the adversary can and cannot learn next.
+
+        Re-encryption graphs often reflect applications. For example, for simply rotating keys
+     the resulting graph will be a chain, as is assumed in updatable encryption [BLMR13, LT18]
+     and key rotation [EPRS17], whereas some access control hierarchies may lead to trees. Some
+     results such as those given in [FKKP18] between selective and adaptive security mainly
+     apply to some types of graph. Note that some existing work assumes DRGs are acyclic.
+
+     2.2        Common oracles
+     Security games usually have a key generation oracle OKeyGen , key corruption oracle OCorrupt ,
+     update token generation oracle OReKeyGen , re-encryption oracle OReEnc , and finally a challenge
+     oracle Ochallenge . Recent work also gives an encryption oracle OEnc , as we shall explain in
+     Section 3.1. We give most of these oracles in Figure 3 for compactness.
+         The main variations between definitions are how the challenge oracle Ochallenge is defined,
+     and how OReEnc affects the DRG. We therefore define these in each individual game. Games
+     often keep track of lists updated by the oracles, namely a list of challenge keys Kchal , cor-
+     rupted keys Kcorrupted , oracle-generated ciphertexts Chonest , challenge ciphertexts Cchal and
+     oracle-generated tokens Thonest .
+
+
+
+OKeyGen (1λ )                        OCorrupt (i)            OEnc (i, m)            OReKeyGen (i, j)
+                                                                $                        ($)
+κ=κ+1                                Kcorrupted .add{ski }   C ← Enc(pki , m)       ∆i,j ← ReKeyGen(ski , pkj )
+            $
+(pkκ , skκ ) ← KeyGen(1λ )           return ski              Chonest .add{(i, C)}   Thonest .add{i, j, ∆i,j }
+                                                             return C                               →
+DRG.add{vκ }                                                                         DRG.add{ e i,j }
+return pkκ                                                                          return ∆i,j
+     Fig. 3: Common oracles used in security games for PRE, where κ is the number of keys in
+     the game and boxed values indicate steps to update lists that may not be used depending
+     on the game. The lists a particular game uses are indicated in the game’s setup phase.
+
+
+
+         OKeyGen (1λ ) increments the number of keys κ, generates a new key pair and adds a new
+     vertex to DRG to represent this key pair before returning the public key. OCorrupt (i) adds ski
+     to the set of corrupted keys Kcorrupted and returns it to the adversary. OEnc (i, m) encrypts the
+     message under pki , appends the list of honestly-created ciphertexts Chonest with (i, C) and
+     returns the ciphertext. OReKeyGen (i, j) creates the update token, appends the list of honestly-
+                                                                       →
+     generated update tokens Thonest with (i, j, ∆i,j ), adds the edge e i,j to DRG and returns the
+     update token.
+
+
+                                                                     6
+    In our syntax, the restrictions on what tokens the adversary is allowed to learn is not
+enforced by oracles (as in other work), but instead by the list of challenge keys Kchal being
+updated using the graph DRG after the adversary has output its guess. Since the adver-
+sary can locally re-encrypt the challenge ciphertext using any relevant update tokens it has
+learned, we therefore use the following function to update the set of challenge keys:
+
+                         UpdateChallengeKeys(Kchal , DRG)
+
+                         ∀i such that ski ∈ Kchal :
+                           ∀j such that ∃ a path from vi to vj in DRG :
+                             Kchal .add{skj }
+                         return Kchal
+
+   We enforce the trivial win condition by calling UpdateChallengeKeys at the end of the
+game, and checking that no challenge keys have been corrupted (Kchal ∩ Kcorrupted = ∅).
+
+
+3     Related work
+
+We begin by stating definitions of PRE schemes that imply confidentiality in Section 3.1,
+before stating other properties of PRE schemes already defined in the literature that are
+relevant to our work in Section 3.2.
+
+
+3.1   Confidentiality definitions
+
+The basic security definition for PRE was first given in [BBS98] for bidirectional PRE
+schemes. Informally, it states the scheme should still be PKE-IND-CPA-secure when given
+the additional functionality of re-encryption. This means the proxy should not learn the
+message during the re-encryption process. Unidirectional PRE schemes were introduced by
+Ateniese et al. [AFGH06] together with an equivalent security definition. Similar definitions
+conveying this notion appear in all work on PRE. We refer to such notions as PRE-IND-CPA.
+
+Definition 6. A PRE scheme PRE is said to be (selectively) -Indistinguishable against
+Chosen Plaintext Attacks-secure (-PRE-IND-CPA-secure) if for all PPT adversaries A =
+(A0 , A1 ):
+
+            Pr PRE-IND-CPA0A (1λ ) = 1 − Pr PRE-IND-CPA1A (1λ ) = 1 ≤ ,
+                                                                 
+
+
+where PRE-IND-CPA is defined in Figure 4.
+    If  is negligible as parameterised by the security parameter, then we say the scheme is
+(selectively) Indistinguishable against Chosen Plaintext Attacks (PRE-IND-CPA-secure).
+
+    Whilst Definition 6 is based on the one given in [FKKP18], our formulation is slightly
+different as we account for there being multiple possible tokens per key pair, meaning OReEnc
+allows A to input an honestly-generated update token as opposed to only having indexes as
+input. Note that the DRG is created by adding an edge whenever OReEnc is called.
+    It was an open problem for many years to create a PRE scheme which is both unidi-
+rectional and multi-hop (can be re-encrypted more than once), with single-hop (can only
+be re-encrypted once) constructions emerging as the means of providing unidirectionality in
+the meantime. Multi-hop schemes are necessary for both key rotation and dynamic access
+control. Unidirectional schemes are necessary for applications where the trust relationship
+
+
+                                                  7
+       PRE-IND-CPAb,PRE
+                  A     (1λ )                                                 OPRE-IND-CPA
+                                                                               ReEnc       (C, i, j, [∆i,j ])
+
+       Kchal , Kcorrupted , Thonest , DRG = ∅                                                                 / Thonest :
+                                                                              if ∆i,j given AND (i, j, ∆i,j ) ∈
+       κ = 0, called = false                                                    return ⊥
+               ($)
+                O       ,O                                                    if ∆i,j not given :
+       state ← A0 KeyGen Corrupt (1λ )
+                                                                                       ($)
+         ($)     OEnc ,OReKeyGen ,OPRE-IND-CPA ,OPRE-IND-CPA                    ∆i,j ← ReKeyGen(ski , pkj )
+       b0 ← A 1                    ReEnc         challenge
+                                                               (1λ , state)
+                                                                                             →
+       Kchal ← UpdateChallengeKeys(Kchal , DRG)                               DRG.add{ e i,j }
+                                                                                 ($)
+       if Kchal ∩ Kcorrupted 6= ∅ : return 0                                  C 0 ← ReEnc(∆i,j , C)
+                     0
+       return b                                                               return C 0
+                                               OPRE-IND-CPA
+                                                challenge   (i, m0 , m1 )
+
+                                               if called = true OR |m0 | 6= |m1 | :
+                                                  return ⊥
+                                                   $
+                                               C ← Enc(pki , mb )
+                                               Kchal .add{ski }
+                                               called ← true
+                                               return C
+
+Fig. 4: The PRE-IND-CPA game – an extension of PKE-IND-CPA which accounts for re-
+encryption. OKeyGen , OEnc , OReKeyGen are as defined in Figure 3. We note that an equivalent
+way to enforce the trivial win condition is for ⊥ to be returned whenever OReKeyGen or OReEnc
+are called from an uncorrupted key ski to a corrupted key skj .
+
+between Alice and Bob is not symmetrical, such as if Bob is more senior to Alice and there-
+fore has access to more sensitive files. Whilst most existing literature considers directionality
+as a class of PRE schemes, it was been defined explicitly as a formal security definition
+in [Lee17]. The first constructions for PRE-IND-CPA secure unidirectional, multi-hop PRE
+schemes were given using program obfuscation [HRSV07,CCV12], until Gentry [Gen09] gave
+a generic construction using Fully Homomorphic Encryption (FHE).
+    Much of the research on PRE in recent years has focused on CCA security. A definition of
+IND-CCA security for PRE first appears in [CH07] for bidirectional single-hop (ciphertexts
+can only be re-encrypted once) schemes. This allows the adversary to adaptively corrupt
+secret keys. A definition of IND-CCA security for unidirectional schemes is given in [LV08].
+Honest Re-encryption Attacks. Recently, a stronger notion than PRE-IND-CPA se-
+curity has been introduced which allows the adversary to receive re-encryptions of non-
+challenge ciphertexts from uncorrupted to corrupted keys, as long as the ciphertexts were
+honestly generated. Cohen formalised these as Honest Re-encryption Attacks (HRA) [Coh17]
+but the same idea is also used elsewhere [LT18]. This motivates the concept of a PRE
+scheme being Indistinguishable against Honest Re-encryption Attacks (IND-HRA) [Coh17].
+We base our formulation on IND-ENC-security [LT18], HRA-security [Coh17] and IND-CPA-
+security [PRSV17].
+Definition 7. A PRE scheme PRE is said to be (selectively) -Indistinguishable against
+Honest Re-encryption Attacks (-IND-HRA-secure) if for all PPT adversaries A = (A0 , A1 ):
+                Pr IND-HRA0A (1λ ) = 1 − Pr IND-HRA1A (1λ ) = 1 ≤ ,
+                                                              
+
+
+where IND-HRAb,PREA      is defined in Figure 5.
+    If  is negligible as parameterised by the security parameter, then we say the scheme is
+(selectively) Indistinguishable against Honest Re-encryption Attacks (IND-HRA-secure).
+
+
+                                                                        8
+         IND-HRAb,PRE
+                A     (1λ )                                                    OIND-HRA
+                                                                                ReEnc   (C, i, j, [∆i,j ])
+
+         Kchal , Kcorrupted , Chonest , Cchal , Thonest , DRG = ∅              if (i, C) 6∈ Chonest :
+         κ = 0, called = false                                                   return ⊥
+                  ($)
+                  O       ,O                                                                                   / Thonest :
+                                                                               if ∆i,j given AND (i, j, ∆i,j ) ∈
+         state ← A0 KeyGen Corrupt (1λ )
+            ($)     OEnc ,OReKeyGen ,OIND-HRA ,OIND-HRA
+                                                                                 return ⊥
+         b0 ← A 1                     ReEnc     challenge
+                                                            (1λ , state)       if ∆i,j not given :
+         Kchal ← UpdateChallengeKeys(Kchal , DRG)                                       ($)
+                                                                                 ∆i,j ← ReKeyGen(ski , pkj )
+         if Kchal ∩ Kcorrupted 6= ∅ : return 0
+                                                                                  ($)
+         return b0                                                             C 0 ← ReEnc(∆i,j , C)
+                                                                               Chonest .add{j, C 0 }
+                                                                               if (i, C) ∈ Cchal :
+                                                                                                               →
+                                                                                 Cchal .add{j, C 0 }, DRG.add{ e i,j }
+                                                                               return C 0
+                                                OIND-HRA
+                                                 challenge (i, m0 , m1 )
+
+
+                                               if |m0 | 6= |m1 | OR called = true :
+                                                   return ⊥
+                                                    $
+                                               C ← Enc(pki , mb )
+                                               Chonest .add{i, C}
+                                               Cchal .add{i, C} Kchal .add{ski }
+                                               called ← true
+                                               return C
+
+Fig. 5: The IND-HRA game [Coh17], which allows re-encryptions of non-challenge ciphertexts
+from uncorrupted to corrupted keys using OReEnc .
+
+We discuss security with respect to adaptive key corruptions in Section 6.
+
+Theorem 1. IND-HRA =⇒ PRE-IND-CPA =⇒ PKE-IND-CPA.
+
+  As each game builds directly on the last but giving the adversary access to more infor-
+mation, the proof of this theorem follows trivially.
+
+
+3.2   Re-encryption Simulatability and Source-hiding
+
+There are a few properties that a PRE scheme can have that lift the scheme from being
+CPA secure to being HRA secure. The goal is to demonstrate that it is possible to replace
+re-encryptions from uncorrupted keys to corrupted ones with a value that is created inde-
+pendently of the old secret key. This enables an adversary Acpa in the CPA game to simulate
+the HRA game, meaning they can run an adversary Ahra in the HRA game and return the
+same output to win the CPA game with the same advantage. One such property that was
+defined by Cohen is re-encryption simulatability.
+
+Definition 8. A PRE scheme PRE is re-encryption simulatable if there exists a proba-
+bilistic, polynomial-time algorithm ReEncSim such that with high probability over aux, for all
+m ∈ M:
+                        (ReEncSim(pki , pkj , skj , C, m), aux) ≈s (ReEnc(∆i,j , C), aux)
+
+
+                                                                           9
+where ≈s denotes statistical indistinguishability, and values are sampled according to
+
+                                                          $
+                                           (pki , ski ) ← KeyGen(1λ )
+                                                           $
+                                           (pkj , skj ) ← KeyGen(1λ )
+                                                    ($)
+                                           ∆i,j ← ReKeyGen(ski , pkj )
+                                                $
+                                           C ← Enc(pki , m)
+                                           aux = (pki , pkj , skj , C, m).
+
+Cohen demonstrates that PRE-IND-CPA-secure schemes which have this property are
+IND-HRA-secure [Coh17, Theorem 5].
+    Fuchsbauer et al. [FKKP18] expand on Cohen’s work in defining source-hiding. Infor-
+mally, in a source-hiding scheme a fresh encryption of a message is indistinguishable from
+a re-encrypted ciphertext that is an encryption of the same message even given both key
+pairs, the old ciphertext and the update token. This means re-encrypted ciphertexts reveal
+no history as to the keys they were previously encrypted under, or similarities between
+components of previous ciphertexts. We give a formal description of the game defining the
+source-hiding property in Figure 6.
+    We note that we have changed this definition from the one given our original publication,
+which was a multi-key, multi-challenge version of the definition of source-hiding presented
+in [FKKP18]. We now use the same definition as in [FKKP18] to avoid confusion and enable
+easier comparison. Proofs have been updated accordingly.
+
+
+             SHb,PRE
+               A     (1λ )                                               OSH          ∗ ∗
+                                                                          challenge (m , ` )
+
+                                $
+             (pk0 , sk0 ) ← KeyGen(1λ )                                  if `∗ + 1 > L] :
+                                $
+             (pk1 , sk1 ) ← KeyGen(1λ )                                      return ⊥
+                                                                             ∗ $
+                     ($)                                                 C ← Enc(pk0 , m∗ , `∗ )
+             ∆0,1 ← ReKeyGen(sk0 , pk1 )
+                                                                              (0) ($)
+               ($)         SH                                            C0        ← ReEnc(∆0,1 , C ∗ )
+             b0 ← AOchallenge (1λ , (pk0 , sk0 ), (pk1 , sk1 ), ∆0,1 )
+                                                                             0 (1) $
+             return b0                                                   C         ← Enc(pk1 , m∗ , `∗ + 1)
+                                                                                             (b)
+                                                                         return (C ∗ , C 0         )
+
+Fig. 6: Experiments for the source-hiding property. Here, ` denotes a level for the ciphertext
+to be encrypted at – essentially the number of times C has been re-encrypted. This is
+important for noisy PRE schemes, but ignored for PRE schemes without levelling. L is
+the number of times a ciphertext can be re-encrypted without breaking the correctness
+conditions (the correctness bound).
+
+
+Definition 9. A PRE scheme PRE is said to be -source-hiding if for all PPT adversaries
+A = (A0 , A1 ):
+                   h                 i     h                 i
+                 Pr SH0,PRE
+                       A    (1λ ) = 1 − Pr SH1,PRE
+                                               A    (1λ ) = 1 ≤ 
+
+where SHb,PRE
+          A      is defined in Figure 6.
+   If  is negligible as parameterised by the security parameter, then we say the scheme is
+source-hiding (SH).
+
+
+                                                               10
+    The purpose of source-hiding in [FKKP18] is to relate selective and adaptive security.
+Fuchsbauer et al. also define weak key privacy and show how this together with source-hiding
+can reduce security against adaptive HRAs to security against CPA, with sub-exponential
+loss for some re-encryption graphs. In particular, they show quasi-polynomial loss in security
+when lifting to adaptive corruption for trees and chains, and exponential loss otherwise. We
+discuss adaptive key corruptions more fully in Section 6, but note that the reason for the
+exponential security loss in [FKKP18] is because the definition of source-hiding is defined
+for only two key pairs, a single challenge, and challenges output both the original ciphertext
+and the potential re-encryption. This means the simulator in their proof needs to guess
+in advance which keys the adversary will ask for an honest re-encryption of and which
+ciphertext will be re-encrypted so that they can integrate the source-hiding challenge in the
+right place. This only works if they guess correctly, which leads to the loss in security. We
+shall both use and discuss this technique in Section 4.4.
+
+3.3   Ciphertext re-randomisation
+Thus far we have not considered key revocation explicitly. In this case, stronger definitions
+requiring re-encryption to re-randomise the ciphertext are required. To see this, consider the
+key encapsulation approach to PRE:
+                                                                                            $
+ – Encrypt the message m using a symmetric encryption algorithm with key k (C1 ←
+   symEnc(k, m)).
+ – Encrypt k with a public key of a PRE scheme pki and prepend this to make a header
+                                    $
+   for the encrypted message (C0 ← PRE.Enc(pki , k)).
+ – To decrypt, first decrypt the header to retrieve k 0 , then use k 0 to retrieve m0 (k 0 ←
+   PRE.Dec(ski , C0 ), m0 ← symDec(k 0 , C1 )).
+                                                                ($)
+ – The update token is the token from the PRE scheme (∆i,j ← PRE.ReKeyGen(ski , pkj )).
+                                                               ($)
+ – To re-encrypt, re-encrypt the header of the ciphertext (C00 ← PRE.ReKeyGen(∆i,j , C0 )).
+   C00 is an encryption of k under pkj .
+Whilst this method grants the benefits of hybrid encryption, key-scraping attacks are possi-
+ble: a malicious user simply retains the message encryption key k and can derive the message
+regardless of how many times the ciphertext is re-encrypted. It may be unrealistic for a ma-
+licious revoked user to download all the plaintexts due to storage constraints, as is the case
+for subscriber-based streaming platforms. However, as symmetric keys are typically much
+shorter than the plaintexts, it is more realistic that a malicious subscriber could retain the
+message key, k. Although constructions based on this model can be shown to meet the typ-
+ical confidentiality definitions for PRE shown in Section 3.1, they are not appropriate for
+PCS.
+     There is little work on requiring re-encryption to also re-randomise. In [CH07], Canetti
+and Hohenberger discuss a notion for re-randomising ciphertexts (which they call unlinka-
+bility) in the context of creating a CCA definition. Other notions of re-randomisation exist
+in the related areas of key rotation [EPRS17] and updatable encryption [LT18]. These differ
+from proxy re-encryption in that they are symmetric schemes, updates happen sequentially
+from ki to ki+1 , and they name full re-randomisation as a necessary security goal. The fact
+the schemes are symmetric gives the impression that they must be faster than asymmetric
+schemes. However, both constructions rely on homomorphic properties of field groups used
+in public-key cryptography, and to date all such schemes rely on these. It is difficult to see
+how to construct a scheme that re-encrypts a ciphertext that doesn’t rely on such public-
+key-like primitives. It would therefore be wrong to assume that symmetric re-encryption
+
+
+                                             11
+primitives must be faster. Our public-key constructions should therefore not necessarily be
+assumed inefficient in comparison to all symmetric constructions.
+     [EPRS17] defines UP-REENC security for key rotation / updatable encryption schemes,
+which does not give the adversary the token used to create the challenge re-encryption. Their
+construction, ReCrypt allows an adversary who has learned the update token to reverse the
+re-encryption of the challenge ciphertext and therefore does not cover full compromise of
+the user who generated the update token. Other related work models PCS by giving a
+bound on the amount of information the adversary retains about a the ciphertext prior to
+re-encryption [Lee17, MS17]. Such definitions do not account for the possibility of revoked
+users storing parts of the original ciphertexts and colluding, and lead to more complicated,
+less intuitive proofs than our approach. We create a stronger definition in which schemes must
+be unidirectional, and the adversary knows the update token used to create the challenge
+re-encryption.
+    A particular work of note is [LT18], where Lehmann and Tackmann define PCS for
+updatable encryption schemes as IND-UPD. We give an asymmetric version of IND-UPD
+for comparison with our work in Appendix B, but state the main points briefly here. In
+the pkIND-UPD game, key updates happen sequentially. The challenge oracle outputs a re-
+encrypted ciphertext and the adversary must guess which ciphertext it is a re-encryption
+of. Challenge ciphertexts are updated whenever a new key is generated, but only given
+to the adversary if the oracle OpkIULearnChal is called under a specific key (or epoch, in their
+terminology). An updatable encryption scheme can be bidirectional and still be IND-UPD,
+as bidirectionality invokes the additional winning condition that the adversary cannot have
+learned any update tokens used to create a challenge ciphertext. Another of the winning
+conditions given in OpkIU
+                        ReEnc is that when ReEnc is deterministic, the adversary cannot have
+re-encrypted either of the potential challenge ciphertexts C̄0 , C̄1 . Another notable condition
+is that the adversary cannot learn the update token going towards the key that the challenge
+is given under, which is enforced as a condition in OpkIU LearnTok . We will address these points
+when we build our own definition in Section 4. We provide separating examples with respect
+to pkIND-UPD in Section 4.3 to demonstrate that our notion is stronger.
+
+
+4   Strong PCS for PRE
+
+In this section, we create a definition for strong PCS for public-key PRE schemes. We begin
+by justifying our motivation, explaining why we believe existing definitions are insufficient
+for PCS.
+    We have two main motivations for creating a new definition for PCS in the context of
+PRE. The first is that there is currently no definition that implies unidirectionality and
+ciphertext re-randomisation. We believe that the distinction whether a PRE scheme is uni-
+directional or bidirectional is vital in the post-compromise scenario to model the corruption
+of used update tokens, and hence we define PCS to explicitly mean that schemes meeting
+the definition must be unidirectional. The second motivation is a matter of existing defi-
+nitions inherently assuming which of the algorithms in the PRE scheme are probabilistic.
+We explain how this introduces problems when considering a post-compromise scenario. We
+now go into both of these motivations in more detail.
+Explicit unidirectionality. We use the most relevant definition in the existing literature
+to make our case. IND-UPD [LT18], defined for updatable encryption, places restrictions
+based on inferable information, as defined by the [LT18] notions of directionality:
+
+ – When skj can be derived from ski and ∆i,j (LT-bidirectional).
+
+
+                                               12
+ – When skj cannot be derived from ski and ∆i,j (LT-unidirectional)4
+In the LT-unidirectional case, the adversary can acquire re-encryption tokens from a cor-
+rupted key to a challenge key, but not the other way around. In the LT-bidirectional case, the
+adversary is additionally prevented, by definition, from learning tokens from challenge keys
+to corrupted keys or vice versa. This means that for bidirectional schemes, the adversary
+queries tokens in such a way that the resulting re-encryption graphs form disjoint sub-graphs
+– one containing corrupted keys and the other containing challenge keys. Proving security
+is therefore reduced to proving that unrelated, randomly-generated keys cannot be used to
+infer information about an encrypted message. We consider applying the same restrictions
+for a definition of PCS for PRE to be too restrictive, as they go against our intuition of PCS
+that only the new secret key must remain secret.
+    Since the derivability of the new secret key is implicit information to the game, meeting
+the definition itself says nothing about directionality and therefore the extent to which
+update token compromise is of concern. We believe that it is better for directionality to be
+explicit as it allows practitioners to understand the security of a scheme more clearly.
+Assuming probabilistic algorithms. There appear to be only two existing security defi-
+nitions which explicitly consider re-randomisation [EPRS17,LT18]. The [EPRS17] definition
+of a key rotation scheme assumes that ReKeyGen is randomised but ReEnc is determinis-
+tic. This leads to a necessary condition that the update token used to create the challenge
+re-encryption cannot be learned by the adversary, otherwise the adversary could use it to
+re-encrypt the input ciphertexts locally and compare this to the challenge to win the game.
+The adversary is allowed to learn other tokens going from corrupted to challenge keys us-
+ing an oracle OReKeyGen , but not the exact token used to perform the re-encryption. This
+means UP-REENC [EPRS17] does not model compromise of the update token used. For
+this reason, it is important that new randomness is also introduced in ReEnc to prevent
+trivial downgrading of the challenge ciphertext if the adversary compromises the update
+token used.
+     In the [LT18] definition of an updatable encryption scheme, the opposite assumption is
+made – that ReEnc is randomised and ReKeyGen is deterministic. This means that for keys
+ski , pkj , there is only one update token ∆i,j . This is reflected in their IND-UPD security
+game (and pkIND-UPD) by having an update token ∆i−1,i created when ki is generated and
+later having oracles reveal tokens to the adversary. This is less fitting for schemes where
+ReKeyGen is randomised and there are multiple tokens per key pair5 . More importantly,
+such an assumption implicitly rules out the possibility that additional randomness incorpo-
+rated into the update token masks the secret keys, which is important for security as the
+secret key ski should not be derivable from the update token ∆i,j and the public key pkj .
+BV-PRE [PRSV17] is an example of this, where knowledge of the ‘public’ key ‘pkj ’ together
+with ∆i,j can be used to derive ski . Another example is ElGamal-based symmetric PRE
+schemes (e.g. [BBS98, LT18]) where update tokens have the form ∆i,j = skj /ski . Clearly,
+given the update token, compromise of the old key leads to compromise of the new key.
+Introducing additional randomness into the update token not only gives a means of masking
+the new key, but also means that the client does not need to fully rely on the proxy to be
+assured of new randomness, which is more appropriate for some trust scenarios.
+
+
+   4
+     The general understanding of unidirectionality is not so strong - the new key does not necessarily
+have to be derivable, but the token and old key should lead to the message being learned.
+   5
+     Interestingly, other works such as [FKKP18] take a similar approach to the adversary learning
+update tokens, despite their assuming randomised tokens.
+
+
+                                                  13
+    For constructions where randomness is added in both ReKeyGen and ReEnc, neither
+definition is suitable. It is therefore of interest to create a security notion for PCS which
+factors in the possibility that both the ReKeyGen and ReEnc algorithms are probabilistic.
+
+
+4.1     Post-Compromise Security
+
+We model Post-Compromise Security (PCS) using an adversary A who chooses two ci-
+phertexts (whose decryption key can be known) and a re-encryption token, and receives a
+challenge ciphertext which is a re-encryption of one of the chosen ciphertexts created us-
+ing the specified token. A attempts to distinguish which ciphertext was re-encrypted. This
+models the compromise of all key-related material prior to the challenge re-encryption.
+    Unlike some previous definitions, we allow A to corrupt the secret key with which the
+update token was generated. As in IND-HRA security, we also allow A to re-encrypt honestly
+(oracle)-generated non-challenge ciphertexts to corrupted keys. Challenges are obtained via
+the challenge oracle OPCchallenge which will only accept as input honestly-generated ciphertexts
+of the same length, and honestly-generated update tokens. The challenger maintains lists to
+enforce this: Chonest and Thonest respectively.
+    Here we present a formal definition of PCS for general PRE. As for PRE-IND-CPA and
+IND-HRA security, the first stage adversary A0 can access key generation and key corrup-
+tion oracles OKeyGen , OCorrupt and the second stage adversary A1 can access the encryption,
+token generation, re-encryption and challenge oracles OEnc , OReKeyGen , OPC          PC
+                                                                             ReEnc , Ochallenge . The
+challenger maintains a list of corrupted keys Kcorrupted , honest ciphertexts Chonest and chal-
+lenge ciphertexts Cchal , and enforces the trivial win condition using a re-encryption graph
+DRG to verify that no challenge keys have been corrupted.
+
+Definition 10. A PRE scheme PRE is said to have (selective) -Post-Compromise Security
+(-PCS) if for all PPT adversaries A = (A0 , A1 ):
+
+                   Pr PostComp0A (1λ ) = 1 − Pr PostComp1A (1λ ) = 1 ≤ ,
+                                                                 
+
+
+where PostCompb,PREA      is defined in Figure 7.
+    If  is negligible as parameterised by the security parameter, then we say the scheme has
+(selective) Post-Compromise Security (PCS).
+
+      We give a definition of PCS for symmetric PRE schemes in Appendix A.
+
+
+4.2     Basic observations
+
+In Lemma 1, we show that it is necessary for PCS to have randomness incorporated into
+re-encryption.
+
+Lemma 1. No PRE scheme where ReEnc is deterministic has PCS.
+
+Proof. If ReEnc is deterministic then A can submit (C0 , C1 , i, j, ∆i,j ) to Ochallenge to learn
+challenge Cb0∗ . Then A can locally compute C00 ← ReEnc(∆i,j , C0 ) and compare this with
+Cb0∗ – if they match then output b0 = 0, otherwise output b0 = 1.
+
+Lemma 2. PCS =⇒ unidirectional.
+
+
+                                                 14
+         PostCompb,PRE
+                 A     (1λ )                                                  OPC
+                                                                               ReEnc (C, i, j, [∆i,j ])
+
+
+         Kchal , Kcorrupted , Chonest , Cchal , Cmsg , Thonest , DRG = ∅      if ∆i,j given :
+         κ = 0, called = false                                                                   / Thonest : return ⊥
+                                                                                if (i, j, ∆i,j ) ∈
+                  ($)
+                  O       ,O                                                  else : ∆i,j ← ReKeyGen(ski , pkj )
+         state ← A0 KeyGen Corrupt (1λ )
+                    OReKeyGen ,OEnc ,OPC      PC                              if (i, C) 6∈ Chonest : return ⊥
+            ($)                       ReEnc ,Ochallenge
+         b0 ← A 1                                         (1λ , state)           ($)
+         Kchal ← UpdateChallengeKeys(Kchal , DRG)                             C 0 ← ReEnc(∆i,j , C)
+
+         if Kchal ∩ Kcorrupted 6= ∅ : return 0                                Chonest .add{j, C 0 }
+
+         return b0                                                            Cmsg [(j, C 0 )] = Cmsg [(i, C)]
+                                                                              if (i, C) ∈ Cchal :
+                                                                                                                 →
+                                                                                Cchal .add{j, C 0 }, DRG.add{ e i,j }
+                                                                              return C 0
+                             OPC
+                              challenge (C0 , C1 , i, j, ∆i,j )
+
+
+                            if |C0 | 6= |C1 | OR called = true : return ⊥
+                            if (i, C0 ), (i, C1 ) 6∈ Chonest OR (i, j, ∆i,j ) 6∈ Thonest : return ⊥
+                                   ($)
+                            C00∗ ← ReEnc(∆i,j , C0 )
+                                   ($)
+                            C10∗ ← ReEnc(∆i,j , C1 )
+                            Cmsg [(j, Cb0∗ )] = Cmsg [(i, Cb )]
+                            Chonest .add{j, Cb0∗ }, Cchal .add{j, Cb0∗ }, Kchal .add{skj }
+                            called ← true
+                            return Cb0∗
+
+Fig. 7: The PostComp game. This reflects full compromise of the old secret key and update
+token used to perform the re-encryption.
+
+Proof. We show that if a scheme is bidirectional then it cannot have PCS. Bidirectionality
+implies that an update token ∆i,j , can be used to derive ∆j,i . The adversary A proceeds
+                                                                                                          $             $
+as follows: A first corrupts a key ski , then creates two ciphertexts C0 ← OEnc (i, m0 ), C1 ←
+                                                            ($)
+OEnc (i, m1 ) and update token ∆i,j ← OReKeyGen (i, j), before submitting (C0 , C1 , i, j, ∆i,j )
+                                                                                                                        ($)
+to the challenge oracle. A then computes ∆j,i from ∆i,j , and uses this to compute C 00 ←
+ReEnc(∆j,i , C 0 ), where C 0 is the received challenge re-encryption, to obtain the challenge
+ciphertext under key pki , before decrypting using ski to win the game.
+
+This means an easy way to disprove PCS for existing schemes is to show bidirectionality.
+
+
+4.3   Separating examples
+
+We now demonstrate the relationship between PCS and existing security notions and con-
+structions by means of a number of separating examples.
+
+                             6
+Lemma 3. pkIND-UPD-security =⇒ PCS.
+
+Proof. Let PRE be a pkIND-UPD-secure PRE scheme where ReEnc is deterministic. By
+Lemma 1, this scheme does not have PCS.
+
+The same can be said for IND-UPD security and PCS for symmetric re-encryption schemes
+as defined in Appendix A.
+
+
+                                                                         15
+Lemma 4. Let PRE be a PRE scheme where ReKeyGen is deterministic. If PRE has PCS,
+then it is pkIND-UPD-secure.
+
+    We note that Lemma 4 is not an exact comparison, as pkIND-UPD-security assumes
+that ciphertexts are re-encrypted through every key (as is the case in the key rotation
+application) whereas the same is not true in security PRE6 . However include a proof sketch
+to demonstrate how the two may relate.
+Proof sketch. The PostComp adversary A can simulate the pkIND-UPD game. Before the
+challenge is issued, ONext can be easily simulated by generating a new key pair, corrupting
+the old secret key and creating an update token between the old key and the new. The
+adversary replaces the challenge ciphertext with the output from OPC challenge (C0 , C1 , ẽ − 1, ẽ).
+The PostComp adversary A0 must guess the remaining keys which the pkIND-UPD will
+corrupt, which will result in a sub-exponential loss of security as the challenge graph will
+be a chain. The simulator can update both challenge and honest ciphertexts using OReEnc ,
+and corrupting tokens can be simulated with calls to OReKeyGen . Re-encrypting a challenge
+ciphertext directly to the requested key as opposed to going through all previous keys in the
+chain first will go unnoticed, as if the number of times a ciphertext has been re-encrypted
+could be detected then this could be used to win the PostComp game.
+
+                           6
+Lemma 5. IND-HRA-security =⇒ PCS.
+
+Proof. Let PRE = (KeyGen, Enc, Dec, ReKeyGen, ReEnc) be a IND-HRA-secure PRE
+scheme, and let (symKeyGen, symEnc, symDec) be an IND-CPA-secure symmetric encryp-
+tion scheme. We now define a PRE scheme using the key encapsulation method as follows:
+                  $                     $
+ – KeyGen(1λ ) → (pk, sk) : (pk, sk) ← KeyGen(1λ )
+                 $                $                        $                  $
+ – Enc(pk, m) → (C0 , C1 ) : k ← symKeyGen(1λ ), C0 ← Enc(pk, k), C1 ← symEnc(k, m)
+ – Dec(sk, C) → m0 : k 0 ← Dec(sk, C0 ), m0 ← symDec(k 0 , C1 )
+                            ($)          ($)
+ – ReKeyGen(ski , pkj ) → ∆i,j : ∆i,j ← ReKeyGen(ski , pkj )
+                      ($)              ($)
+ – ReEnc(∆i,j , C) → (C00 , C10 ) : C00 ← ReEnc(∆i,j , C0 ), C10 = C1
+
+This scheme is also IND-HRA, but is not PCS. An adversary A can submit two ciphertexts
+to the challenge oracle, and compare the second part of the challenge re-encryption with the
+submitted ciphertexts to win the game.
+
+              6
+Lemma 6. PCS =⇒ PRE-IND-CPA-security.
+
+Proof. Let PRE = (KeyGen, Enc, Dec, ReKeyGen, ReEnc) be a PRE scheme that is
+IND-HRA-secure and has PCS. We use it to construct the following PRE scheme:
+                  $                     $
+ – KeyGen(1λ ) → (pk, sk) : (pk, sk) ← KeyGen(1λ )
+                 $                $
+ – Enc(pk, m) → (C0 , C1 ) : C ← (m, Enc(pk, m))
+ – Dec(sk, C) → m0 : m0 ← Dec(sk, C1 )
+                            ($)          ($)
+ – ReKeyGen(ski , pkj ) → ∆i,j : ∆i,j ← ReKeyGen(ski , pkj )
+                      ($)               $                  ($)
+ – ReEnc(∆i,j , C) → (C00 , C10 ) : C00 ← Enc(pkj , 0), C10 ← ReEnc(∆i,j , C1 )
+
+    6
+      However, it appears that if a re-encryption scheme has transparency, then it is much easier to
+relate security for updatable encryption schemes with security for PRE schemes meaning that the
+relation applies exactly for such schemes.
+
+
+                                                 16
+Clearly this scheme is not PRE-IND-CPA secure, as fresh ciphertexts contain the plaintext.
+However the scheme has PCS, as re-encryptions C10 will be unrelated to C1 , since PRE has
+PCS, and the creation of C00 is independent of both C0 and ∆i,j .
+
+   Since PCS does not imply any security notion concerning confidentiality of the message,
+confidentiality definitions must be proven separately in order to demonstrate that a PRE
+scheme is useful in practice.
+
+
+4.4   PCS via source-hiding
+
+This section has been updated, partly due to errors and partly due to the change in our given
+definition of source-hiding in Definition 9 as we no longer use a multi-key, multi-challenge
+version. The main impact is that the proven advantages are now higher, but still negligible.
+    In this section we show that a PRE scheme that is both source-hiding and
+PRE-IND-CPA-secure also has PCS.
+
+Theorem 2 (main). Let PRE be a PRE scheme with transparency which is both
+PRE-IND-CPA-secure and source-hiding. Then PRE also has PCS, limited to the case where
+re-encryption graphs are acyclic.
+    More specifically, if PRE is CPA -PRE-IND-CPA-secure and SH -source-hiding, then the
+advantage  of an adversary A in winning PostCompPRE
+                                                  A     is
+
+              ≤ κ(κ − 1)(QE + QHRE + 1)(QHRE + 1) · SH + CPA < negl(λ)
+
+for some negligible function negl(λ), where QE is the number of queries A makes to OEnc ,
+and QHRE is the number of re-encryption queries for non-challenge ciphertexts that A makes
+to OReEnc .
+
+    The intuition behind this proof is that as source-hiding implies that re-encrypted ci-
+phertexts appear to be independent of the original ciphertext (and the old secret key), the
+challenge re-encryption in PostCompPRE
+                                     A    can be replaced with a fresh encryption of mb at
+the appropriate level. As long as the ciphertext does not reveal anything about the under-
+lying message, PRE is PCS. We give a reduction-based proof that a PRE scheme that is
+both source-hiding and PRE-IND-CPA-secure is PCS.
+
+Proof. We prove this theorem using a sequence of game hops, breaking the proof down
+into a number of lemmas. Let PostCompSH be a variant of the PostComp game where all
+re-encryptions of non-challenge ciphertexts and the re-encryption made by OPostComp
+                                                                           challenge are
+replaced with fresh encryptions at the appropriate level. Let Gameb denote the experi-
+ment Game where choice of b is made explicit. We first demonstrate that PostComp and
+PostCompSH are computationally indistinguishable, before showing how PRE-IND-CPA-
+security implies that PostCompSH0 and PostCompSH1 are computationally indistinguish-
+able.
+
+Lemma 7. Let 0 be the advantage in distinguishing between PostCompSH and PostComp.
+Then
+                  0 ≤ κ(κ − 1)(QE + QHRE + 1)(QHRE + 1) · SH .
+
+
+
+
+                                             17
+Proof. This proof is based on proof of [FKKP18, Lemma 7], which gives a reduction based
+on source-hiding. We use a hybrid argument where re-encryptions are replaced one at a
+time. Let PostCompSH0 := PostComp, and let PostCompSHk be identical to PostCompSHk−1
+except that the k th re-encryption query is replaced with a fresh encryption. We see that
+PostCompSHQHRE +1 = PostCompSH.
+    We describe how an adversary B trying to win SHd can simulate either PostCompSHk−1
+or PostCompSHk , depending on the bit d. Therefore, if there exists a PPT distinguisher D
+that, with advantage δ, outputs d0D = 0 to indicate that it is playing PostCompSHk−1 and
+d0D = 1 to indicate that it is playing PostCompSHk , then B can run D as a subroutine and
+set d0 = d0D to win SH with the same advantage.
+                        $
+   B first sets b ← {0, 1} for PostComp. Note that SH only has two keypairs
+(pkSH    SH      SH    SH                           SH
+   0 , sk0 ), (pk1 , sk1 ), and that the challenge Ochallenge (m, `) returns both the fresh en-
+            ∗                      (b)
+cryption C and the challenge C . Therefore, B must first guess which ciphertext C and
+key indexes i∗ , j ∗ will be input for the k th replacement. B responds to the k th re-encryption
+query as follows:
+ – It takes the two keypairs from the source-hiding game (pkSH                    SH      SH    SH
+                                                                            0 , sk0 ), (pk1 , sk1 ), sets
+   these as (pki∗ , ski∗ ), (pkj ∗ , skj ∗ ) respectively, and then self-generates the remaining κ − 2
+   key pairs for PostComp.
+ – When the adversary makes the query that leads to the creation of C under pki (which
+   could be either through OEnc or OReEnc )), if i 6= i∗ then the reduction aborts. Other-
+                                                                                                       $
+    wise the reduction takes the underlying message and uses it to query OSH
+                                                                          challenge (m, `) →
+            (b)
+   (C ∗ , C 0 ) and returns C ∗ to the adversary. Note that C ∗ is created via oracles, either
+   by OEnc (i, m) or by calling OReEnc on an oracle-created ciphertext. This means that for
+   a pair (i, C) where C is an oracle-created ciphertext under pki reduction will know the
+   underling message m and the number of times ` that the ciphertext has been (or appears
+   to have been) re-encrypted.
+ – Let the k th re-encryption is the adversary queries for an honest ciphertext C be
+   OReEnc (i∗ , j, (∆i∗ ,j ), C). If C 6= C ∗ or j 6= j ∗ , the reduction aborts. Otherwise, it re-
+                                (b)
+   turns the challenge C 0 it received from the source-hiding game.
+Note that for the challenge ciphertext, B has chosen b and therefore can easily simulate the
+challenge by re-encrypting as described above.
+   Because PRE is SH -source-hiding by assumption, we conclude that the advantage δ that
+D has in distinguishing between PostCompSHk−1 and PostCompSHk cannot be greater than
+κ(κ − 1)(QE + QHRE + 1) · SH . Because QHRE + 1 replacements need to be made in total,
+we get that the advantage of distinguishing between PostComp and PostCompSH is bounded
+by 0 ≤ δ · (QHRE + 1) · SH , as required.
+
+Lemma 8. If PRE is CPA -secure, then the advantage 1 in distinguishing between
+PostCompSH0,PRE and PostCompSH0,PRE is
+
+                                              1 ≤ CPA .
+
+
+
+Proof. We show how an adversary A in PRE-IND-CPAb can simulate PostCompSHb,PRE .
+Thus, if there exists a PPT adversary B that wins PostCompSH (returning b0B ) with advantage
+0 , then A can win PRE-IND-CPAb,PRE with the same advantage by returning b0 = b0B . A
+simulates PostCompb,PRE by responding to oracle queries made by B as follows:
+
+
+                                                  18
+ – A simulates OEnc as described in PostComp, also setting lookup tables Cmsg [(i, C)] := m
+   for the underlying message m and Clev [(i, C)] := 0 for the ciphertext level.
+ – A forwards calls to OReKeyGen to the same oracle in its own game.
+                                    ∗ ∗                  ∗    ∗                                   ∗ ∗
+ – To simulate OPC      challenge (i , j , [∆i∗ ,j ∗ ], C0 , C1 ), A first retrieves m0 ← Cmsg [(C0 , i )],
+   `0 ← Clev [(C0∗ )], m1 ← Cmsg [(C1∗ )], `1                    ←    Clev [(C1∗ , i∗ )]. Then A queries
+                                    0 (b)
+   OCPA
+     challenge (j, m0 , m1 ) → C          .
+ – A simulates OReEnc (i, j, C) for non-challenge ciphertexts by retrieving m ← Cmsg [(i, C)]
+                                                    $
+      and ` ← Clev [(i, C)] and returning C 0 ← Enc(pkj , m, ` + 1). A sets Cmsg [(j, C 0 )] :=
+      m, Clev [(j, C 0 )] := ` + 1.
+      For challenge ciphertexts, if B has set ∆i,j = ⊥ then A retrieved ∆i,j ← OReKeyGen (i, j)
+      and returns C 0 ← ReEnc(∆i,j , C).
+We note that, as PRE has transparency, the level of the challenge re-encryption will be hid-
+den meaning that B cannot submit ciphertexts at different levels and use this to distinguish
+  (b)
+C0 .
+   The resulting simulation is identical to PostCompSHb . Therefore, if there exists an ad-
+versary B that wins PRE-IND-CPAb with advantage , then A can win PostCompSH with the
+same advantage. We conclude that 1 ≤ CPA , as required.
+      By Lemmas 7 and 8 and the triangle inequality, we see that
+
+                     ≤ κ(κ − 1)(QE + QHRE + 1)(QHRE + 1) · SH + CPA ,
+
+as required.                                                                                             u
+                                                                                                         t
+
+Remarks. These remarks address the benefits or our original approach where we used a
+multi-key, multi-challenge variant of source-hiding.
+    We note that a multi-key, multi-challenge variant of source-hiding will result in a simpler
+reduction, as the simulator will no longer need to guess in advance which keys and ciphertexts
+will be used in replacing the re-encrypted ciphertext with a fresh encryption. We conjecture
+that proving that a PRE scheme meets multi-key, multi-challenge variant of source-hiding
+should not incur a significant loss, proving source-hiding requires a statistical argument that
+ciphertexts are identically distributed, which should apply to multiple keys and ciphertexts
+as long as they are honestly-generated. Indeed, it is possible that the overall loss from using
+a multi-key, multi-challenge notion of source-hiding will mean the overall loss of security is
+less severe than it is in the current approach.
+    Finally, we conjecture that there is the potential for a tighter relation between IND-HRA-
+security and PCS, as at a high level the only re-encryption that needs replacing here is the one
+performed by OPC challenge . Because the single-challenge definition of source-hiding has limited
+                                                              ($)
+application in that it only says that re-encryptions C 0 ← ReEnc(∆i,j , C) of fresh ciphertexts
+   $
+C ← Enc(pki , m, [`]) can be replaced by fresh encryptions, whereas we need this property to
+hold even when C is itself a re-encrypted ciphertext.
+    It should be possible that such a replacement can be made without needing to replace
+all previous re-encryptions. Informally, this follows trivially from an iterative argument, or
+from the statistical argument outlined above.
+
+4.5     Existing PRE schemes that satisfy PCS
+This subsection has also been updated to discuss the possibility that additional schemes have
+PCS.
+
+
+                                                   19
+    In [FKKP18, Construction 7.b], Fuchsbauer et al. present a PRE scheme which is
+PRE-IND-CPA-secure and source-hiding. This construction is based on the hardness of the
+decision learning with errors problem with sub-exponential noise-to-modulus ratio. Using
+the result of Theorem 2, see that this scheme is PCS. However, current known techniques
+that make a PRE scheme provably source-hiding result in a scheme that is both less efficient,
+and relies on stronger security assumptions. We shall discuss this in detail in Section 6.3.
+    We therefore aim to demonstrate that source-hiding is not necessary for proving PCS,
+which we do with our construction in Section 5. We note that, subject to the remarks given
+in Section 4.4, it is possible that [FKKP18, Construction 2, Construction 4] also have PCS,
+as, whilst these constructions are not source-hiding, they do re-randomise ciphertexts upon
+re-encryption in a way that is necessary for PCS.
+
+
+5     An Efficient Construction from Lattices
+
+We introduce a natural construction with PCS, based on BV-PRE – the ring-LWE (RLWE)
+construction presented in [PRSV17]. Whilst Theorem 2 shows that source-hiding can lead
+to PCS, the existing constructions with this property [FKKP18] make sub-optimal param-
+eter choices that significantly impact the schemes’ practicality. Our construction has PCS
+but is not source-hiding, implying that source-hiding is not necessary for PCS. This means
+that our construction can make much better parameter choices in terms of efficiency. Our
+construction also does not rely on strong assumptions or heavy techniques such as obfusca-
+tion [HRSV07, CCV12]. We also achieve transparency, meaning the cost of decryption does
+not grow for repeatedly re-encrypted ciphertexts. If extra computation is needed to decrypt
+a re-encrypted ciphertext, then this may outweigh the benefits of outsourcing re-encryption.
+Heavier computation may go against the reasons for outsourcing re-encryption to begin with.
+    Our construction makes some adaptations to BV-PRE to fit the workflow of PRE; making
+use of the key resampling technique of [BV11] to re-randomise the ciphertext. Any scheme
+that permits similar re-randomisation can be proven secure using related methods. We begin
+this section by covering some necessary preliminaries for lattices.
+
+
+5.1   Lattice preliminaries
+
+We let q ∈ Z denote some modulus and n denote a ring dimension. We represent the set of
+integers modulo q as Zq = {b−q/2c, . . . , 0, . . . , bq/2c}. We will be working over power-of-two
+cyclotomic rings of the form Rq = Zq [x]/hxn +i where n is a power of two. We use Φ to
+denote the polynomial such that Rq = Zq [x]/Φ. Next we discuss the various distributions
+                                               $
+that will be used. We use the notation s ← D to denote that the element s is sampled
+                                                                $
+according to distribution D. If D is a set, then we assume s ← D means that s is sampled
+uniformly from the set D. We denote the discrete Gaussian distribution over Zq as χσ . The
+distribution χσ has its support restricted to Zq and a probability mass function proportional
+to that of a Gaussian distribution with variance σ 2 . We sometimes write χe where we use a
+subscript e to denote an “error” distribution, but the underlying variance is still denoted by
+                                                               $
+σ. Slightly abusing notation, we can sample a polynomial s ← χe by sampling each of the
+coefficients
+                        to the distribution χe . We say a distribution D is (B, δ)-bounded
+             of s according
+                   $
+if Pr |x| > B : x ← D     ≤ δ. We denote the uniform distribution over Rq as Uq , and we
+                          $                         $
+use the shorthand (a, b) ← Uq2 to mean that a, b ← Uq .
+
+
+                                               20
+ring-LWE (RLWE) assumption:               Let s be some secret polynomial in Rq . Samples from
+                                                                                        $
+the RLWEn,q,χe (s) distribution take the form (a, b = as + e) ∈ Rq × Rq where a ← Uq ,
+  $
+e ← χe . The (normal form) RLWEn,q,χe problem is to distinguish between an oracle that
+                                                             $
+outputs samples from RLWEn,q,χe (s) where s ← χe and an oracle that outputs uniform
+elements in R2q . The RLWEn,q,χe assumption states that no PPT algorithm can solve the
+RLWEn,q,χe problem with a non-negligible advantage. Note that if we take σ ≥ ω(log n) and
+σ/q = 1/poly(n), the RLWEn,q,χe problem is at least as hard as solving standard worst-case
+lattice problems over ideal lattices up to polynomial approximation factors using quantum
+algorithms [LPR10].
+
+
+5.2     Adapting BV-PRE for PCS
+The underlying scheme, BV-PRE [PRSV17], is based on the BV encryption scheme [BV11],
+which is based on RLWE. This scheme is parameterised by ciphertext modulus q, plaintext
+modulus p ≥ 2, ring dimension n, polynomial ring Rq = Zq [n]/hxn + 1i and relinearisation
+window r. BV-PRE uses a relinearisation technique to reduce the size of the error that is
+added to a ciphertext upon re-encryption. During relinearisation, we break down a ciphertext
+into parts as determined by the relinearisation window:
+                                              blog2 (q)/rc
+                                                  X
+                                        C=                   Ci · (2r )i .                  (1)
+                                                  i=0
+
+Note BV-PRE is not fully public-key, relying on an additional ‘public’7 key ‘pk’B for the
+target key skB to generate update tokens. These ‘public’ keys are also RLWE samples with
+the same underlying secret, sB as the public key pkB . However, and these ‘public’ keys
+are assumed to be unknown to the adversary when proving security. Indeed any entity in
+possession of both the ‘public’ key and an update token created from this key can derive the
+old secret key, skA . A description of the full BV-PRE scheme can be found in Appendix C.
+    We get around the need for additional ‘public’ keys using the key resampling technique
+ReSample [BV11] which takes a public key pkB and outputs a fresh public key pk0B with the
+same underlying secret. We also use same relinearisation technique as [PRSV17] to reduce
+error growth. We describe the re-sampling algorithm ReSample in Appendix D, but note
+that it can also be written as (¯(a), ¯(b)) ← pcBV-PRE.Enc((a, b), 0).
+                                            $
+
+    We give our construction, pcBV-PRE, in Figure 8. It builds on BV-PRE by having the
+proxy add further randomness in the ReEnc operation. Recall that this is necessary for a
+scheme to have PCS, as otherwise an adversary could re-encrypt locally to obtain the same
+re-encryption. This additional randomness has minor implications for how this affects the
+correctness requirement for multiple re-encryptions over that presented in [PRSV17].
+
+
+5.3     Security proofs
+For brevity, we defer the correctness analysis of pcBV-PRE to Appendix E.
+Post-Compromise Security. The proof in this updated version is new, as it addresses
+errors in the previous proof regarding how key corruption is handled, and how re-encryptions
+of non-challenge ciphertexts are handled.
+
+   7
+       Polyakov et al. also refer to these keys as “ ‘public’ ”.
+
+
+                                                     21
+                                                         $
+                  KeyGen(1λ )             Enc(pk, m) → C                  Dec(sk, C) → m
+                     $
+                  a ← Uq ,                (a, b) ← pk                     s ← sk
+                         $
+                  s, e ← χe
+                                                     $
+                                          v, e0 , e1 ← χe                 m0 = C0 − s · C1             mod p
+                                                                                           0
+                  b = a · s + pe          C0 = b · v + pe0 + m            return m
+                  sk = s                  C1 = a · v + pe1
+                  pk = (a, b)             return c = (C0 , C1 )
+                  return (pk, sk)
+                                      $                                                   $
+            ReKeyGen(skA , pkB ) → ∆A,B                       ReEnc(∆A→B , C) → C 0
+                                                                                           
+                                                                           blog (q)/rc
+            for i ∈ {0, 1, . . . , blog2 (q)/rc} :             {(βi , γi )}i=0 2       , pkB ← ∆A→B
+                             $
+              (βi , θi ) ← ReSample(pkB )                     (C0 , C1 ) ← c
+                                   r i                                               $
+             γi = θi − skA · (2 )                             (β proxy , θproxy ) ← ReSample(pkB )
+                                                 
+                                blog (q)/rc                                  blog2 (q)/rc
+            ∆A→B = {(βi , γi )}i=0 2        , pkB                               X
+                                                              C00 = C0 +
+                                                                                                 (i)
+                                                                                               (C1 · γi ) + θproxy
+            return ∆A→B                                                          i=0
+                                                                      blog2 (q)/rc
+                                                                         X
+                                                              C10 =
+                                                                                         (i)
+                                                                                 (C1 · βi ) + β proxy
+                                                                          i=0
+                                                                           0
+                                                              return C = (C00 , C10 )
+
+Fig. 8: pcBV-PRE. This adapts BV-PRE [PRSV17] to be fully public-key, and minimises
+computation and bandwidth for the user for the re-encryption process. The key resampling
+algorithm ReSample is described in Appendix D.
+
+    We firstly show that pcBV-PRE is satisfies PCS with a direct proof. In other words,
+we do not leverage the proof of Theorem 2 to prove PCS via source-hiding security. This
+is because pcBV-PRE as written does not satisfy source-hiding security, see Section 6.3 for
+more details.
+
+Theorem 3. pcBV-PRE has Post-Compromise Security. In other words, for any adversary
+A to the PostComp game,
+             h                      i    h                          i
+          Pr PostComp0,PRE
+                      A
+                                                  1,pcBV-PRE λ
+                           (1λ ) = 1 − Pr PostCompA         (1 ) = 1 ≤ ,
+
+for some  = negl(λ) under the RLWEn,q,χe assumption.
+
+Proof Overview. We only give a brief informal argument here and refer the reader to Ap-
+pendix E for a full proof. We first demonstrate that the scheme is secure for a variant of
+the game where re-encryptions of non-challenge ciphertexts from uncorrupted to corrupted
+keys are forbidden. We call this variant CPA-PostComp.
+   This proof is adapted from the PRE-IND-CPA-security (IND-CPA-security in their ter-
+minology) proof of the BV-PRE in [PRSV17]. It follows a sequence of game hops beginning
+                                                                                 $
+with the CPA-PostCompb,pcBV-PRE security game where b ← {0, 1}. In this game, the adver-
+sary is challenged to guess the bit b. Then we use a hybrid argument with a series of game
+hops where each game hop replaces:
+
+1. resamples of the public key of a single honest entity with uniform random values, and
+2. the update tokens created using the honest entity’s public key with uniform random
+   values.
+
+
+                                                             22
+Finally, the challenge re-encryption given to the adversary is a uniformly sampled value and
+thus the adversary has no advantage in this game. This implies that CPA-PostComp0,pcBV-PRE
+and CPA-PostComp1,pcBV-PRE are indistinguishable.
+    To prove security for the full PostComp game including honest re-encryptions, we use a
+similar idea to re-encryption simulatability to demonstrate how re-encryptions from un-
+corrupted to corrupted keys can be simulated without the update token or knowledge
+of the old secret key. We demonstrate how this simulated game is indistinguishable from
+PostComp, meaning that pcBV-PRE has post-compromise security. The full proof is given in
+Appendix E.
+PRE-IND-CPA security. We secondly show that pcBV-PRE is a PRE-IND-CPA-secure
+PRE scheme. This is a much simpler proof since it follows a similar argument to that of
+Theorem 3, and the fact that the same security notion was shown in [PRSV17, Theorem 2].
+Theorem 4. pcBV-PRE is IND-HRA secure.
+Proof. The proof of this property follows an identical similar argument to that of Theorem 3,
+except that the challenge is now replacing a fresh encryption as opposed to a re-encrypted
+ciphertext.                                                                                u
+                                                                                           t
+
+6     From selective to adaptive security
+Thus far, we have discussed selective security, where the adversary first corrupts keys, then
+learns challenges, in two distinct stages. In the adaptive model, a single-stage adversary can
+corrupt secret keys at any point and therefore choose which keys to corrupt as a result of
+received challenges. As long as the trivial win condition holds (that no challenge key has been
+corrupted), the adversary can adaptively decide which keys should be corrupted depending
+on the output of other oracle queries.
+    To lift to this stronger model, we need notions of key privacy. The intuition behind this
+is that we can replace some challenge-related queries with counterparts under different keys
+and relate this to key privacy.
+
+6.1    Weak Key Privacy
+In this section, we present the formal definitions for the related notions of key privacy. key
+privacy (sometimes called key anonymity), was first introduced for PKE in [BBDP01]. Infor-
+mally it means that an adversary is unable to determine which public key was used to encrypt
+a ciphertext. A strong version for PRE schemes for update tokens appears in [ABH09] which
+is referred to as strong key privacy in [FKKP18], and states that an adversary is unable to
+distinguish between an update token between two uncorrupted keys and a random element
+of the token space. Note that this is strictly stronger than key inference where the hidden se-
+cret keys must be computed, as is is the concern in collusion attacks. We refer the interested
+reader to [ABH09] for further details.
+    In their work relating selective and adaptive security, Fuchsbauer et al. [FKKP18] define
+weak key privacy and show that this is sufficient for adaptive security. We now define this
+formally.
+Definition 11. A PRE scheme PRE is said to have -weak key privacy if for all PPT
+adversaries A:
+                 Pr weakKP0A (1λ ) = 1 − Pr weakKP1A (1λ ) = 1 ≤ ,
+                                                           
+
+where weakKPb,PRE
+            A     is defined in Figure 9.
+
+
+                                              23
+          weakKPb,PRE
+                A     (1λ )                 OKeyGen ()                   Ochallenge (i, j)
+                                                                             ($)
+          κ=0                               κ←κ+1                        ∆0 ← ReKeyGen(ski , pkj )
+            ($)                                          $
+          b0 ← AOKeyGen ,Ochallenge (1λ )   (pkκ , skκ ) ← KeyGen(1λ )    ˜ pk)
+                                                                         (sk,
+                                                                                    $
+                                                                              ˜ ← KeyGen(1λ )
+                     0
+          return b                          return pkκ                       ($)
+                                                                                       ˜ pk )
+                                                                         ∆1 ← ReKeyGen(sk, j
+
+                                                                         return ∆b
+
+Fig. 9: The weak key privacy game [FKKP18, Definion 8]. Given an update token, an adver-
+sary cannot distinguish the source key.
+
+6.2   Adaptive Post-Compromise Security
+In this section, we discuss PCS with adaptive key corruptions. We give the full adaptive
+game for adaptive PCS in Appendix G.
+    In general, selective security can be shown to imply adaptive security at an exponential
+loss, where the adversary in the selective game must first guess which keys the adaptive
+adversary will corrupt. This is known as complexity leveraging. A general framework for
+showing relations between selective and adaptive security for general definitions is given
+in [JKK+ 17]. Jafargholi et al. achieve this by constructing a variant of the selective game,
+then using pebbling games that dictate what replacements can be made in a series of hy-
+brids, leading to the adaptive game, demonstrating the loss of security between each hybrid.
+Jafargholi et al. demonstrate how using pebbling games can give a smaller loss of security.
+We refer the interested reader to [JKK+ 17,FKKP18] for a full description of pebbling games
+and their usage. A similar approach specific to PRE is used in [FKKP18], limited to when the
+adversary creates directed re-encryption graphs which are acyclic and have only one source
+node. An even tighter reduction is given which results in quasi-polynomial loss between
+selective and adaptive HRA security for PRE schemes with ciphertext indistinguishability
+and weak key privacy, limited to some types of directed re-encryption graph, namely trees
+and chains.
+    Selective PRE-IND-CPA security combined with weak key privacy gives adaptive
+PRE-IND-CPA security [FKKP18, Theorem 1, Theorem 5]. The loss of security compared
+to the selective setting depends on the number of keys κ generated during the game, and
+the space and time complexities of the DRG. More precisely, the loss of security is approxi-
+mately τ · κσ , where σ is the maximum number of pebbles and τ is the maximum number of
+moves for a valid pebbling strategy for a considered class of re-encryption graphs DRG. This
+means that the loss is exponential for general re-encryption graphs, but quasi-polynomial
+for trees and chains. We therefore obtain the following theorem, whose proof follows from
+Theorem 2 and uses the same techniques as those used to prove [FKKP18, Theorem 5]:
+Theorem 5. Let PRE be a PRE scheme which is CPA -selectively PRE-IND-CPA secure,
+SH -source-hiding and wKP -weakly key private. for some negligible function negl(λ), where
+QE is the number of queries A makes to OEnc , and QHRE is the number of re-encryption
+queries for non-challenge ciphertexts that A makes to OReEnc . Let QE be the number of
+encryption oracle queries made by the adversary, and QHRE be the number of re-encryption
+queries for non-challenge ciphertexts that the adversary makes to OReEnc .
+    Then PRE is -adaptively PCS secure with a security loss of ≈ τ · κσ for directed re-
+encryption graphs DRG with degree κ, space complexity σ and time complexity τ , where
+
+        ≤ 2κ(κ − 1)(QE + QHRE + 1)(QHRE + 1) · SH + κσ+δ+1 (CPA + 2τ · wKP ),                    (2)
+
+restricted to graphs DRG which are acyclic, have at most κ nodes, degree δ and depth d.
+
+
+                                                             24
+6.3   Achieving adaptive security of pcBV-PRE
+
+Our construction pcBV-PRE is not source-hiding. This is because fresh encryptions will have
+different noise magnitudes compared with re-encryptions. One method of overcoming this is
+using a noise ‘blurring’ approach [CCL+ 14], as was noted by [FKKP18, Construction 7.b].
+This would involve ‘blurring’ or ‘drowning’ the noise in fresh encryptions so that it was
+distributed in the same way as re-encryptions. To do this, we would modify the ciphertext
+pairs in the Enc and ReEnc algorithms so that we would add fresh noise to them. This fresh
+noise would be taken from an error distribution such that it ‘blurred’ out all the old noise
+that was introduced from the encryption and re-encryption operations. We present a variant
+of pcBV-PRE that is provably source-hiding using this blurring approach in Appendix E.3.
+    The advantage of doing this, is that on decryption the noise will not reveal anything
+about the method of encryption/re-encryption that was used, or the keys the ciphertext was
+previously encrypted under. This is vital since in the source-hiding security property, the
+adversary receives all of the available decryption keys and thus can decrypt any ciphertext
+that they want.
+    With this in mind, there are a number of reasons why proving source-hiding is actu-
+ally a hindrance. Using the same approach as [FKKP18, construction 7b] requires at least
+a sub-exponential noise-to-modulus ratio which considerably harms performance and se-
+curity. This is because the LWE assumption (and respectively RLWE in our case) that
+is used becomes much stronger, since the approximation factors of the related ideal lat-
+tice problems become sub-exponential rather than polynomial in n. In particular, there are
+quantum polynomial
+           √          time algorithms solving ideal lattice problems with approximation fac-
+tor exp(Õ( n)) [BS16, CDPR16, CDW17] providing evidence that we cannot simply use an
+arbitrary noise-to-modulus ratio while retaining the same security guarantees. Moreover,
+the increase in modulus that is required makes standard operations much slower. As a by-
+product, the scheme of [FKKP18] allows only a constant number of re-encryptions.
+    The intention with our construction was to give a practical PRE scheme with PCS with
+minimal restrictions and from weaker assumptions. Since pcBV-PRE is very close to the
+original (BV-PRE) [PRSV17] which is comparatively fast (see [PRSV17] for exact figures)
+and our construction only adds extra sampling, loss of efficiency is minimal. Incorporating
+source-hiding, results in a scheme that is impractical, based on much stronger assumptions
+and also heavily restricted in the number of re-encryptions that can occur.
+    We prove that pcBV-PRE has weak key privacy in Appendix H. Therefore, it should be
+noted that a source-hiding version of pcBV-PRE would achieve adaptive security (for the
+restricted graphs of [FKKP18]) by the proof of Theorem 2 and the fact that pcBV-PRE is
+PRE-IND-CPA secure (Theorems 1 and 4).
+
+
+7     Conclusions and Future work
+
+In this paper, we have presented the strongest notion of Post-Compromise Security for
+PRE to date. By strongest, we mean that existing Post-Compromise Security notions are
+implied by our notion of security, and we have presented separating examples showing that
+the opposite implication does not hold. We have also shown that PCS can be achieved
+via a number of existing PRE security notions which immediately shows that at least one
+existing PRE scheme satisfies PCS [FKKP18]. We presented an efficient construction of a
+PRE scheme with PCS based on lattices that is transparent. We have also discussed the
+possibility of achieving adaptive security for restricted re-encryption graphs. We leave as
+future work the possibility of proving tighter bounds between security notions, and further
+
+
+                                            25
+investigating the relationship between selective and adaptive security for more generic re-
+encryption graphs.
+
+
+Acknowledgements
+
+Special thanks to Katriel Cohn-Gordon for his help in motivating this work and providing
+the context for using PCS PRE to compliment the PCS messages in transit. We also thank
+Rachel Player for her assistance in proving Theorem 7.
+
+
+References
+ABH09.   Giuseppe Ateniese, Karyn Benson, and Susan Hohenberger. Key-private proxy re-
+         encryption. In Marc Fischlin, editor, Topics in Cryptology - CT-RSA 2009, The Cryp-
+         tographers’ Track at the RSA Conference 2009, San Francisco, CA, USA, April 20-24,
+         2009. Proceedings, volume 5473 of Lecture Notes in Computer Science, pages 279–294.
+         Springer, 2009.
+AFGH06. Giuseppe Ateniese, Kevin Fu, Matthew Green, and Susan Hohenberger. Improved proxy
+         re-encryption schemes with applications to secure distributed storage. ACM Trans. Inf.
+         Syst. Secur., 9(1):1–30, 2006.
+BBB+ 12. Elaine Barker, William Barker, William Burr, William Polk, and Miles Smid. Recom-
+         mendation for key management part 1: General (revision 3). NIST special publication,
+         800(57):1–147, 2012.
+BBDP01. Mihir Bellare, Alexandra Boldyreva, Anand Desai, and David Pointcheval. Key-privacy
+         in public-key encryption. In Colin Boyd, editor, Advances in Cryptology - ASIACRYPT
+         2001, 7th International Conference on the Theory and Application of Cryptology and
+         Information Security, Gold Coast, Australia, December 9-13, 2001, Proceedings, volume
+         2248 of Lecture Notes in Computer Science, pages 566–582. Springer, 2001.
+BBS98.   Matt Blaze, Gerrit Bleumer, and Martin Strauss. Divertible protocols and atomic proxy
+         cryptography. In Kaisa Nyberg, editor, Advances in Cryptology - EUROCRYPT ’98,
+         International Conference on the Theory and Application of Cryptographic Techniques,
+         Espoo, Finland, May 31 - June 4, 1998, Proceeding, volume 1403 of Lecture Notes in
+         Computer Science, pages 127–144. Springer, 1998.
+BLMR13. Dan Boneh, Kevin Lewi, Hart William Montgomery, and Ananth Raghunathan. Key
+         homomorphic prfs and their applications. In Ran Canetti and Juan A. Garay, editors,
+         Advances in Cryptology - CRYPTO 2013 - 33rd Annual Cryptology Conference, Santa
+         Barbara, CA, USA, August 18-22, 2013. Proceedings, Part I, volume 8042 of Lecture
+         Notes in Computer Science, pages 410–428. Springer, 2013.
+BS16.    Jean-François Biasse and Fang Song. Efficient quantum algorithms for computing class
+         groups and solving the principal ideal problem in arbitrary degree number fields. In
+         Robert Krauthgamer, editor, Proceedings of the Twenty-Seventh Annual ACM-SIAM
+         Symposium on Discrete Algorithms, SODA 2016, Arlington, VA, USA, January 10-12,
+         2016, pages 893–902. SIAM, 2016.
+BV11.    Zvika Brakerski and Vinod Vaikuntanathan. Fully homomorphic encryption from ring-
+         lwe and security for key dependent messages. In Phillip Rogaway, editor, Advances
+         in Cryptology - CRYPTO 2011 - 31st Annual Cryptology Conference, Santa Barbara,
+         CA, USA, August 14-18, 2011. Proceedings, volume 6841 of Lecture Notes in Computer
+         Science, pages 505–524. Springer, 2011.
+CCG16. Katriel Cohn-Gordon, Cas J. F. Cremers, and Luke Garratt. On post-compromise se-
+         curity. In IEEE 29th Computer Security Foundations Symposium, CSF 2016, Lisbon,
+         Portugal, June 27 - July 1, 2016, pages 164–178. IEEE Computer Society, 2016.
+CCL+ 14. Nishanth Chandran, Melissa Chase, Feng-Hao Liu, Ryo Nishimaki, and Keita Xagawa.
+         Re-encryption, functional re-encryption, and multi-hop re-encryption: A framework for
+
+
+                                              26
+         achieving obfuscation-based security and instantiations from lattices. In Hugo Krawczyk,
+         editor, Public-Key Cryptography - PKC 2014 - 17th International Conference on Practice
+         and Theory in Public-Key Cryptography, Buenos Aires, Argentina, March 26-28, 2014.
+         Proceedings, volume 8383 of Lecture Notes in Computer Science, pages 95–112. Springer,
+         2014.
+CCV12. Nishanth Chandran, Melissa Chase, and Vinod Vaikuntanathan.                  Functional re-
+         encryption and collusion-resistant obfuscation. In Ronald Cramer, editor, Theory of
+         Cryptography - 9th Theory of Cryptography Conference, TCC 2012, Taormina, Sicily,
+         Italy, March 19-21, 2012. Proceedings, volume 7194 of Lecture Notes in Computer Sci-
+         ence, pages 404–421. Springer, 2012.
+CDPR16. Ronald Cramer, Léo Ducas, Chris Peikert, and Oded Regev. Recovering short genera-
+         tors of principal ideals in cyclotomic rings. In Marc Fischlin and Jean-Sébastien Coron,
+         editors, Advances in Cryptology - EUROCRYPT 2016 - 35th Annual International Con-
+         ference on the Theory and Applications of Cryptographic Techniques, Vienna, Austria,
+         May 8-12, 2016, Proceedings, Part II, volume 9666 of Lecture Notes in Computer Science,
+         pages 559–585. Springer, 2016.
+CDW17. Ronald Cramer, Léo Ducas, and Benjamin Wesolowski. Short stickelberger class relations
+         and application to ideal-svp. In Jean-Sébastien Coron and Jesper Buus Nielsen, editors,
+         Advances in Cryptology - EUROCRYPT 2017 - 36th Annual International Conference
+         on the Theory and Applications of Cryptographic Techniques, Paris, France, April 30 -
+         May 4, 2017, Proceedings, Part I, volume 10210 of Lecture Notes in Computer Science,
+         pages 324–348, 2017.
+CH07.    Ran Canetti and Susan Hohenberger. Chosen-ciphertext secure proxy re-encryption. In
+         Peng Ning, Sabrina De Capitani di Vimercati, and Paul F. Syverson, editors, Proceedings
+         of the 2007 ACM Conference on Computer and Communications Security, CCS 2007,
+         Alexandria, Virginia, USA, October 28-31, 2007, pages 185–194. ACM, 2007.
+Coh17.   Aloni Cohen. What about bob? the inadequacy of CPA security for proxy reencryption.
+         IACR Cryptology ePrint Archive, 2017:785, 2017.
+EPRS17. Adam Everspaugh, Kenneth G. Paterson, Thomas Ristenpart, and Samuel Scott. Key
+         rotation for authenticated encryption. IACR Cryptology ePrint Archive, 2017:527, 2017.
+FKKP18. Georg Fuchsbauer, Chethan Kamath, Karen Klein, and Krzysztof Pietrzak. Adaptively
+         secure proxy re-encryption. IACR Cryptology ePrint Archive, 2018:426, 2018.
+Gen09.   Craig Gentry. Fully homomorphic encryption using ideal lattices. In Michael Mitzen-
+         macher, editor, Proceedings of the 41st Annual ACM Symposium on Theory of Comput-
+         ing, STOC 2009, Bethesda, MD, USA, May 31 - June 2, 2009, pages 169–178. ACM,
+         2009.
+HRSV07. Susan Hohenberger, Guy N. Rothblum, Abhi Shelat, and Vinod Vaikuntanathan. Se-
+         curely obfuscating re-encryption. In Salil P. Vadhan, editor, Theory of Cryptography, 4th
+         Theory of Cryptography Conference, TCC 2007, Amsterdam, The Netherlands, Febru-
+         ary 21-24, 2007, Proceedings, volume 4392 of Lecture Notes in Computer Science, pages
+         233–252. Springer, 2007.
+ID03.    Anca-Andreea Ivan and Yevgeniy Dodis. Proxy cryptography revisited. In Proceedings
+         of the Network and Distributed System Security Symposium, NDSS 2003, San Diego,
+         California, USA. The Internet Society, 2003.
+JKK+ 17. Zahra Jafargholi, Chethan Kamath, Karen Klein, Ilan Komargodski, Krzysztof Pietrzak,
+         and Daniel Wichs. Be adaptive, avoid overcommitting. In Jonathan Katz and Hovav
+         Shacham, editors, Advances in Cryptology - CRYPTO 2017 - 37th Annual International
+         Cryptology Conference, Santa Barbara, CA, USA, August 20-24, 2017, Proceedings, Part
+         I, volume 10401 of Lecture Notes in Computer Science, pages 133–163. Springer, 2017.
+LATV13. Adriana Lopez-Alt, Eran Tromer, and Vinod Vaikuntanathan. On-the-fly multiparty
+         computation on the cloud via multikey fully homomorphic encryption. Cryptology ePrint
+         Archive, Report 2013/094, 2013. https://eprint.iacr.org/2013/094.
+Lee17.   Ela Lee. Improved security notions for proxy re-encryption to enforce access control.
+         Cryptology ePrint Archive, Report 2017/824, 2017. http://eprint.iacr.org/2017/
+         824.
+
+
+                                               27
+LPR10.  Vadim Lyubashevsky, Chris Peikert, and Oded Regev. On ideal lattices and learning with
+        errors over rings. In Henri Gilbert, editor, Advances in Cryptology - EUROCRYPT 2010,
+        29th Annual International Conference on the Theory and Applications of Cryptographic
+        Techniques, Monaco / French Riviera, May 30 - June 3, 2010. Proceedings, volume 6110
+        of Lecture Notes in Computer Science, pages 1–23. Springer, 2010.
+LT18.   Anja Lehmann and Björn Tackmann. Updatable encryption with post-compromise se-
+        curity. In Jesper Buus Nielsen and Vincent Rijmen, editors, Advances in Cryptology -
+        EUROCRYPT 2018 - 37th Annual International Conference on the Theory and Applica-
+        tions of Cryptographic Techniques, Tel Aviv, Israel, April 29 - May 3, 2018 Proceedings,
+        Part III, volume 10822 of Lecture Notes in Computer Science, pages 685–716. Springer,
+        2018.
+LV08.   Benoît Libert and Damien Vergnaud. Unidirectional chosen-ciphertext secure proxy
+        re-encryption. In Ronald Cramer, editor, Public Key Cryptography - PKC 2008, 11th
+        International Workshop on Practice and Theory in Public-Key Cryptography, Barcelona,
+        Spain, March 9-12, 2008. Proceedings, volume 4939 of Lecture Notes in Computer Sci-
+        ence, pages 360–379. Springer, 2008.
+MR07.   Daniele Micciancio and Oded Regev. Worst-case to average-case reductions based on
+        gaussian measures. SIAM J. Comput., 37(1):267–302, 2007.
+MS17.   Steven Myers and Adam Shull. Efficient hybrid proxy re-encryption for practical revo-
+        cation and key rotation. IACR Cryptology ePrint Archive, 2017:833, 2017.
+OWA18. OWASP. Cryptographic storage cheat sheet. https://www.owasp.org/index.php/
+        Cryptographic_Storage_Cheat_Sheet, 2018. Accessed 9th October 2018.
+PCI18.  PCI Security Standards Council 2018. Payment Card Industry (PCI) data security
+        standard (version 3.2.1). 2018.
+PRSV17. Yuriy Polyakov, Kurt Rohloff, Gyana Sahu, and Vinod Vaikuntanathan. Fast proxy re-
+        encryption for publish/subscribe systems. ACM Trans. Priv. Secur., 20(4):14:1–14:31,
+        2017.
+
+
+A    Definitions for symmetric PRE
+Here we give definitions for the symmetric setting for easier comparison with other re-
+encryption schemes defined with symmetric keys. We leave out some security games where
+the change is analogous, but explicitly give those which contains lists to clarify how those
+lists are updated.
+Definition 12. A symmetric Proxy Re-Encryption (symPRE) scheme s PRE consists of
+the following algorithms:
+ – s PRE.Setup(1λ ) → params: Outputs a set of public parameters, including the message
+   space and ciphertext space. Note that params is input to every subsequent algorithm, but
+   we leave it out for compactness of notation. We often omit the Setup algorithm for the
+   same reason.
+                        $
+ – s PRE.KeyGen(1λ ) → k: Generates a secret key
+                         $
+ – s PRE.Enc(k, m, `) → C: Encrypts a message m using a key k, producing a ciphertext
+   at level `. We often leave out ` for compactness.
+ – s PRE.Dec(k, C) → m0 ∪ ⊥: Decrypts a ciphertext C to produce either an element of the
+   message space m0 or the error symbol
+                               ($)
+ – s PRE.ReKeyGen(ki , kj ) → ∆i,j ∪⊥: Takes current key ki and next key kj and outputs an
+   update token ∆i,j , or ⊥ when i = j. This last condition is often left out of constructions
+   for compactness.
+                             ($)
+ – s PRE.ReEnc(∆i,j , C) → C 0 : Takes a ciphertext C under ki and outputs a new ciphertext
+   C’ under kj .
+
+
+                                              28
+                                                                                 $
+A symmetric PRE scheme is correct if for all m ∈ M, k ← s PRE.KeyGen(1λ ):
+
+                              s PRE.Dec(k, s PREEnc(k, m)) → m
+
+and if for all C ∈ C such that s PRE.Dec(ki , C) → m:
+
+                          s PRE.Dec(kj , s PRE.ReEnc(∆i,j , C)) → m
+               $
+where ki , kj , ← s PRE.KeyGen(1λ ) and ∆i,j ← s PRE.ReKeyGen(ki , kj ).
+
+
+
+                          SE-IND-CPAb,SE
+                                    A    (1λ )                       Ochallenge (i, m0 , m1 )
+
+                         κ=0                                         if |m0 | 6= |m1 | :
+                          0 ($)   OKeyGen ,OEnc ,Ochallenge    λ       return ⊥
+                         b ←A                                 (1 )
+                                     0                                  $
+                         return b = b                                C ← Enc(ki , mb )
+                                                                     return C
+
+Fig. 10: SE-IND-CPA, the symmetric variant of the PKE-IND-CPA game. Again, we give a
+multi-key, multi-challenge variant.
+
+   We present oracles commonly used in games for symmetric PRE schemes in Figure 11.
+
+
+      OKeyGen (1λ )        OCorrupt (i)                  OEnc (i, m)                  OReKeyGen (i, j)
+                                                               $                            ($)
+      κ=κ+1                Kcorrupted .add{ki }          C ← Enc(ki , m)              ∆i,j ← ReKeyGen(ki , kj )
+          $
+      kκ ← KeyGen(1λ )     return ki                      Chonest .add{(i, C)}        Thonest .add{(i, j, ∆i,j )}
+                                                                                                   →
+      DRG.add{vκ }                                       return C                     DRG.add{ e i,j }
+                                                                                      return ∆i,j
+              Fig. 11: Common oracles used in security games for symmetric PRE.
+
+
+Definition 13. An encryption scheme SE is -Indistinguishable against Chosen Plaintext
+Attacks (-SE-IND-CPA-secure) if for all PPT adversaries A:
+              h                          i      h                        i
+            Pr SE-IND-CPA0,SE
+                          A   (1 λ
+                                   ) = 1   − Pr   SE-IND-CPA1,SE λ
+                                                            A   (1 ) = 1   ≤ ,
+
+where SE-IND-CPAb,SE     λ
+                   A (1 ) is defined in Figure 10. If  is negligible as parameterised by the
+security parameter λ, then we say the scheme isIndistinguishable against Chosen Plaintext
+Attacks (sym-CPA-secure).
+A symmetric PRE scheme s PRE is (-sym-CPA-secure) if the encryption scheme given by
+s PRE = {s PRE.KeyGen, s PRE.Enc, s PRE.Dec} is -SE-IND-CPA-secure.
+
+Definition 14. A symmetric PRE scheme s PRE is -source-hiding if for all PPT adver-
+saries A:       h                      i      h                       i
+                         s PRE λ                      1,s PRE λ
+              Pr symSH0,
+                      A       (1 ) = 1   − Pr   symSH A      (1 ) = 1   ≤ ,
+where symSH is defined in Figure 12. If  is negligible as parameterised by the security
+parameter λ, then we say s PRE is source-hiding.
+
+
+
+                                                               29
+                                                                  s PRE λ
+                                                           symSHb,
+                                                                A      (1 )                                        Ochallenge (m∗ , `∗ )
+                                                                $                           $
+                                                           k0 ← KeyGen(1λ ), k1 ← KeyGen(1λ )                      if `∗ > L − 1 : return ⊥
+                                                                     $
+                                                           ∆0,1 ← ReKeyGen(k0 , k1 )                               C ← Enc(k0 , m∗ , `∗ )
+                                                                                                                        (0)
+                                                               ($)                                                 C0         ← ReEnc(∆0,1 , C)
+                                                           b0 ← AOchallenge (1λ , k0 , k1 , ∆0,1 )
+                                                                                                                       0 (1) $
+                                                           return b = b   0                                        C          ← Enc(k1 , m∗ , `∗ + 1)
+                                                                                                                                         (b)
+                                                                                                                   return (C, C 0              )
+                            Fig. 12: Experiments for the symmetric source-hiding property. L is the number of times a
+                            ciphertext can be re-encrypted without breaking the correctness conditions.
+             s PRE λ
+SymPostCompb,
+           A      (1 )                                                   OReEnc (C, i, j, [∆i,j ])                             Ochallenge (C0 , C1 , i, j, ∆i,j )
+
+Kchal , Kcorrupted , Chonest , Cchal , Thonest , DRG = ∅                 if ∆i,j given :                                      if |C0 | 6= |C1 | OR called = true : return ⊥
+κ = 0, called = false                                                                          / Thonest : return ⊥
+                                                                              if (i, j, ∆i,j ) ∈                              if (i, C0 ), (i, C1 ) 6∈ Chonest OR (i, j, ∆i,j ) 6∈ Thonest : return ⊥
+         ($)
+         O       ,O                                                      else : ∆i,j ← ReKeyGen(ki , kj )                           $
+                                                                                                                              C 0 ← ReEnc(∆i,j , Cb )
+state ← A0 KeyGen Corrupt (1λ )
+   ($)     O   ,OReKeyGen ,OReEnc ,Ochallenge
+                                                                         if (i, C) 6∈ Chonest : return ⊥                      Chonest .add{(j, C 0 )}, Cchal .A(j, C 0 ), Kchal .add{kj }
+b0 ← A1 Enc                                     (1λ , state)               0 $
+                                                                         C ← ReEnc(∆i,j , C)                                  called ← true
+Kchal ← UpdateChallengeKeys(Kchal , DRG)
+                                                                         Chonest .add{(j, C 0 )}                              return C 0
+if Kchal ∩ Kcorrupted 6= ∅ : return ⊥
+                                                                         if (i, C) ∈ Cchal :
+return b0 = b
+                                                                              Cchal .add{(j, C 0 )}, Kchal .add{kj }
+                                                                         return C 0
+                                                                 Fig. 13: The symmetric variant of PostComp game.
+
+                            Definition 15. A symmetric PRE scheme s PRE is said to be -post-compromise secure
+                            (-PCS) if for all PPT adversaries A = (A0 , A1 ):
+                                       h                            i      h                        i
+                                                       s PRE λ                         s PRE λ
+                                   Pr SymPostComp0,  A      (1 ) = 1 − Pr SymPostComp1,
+                                                                                     A      (1 ) = 1 ≤ ,
+
+                                                   s PRE λ
+                            where SymPostCompb,   A      (1 ) is defined in Figure 13.
+                               If  is negligible as parameterised by the security parameter, then we say the scheme is
+                            Post-Compromise Security (PCS).
+
+                                  We give the equivalent lemma to Lemma 5 for symmetic PRE.
+                                              6
+                            Lemma 9. IND-UPD =⇒ symmetric PCS.
+
+                            Proof. Because RISE is not unidirectional, it is not compromise secure by Lemma 2. We
+                            present the following full counterexample to demonstrate this. RISE [LT18] is proven to be
+                            IND-UPD. Here we adapt RISE for general proxy re-encryption as this fits more with our
+                            notation, but we observe that the original construction defined as an updatable encryption
+                            scheme is also sufficient for the proof.
+                                                                                  $
+                               – RISE0 .KeyGen(1λ ) : x ← Z∗q , (pk, sk) =, (x, g x )
+                                                                              $
+                               – RISE0 .Enc(pk, m) : r ← Z∗q , C ← (pkr , g r · m)
+                                                                                            −1/sk
+                               – RISE0 .Dec(sk, m) : m0 ← C1 · C0
+                               – RISE0 .ReKeyGen(ski , skj ) : ∆i,j = (skj /ski , pkj ) = (xj /xi , g xj )
+                                                                                                           $                                   r0          0
+                               – RISE0 .ReEnc(∆i,j , C) : (∆, y 0 ) = ∆i,j , r0 ← Z∗q , C 0 ← (C0∆ · y 0 , C1 · g r )
+
+                            Given ∆i,j = (xj /xi , g xj ), and xi , A can compute xj and use this to decrypt the challenge
+                            ciphertext.
+
+
+                                                                                                           30
+B    Asymmetric IND-UPD
+
+
+IND-UPD [LT18, definition 3] is a post-compromise security notion for updatable encryp-
+tion schemes, which are a variant of symmetric PCS schemes. The main difference in up-
+datable encryption is that key updates happen sequentially from ki to ki+1 , meaning the
+re-encryption graph is always a chain. Another notable difference between updatable en-
+cryption schemes and PRE schemes is that they contain an algorithm Next, which generates
+a new key and an update token from the old key to the new one as opposed to defining these
+functions separately.
+    Here we adapt IND-UPD for the public-key setting.
+
+
+      pkIND-UPDb,PRE
+               A     (1λ )                                                                            ONext ()
+
+     e = 0, DRG = (v0 )                                                                               e←e+1
+                      $
+     (sk0 , pk0 ) ← KeyGen(1 )          λ                                                             DRG.add{ve }
+                                                                                                                       $
+     Kcorrupted , Chonest , Kchal = ∅                                                                 (pke , ske ) ← KeyGen(1λ )
+     called = 0                                                                                                  ($)
+                                                                                                      ∆e−1,e ← ReKeyGen(ske−1 , pke , )
+                                              pkIU       pkIU
+              O($)  ,O ,O       ,O       ,O
+     state ← A0 Next Enc Corrupt LearnTok ReEnc (1λ , pk0 )                                           if called = 1 :
+                                         pkIU       pkIU        pkIU    pkIU                                   ($)
+        ($)
+     b0 ← A 1
+                 ONext ,OEnc ,OCorrupt ,OLearnTok ,OLearnChal ,OReEnc ,Ochallenge
+                                                                                    (1λ , state)
+                                                                                                                                 ∗
+                                                                                                           Ce∗ ← ReEnc(∆e−1,e , Ce−1 )
+     Kchal ← UpdateChallengeKeys(Kchal , DRG)                                                         return pke
+     if Kchal ∩ Kcorrupted 6= ∅ : return 0
+     return b0
+                                   OpkIU
+                                    LearnTok (i)                                                      OpkIU
+                                                                                                       LearnChal ()
+
+
+                                   if i = ē : return ⊥                                               Kchal .add{ske }
+                                   if PRE is unidirectional :                                         return Ce∗
+                                                        →
+                                       DRG.add{ e i−1,i } // directed edge
+                                   elseif PRE is bidirectional :
+                                       DRG.add{ei,i−1 } // undirected edge
+                                   return ∆i−1,i
+     OpkIU
+      ReEnc (C)                                                                            OpkIU
+                                                                                            challenge (C0 , C1 )
+
+
+     if (e − 1, C) 6∈ Chonest : return ⊥                                                  if called = 1 OR |C0 | 6= |C1 | : return ⊥
+     if ReEnc is deterministic, called = 1 AND e = ē :                                   if (e, C0 ), (e, C1 ) 6∈ Chonest : return ⊥
+       if C = C̄0 OR C = C̄1 : return ⊥                                                   e ←= e + 1
+       0 ($)                                                                              DRG.add{ve }
+     C ← ReEnc(∆e−1,e , C)
+                                                                                                           $
+     Chonest .add{e, C 0 }                                                                (pke , ske ) ← KeyGen(1λ )
+     return C 0                                                                           ē = e, C̄0 = C0 , C̄1 = C1
+                                                                                                     ($)
+                                                                                          ∆e−1,e ← ReKeyGen(ske−1 , pke )
+                                                                                               ($)
+                                                                                          Ce∗ ← ReEnc(∆e−1,e , Cb )
+                                                                                          Kchal .add{ske }
+                                                                                          return (pke , Ce∗ )
+
+Fig. 14: The pkIND-UPD game, based on IND-UPD [LT18] adapted to the public-key setting.
+
+
+
+                                                                               31
+Definition 16. A PRE scheme PRE is said to be (selectively) -pkIND-UPD-secure if for
+all PPT adversaries A = (A0 , A1 ):
+               h                          i      h                        i
+             Pr pkIND-UPD0,PRE
+                         A     (1 λ
+                                    ) = 1   − Pr   pkIND-UPD1,PRE λ
+                                                            A    (1 ) = 1   ≤ ,
+
+
+where pkIND-UPDb,PRE A     (1λ ) is defined in Figure 14.
+    If  is negligible as parameterised by the security parameter, then we say the scheme is
+(selectively) pkIND-UPD-secure.
+
+
+
+C    BV-PRE
+
+
+We describe BV-PRE [PRSV17] in Figure 15. Note that BV-PRE is not fully public-key as
+it uses an additional ‘public’ key ‘pk’B for the target key, which cannot be made public
+without exposing skA to anyone with the update token.
+
+
+                 Setup(1λ )                                  KeyGen(1λ )                   Enc(pk, m)
+                                                               $
+                 Choose positive integers q, n               a ← Uq                        (a, b) ← pk
+                 Choose plaintext modulus p                        $
+                                                             s, e ← χe
+                                                                                                     $
+                                                                                           v, e0 , e1 ← χe
+                 Choose key switching window r               b = a · s + pe                C0 = b · v + pe0 + m
+                 return pp = (q, n, p.r)                     sk = s, pk = (a, b)           C1 = a · v + pe1
+                                                       return (sk, pk)                     return C = (C0 , C1 )
+    Dec(sk, c)                       Preprocess(1λ , skB )                                  ReKeyGen(skA , ‘pk’B )
+
+    s ← sk, (C0 , C1 ) ← C          sb ← skb                                               sA ← skA
+    m0 = C0 − s · C1     mod p      for i ∈ {0, 1, . . . , blog2 (q)/rc} :                            blog (q)/rc
+                                                                                           {(βi , θi )}i=0 2        ← ‘pk’B
+                 0
+    return m                                $
+                                       βi ← Uq                                             for i ∈ {0, 1, . . . , blog2 (q)/rc} :
+                                           $
+                                       ei ← χe                                                γi = θi − sA · (2r )i
+                                                                                                                    blog (q)/rc
+                                       θi = βi · sB + pei                                  ∆A→B = {(βi , γi )}i=0 2
+                                    return ‘pk’B = {(βi , θi )}i=0 2
+                                                                             blog (q)/rc   return ∆A,B
+                                        ReEnc(∆A,B , C)
+                                                       blog (q)/rc
+                                           {(βi , γi )}i=0 2             ← ∆A,B
+                                           (C0 , C1 ) ← C
+                                                          blog2 (q)/rc
+                                                               X
+                                           C00 = C0 +
+                                                                               (i)
+                                                                             (C1 · γi )
+                                                               i=0
+                                                   blog2 (q)/rc
+                                                      X
+                                           C10 =
+                                                                       (i)
+                                                                (C1 · βi )
+                                                       i=0
+                                                        0
+                                           return C = (C00 , C10 )
+
+Fig. 15: BV-PRE [PRSV17]. Uq is the discrete uniform distribution over Rq and χe is a
+Be -bounded discrete Gaussian error distribution.
+
+
+
+                                                               32
+D     Key Resampling and its Implications
+To prevent the need for a ‘public’ key ‘pk’B to create a secure PRE scheme as in BV-PRE,
+we a key resampling technique. This means our scheme is public-key in the traditional sense
+where no extra keys are required for re-encryption.
+
+D.1    Key Resampling
+The key resampling technique [BV11], can be found in Figure 16. We use this in our con-
+struction in Figure 8 to obtain PCS.
+
+
+                                                      ReSample(pk)
+
+                                                      (a, b) ← pk
+                                                              $
+                                                      v, e0 ← χe
+                                                          $
+                                                      e00 ← χe
+                                                      ā = av + pe0
+                                                      b̄ = bv + pe00
+                                                      return (ā, b̄)
+
+                                Fig. 16: Key resampling technique [BV11].
+
+      Observe that b̄ = ās + p(ev + e00 − e0 s) and therefore (ā, b̄) is also suitable for encryption.
+(ā, b̄) is computationally indistinguishable from a freshly generated public key for s. This
+leads us to define the a new security game for resampled keys in Figure 17, where given a
+public key (a, b), the challenger either returns a resampled key or a uniformly sampled pair.
+It is similar to RLWE challenges for fresh keys.
+
+D.2    Implications of resampling
+
+
+            ReSample-ncRLWEdA (1λ )         OKeyGen ()                  Ochallenge (i)
+
+            κ=0                             κ←κ+1                       (a, b) ← pki
+            d0 ← AOKeyGen ,OCorrupt (1λ )     $
+                                            a ← Uq
+                                                                               $
+                                                                        v, e0 ← χe , e00 ← χe
+                                                                                             $
+
+                        0
+            return (d = d)                        $
+                                            s, e ← χe                   (ā0 , b̄0 ) = (av + pe0 , bv + pe00 )
+                                                                                   $
+                                            b = a · s + pe              (ā1 , b̄1 ) ← Uq2
+                                            pkκ = (a, b), skκ = s       return (ād , b̄d )
+                                            return pkκ
+
+Fig. 17: A variant of RLWE for resampling. Note that the challenge oracle can be queried
+more than once.
+
+Lemma 10. Let ReSample-ncRLWEbA (1λ ) be defined as in Figure 17 and let κ be the number
+of keys generated in ReSample-ncRLWEbA (1λ ). Then for all PPT adversaries A there exists
+a RLWE distinguisher D such that:
+
+    Pr ReSample-ncRLWE0A = 1 − Pr ReSample-ncRLWE1A = 1
+                                                          
+
+                                                                        ≤ (κ + Q) · AdvRLW Eφ,q,χe (D),
+
+
+                                                              33
+where Q is the number of calls that A makes to Ochallenge .
+
+Proof. Let D receive an RLWE challenge, where either the sample is genuine d = 0 or it is
+random d = 1. We demonstrate via a hybrid argument that D can simulate ReSample-RLWE.
+    Let H0 := ReSample-RLWE, and let Hi be identical to Hi−1 except that the first i public
+keys have been replaced with uniform random values. Suppose there exists an adversary
+B that can distinguish between Hi−1 and Hi with advantage . We demonstrate how an
+RLWE distinguisher D that can break RLWE with the same advantage by simulating Hi
+and running B as a subroutine. D simulates Hi−d by responding to calls B makes to OKeyGen
+as follows:
+                                                         $
+ – if k < i then D returns (u0 , u1 ) ← Uq2 ,
+ – if k = i D returns an RLWE challenge (a, b),
+ – if k > i then D returns a genuine RLWE sample.
+
+Then D returns d0 = d0A . The maximal advantage in distinguishing between Hi and Hi−1 is
+therefore AdvRLW Eφ,q,χe (D).
+   Now consider a further hybrid argument H̄0 . . . H̄Q where H̄0 is identical to Hκ and H̄i is
+                                                                                                                 $
+identical to H̄i−1 except that the ith output of Ochallenge is replaced with (ā, b̄) ← Uq2 .
+   Because all public keys are now random elements of Uq , we note that we can replace ā, b̄
+with random elements of Uq , by the RLWE assumption. Alternatively, this can be seen in
+the same way as the IND-CPA security of the underlying encryption scheme [PRSV17, proof
+of Theorem 5.1], as ReSample is the same as encrypting 0. This means that the maximal
+advantage in distinguishing between H̄i and H̄i−1 is AdvRLW Eφ,q,χe (D)
+   Overall, we get that the number of times we rely on RLWE is κ + Q. This completes the
+proof.                                                                                        u
+                                                                                              t
+
+    To get to selective key corruption models, we need to consider a variant of
+ReSample-ncRLWE where A is also given access to a key corruption oracle. We describe
+this variant, which we call ReSample-RLWE, in Figure 18.
+
+
+ReSample-RLWEdA (1λ )                          OKeyGen ()       OCorrupt (i)           Ochallenge (i)
+
+κ=0                                            κ←κ+1            if i ∈ Kchal :         if i ∈ Kcorrupted :
+Kcorrupted , Kchal = ∅                           $
+                                               a ← Uq             return ⊥                return ⊥
+ 0      OKeyGen ,OCorrupt ,Ochallenge    λ                      Kcorrupted .add{(}i)   (a, b) ← pki
+d ←A                                    (1 )         $
+                                               s, e ← χe
+return (d0 = d)                                                 return ski                    $
+                                                                                       v, e0 ← χe , e00 ← χe
+                                                                                                            $
+                                               b = a · s + pe
+                                               pkκ = (a, b)                            (ā0 , b̄0 ) = (av + pe0 , bv + pe00 )
+                                                                                                  $
+                                               skκ = s                                 (ā1 , b̄1 ) ← Uq2
+                                               return pkκ                              Kchal .add{(}i)
+                                                                                       return (ād , b̄d )
+Fig. 18: A variant of RLWE for resampling with key corruptions. As in ReSample-ncRLWE
+the challenge oracle can be queried more than once.
+
+   To prove ReSample-RLWEdA (1λ ), we revisit an observation made in [FKKP18], where
+Fuchsbauer et al. note that when proving the security of PRE schemes, it is sufficient to
+only need to replace values connected to the challenge graph – the subgraph of the re-
+encryption graph which is reachable from the challenge node. We believe this is logical,
+as the corruption of independently generated keys with no links to challenge keys should
+
+
+                                                                34
+not affect the security of the challenge keys. We generalise this observation assumption as
+follows: if {q} is the set of queries made in a security game Game that are independent of
+any challenge queries, then {q} can give no advantage to an adversary hoping to win Game.
+We call this the challenge independence assumption. This is relevant for key corruptions as,
+if the adversary corrupts keys which are never related to any challenge keys, the challenge
+independence assumption means these keys give the adversary no additional advantage. This
+principle is similar to the intuition of how re-encryption simulatability and source-hiding
+imply IND-HRA, as replacing re-encryptions with ciphertexts independent of the challenge
+secret key cannot give an advantage in learning challenge keys.
+
+Lemma 11. Let ReSample-RLWEbA (1λ ) be defined as in Figure 18 and let κchal be the number
+of keys on which challenges are called by A8 . Then an adversary who wins ReSample-ncRLWE
+when κchal keys are generated can win ReSample-RLWE with the same advantage by the
+challenge independence assumption.
+
+Proof. We note that all keys are generated independently, and that in ReSample-RLWE keys
+either become challenge keys or corrupted keys. Therefore corrupted keys are independent of
+the challenge keys, so the challenge independence assumption applies, meaning key corrup-
+tion gives no advantage in winning the original game. We conclude that ReSample-ncRLWE
+implies ReSample-RLWE, and so we can therefore replace all RLWE samples with uniform
+random values.
+
+    Combining Lemma 10 and Lemma 11 gives the following result.
+
+Lemma 12. Then for all PPT adversaries A:
+
+    Pr ReSample-RLWE0A (1λ ) = 1 − Pr ReSample-RLWE1A (1λ ) = 1
+                                                             
+
+                                                         ≤ (κ + Q) · AdvRLW Eφ,q,χe (D), (3)
+
+where κ is the number of key pairs generated in ReSample-ncRLWEdA (1λ ) and Q is the number
+of calls that A makes to Ochallenge .
+
+
+E       Analysis of pcBV-PRE
+In this section, we present proofs concerning pcBV-PRE. We first demonstrate correctness
+and calculate the correctness bound, before giving a full proof of Theorem 3 that pcBV-PRE
+has PCS.
+
+
+E.1     Correctness of pcBV-PRE
+Much of the analysis used to argue correctness from [PRSV17] holds for our modified scheme
+in Figure 8. Therefore, we keep the discussion fairly brief and refer to [PRSV17] for full
+details.
+   Recall that the decryption algorithm computes C0 − C1 s and then performs a reduction
+modulo p. In the case that (C0 , C1 ) is a ciphertext produced by the Enc algorithm, we have
+that
+                             C0 − C1 s = p(ev + e0 + e1 s) + m,                          (4)
+    8
+     Without loss of generality, we assume that by the end of the game, all keys are either corrupted
+or challenged.
+
+
+                                                 35
+so decryption is successful when p(ev + e0 + e1 s) + m (i.e. the error plus the message) does
+not wrap around modulo q. However, the correctness condition of decryption is different
+                                                                                           $
+when considering ciphertexts output by the ReEnc algorithm. To see how, let (C00 , C10 ) ←
+ReEnc(∆A→B , (C0 , C1 )). We also note that for (ā, b̄) ← ReSample(i, j) where b = as + pe,
+we get
+                                 b̄ − sā = p(ev + e00 − e0 s).                           (5)
+Using notation consistent with Figure 16, we have that
+                                blog(q)/rc
+                                               (i)
+                                      X
+        C00 − C10 sB = C0 +                          θi − sA (2r )i − sB βi + (θproxy − β proxy sB )
+                                                                           
+                                             C1
+                                      i=0
+                                            blog(q)/rc
+                                                           (i)
+                                               X
+                    = C0 − C1 sA +                       C1 (θi − sB βi ) + (θproxy − β proxy sB )
+                                               i=0
+                                             blog(q)/rc
+                    (5)                        X            (i)
+                    = C0 − C1 sA +                        C1 · p(evi + e0i sB + e00i )
+                                                  i=0
+                                                                  + p(ev proxy + e0proxy sB + e00proxy ),
+
+where all arithmetic is done over the integers modulo q. This shows that the error grows by
+an additive term of pE on each re-encryption where
+                 blog(q)/rc
+                                (i)
+                    X
+            E=                C1 · (evi + e0i sB + e00i ) + (ev proxy + e0proxy sB + e00proxy ).
+                    i=0
+
+Assume that χe is (B, δ)-bounded for some small δ (we quantify these values later). Then
+we have that the noise grows by at most
+
+      p||E||∞ ≤ pn(2r − 1)(blog(q)/rc + 1)(2B 2 n + B) + p(2B 2 n + B) =: G(n, q, r, B)                     (6)
+
+on each re-encryption taking into consideration the multiplication of degree n − 1 polyno-
+mials. Therefore, after ` re-encryptions, the noise has grown by an additive term of size `G.
+Therefore, the condition for successful decryption after ` re-encryptions is
+
+                               p(2B n + B) + `G(n, q, r, B) + p/2 ≤ q/2                                     (7)
+
+where G is defined in Equation
+                        √         (6). Note that if our error distribution has σ > ω(log n),
+then we can set B = σ n and δ = 2−n+1 [MR07, LATV13]. In order to choose parameters
+of the system, one needs to ensure that Equation (7) is satisfied. Note that this analysis
+is a worst-case one. It is shown in [PRSV17] that the central limit theorem can be used √
+to essentially alter the form of B and change all occurrences of n into occurrences of n
+in Equation (7) by allowing for a tunable failure probability. We omit this more practical
+method of correctness analysis for brevity.
+
+
+E.2     Full proof of Theorem 3
+
+As conveyed in Section 5.3, we separate the proof of Theorem 3 into two theorems, the first
+of which proves a variant of the game that does not consider honest re-encryptions between
+uncorrupted and corrupted keys, and the second which does.
+
+
+                                                           36
+Theorem 6. Let CPA-PostComp be a variant of the PostComp game where no re-
+encryptions from uncorrupted to corrupted keys are permitted whatsoever. Then for all PPT
+adversaries A, there exists an RLWE distinguisher D such that:
+     h                                i    h                               i
+   Pr CPA-PostComp0,pcBV-PRE
+                  A
+                                                        1,pcBV-PRE λ
+                             (1λ ) = 1 = Pr CPA-PostCompA         (1 ) = 1
+               ≤ (κ + (QRK + QRE⊥ + 1)(blog2 (q)/rc + 1) + 1) · AdvRLW Eφ,q,χe (D), (8)
+
+where QRK is the number of queries A makes to OReKeyGen (i, j) where ski and ski are un-
+corrupted, and QRE⊥ is the number of queries A makes to OReKeyGen (C, i, j, ∆i,j ) where ski
+and skj are uncorrupted and ∆i,j = ⊥.
+Because A is PPT, we note that QRK and QRE⊥ are both polynomial, meaning that the
+overall advantage in distinguishing b is negligible by the RLWE assumption.
+
+Proof. We prove this theorem using a sequence of game hops as described in Lemmas 13
+to 15.
+
+Lemma 13. Let Gameb,pcBV-PRE0              be the same as CPA-PostCompb,pcBV-PRE . Let Game1
+is identical to Game0 except that all
+                                                   update tokens  between uncorrupted keys
+                                  blog (q)/rc                                     blog (q)/rc
+  {(βi , γi = θi − skA · (2r )i )}i=0 2       , pkB are replaced with {(βi , θi )}i=0 2       , pkB .
+   Then for b ∈ {0, 1} and for all PPT adversaries A:
+     h                      i    h                       i
+   Pr 1 ← Gameb,pcBV-PRE
+              0          (A) − Pr 1 ← Gameb,pcBV-PRE
+                                          1          (A)
+                            ≤ (κ + (QRK + QRE⊥ )(blog2 (q)/rc + 1)) · AdvRLW Eφ,q,χe (D).
+
+
+
+                                                    $                                              $
+Proof. Note that if x = r + u ∈ R2q , then if r ← Uq2 , then x is indistinguishable from x0 ← Uq2
+                                                                                            blog (q)/rc
+even if u is known, and vice versa. This means we can replace {(βι , γi = θι − ski )ι=0 2                 }
+                 $                    blog (q)/rc
+where {(βι , θι ) ← ReSample(pkj )}ι=0 2    with uniform random values if and only if we can
+replace calls to ReSample(pkj ) with uniform random values. This means it will be possible
+to simulate update tokens ∆i,j when ski and skj are unknown.
+    Let d ∈ {0, 1}. We demonstrate how an adversary B for ReSample-RLWEdB (1λ ) can sim-
+ulate Gamedb,pcBV-PRE :
+
+                     $
+ – B samples b ← {0, 1}
+ – When A calls OGame                Gamed
+                     KeyGen and OCorrupt , B forwards these queries the equivalent oracles in
+                          d
+
+
+   ReSample-RLWE.
+ – When A calls OGame
+                    ReKeyGen (i, j):
+                         d
+
+
+    • If ski is not corrupted and skj is corrupted, B returns ⊥.
+                                                $
+      • If ski is corrupted, B returns ∆i,j ← ReKeyGen(ski , pkj ).
+      • If ski and skj are not corrupted, B uses the ReSample-RLWE challenger to obtain
+                                                                                               
+                    $                 blog2 (q)/rc                            blog2 (q)/rc
+        {(βι , θι ) ← Orrlwe
+                       challenge (j)} ι=0          and sets ∆ ←  {(β ι , θι )}ι=0          , pkj .
+
+ – When A calls OGame
+                 ReEnc (i, j, ∆i,j , C), B makes the checks described in PostComp, using the
+                       d
+
+
+   same method as for OReKeyGen if ∆i,j = ⊥.
+                 Gamed
+ – When A calls Ochallenge (i, j, ∆i,j , C0 , C1 ), B responds as it would for OGame
+                                                                                ReEnc (i, j, ∆i,j , Cb ).
+                                                                                     d
+
+
+
+
+                                                    37
+If d = 0 then resamples are genuine so this perfectly simulates Gameb,pcBV-PRE
+                                                                             0          , and if d = 1
+then this simulates Gameb,pcBV-PRE
+                               1         . Therefore,  for an adversary  A that outputs   d0A = d with
+                                0     0                             d  λ
+advantage δ, B can set d = dA and win ReSample-RLWEB (1 ) with the same advantage.
+Overall, B calls Orrlwe
+                     challenge blog2 (q)/rc + 1 times for each call A makes to OReEnc , and a further
+blog2 (q)/rc + 1 times whenever A calls OReEnc (C, i, j, ∆i,j = ⊥) for some C, i, j. Overall,
+Orrlwe
+  challenge was called at most (QRK + QRE⊥ )(blog2 (q)/rc + 1) times. Lemma 12 gives us the
+result.
+
+Lemma 14. Let Gameb,pcBV-PRE     2             be identical to Game1b,pcBV-PRE , except that when
+Ochallenge (C0 , C1 , i, j, ∆i,j ) is queried, if ∆i,j = ⊥, the challenger generates an update token
+as described for calls to OReKeyGen in proof of Lemma 13, and the output of the ReSample(pkj )
+used in Ochallenge (C0 , C1 , i, j, ∆i,j ) is replaced with uniform random values. Then for b ∈ {0, 1}
+and all PPT adversaries A, there exists an RLWE distinguisher D such that
+     h                       i      h                         i
+        $                               $
+   Pr 1 ← Gameb,pcBV-PRE
+              1          (A)   − Pr   1 ← Game b,pcBV-PRE
+                                               2          (A)
+                                                         ≤ (blog2 (q)/rc + 2) · AdvRLW Eφ,q,χe (D).
+
+
+
+Proof. First, we note that for the challenge query Ochallenge (C0 , C1 , i, j, ∆i,j ), if ∆i,j = ⊥
+and ski is uncorrupted, then ∆ cna be replaced with uniform random values as described in
+proof of Lemma 13. This incurs a security loss of (blog2 (q)/rc + 1) · AdvRLW Eφ,q,χe (D).
+    For the remaining step we demonstrate that if there exists an adversary A that outputs
+d0A = d for Gamebd+1 (where d ∈ {0, 1}) with advantage δ, then there exists an adversary
+                               d,pcBV-PRE λ
+B who can win ReSample-RLWEB             (1 ) with the same advantage. As before, we show
+                                                                                                   $
+how B can use ReSample-RLWEdB (1λ ) to simulate Gamebd+1 . B first samples b ← {0, 1}, and
+responds to all oracles except the challenge as described in proof of Lemma 13. When A calls
+OGame
+  challenge (C0 , C1 , i, j, ∆i,j ), B performs the appropriate checks, then follows the procedure for
+        d
+
+
+pcBV-PRE.ReEnc(∆i,j , Cb ) except that it replaces ReSample(pkj ) with a call to Orrlwe     challenge (j).
+                                 0,pcBV-PRE
+    For ReSample-RLWE                       , this simulates Game1 and for ReSample-RLWE1,pcBV-PRE ,
+this simulates Game2 . Therefore, B can run A on the simulation and return d0 = d0A to win
+with the same advantage.
+    Since Orrlwe
+              challenge (j) is called once for the resample and at most blog2 (q)/rc + 1 times for
+the update token, we leverage RLWE at most blog2 (q)/rc + 2 times.                                      u
+                                                                                                        t
+
+Lemma 15. Let Game3 be identical to Game2 , except that Ochallenge returns uniform random
+values. For all adversaries A:
+                   h                     i    h                           i
+                      $                           $
+                Pr 1 ← Gameb,pcBV-PRE
+                              2       (A) = Pr 1 ← Gameb,pcBV-PRE
+                                                          3           (A) .            (9)
+
+
+
+Proof. In both Game2 and Game3 , the adversary submits two ciphertexts C0 = (C0,0 , C0,1 )
+and C1 = (C1,0 , C1,1 ) when it queries the challenge oracle. In Game3 , the challenger responds
+                                                                               $
+by setting C0 = C0(b) and C1 = C1(b) for uniformly chosen b ← {0, 1} and returning the
+challenge ciphertext given by
+                                blog2 (q)/rc                               blog2 (q)/rc
+                                                 (i)                                        (i)
+                                   X                                          X
+             C00 = C0 + θ∗ +                   (C1 · γi ),   C10 = β ∗ +                  (C1 · βi ),
+                                    i=0                                        i=0
+
+
+                                                       38
+   using the relinearisation breakdown described in Equation (1). In particular, β ∗ and θ∗ are
+   the result of calling ReSample(pkj ) in Game2 on an honest public key and are therefore
+   uniform random values that are used once and never revealed to A. Therefore, C00 and C10
+   are independent uniform random values in Game2 which is the exact case in Game3 . This
+   argument holds for each of A’s challenge oracle queries. This concludes the proof of this
+   lemma.                                                                                    u
+                                                                                             t
+
+
+   Because the challenge in Lemma 15 can be replaced with random values for both b = 0 and
+   b = 1, we can use Lemmas 13 to 15 together with the triangle inequality to get:
+
+           h                              i    h                                 i
+                        0,pcBV-PRE λ
+         Pr CPA-PostCompA         (1 ) = 1 = Pr CPA-PostComp1,pcBV-PRE
+                                                            A          (1λ
+                                                                           ) = 1
+                        ≤ (κ + (QRK + QRE⊥ + 1)(blog2 (q)/rc + 1) + 1) · AdvRLW Eφ,q,χe (D).
+
+   This concludes the proof of Theorem 6.                                                                                     u
+                                                                                                                              t
+
+
+   Theorem 7. If there exists a PPT adversary A that can win PostCompb,pcBV-PRE A        (1λ )
+   with non-negligible probability, then there exists an adversary B that can win
+   CPA-PostCompb,pcBV-PRE
+                B         (1λ ) with non-negligible probability, by the RLWE assumption.
+
+
+   Proof. This is similar to the proof outline of [Coh17, Theorem 5]. We demonstrate how
+   an adversary B for CPA-PostCompb,pcBV-PRE
+                                           B          can simulate PostCompb,pcBV-PRE
+                                                                                A        . B replaces
+                                                / Kcorrupted skj ∈ Kcorrupted and (i, C) ∈ Chonest but
+   calls to OReEnc (C, i, j[, ∆i,j ]) where ski ∈
+          / Cchal , with a fake re-encryption. If this replacement is not detectable, then B can call
+   (i, C) ∈
+   A as a subroutine, output the same guess and win with the same advantage. We demonstrate
+   how B can create these fake re-encryptions of ciphertext C, when pki , pkj are known but
+   ∆i,j is unknown, without detection. Without loss of generality, we give the proof for the
+   simplified construction given in Figure 19.
+       Note that for bi = ai si + pei ,
+
+                                                 bi − ai si = pei .                                                       (10)
+
+
+
+
+C ← Enc(pki , m)        m0 ← Dec(ski = si , C)       ∆i,j ← ReKeyGen(ski , pkj )             C 0 ← ReEnc(∆i,j , C)
+           $
+ṽ, e˜0 , e˜1 ← χe      (C0 , C1 ) ← c               (ā, b̄) ← ReSample(pkj )               (ā, γ) ← ∆i,j
+C0 = bi ṽ + pe˜0 + m   m0 = C0 − C1 si    mod p     γ = b̄ − si                             (â, b̂) ← ReSample(pkj )
+C1 = ai ṽ + pe˜1                                    ā = aj v̄ + pe¯1 , b̄ = bj v̄ + pe¯0   â = aj v̂ + peˆ1 , b̂ = bj v̂ + peˆ0
+                                                     ∆i,j = (ā, γ)
+                                                                                             C00 = C0 + C1 γ + b̂
+                                                                                             C10 = C1 ā + â
+                                         Fig. 19: Simplified construction
+
+
+       Let (pki , ski ) = ((ai , bi = ai si + pei ), si ), (pkj , skj ) = ((aj , bj = aj sj + pej ), sj ) and
+   let C, ∆i,j , C 0 be as described in Figure 19. We first note that by Equation (4), a genuine
+
+
+                                                         39
+re-encryption will result in a ciphertext C 0 = (C00 , C10 ), where
+
+                   C00 = C0 + C1 γ + b̂
+                         = C0 + C1 (b̄ − si ) + b̂
+                         = C0 − si C1 + C1 b̄ + b̂
+                         4
+                         = p(e˜0 si − e˜1 + ei ṽ) + m + C1 (bj v̄ + pe¯0 ) + bj v̂ + peˆ0
+                      = bj (C1 v̄ + v̂) + p(C1 e¯0 + eˆ0 + e˜0 si − e˜1 + ei ṽ) + m,
+                    0
+                   C1 = C1 ā + â
+                         = C1 (aj v̄ + pe¯1 ) + aj v̂ + peˆ1
+                         = aj (C1 v̄ + v̂) + p(C1 e¯1 + eˆ1 ).
+If we let
+       v = C1 v̄ + v̂,            e0 = C1 e¯0 + eˆ0 + e˜0 si − e˜1 + ei ṽ,     e1 = C1 e¯1 + eˆ1 ,   (11)
+we get
+                                             C00 = bj v + pe0 + m,
+                                                                                                      (12)
+                                             C10 = aj v + pe1 .
+Therefore, if the secret key si (and therefore ei ), message m and random values ṽ, e˜0 , e˜1
+were known, an alternative way to compute a genuine re-encryption would be to sample
+                              $
+v̄, e¯0 , e¯1 , v̂, eˆ0 , eˆ1 ← χe and compute C 0 as described in eqs. (11) and (12).
+      We note that, as v̄, e¯0 , e¯1 , v̂, eˆ0 , eˆ1 are freshly sampled for one-time use, B can easily
+sample its own values from χe and use these to calculate v, e1 . However, since the simulator
+                                                                                                  $
+does not know si , ei , they cannot compute e0 . Instead B can sample its own si 0 , ei 0 ← χe
+and use these to create
+                                        e00 = C1 e¯0 + eˆ0 + e˜0 si 0 − e˜1 + ei 0 ṽ,
+and create a fake re-encryption
+                                     C 0∗ = (bj v + pe00 + m, aj v + pe1 ).                           (13)
+We need to demonstrate that this replacement will not be detected.
+    We note that, since pki is uncorrupted, the distinguisher does not know ski = si , and
+therefore cannot use C to learn the ciphertext error EC = e˜0 si − e˜1 + ei ṽ, otherwise they
+could derive m from C without knowing the secret key, thereby breaking RLWE. However,
+as they do know skj = sj , they can compute the error term of a re-encrypted ciphertext.
+Since
+             C00 − C10 sj = (C0 + C1 γ + b̂) − (Ci ā + â)sj
+                             = C1 (γ − āsj ) + C0 + b̂ − âsj
+                             = C1 (b̄ − si − āsj ) + C0 + b̂ − âsj
+                             = C0 + C1 (b̄ − āsj − si ) + (bj v̂ + peˆ0 ) − (aj v̂ + peˆ1 )sj
+                             = C0 − C1 si + C1 (b̄ − āsj ) + (bj − aj sj )v̂ + p(eˆ0 − eˆ1 sj )
+                             10
+                             = m + pEc + C1 p(ej v̄ + e¯0 − e¯1 sj ) + pej v̂ + p(eˆ0 − eˆ1 sj )
+                             = m + p(Ec + eˆ0 − eˆ1 sj + ej v̂ + C1 (ej v̄ + e¯0 − e¯1 sj )),
+
+
+
+                                                         40
+the error on a genuine re-encryption C 0 is
+
+               EC 0 = e˜0 si − e˜1 + ei ṽ + eˆ0 − eˆ1 sj + ej v̂ + C1 (ej v̄ + e¯0 − e¯1 sj ),
+
+and for a fake re-encryption C 0∗ is
+
+              EC 0∗ = e˜0 si 0 − e˜1 + ei 0 ṽ + eˆ0 − eˆ1 sj + ej v̂ + C1 (ej v̄ + e¯0 − e¯1 sj ),
+
+where underlined values are known to the adversary.
+
+     As C1 = ai ṽ + pe˜1 , and ai is public, (ai , C1 ) is an RLWE sample with secret ṽ and error
+pe˜1 . Because ṽ and e˜1 are chosen independently of si and ei , it follows that even if si and ei
+are later corrupted, ṽ and e˜1 should remain unknown. As Ec is the only other value derived
+using ṽ, e˜1 and it is also unknown to the adversary, we can therefore argue that the C1 is
+indistinguishable from a value chosen uniformly at random, by the RLWE assumption.
+     Rearranging, we need to demonstrate that
+
+                     EC 0 = C1 e¯0 + eˆ0 − eˆ1 sj + ej v̂ + C1 (ej v̄ − e¯1 sj ) + Ec                 (14)
+
+and
+                                                                                     ∗
+                     EC 0∗ = C1 e¯0 + eˆ0 − eˆ1 sj + ej v̂ + C1 (ej v̄ − e¯1 sj ) + EC                (15)
+        ∗
+where EC   = e˜0 si 0 − e˜1 + ei 0 ṽ, appear to have the same distribution to any entity that only
+knows m, C, si and C 0(∗) .
+   Because C1 appears to be a uniform element of Rq , C1 e¯0 + eˆ0 is also distributed like
+an RLWE sample with secret e¯0 and error eˆ0 . The distributions of Equations (14) and (15)
+are therefore indistinguishable, under the RLWE assumption, from the distributions of a
+                                                                                         $
+modified version of Equations (14) and (15) where C1 e¯0 + eˆ0 is replaced with u ← Uq .
+                                          $
+   If w is an element of Rq and u ← Uq , then u + w is also distributed as a uniform element
+                                                       0      0∗                            $
+of Rq . We can therefore replace the entirety of both EC and EC  with u0 ← Uq . We conclude
+              0
+that e0 and e0 are indistinguishable.
+   Thus, B can produce indistinguishable fake re-encryptions and thus can simulate
+          ,pcBV-PRE λ
+PostCompA          (1 ) and gain the same advantage as A. This completes the proof.
+
+   Proof of Theorem 3 – that pcBV-PRE is PCS – follows from Theorem 6 and Theorem 7.
+
+E.3   Source-hiding adaptation of pcBV-PRE
+We now describe an adaptation of pcBV-PRE which is provably source-hiding. By the BV-
+PRE adaptation, we mean pcBV-PRE apart from the fact that there are blurring widths E`
+associated to level ` encryption. In particular, Enc(pk, m; `) = (c0 , c1 ) = (bv + pe0 + m +
+                           $
+pf` , av + pe1 ) where f` ← [−E` , E` ]n . In addition, add f` to c00 when re-encrypting to obtain
+a level ` ciphertext too.
+
+Lemma 16. The adapted version of BV-PRE is computationally source-hiding provided that
+E`  E`−1 and E0  (σn)2 .
+
+Proof. For correctly sampled aux = pk0 , pk1 , sk0 , sk1 , rk0→1 , we will show that the distribu-
+tions of
+                          (aux, Enc(pk0 , m; `), Enc(pk1 , m; ` + 1))                         (16)
+
+
+                                                      41
+and
+                         (aux, c := Enc(pk0 , m; `), ReEnc(rk0→1 , pk1 , c; ` + 1))                            (17)
+are computationally indistinguishable for any valid choice of m and `.
+                                                                                            $                     $
+   Firstly, after writing pk1 = (a1 , b1 := a1 · s1 + e1 ), for v, e0 , e00 ← χσ and f`+1 ←
+[−E`+1 , E`+1 ]n , we have that (b1 · v + p(e0 + f`+1 ) + m, a1 · v + pe00 ) or equivalently
+
+                          ((a1 · v) · s1 + p(e0 + e1 v + f`+1 ) + m, a1 · v + pe00 )                           (18)
+                                                         00     0
+is the form of a valid level ` + 1 encryption of m. Let f`+1 = f`+1 + (e00 s1 − e0 − e1 v)
+         0       $
+where f`+1   ← [−E`+1 , E`+1 ]. If E`+1  σ 2 n2 (which is greater than the largest coefficient of
+ 0    00
+e −e s1 +e1 v with all but negligible probability), then the distribution of f`+1 is statistically
+                                                  00
+indistinguishable from the distribution of f`+1      . Therefore, the distribution of Equation (18)
+is statistically indistinguishable from the distribution of
+                                                     0
+                           (a1 · v + pe00 ) · s1 + pf`+1 + m, a1 · v + pe00 .
+                                                                           
+
+
+In turn, the above is computationally indistinguishable via a RLWE assumption to
+                                              0
+                                                        
+                                  u · s1 + pf`+1 + m, u
+
+            $
+where u ← Rq . Since, the arguments hold for any correctly distributed aux, it follows that
+the distribution of (16) is computationally indistinguishable from
+                                                            0
+                                                                          
+                         aux, Enc(pk0 , m; `), (u1 · s0 + pf`+1 + m, u1 )              (19)
+
+             $           $
+where u1 ← Rq , f`0 ← [−E`+1 , E`+1 ].
+      To complete the proof, we will show that the distribution of (17) is also computationally
+indistinguishable to that the distribution of (19) via a similar argument. Let pk0 = (a0 , b0 :=
+a0 ·s0 +e0 ) and fix a valid ciphertext (c0 , c1 ) = ((a0 ·s0 +e0 )v̄ +p(ē+f` )+m, a0 · v̄ +pē¯) where
+            $                                                   blog(q)/rc
+v̄, ē, ē¯ ← χσ . Writing rk0→1 = {βi , θi − s0 · (2r )i }i=0               , we have that βi · s1 = θi − p(e1 v̄i +
+ē¯i − pēi s1 ) for some v̄i , ēi , ē¯i sampled from χσ . In addition, we have the re-randomisation
+term (θproxy , β proxy ) satisfying β proxy · s1 = θproxy − p(e1 v̄ proxy + ē¯proxy − pēproxy s1 ) where
+                                                                         Pblog(q)/rc (i)
+v̄ proxy , ēproxy , ē¯proxy are sampled from χσ . Let c01 = i=0                     c1 · βi + β proxy and ec =
+P (i)
+     c1 (e1 v̄i + ē¯i − pēi s1 ) + e1 v̄  proxy
+                                                  + ē¯proxy
+                                                             − pē proxy
+                                                                         s1 . We can write a re-encryption as
+
+                         (c01 · s1 + p (ec + e0 v̄ + ē − ē¯s + f` + f`+1 ) + m, c01 ) .                      (20)
+
+             $                               00     0                                               $
+where f`+1 ← [−E`+1 , E`+1 ]. Now let f`+1      = f`+1                                          0
+                                                       − (ec + e0 v̄ + ē − ē¯s + f` ) where f`+1  ←
+                                                         2                                   00
+[−E`+1 , E`+1 ]. If E`+1  max{E` , (log(q)/r) · (nσ) }, then the distribution of f`+1 and
+f`+1 are statistically indistinguishable. Therefore (20) is distributed statistically close to the
+distribution of
+                                                  0
+                                     c01 · s1 + pf`+1 + m, c01 .
+                                                              
+                                                                                                  (21)
+Finally, using a RLWE assumption on β proxy , the term c01 is statistically indistinguishable
+from uniform, meaning that the distribution of the above is computationally indistinguish-
+                         0                  $
+able from (u · s1 + pf`+1    , u) where u ← Rq . Since these arguments work for any valid aux
+and ciphertext (c0 , c1 ), it follows that the distributions of (17) and (19) are computationally
+indistinguishable.
+
+
+                                                         42
+         adIND-HRAb,PRE
+                  A     (1λ )                                              OReEnc (C, i, j, [∆i,j ])
+
+         Kcorrupted , Kchal , Cchal , Thonest , DRG = ∅                                                    / Thonest :
+                                                                           if ∆i,j given AND (i, j, ∆i,j ) ∈
+         κ = 0, called ← false                                                return ⊥
+            $
+                                                                           if ∆i,j not given :
+         b ← {0, 1}                                                                 $
+                                                                             ∆i,j ← ReKeyGen(ski , pkj )
+         b0 ← AOKeyGen ,OEnc ,OCorrupt ,OReEnc ,OReEnc ,Ochallenge (1λ )
+                                                                               $
+         Kchal ← UpdateChallengeKeys(Kchal , DRG)                          C 0 ← ReEnc(∆i,j , C)
+         if Kcorrupted ∩ Kchal 6= ∅ :                                      if (i, C) ∈ Cchal :
+            return 0                                                         Cchal .add{(}j, C 0 ), Kchal .add{}skj
+                            0
+         else return b                                                     return C 0
+                                               Ochallenge (m0 , m1 , i)
+
+                                               if |m0 | 6= |m1 | OR called = true :
+                                                  return ⊥
+                                                   $
+                                               C ← ReEnc(pki , mb )
+                                               Cchal .add{(}i, C)
+                                               Kchal .add{sk}i
+                                               called ← true
+                                               return C
+
+Fig. 20: The adIND-HRA game. Like the HRA model [Coh17], it allows re-encryptions of
+non-challenge ciphertexts to compromised keys using OReEnc . It allows adaptive corruption
+of keys subject to the trivial win condition that no key which a challenge ciphertext has
+been learned under can be corrupted.
+
+F    Adaptive HRA security
+Here we describe an extension of selective IND-HRA security as described in Section 3.1,
+which allows the adversary to adaptively corrupt keys in response after receiving challenges.
+
+Definition 17. A PRE scheme PRE is said to be -Adaptively Indistinguishable Honest
+Re-encryption Plaintext Attacks-secure (-adIND-HRA-secure) if for all PPT adversaries
+A = (A0 , A1 ):
+               h                          i      h                         i
+           Pr adIND-HRA0,PRE
+                         A     (1 λ
+                                    ) = 1   − Pr   adIND-HRA 1,PRE λ
+                                                             A    (1 ) = 1   ≤ , (22)
+
+where adIND-HRAPRE
+                 A    is given in Figure 20. If  is negligible as parameterised by the security
+parameter, then we say the scheme is Adaptively Indistinguishable Honest Re-encryption
+Plaintext Attacks-secure (adIND-HRA-secure).
+
+    In the adIND-HRA game (Figure 20), A can adaptively corrupt keys subject to the trivial
+win condition that they cannot have corrupted a key with which a challenge ciphertext can
+be decrypted. In order to keep track of the status of keys, the lists Cchal , Kchal and Kcorrupted
+are used as well as a directed re-encryption graph DRG which tracks update token queries.
+Cchal contains outputs of the challenge oracle Ochallenge as well as outputs of OReEnc when
+given a challenge as input. Kcorrupted contains the outputs of OCorrupt queries. DRG consists
+                                                   →
+of nodes vi that represent key pairs, and edges e i,j which are added when OReKeyGen (i, j)
+is queried. Using update tokens, the adversary can locally re-encrypt challenge ciphertexts.
+Therefore, if a challenge ciphertext is and encryption under pki , and there exists a sequence
+of tokens going from i to j, then both ski and skj are considered challenge keys. Represented
+
+
+                                                                     43
+using the graph DRG, if there is a path from vi to vj and ski is a challenge key, then so
+is skj . At the end of the game, DRG is used to update the list of challenge keys. Then the
+trivial winning condition translates to Kchal ∩ Kcorrupted being empty.
+
+
+G    Adaptive Post-Compromise Security
+Here we give the explicit definition for adaptive PCS.
+
+
+      ad-PostCompb,PRE
+                 A     (1λ )                                                   OaPC
+                                                                                ReEnc (C, i, j, [∆i,j ])
+
+
+      Kcorrupted , Kchal , Chonest , Cchal , Thonest , DRG = ∅                 if |C0 | 6= |C1 | OR called = true : return ⊥
+      κ = 0, called = false                                                    if (i, C0 ), (i, C1 ) 6∈ Chonest : return ⊥
+                                                  aPC    aPC
+      b0 ← AOKeyGen ,OEnc ,OCorrupt ,OReKeyGen OReEnc ,Ochallenge (1λ )        if (i, j, ∆i,j ) 6∈ Thonest : return ⊥
+                                                                                                         $
+      Kchal ← UpdateChallengeKeys(Kchal , DRG)                                 if not given : ∆i,j ← ReKeyGen(ski , pkj )
+      if Kcorrupted ∩ Kchal 6= ∅ :                                                 $
+                                                                               C 0 ← ReEnc(∆i,j , C)
+         return ⊥                                                              if (i, C) ∈ Chonest : Chonest .add{(}j, C 0 )
+      else return b0                                                           if (i, C) ∈ Cchal :
+                                                                                 Cchal .add{(}j, C 0 )
+                                                                                 Kchal .add{(}skj )
+                                                                               return C 0
+                                   OaPC
+                                    challenge (C0 , C1 , i, j, ∆i,j )
+
+
+                                            6 |C1 | : return ⊥
+                                   if |C0 | =
+                                   if (i, C0 ), (i, C1 ) 6∈ Chonest : return ⊥
+                                   if (i, j, ∆i,j ) 6∈ Thonest : return ⊥
+                                        $
+                                   C 0 ← ReEnc(∆i,j , Cb )
+                                   Chonest .add{(}j, C 0 ), Cchal .add{(}j, C 0 ), Kchal .add{(}skj )
+                                   called ← false
+                                   return C 0
+
+Fig. 21: The adaptive post compromise game PostComp. This is stronger than the selective
+version as the adversary can choose to corrupt keys as a result of challenge queries, subject
+to the trivial win condition.
+
+
+Definition 18. A PRE scheme PRE is said to have -Adaptive Post-Compromise Security
+(-adPCS) if for all PPT adversaries A = (A0 , A1 ):
+
+              Pr ad-PostComp0A (1λ ) = 1 − Pr ad-PostComp1A (1λ ) = 1 ≤ ,
+                                                                  
+
+where ad-PostCompAb,PRE is defined in Figure 21. If  is negligible as parameterised by
+the security parameter, then we say the scheme has Adaptive Post-Compromise Security
+(adPCS).
+
+
+H    Weak key privacy of our construction
+We now demonstrates that pcBV-PRE has weak key privacy (??). Recall that this property
+is necessary in order to use the results of [FKKP18].
+
+
+                                                                          44
+Theorem 8. pcBV-PRE has weak key privacy.
+
+Proof. Once again, the proof replaces the public key and ReSample outputs associated to
+identity labels i = 1, . . . , κ by uniform values one by one. This is permissible due to the
+RLWE assumption. Define the following sequence of games:
+
+ – Game0 : The weakKPb,PREA     (1λ , 1κ ) game.
+        0
+ – Gamei for i = 1, . . . , κ: The same as Gamei−1 apart from the fact that pki is replaced
+   with a uniform value.
+ – Gamei for i = 1, . . . , κ: The same as Game0i except that the output of calls to
+   ReKeyGen(·, pki ) are replaced by a uniform value.
+
+The transitions or game hops occur in the order Game0 → Game01 → Game1 → · · · →
+Game0κ → Gameκ . We first note that the secret keys sk1 , . . . , skκ are never used in any of the
+games so we ignore these throughout this proof. Gamei−1 can be seen to be indistinguishable
+from Game0i by acknowledging that the difference between these games is that a single
+RLWE public key is replaced by a uniform value. Next we need to argue that Game0i is
+indistinguishable from Gamei . To do so, we consider a sequence of hybrids between Game0i
+and Gamei denoted as Game0i,j where j = 0 . . . dlog2 (q)/re. Essentially, in Game0i,j , the first j
+calls of the form ReSample(pki ) are replaced by uniform random values. Recall that for both
+these games, the public key pki = (a1 , a2 ) is a uniform random value itself. Therefore, the
+difference between Game0i,j and Game0i,j+1 is that the (j + 1)th call to ReSample denoted by
+(b1 , b2 ) either has the form (a1 v + e0 , a2 v + e00 ) or takes the form of a uniform random value.
+Considering the pairs (a1 , b1 ) and (a2 , b2 ), an adversary cannot distinguish between Game0i,j
+and Game0i,j+1 with non-negligible advantage according to the RLWE assumption. This holds
+for j = 0, . . . , dlog2 (q)/re−1. Since we have Game0i,0 = Game0i and Game0i,dlog2 (q)/re = Gamei ,
+we can conclude that Game0i is indistinguishable from Gamei by using the RLWE assumption
+multiple times. Iterating through i = 0 to κ completes the proof.                                  u
+                                                                                                   t
+
+
+
+
+                                                 45
+

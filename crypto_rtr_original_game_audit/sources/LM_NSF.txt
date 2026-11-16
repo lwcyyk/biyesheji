@@ -1,0 +1,1492 @@
+            On the Security of Homomorphic
+          Encryption on Approximate Numbers
+
+                        Baiyu Li(B) and Daniele Micciancio
+
+                       University of California, San Diego, USA
+                           {baiyu,daniele}@cs.ucsd.edu
+
+
+
+       Abstract. We present passive attacks against CKKS, the homomorphic
+       encryption scheme for arithmetic on approximate numbers presented at
+       Asiacrypt 2017. The attack is both theoretically eﬃcient (running in
+       expected polynomial time) and very practical, leading to complete key
+       recovery with high probability and very modest running times. We imple-
+       mented and tested the attack against major open source homomorphic
+       encryption libraries, including HEAAN, SEAL, HElib and PALISADE, and
+       when computing several functions that often arise in applications of the
+       CKKS scheme to machine learning on encrypted data, like mean and
+       variance computations, and approximation of logistic and exponential
+       functions using their Maclaurin series.
+          The attack shows that the traditional formulation of IND-CPA secu-
+       rity (or indistinguishability against chosen plaintext attacks) achieved by
+       CKKS does not adequately capture security against passive adversaries
+       when applied to approximate encryption schemes, and that a diﬀerent,
+       stronger deﬁnition is required to evaluate the security of such schemes.
+          We provide a solid theoretical basis for the security evaluation
+       of homomorphic encryption on approximate numbers (against passive
+       attacks) by proposing new deﬁnitions, that naturally extend the tradi-
+       tional notion of IND-CPA security to the approximate computation set-
+       ting. We propose both indistinguishability-based and simulation-based
+       variants, as well as restricted versions of the deﬁnitions that limit the
+       order and number of adversarial queries (as may be enforced by some
+       applications). We prove implications and separations among diﬀerent
+       deﬁnitional variants, and discuss possible modiﬁcations to CKKS that
+       may serve as a countermeasure to our attacks.
+
+
+1    Introduction
+Fully homomorphic encryption (FHE) schemes allow to perform arbitrary com-
+putations on encrypted data (without knowing the decryption key), and, at least
+in theory, can be a very powerful tool to address a wide range of security prob-
+lems, especially in the area of distributed or outsourced computation. Since the
+discovery of Gentry’s bootstrapping technique [23] and the construction of the
+Research supported by Global Research Cluster program of Samsung Advanced Insti-
+tute of Technology and NSF Award 1936703.
+c International Association for Cryptologic Research 2021
+A. Canteaut and F.-X. Standaert (Eds.): EUROCRYPT 2021, LNCS 12696, pp. 648–677, 2021.
+https://doi.org/10.1007/978-3-030-77870-5_23
+     On the Security of Homomorphic Encryption on Approximate Numbers          649
+
+ﬁrst FHE schemes based on standard lattice assumptions [9–12], improving the
+eﬃciency of these constructions has been one of the main challenges in the area,
+both in theory and in practice.
+    The main source of ineﬃciency in FHE constructions is the fact that these
+cryptosystems (or, more generally, encryption schemes based on lattice prob-
+lems [38,45]) are inherently noisy: encrypting (say) an integer message m, and
+then applying the raw decryption function produces a perturbed message m + e,
+where e is a small error term added for security purposes during the encryption
+process. This is not much of a problem when using only encryption and decryp-
+tion operations: the error can be easily removed by scaling the message m by
+an appropriate factor B > 2|e| (e.g., as already done in [45]), or applying some
+other form of error correction to m before encryption. Then, if the raw decryp-
+tion function outputs a perturbed value v = m·B +e, the original message m can
+be easily recovered by rounding v to the closest multiple of B. However, when
+computing on encrypted messages using a homomorphic encryption scheme, the
+errors can grow very quickly, making the resulting ciphertext undecryptable, or
+requiring such a large value of B (typically exponential or worse in the depth of
+the computation) that the cost of encryption becomes prohibitive. The size of the
+encryption noise e can be reduced using the bootstrapping technique introduced
+by Gentry in [23], thereby allowing to perform arbitrary computations with a
+ﬁxed value of B. However, all known bootstrapping methods are very costly,
+making them the main eﬃciency bottleneck for general purpose computation on
+encrypted data. So, reducing the growth rate of the noise e during encrypted
+computations is of primary importance to either use bootstrapping less often,
+or avoid the use of bootstrapping altogether by employing a suﬃciently large
+(but not too big) scaling factor B. In fact, controlling the error growth during
+homomorphic computations has been the main objective of much research work,
+starting with [9–12].
+
+Homomorphic encryption for arithmetic on approximate numbers. One of the
+most recent and interesting contributions along these lines is the approach sug-
+gested in [14,16–18,33] based on the idea that in many practical scenarios, com-
+putations are performed on real-world data which is already approximate, and
+the result of the computation inherently contains small errors even when carried
+out in the clear (without any encryption), due to statistical noise or measure-
+ment errors. If the goal of encryption is to secure these approximate real-world
+computations, requiring the decryption function to produce exact results may
+seem an overkill, and rightly so: if the decryption algorithm simply outputs
+m + e, the application can treat e just like the noise already present in the input
+and output of the (unencrypted) computation. Interestingly, [18] shows that
+the resulting “approximate encryption” scheme produces results that are almost
+as accurate as ﬂoating point computations on plaintext data. But the practi-
+cal impact on the concrete eﬃciency of the scheme is substantial: by avoiding
+the large scaling factor B, the scheme achieves much slower error growth than
+“exact” homomorphic encryption schemes. This allows to perform much deeper
+computations before the need to invoke a costly bootstrapping procedure, and,
+650    B. Li and D. Micciancio
+
+in many settings, completely avoid the use of bootstrapping while still delivering
+results that are suﬃciently accurate for the application.
+    Not surprisingly, the scheme of [18] and its improved variants [14,16,17,33]
+(generically called CKKS after the authors of [18]) have attracted much atten-
+tion as a potentially more practical method to apply homomorphic computa-
+tion on the encryption of real data. The CKKS paper [18] already provided an
+open source implementation in the “Homomorphic Encryption for Arithmetic
+on Approximate Numbers” (HEAAN) library [30]. Subsequently, other imple-
+mentations of the scheme have been included in pretty much all mainstream
+libraries for secure computation on encrypted data, like Microsoft’s “Simple
+Encrypted Arithmetic Library” SEAL [15], IBM’s “Homomorphic Encryption”
+library HElib [26–28], and NJIT’s lattice cryptography library PALISADE [41].
+Some of these libraries are used as a backend for other tools, like Intel’s nGraph-
+HE compiler [6,7] for secure machine learning applications, and a wide range
+of other applications, including the encrypted computation of logistic regression
+[29], security-preserving support vector machines [42], homomorphic training of
+logistic regression models [5], homomorphic evaluation of neural networks and
+tensor programs [20,21], compiling ngraph programs for deep learning [7], pri-
+vate text classiﬁcation [2], and clustering over encrypted data [19] just to name
+a few.
+
+Our contribution. While, as argued in much previous work, approximate compu-
+tations have little impact on the correctness of many applications, we bring into
+question their impact on security. In particular, we show that the traditional for-
+mulation of indistinguishability under chosen plaintext attack (IND-CPA, [4,25],
+see Deﬁnition 1) is inadequate to capture security against passive adversaries
+when applied to approximate encryption schemes. In fact, as our work shows, an
+approximate homomorphic encryption scheme can satisfy IND-CPA security and
+still be completely insecure from both a theoretical and practical standpoint. In
+order to put the study of approximate homomorphic encryption schemes on a
+sound theoretical basis, we propose a new, more reﬁned formulation of passive
+security which properly captures the capabilities of a passive adversary when
+applied to approximate (homomorphic) encryption schemes. We call this notion
+IND-CPAD security, or “indistinguishability under chosen plaintext attacks with
+decryption oracles”, for reasons that will soon be clear. Our new IND-CPAD
+security deﬁnition is a conservative extension of IND-CPA, in the sense that (1)
+it implies IND-CPA security, and (2) when applied to standard (exact, possibly
+homomorphic) encryption schemes, it is perfectly equivalent to IND-CPA. How-
+ever, when applied to approximate encryption, it is strictly stronger: there are
+approximate encryption schemes that are IND-CPA secure, but not IND-CPAD .
+     This is not just a theoretical problem: we show (both by means of theoret-
+ical analysis and practical experimentation) that the deﬁnitional shortcomings
+highlighted by our investigation directly aﬀect concrete homomorphic encryp-
+tion schemes proposed and implemented in the literature. In particular, we show
+that the CKKS FHE scheme for arithmetics on approximate numbers (both as
+described in the original paper [18], and as implemented in all major FHE soft-
+     On the Security of Homomorphic Encryption on Approximate Numbers              651
+
+ware libraries [30,31,41,47]) is subject to a devastating key recovery attack that
+can be carried out by a passive adversary, accessing the encryption function only
+through the public interfaces provided by the libraries. We remark that there
+is no contradiction between our results and the formal security claims made in
+[18]: the CKKS scheme satisﬁes IND-CPA security under standard assumptions
+on the hardness of the (Ring) LWE problem. The problem is with the technical
+deﬁnition of IND-CPA used in [18], which does not oﬀer any reasonable level of
+security against passive adversaries when applied to approximate schemes.
+    The ideas behind the new IND-CPAD deﬁnition and the attacks to CKKS are
+easily explained. The traditional formulation of IND-CPA security lets the adver-
+sary choose the messages being encrypted, in order to model a-priori knowledge
+about the message distribution, or even the possibility of the adversary inﬂuenc-
+ing the choice of the messages encrypted by honest parties. This is good, but not
+enough. When using a homomorphic encryption scheme, a passive adversary may
+also choose/know the homomorphic computation being performed1 . Finally, a
+passive adversary may observe the decrypted result of some homomorphic com-
+putations. (See Fig. 1 for an illustration.) So, our IND-CPAD deﬁnition provides
+the adversary with encryption, evaluation, and a severely restricted decryption
+oracle2 that model the input/output interfaces of encryption and evaluation
+algorithms and the output interface of the decryption algorithm. We chose the
+name IND-CPAD to indicate its close relationship to IND-CPA, but with some
+emphasis on the adversarial ability to observe the decryption results3 . It is easy
+to check (see Lemma 1) that as long as the deﬁnition is applied to a standard
+(exact) encryption scheme, observing the decryption of the ﬁnal result of the
+homomorphic computation provides no additional power to the adversary: since
+the adversary already knows the initial message m and the function f , it can
+also compute the ﬁnal result f (m) on its own. So, there is no need to explicitly
+give to the adversary access to a decryption (or homomorphic evaluation) oracle.
+    However, for approximate encryption schemes, seeing the result of decryption
+may provide additional information, which the adversary cannot easily compute
+(or simulate) on its own. In particular, this additional data may provide useful
+information about other ciphertexts, or even the secret key material. This pos-
+sibility is quite real, as we demonstrate it can be used to attack all the major
+libraries implementing the CKKS scheme. The attack is very simple. It involves
+encrypting a collection of messages, optionally performing some homomorphic
+computations on them, and ﬁnally observing the decryption of the result. Then,
+using only the information available to a passive adversary (i.e., the input values,
+1
+  This computation may or may not be secret, depending on whether the scheme is
+  “circuit-hiding”.
+2
+  We remark that this use of decryption oracle is only a technical detail of our formu-
+  lation, and it is quite diﬀerent from the decryption oracle used for deﬁning active
+  (chosen ciphertext) attacks: Our decryption oracle only provides access to the plain-
+  text output interface of a decryption algorithm, and does not allow to apply the
+  decryption algorithm on adversarially chosen ciphertexts.
+3
+  The name IND-CPA+ was used in earlier versions of this paper. An alternative nota-
+  tion could be IND-CPA-D.
+652     B. Li and D. Micciancio
+
+
+
+
+Fig. 1. A passive attacker against a homomorphic encryption scheme may choose/know
+the plaintext m and the homomorphic computation f (thick blue interfaces), and it can
+read from black interfaces to learn the ciphertexts ct, ct and the decryption results m .
+The adversary has only passive access to the communication and ﬁnal output channels,
+i.e., it can eavesdrop, but is not allowed to tamper with (or inject) ciphertexts or alter
+the ﬁnal result of the computation. (Color ﬁgure online)
+
+
+encrypted ciphertexts, and ﬁnal decrypted result of the computation), the attack
+attempts to recover the secret key using standard linear algebra or lattice reduc-
+tion techniques. We demonstrate the attack on a number of simple, but repre-
+sentative computations: the computation of the mean or variance of a large data
+set, and the approximate computation of the logistic and exponential functions
+using their Maclaurin series. These are all common computations that arise in
+the application of CKKS to secure machine learning, the primary target area for
+approximate homomorphic encryption. We implemented and tested the attack
+against all main open source libraries implementing approximate homomorphic
+encryption (HEAAN, RNS-HEAAN, PALISADE, SEAL and HElib), showing that
+they are all vulnerable. We stress that this is due not to an implementation
+bug in the libraries (which faithfully implement CKKS encryption), but to the
+shortcomings of the theoretical security deﬁnition originally used to evaluate
+the CKKS scheme. Still, our key recovery attack works very well both in theory
+and in practice, provably running in expected polynomial time and with success
+probability 1, and recovering the key in practice, even for large values of the
+security parameter, in just a few seconds. So, the attack may pose a real threat
+to applications using the libraries. It immediately follows from the attack that
+the CKKS scheme is not IND-CPAD secure. In practice, such an attack can be
+carried out in systems where the decryption results are made publicly available,
+or, more generally, they may be disclosed to selected parties. As an example,
+consider privacy-preserving data sharing and aggregation services for medical
+data [44]. In this setting, individual hospitals encrypt their own sensitive medi-
+cal records using a public key approximate homomorphic encryption scheme and
+upload the ciphertexts to a cloud computing service; the cloud service accepts
+queries from an investigator, perhaps from one of the hospitals, and homomor-
+phically computes the requested statistics. Finally, it decrypts or re-encrypts the
+ﬁnal computation result (possibly with the help of a third party that holds the
+secret decryption key) and sends it to the investigator. We may assume that
+the service checks that the query issued by the investigator is legitimate, and
+does not reveal sensitive information about individual patient records. Still, our
+attack shows that the result of the query may be enough to recover in full the
+      On the Security of Homomorphic Encryption on Approximate Numbers                 653
+
+secret decryption key, exposing the entire medical record database of all partic-
+ipating hospitals. Similar attacks are also feasible in homomorphic encryption
+based vehicular ad-hoc networks [48] where homomorphically evaluated data
+analytics (both ciphertexts and decrypted results) can be accessed by a passive
+attacker.
+    On the theoretical side, we consider several restricted versions of IND-CPAD ,
+showing implications and separations among them. For example, one may con-
+sider adversaries that perform only a bounded number k of decryption queries,
+as may be enforced by an application that chooses a new key every k homomor-
+phic computations. (IND-CPA may be considered a special case where k = 0.)
+Interestingly, we show that for every k there are approximate encryption schemes
+that are secure up to k decryption queries, but completely insecure for k + 1.
+
+Relations to other attacks to homomorphic encryption schemes. It is well known
+that homomorphic encryption schemes cannot be secure under adaptive chosen
+ciphertext attacks (CCA2). In [35], Li, Galbraith, and Ma presented adaptive
+key recovery attacks against the GSW homomorphic encryption scheme as well
+as modiﬁcations to GSW to prevent such attacks. We remark that both attacks
+considered in [35] are active attacks that require calling a decryption oracle
+on ciphertexts formed by the adversary. So these attacks are outside of the
+IND-CPAD security model that we consider in this paper.
+
+Organization. The rest of the paper is organized as follows. In Sect. 2 we pro-
+vide some mathematical background about the LWE problem and lattice-based
+(homomorphic) encryption. In Sect. 3 we present our IND-CPAD security def-
+inition, and initiate its theoretical study, proving implication and separation
+results between diﬀerent variants of the deﬁnition. In Sect. 4 we give a detailed
+description and rigorous analysis of our attack. Practical experiments using our
+implementation of the attack are described in Sect. 5. Section 6 concludes with
+some general remarks and a discussion of possible countermeasures to our attack.
+
+
+2    Preliminaries
+
+Notation. We use the notation a = (a0 , . . . , an−1 ) for column vectors, and at =
+[a0 , . . . , an−1 ] for rows. Vector entries are indexed starting from 0, and denoted
+by ai or a[i]. The dot product between two vectors (with entries in a ring) is
+written a, b or at · b. Scalar functions f (a) = (f (a0 ), . . . , f (an−1 )) are applied
+to vectors componentwise.
+     For any ﬁnite set A, we write x ← A for the operation of selecting x uniformly
+at random from A. More generally, if χ is a probability distribution, x ← χ selects
+x according to χ.
+
+Standard cryptographic deﬁnitions. In all our deﬁnitions, we denote the security
+parameter by κ. A function f in κ is negligible if f (κ) = κ−ω(1) . We use negl(κ)
+to denote an arbitrary negligible function in κ.
+654     B. Li and D. Micciancio
+
+   We recall the standard notions of public-key encryption scheme and homo-
+morphic encryption scheme. A public-key encryption scheme with a message
+space M is a tuple (KeyGen, Enc, Dec) consisting of three algorithms:
+– a randomized key generation algorithm KeyGen that takes the security param-
+  eter 1κ and outputs a secret key sk and a public key pk,
+– a randomized encryption algorithm Enc that takes pk and a message m ∈ M
+  and outputs a ciphertext ct, and
+– a deterministic decryption algorithm Dec that takes sk and a ciphertext ct
+  and outputs a message m or a special symbol ⊥ indicating decryption failure.
+We usually parameterize Enc with pk and write Encpk (·) to denote the function
+Enc(pk, ·), and similarly we write Decsk (·) for the function Dec(sk, ·). A public-
+key encryption scheme is correct if for all m ∈ M and keys (sk, pk) in the support
+of KeyGen(1κ ), Pr{Decsk (Encpk (m)) = m} = 1 − negl(κ), where the probability
+is over the randomness of Enc.
+    A public-key homomorphic encryption scheme is a public-key encryption
+scheme with an additional, possibly randomized, (homomorphic) evaluation
+algorithm Eval, and such that KeyGen outputs an additional evaluation key ek
+besides sk and pk. The algorithm Eval takes ek, a circuit g : Ml → M for
+some l ≥ 1, and a sequence of l ciphertexts cti , and it outputs a ciphertext ct .
+The correctness of a homomorphic encryption scheme requires that, for all keys
+(sk, pk, ek) in the support of KeyGen(1κ ), for all circuits g : Ml → M and for all
+mi ∈ M, 1 ≤ i ≤ l, it holds that
+                                                                
+                 cti ← Encpk (mi ) for 1 ≤ i ≤ l,
+            Pr                                                     = 1 − negl(κ),
+                 Decsk (Evalek (g, (cti )li=1 )) = g((mi )li=1 )
+where the probability is over the randomness of Enc and Eval. We also require
+that the complexity of Dec is independent (or a slow growing function) of the
+size of the circuit g.
+     In terms of security, we recall the standard security notion of indistinguisha-
+bility under chosen plaintext attack, or IND-CPA, for public-key (homomorphic)
+encryption schemes.
+Deﬁnition 1 (IND-CPA Security). Let (KeyGen, Enc, Dec, Eval) be a homo-
+morphic encryption scheme. We deﬁne an experiment Exprcpa
+                                                      b [A] parameterized
+by a bit b ∈ {0, 1} and an eﬃcient adversary A:
+                              κ
+                   Exprcpa
+                       b [A](1 ) :    (sk, pk, ek) ← KeyGen(1κ )
+                                      (x0 , x1 ) ← A(1κ , pk, ek)
+                                      ct ← Encpk (xb )
+                                      b ← A(ct)
+                                      return(b )
+    We say that the scheme is IND-CPA secure if for any eﬃcient adversary A,
+it holds that
+                                κ                       κ
+Advcpa [A](κ) = | Pr{Exprcpa                     cpa
+                         0 [A](1 ) = 1} − Pr{Expr1 [A](1 ) = 1}| = negl(κ).
+      On the Security of Homomorphic Encryption on Approximate Numbers                  655
+
+Lattices and rings. A lattice is a (typically full rank) discrete subgroup of Rn .
+Lattices L ⊂ Rn can be represented by a basis, i.e., a matrix B ∈ Rn×k with
+linearly independent columns such that L = BZk . The length of the shortest
+nonzero vector in a lattice L is denoted by λ(L). The Shortest Vector Problem,
+given a lattice L, asks to ﬁnd a lattice vector of length λ(L). The Approximate
+SVP relaxes this condition to ﬁnding a nonzero lattice vector of length at most
+γ·λ(L), where the approximation factor γ ≥ 1 may be a function of the dimension
+n or other lattice parameters.
+    We write Z, Q, R, C for the sets of integer, rational, real and complex num-
+bers. For any positive q > 0, we write Rq = R/(qZ) for the set of reals modulo
+q (as a quotient of additive groups), uniquely represented as values in the cen-
+tered interval [−q/2, q/2). Similarly, for any positive integer q > 0, we write
+Zq = Z/(qZ) for the     ring of integers      modulo
+                                              q−1     q, uniquely represented as values in
+[−q/2, q/2) ∩ Z = − q−1         2  , . . . ,    2    .
+    Let N = 2k be a power of 2, ζ2N = eπı/N the principal (2N )th complex root
+of unity. We write K(2N ) = Q[X]/(X N + 1) for the cyclotomic ﬁeld of order 2N ,
+and O(2N ) = Z[X]/(X N + 1) for its ring of integers. The primitive roots of unity
+  2j+1
+ζ2N    , for j = 0, . . . , N − 1, are precisely the roots of the cyclotomic polynomial
+X N + 1. We omit the index 2N and simply write K, O and ζ when the value
+of N is clear from the context. Elements of K (and O) are uniquely represented
+as polynomials a(X) = a0 + a1 · X + . . . + aN −1 · X N −1 of degree less than N ,
+and identiﬁed with their vectors of coeﬃcients a = (a0 , . . . , aN −1 ) ∈ QN (and
+ZN ). For any positive integer q > 0, we write Kq = K/(qK) ≡ QN               q for the set
+of vectors/polynomials with entries/coeﬃcients reduced modulo q. Similarly for
+O ≡ ZN and Oq ≡ ZN          q .
+
+
+LWE and homomorphic encryption. The (Ring) Learning With Errors (LWE)
+distribution RLWEs (N, q, χ) with secret s ∈ O(2N ) and error distribution χ (over
+                                    (2N )              (2N )
+O(2N ) ), produces pairs (a, b) ∈ Oq      where a ← Oq       is chosen uniformly at
+random, and b = s ·a+ e for e ← χ. The (decisional) Ring LWE assumption over
+O(2N ) with error distribution χ and secret distribution χ and m samples, states
+that when s ← χ , the product distribution RLWEs (N, q, χ)m is pseudorandom,
+i.e., it is computationally indistinguishable from the uniform distribution over
+(Oq × Oq )m .
+     For appropriate choices of χ, χ and q, the Ring LWE problem is known to be
+computationally hard, based on (by now) standard assumptions on the worst-
+case complexity of computing approximately shortest vectors in ideal lattices.
+Theoretical work supports√setting the error distribution χ to a discrete Gaussian
+of standard deviation O( N ), and setting the secret distribution χ to either
+the uniform distribution over Oq , or the same distribution as the errors χ. For
+the sake of eﬃciency, the Ring LWE problem is often employed by homomorphic
+encryption schemes also for narrower secret and error distributions, that lack the
+same theoretical justiﬁcations, but for which no eﬃcient attack is known, e.g.,
+distributions over vectors with binary {0, 1} or ternary {−1, 0, 1} coeﬃcients.
+656      B. Li and D. Micciancio
+
+      The raw (Ring) LWE encryption scheme works as follows:
+– The key generation algorithm picks s ← χ , e ← χ, a ← Oq , and outputs
+  secret key sk = (−s, 1) ∈ Oq2 and public key pk = (a, b) ∈ Oq2 where b = s·a+e
+  follows the LWE distribution.
+– The encryption algorithm, Encpk (m) picks random u ← {0, 1}N and e =
+  (e0 , e1 ) ← χ2 , and outputs ct = u · pk + e + (0, m) ∈ Oq2
+– The raw decryption algorithm Decsk (ct) outputs sk, ct mod q.
+The secret and public keys satisfy the property that sk, pk = e equals the short
+error vector chosen during key generation. We qualiﬁed this scheme and the
+decryption algorithm as “raw” because applying the encryption algorithm, and
+subsequently decrypting the result (with a matching pair of public and secret
+keys) does not recover the original message, but only a value close to it. In fact,
+for any (sk, pk) produced by the key generation algorithm, we have
+ Decsk (Encpk (m)) = u · sk, pk + sk, e + m = m + (ue − se0 + e1 ) (mod q)
+where the perturbation ẽ = (ue − se0 + e1 ) is small because it is a combination
+of short vectors u, e, s, e0 , e1 . (The size of these vectors is best quantiﬁed with
+respect to the message encoding used by the application, and it is discussed
+below.) In order to obtain a proper encryption scheme that meets the correct-
+ness requirement, the message m must be preprocessed, by encoding it with
+an appropriate error correcting code, which allows to recover from the error ẽ.
+For example, if m has binary entries, one can multiply m by a scaling factor
+q/2, and then round (each coeﬃcient of) the output of the raw decryption
+algorithm to the closest multiple of q/2. For the sake of improving the eﬃ-
+ciency of homomorphic computations, the CKKS encryption scheme [18] gets
+away without applying error correction, and directly using the raw decryption
+algorithm to produce “approximate” decryptions of the ciphertexts. So, in the
+following we focus on the “raw” LWE scheme, and postpone the discussion of
+error correction to later.
+    By linearity of Enc, LWE encryption directly supports (bounded) addition
+of ciphertexts: if ct0 = (a0 , b0 ) and ct1 = (a1 , b1 ) are encryptions of m0 and m1
+with noise e0 and e1 respectively, then the vector sum
+                        ct0 + ct1 = (a0 + a1 , b0 + b1 ) mod q
+is an encryption of m0 + m1 with noise e0 + e1 .
+    There are several ways to perform homomorphic multiplication on LWE
+ciphertexts. As in [18], here we focus on the “tensoring” technique of [10] imple-
+mented using the “raising the modulus” multiplication method of [24]. This
+multiplication method uses an appropriate multiple pq of the ciphertext modu-
+lus q, and requires an “evaluation key”, produced during key generation, which
+is computed and used as follows:
+– ek = (a, b) ∈ Opq
+                 2
+                    where a ← Opq , e ← χe and b = as + e + ps2 (mod pq).
+– Using ek, the product of two ciphertexts ct0 = (a0 , b0 ), ct1 = (a1 , b1 ) is com-
+  puted as
+               ct0 × ct1 = (a0 b1 + a1 b0 , b0 b1 ) + (a0 a1 mod q) · ek/p .
+     On the Security of Homomorphic Encryption on Approximate Numbers              657
+
+    In order to approximately evaluate deep arithmetic circuits, the CKKS
+scheme combines these addition and multiplication procedures with a rescaling
+operation RS, implemented using the key switching technique of [10]. Rescaling
+requires the use of a sequence of moduli ql , which for simplicity we assume to
+be of the form ql = q0 · pl for some base p, e.g., p = 2. Ciphertexts may live at
+diﬀerent levels, with level l ciphertexts encrypted using modulus ql . The key gen-
+eration algorithm takes as auxiliary input the highest number of desired levels L,
+and produces public and evaluation keys with respect to the largest modulus qL .
+CKKS directly supports addition and multiplication only between ciphertexts
+at the same level. Rescaling is used to map ciphertexts ct ∈ Oq2l+l to a lower
+level l with the operation
+                                                 
+                             RSl (ct) = ct/pl       ∈ Oq2l
+
+where the division and rounding are performed componentwise.
+
+The CKKS message encoding. The CKKS scheme considers a vector of complex
+numbers (or Gaussian integers) ã as the set of evaluation points ãj = a(xj ) of a
+real (in fact, integer) polynomial a(X) ∈ Z[X]. This allows to perform pointwise
+addition and multiplication of vectors (SIMD style) by means of addition and
+multiplication of polynomials as (a(X) ◦ b(X))(xj ) = a(xj ) ◦ b(xj ) for any xj ,
+where ◦ ∈ {+, ×}. The evaluation points are chosen among the primitive (2N )th
+roots of unity ζ 2j+1 , so that the cyclotomic polynomial X N + 1 evaluates to zero
+at all those points, and reduction modulo X N + 1 does not aﬀect the value
+of a(xj ). This allows to operate on the polynomials modulo X N + 1, i.e., as
+elements of the cyclotomic ring O. Since a(X) has real coeﬃcients and primitive
+roots come in complex conjugate pairs ζ 2j+1 , ζ 2(N −j)−1 , the value of a(X) can be
+freely chosen only for half of the roots, with the value of a(ζ 2(N −j)−1) ) uniquely
+determined as the complex conjugate of a(ζ 2j+1 ). So, a(X) is used to represent a
+vector ã of N/2 complex values. Setting the evaluation points to xj = ζ 4j+1 (for
+j = 0, . . . , N/2 − 1), and using the fact that these points are primitive roots of
+unity, interpolation and evaluation can be eﬃciently computed (in O(N log N )
+time) using the Fast Fourier Transform.
+    Let ϕ : O → CN/2 be the transformation mapping a(X) ∈ O ≡ ZN to
+                              N/2−1
+ϕ(a) = ã = (a(ζ 4j+1 ))j=0            ∈ CN/2 , and its extension ϕ : S → CN/2 to arbi-
+trary real polynomials, where S = R[X]/(X N + 1) ≡ RN . We can identify
+any polynomial a ∈ S by its coeﬃcient vector (a0 , a1 , . . . , aN −1 ), and we set
+a2 = (a0 , a1 , . . . , aN −1 )2 . Similarly we can deﬁne a1 and a∞ as the cor-
+responding norms on the coeﬃcient vector. So √          the transformation ϕ : S → CN/2
+is a scaled isometry, satisfying ϕ(a)2 = N a2 and ϕ(a)∞ ≤ a1 .
+In what follows, we assume, as a message space, the set of complex vectors
+ã ∈ ϕ(O) ⊂ CN/2 which are the evaluation of polynomials a(X) ∈ O with inte-
+ger coeﬃcients much smaller than the ciphertext modulus q. Arbitrary vectors
+z ∈ CN/2 can be encrypted (approximately) by taking the inverse transform ϕ−1
+on a scaled vector Δ·z, for some scaling factor Δ ∈ R, such that ϕ−1 (Δ·z)  q
+and rounding ϕ−1 (Δ · z) to a nearby point of the form ϕ(a) for some a(X) ∈ O.
+658      B. Li and D. Micciancio
+
+      The complete message encoding and decoding functions in CKKS are deﬁned
+as
+                                   
+– Encode(z ∈ CN/2 ; Δ) = Δ · ϕ−1 (z) ∈ O.
+– Decode(a ∈ O; Δ) = ϕ(Δ−1 · a) ∈ CN/2 .
+Once encoded, the scaling factor Δ is usually implicitly tied to a plaintext poly-
+nomial, so we sometimes omit it when its value is clear from the context.
+    Since these encoding and decoding operations can be performed without any
+knowledge of the secret or public keys, sometimes we assume they are performed
+at the outset, at the application level, before invoking the encryption or decryp-
+tion algorithms. More speciﬁcally, we may assume messages ϕ(Δ−1 · m) ∈ CN/2
+are provided to the encryption algorithm by specifying the integer polynomial
+m ∈ O, and the decryption algorithm returns a message m̃ = Decode(m ; Δ)
+represented as the underlying polynomial m ∈ O that is an approximation of
+m. All this is only for the sake of theoretical analysis, and all concrete imple-
+mentations (of the scheme and our attacks to it) include encoding and decoding
+procedures as part of the encryption and decryption algorithms. Message encod-
+ing can be quite relevant to quantify the amount of noise in a ciphertext. We
+say that a ciphertext ct approximately encrypts message m̃ with scaling factor
+Δ and noise ẽ if Decode(Decsk (ct); Δ) = m̃ + ẽ.
+
+
+3      Security Notions for Approximate Encryption
+In this section we present general deﬁnitions in the public-key setting that accu-
+rately capture passive attacks against a (possibly approximate, homomorphic)
+encryption scheme. We recall that in a passive attack the adversary may control
+which messages get encrypted, what homomorphic computations are performed
+on them, and may observe all ciphertexts produced in the process, as well as the
+decrypted result of the computations (as illustrated in Fig. 1).
+    We present an indistinguishability-based deﬁnition (similar in spirit to the
+standard IND-CPA notion described in Deﬁnition 1). A simulation-based notion
+is presented in the full version of this paper. Then, we explore restricted and
+extended variants of these basic deﬁnitions.
+
+3.1     Indistinguishability-Based Deﬁnition
+Our ﬁrst deﬁnition is indistinguishability-based: the adversary chooses a number
+of pairs of plaintext messages, and its goal is to determine whether the cipher-
+texts it receives are encryptions of the ﬁrst or the second plaintext in the pairs.
+In contrast to Deﬁnition 1, our new deﬁnition allows an adversary to make mul-
+tiple challenge queries (m0 , m1 ), rather than a single one. Our adversary can also
+issue homomorphic evaluation and decryption queries. We now give the formal
+deﬁnition. For simplicity, and as common in homomorphic encryption schemes,
+we assume all messages belong to a ﬁxed message space M. In particular, all
+messages have (or can be padded to) the same length. We refer to our deﬁnition
+     On the Security of Homomorphic Encryption on Approximate Numbers                          659
+
+as IND-CPAD , as it includes IND-CPA (see Deﬁnition 1) as a special case, where
+the adversary makes only one encryption query, and no homomorphic evaluation
+or decryption queries, whereas our deﬁnition explicitly provides the adversary
+with a restricted decryption oracle which allows to observe decryption results of
+honestly generated ciphertexts.
+
+Deﬁnition 2 (IND-CPAD Security). Let E = (KeyGen, Enc, Dec, Eval) be a
+public-key homomorphic (possibly approximate) encryption scheme with plain-
+                                                                         D
+text space M and ciphertext space C. We deﬁne an experiment Exprindcpa
+                                                                     b     [A],
+parameterized by a bit b ∈ {0, 1} and involving an eﬃcient adversary A that is
+given access to the following oracles, sharing a common state S ∈ (M × M × C)∗
+consisting of a sequence of message-message-ciphertext triplets:
+
+– An encryption oracle Epk (m0 , m1 ) that, given a pair of plaintext messages
+  m0 , m1 , computes c ← Encpk (mb ), extends the state
+
+                                     S := [S; (m0 , m1 , c)]
+
+  with one more triplet, and returns the ciphertext c to the adversary.
+– An evaluation oracle Hek (g, J) that, given a function g : Mk → M and a
+  sequence of indices J = (j1 , . . . , jk ) ∈ {1, . . . , |S|}k , computes the ciphertext
+  c ← Evalpk (g, S[j1 ].c, . . . , S[jk ].c), extends the state
+
+         S := [S; (g(S[j1 ].m0 , . . . , S[jk ].m0 ), g(S[j1 ].m1 , . . . , S[jk ].m1 ), c)]
+
+  with one more triplet, and returns the ciphertext c to the adversary. Here
+  and below |S| denotes the number of triplets in the sequence S, and S[j].m0 ,
+  S[j].m1 and S[j].c denote the three components of the jth element of S.
+– A decryption oracle Dsk (j) that, given an index j ≤ |S|, checks whether
+  S[j].m0 = S[j].m1 , and, if so, returns Decsk (S[j].c) to the adversary. (If the
+  check fails, a special error symbol ⊥ is returned.)
+
+The experiment is deﬁned as
+                              D
+                  Exprindcpa
+                      b      [A](1κ ) :      (sk, pk, ek) ← KeyGen(1κ )
+                                             S := [ ]
+                                             b ← AEpk ,Hek ,Dsk (1κ , pk, ek)
+                                             return(b )
+
+The advantage of adversary A against the IND-CPAD security of the scheme is
+                                         D                                       D
+AdvindcpaD [A](κ) = | Pr{Exprindcpa
+                             0      [A](1κ ) = 1} − Pr{Exprindcpa
+                                                           1      [A](1κ ) = 1}|,
+
+where the probability is over the randomness of A and the experiment. The
+scheme E is IND-CPAD -secure if for any eﬃcient (probabilistic polynomial time)
+A, the advantage AdvindcpaD [A] is negligible in κ.
+660     B. Li and D. Micciancio
+
+    As a standard convention, if at any point in an experiment the adversary
+makes an invalid query (e.g., a circuit g not supported by the scheme, or indices
+out of range), the oracle simply returns an error symbol ⊥.
+    We remark that, while the adversary in Deﬁnition 2 is given access to a
+decryption oracle, this should not be confused with indistinguishability under
+a chosen ciphertext attack (IND-CCA), which models active adversaries with
+the capability of tampering with (or injecting) arbitrary ciphertexts. Deﬁni-
+tion 2 only allows for decryption queries on valid ciphertexts that have been
+honestly computed using the correct encryption and homomorphic evaluation
+algorithms (modeled by the oracles E and H). Furthermore, the requirement
+that S[j].m0 = S[j].m1 is to eliminate trivial attacks where the adversary can
+distinguish between two computations that lead to diﬀerent results when com-
+puted on exact values.
+    Exact encryption schemes can be seen as a special case of approximate
+encryption, with the added correctness requirement. So, Deﬁnition 2 can be
+applied to exact as well as approximate encryption schemes. As a sanity check,
+we compare our new deﬁnition with the traditional formulation of IND-CPA secu-
+rity (Deﬁnition 1) modeling passive attacks against exact encryption schemes.
+Perhaps not surprisingly, for the case of exact encryption schemes, our new secu-
+rity deﬁnition coincides with the standard notion of IND-CPA security.
+
+Lemma 1. Any exact homomorphic encryption scheme E is IND-CPA secure if
+and only if it is IND-CPAD secure.
+
+Proof. It is easy to see that IND-CPAD security implies IND-CPA security, as
+an adversary making only one E query but no other queries in the IND-CPAD
+experiment is also an IND-CPA adversary. So we consider the reverse direction.
+   Assume E is IND-CPA secure. Let A be any adversary breaking the IND-CPAD
+security of E, and assume A makes at most l queries in total to E and H. We
+build adversaries B (i) , for 0 ≤ i < l, to break the IND-CPA security of E.
+   B (i) takes input 1κ , pk, ek, and it then runs A(1κ , pk, ek). It maintains a state
+                                           D
+S ∈ (M × M × C)∗ just like Exprindcpa , and it answers oracle queries made by
+A as follows:
+
+– For each query (m0 , m1 ) to E, if |S| < i, then let c ← Encpk (m1 ); if |S| > i,
+  then let c ← Encpk (m0 ); and if |S| = i, B (i) sends (m0 , m1 ) to Exprcpa
+                                                                           b   and
+  receives c. The state S is extended by one more triplet (m0 , m1 , c), and c is
+  returned to A.
+– For each query (g, J) to H, where g : Mk → M and J = (j1 , . . . , jk ), let
+  c ← Evalek (g, S[j1 ].c, . . . , S[jk ].c), extend S by one more triplet
+
+              (g(S[j1 ].m0 , . . . , S[jk ].m0 ), g(S[j1 ].m1 , . . . , S[jk ].m1 ), c),
+
+  and return c to A.
+– For each query j to D, if j ≤ |S| and S[j].m0 = S[j].m1 , then return S[j].m0
+  to A; otherwise return an error symbol ⊥.
+      On the Security of Homomorphic Encryption on Approximate Numbers                  661
+
+Finally, when A halts with a bit b , B (i) outputs this bit.
+   Since B (i) does not depend on the secret key sk to answer the D queries, it is
+a valid adversary in the IND-CPA experiment. Now, let H(i) = Exprcpa                (i)
+                                                                             0 [B ] for
+                               cpa (l−1)
+0 ≤ i < l, and let H = Expr1 [B
+                     (l)
+                                            ]. For 1 ≤ i < l, note that H is exactly
+                                                                            (i)
+
+the same distribution as Exprcpa
+                              1   [B (i−1)
+                                           ]. Furthermore, by the correctness of exact
+homomorphic encryption schemes, the D responses from B (i) to A are indistin-
+                                                                                       D
+guishable from those in the IND-CPAD experiment; so H(0) and Exprindcpa         0        [A]
+                                                                          indcpaD
+are indistinguishable, and the same holds true for H and Expr1
+                                                            (l)
+                                                                                   [A]. So
+          D
+Advindcpa [A] ≤       0≤i<l Adv cpa (i)
+                                   [B   ]  +   negl(κ), which   is negligible   since   E is
+IND-CPA secure.                                                                            
+                                                                                           
+
+    Notice that the above lemma makes essential use of the correctness of exact
+encryption schemes, and the proof does not extend to approximate encryption
+schemes. In fact, for approximate encryption schemes, the result of decryption
+is not a simple function of the encrypted messages (and the computations per-
+formed on them), and may potentially depend (in an indirect, unspeciﬁed way)
+on the scheme’s secret key and encryption randomness. So the information pro-
+vided by decryption queries is not easily computed by the adversary on its own,
+and, at least in principle, IND-CPAD may be a stronger security notion than
+IND-CPA when applied to approximate encryption schemes. We will make this
+intuition clear in the following sections, proving formal separation results, and
+providing concrete attacks to actual approximate encryption schemes.
+    Also note that the above deﬁnition does not guarantee circuit privacy in the
+homomorphically evaluated ciphertexts, as the circuit to be evaluated in a query
+to oracle H does not depend on the bit b of the IND-CPAD experiment. In the full
+version we extend our deﬁnitions with circuit privacy. Here we focus on the basic
+deﬁnition (without circuit privacy) which is the most common in cryptography.
+
+
+3.2   Restricted Security Notions and Separations Between Them
+
+We have observed that, for exact encryption schemes, IND-CPAD security is
+equivalent to the traditional IND-CPA security. (See Lemma 1.) We now show
+that IND-CPAD is strictly stronger than IND-CPA, i.e., there are approximate
+encryption schemes that are provably IND-CPA secure (under standard com-
+plexity assumptions) but are not IND-CPAD secure. In order to get a more
+reﬁned understanding of the gap between these notions, we introduce a natu-
+ral parameterization of IND-CPAD security, that smoothly interpolates between
+IND-CPA and IND-CPAD . Then, we deﬁne a number of restricted notions of secu-
+rity, and show separations between them, showing that there is an inﬁnite chain
+of (strictly) increasingly stronger deﬁnitions, ranging from IND-CPA all the way
+to IND-CPAD .
+
+Restricting the numbers of queries. We parameterize the deﬁnition by imposing
+a bound on the number of queries that may be asked by the adversary.
+662    B. Li and D. Micciancio
+
+Deﬁnition 3 ((q, )-IND-CPAD Security). For any two functions q(κ) and
+ (κ) of the security parameter κ, we say that a homomorphic encryption scheme
+is (q, )-IND-CPAD secure if it satisﬁes Deﬁnition 2 for all adversaries A that
+make at most (κ) queries to oracles E, H, and at most q(κ) queries to oracle D.
+     We combined the encryption (E) and evaluation (H) queries into a single
+bound (κ) for simplicity, and because both types of queries produce ciphertexts.
+The bound could be signiﬁcant for approximate encryption schemes as security
+with respect queries to E and H does not appear to imply security with respect
+to + 1 such queries. This is in contrast to proper (exact) encryption schemes in
+the public-key setting where one-message security implies multi-message security.
+It remains an interesting open question to ﬁnd out the relationship between
+(q, )-IND-CPAD and (q, + 1)-IND-CPAD securities.
+     The deﬁnition is easily extended to more general formulations, but we will
+be primarily interested in the bound q on the number of decryption queries,
+which are the distinguishing feature of approximate encryption schemes. When
+   is an arbitrary polynomial, and only the number of decryption queries q(κ) is
+restricted, we say that a scheme is q-IND-CPAD secure.
+     Now, we can think of IND-CPA security as a special case of (q, )-IND-CPAD ,
+for q = 0 and = 1, as the only query to E/H must be an encryption query.
+(Oracle E must be called at least once before one can use H to homomorphi-
+cally evaluate a function on a ciphertext.) So, bounding the number of queries
+allows to smoothly transition from the traditional IND-CPA deﬁnition (i.e., (0, 1)-
+IND-CPAD security), to our IND-CPAD (i.e., (poly, poly)-IND-CPAD security).
+     Naturally, for proper (exact) encryption schemes, all these deﬁnitions are
+equivalent, and it is only in the approximate encryption setting that the deﬁni-
+tions can be separated.
+     In the following proposition we show that there exists some scheme that is
+secure for up to some ﬁxed number q of decryption queries but insecure for just
+q + 1 decryption queries. We remark that the encryption scheme described in the
+proof is presented for the sole purpose of separating the two deﬁnitions. More
+natural examples that separate IND-CPA and IND-CPAD will be described in
+Sect. 4, where we present attacks to approximate encryption schemes from the
+literature.
+Proposition 1. Assume there exist a pseudorandom function and an IND-CPA-
+secure exact homomorphic encryption scheme. Then, for any ﬁxed q ≥ 2, there
+exists a homomorphic approximate encryption scheme that is (q, )-IND-CPAD -
+secure but not (q + 1, )-IND-CPAD -secure.
+Proof (sketch). Let E = (KeyGen, Enc, Dec, Eval) be an exact, IND-CPA-secure,
+HE scheme. The main idea is to construct a new scheme E  that consists of
+the same encryption and evaluation algorithms, but with new key generation
+KeyGen and decryption algorithms Dec . KeyGen (1κ ) samples keys (sk, pk, ek) ←
+KeyGen(1κ ) as in E, and then it samples a PRF key K to form the new secret key
+sk = (sk, K), while keeping the public key pk and the evaluation key ek the same.
+Given a ciphertext c, Decsk ﬁrst runs Decsk (c) to obtain the exact plaintext m,
+      On the Security of Homomorphic Encryption on Approximate Numbers                           663
+
+and then it adds to m a secret share (encoded as a small number) of sk produced
+by the PRF on m. Speciﬁcally, if m (mod q + 1) ≡ 0, then the share is sk ⊕ r for
+r = ⊕qi=1 PRFK (i); otherwise, the share is PRFK (m mod (q + 1)). Here a PRF is
+used to keep Dec deterministic. Since E is IND-CPA secure, and since any q or
+less shares of sk are pseudorandom, our new approximate encryption scheme is
+(q, )-IND-CPAD -secure. However, an adversary can fully recover sk using q + 1
+decryption queries, breaking (q + 1, )-IND-CPAD security of the new scheme.  
+
+Restricting the query ordering. In the deﬁnition of IND-CPAD security, we did not
+state any restriction on the relative order of queries made by the adversary. In
+particular, queries can be made in many rounds, and a later query can depend on
+the responses from earlier queries. Such notion is called security with adaptively
+chosen queries, or simply adaptive security.
+    There are several other natural query orderings that can be imposed on the
+adversary, and enforced by an application. For example, it is often the case
+that inputs are encrypted and collected in advance, before any homomorphic
+evaluation or decryption operation takes place. As an extreme situation, one
+can consider a fully non-adaptive setting, where the adversary speciﬁes all its
+queries in advance after seeing the public/evaluation key. We call this the (fully)
+non-adaptive model. Non-adaptive security is much easier to formulate, and we
+fully spell out its deﬁnition now.
+Deﬁnition 4 (Non-Adaptive (q, )-IND-CPAD Security). Let E be a homo-
+morphic (possibly approximate) encryption scheme E = (KeyGen, Enc, Dec, Eval).
+Let q and be two polynomial bounds in κ. We say that E is non-adaptively (q, )-
+IND-CPAD -secure if for all eﬃcient adversary A = (A0 , A1 ) consisting of two
+steps such that
+
+        ({m0 }ki=1 , {m1 }ki=1 , {(gi , Ji )}i=k+1 , {ji }qi=1 , st) ← A0 (1κ , pk, ek),
+             (i)           (i)
+
+
+where (sk, pk, ek) ← KeyGen(1κ ), m0 = gi (m0 i ), m1 = gi (m1 i ) for i =
+                                              (i)           (J )      (i)           (J )
+
+k+1, . . . , , and all gi are valid circuits with indices Ji ∈ {1, . . . , }∗ , the following
+two distributions are indistinguishable to A1 (1κ , st):
+                    (i)
+ { {ci ← Encpk (m0 )}ki=1 , {ci ← Evalek (gi , c(Ji ) )}i=k+1 , {Decsk (ci ) | mj0i = mj1i }qi=1 },
+
+and
+                    (i)
+ { {ci ← Encpk (m1 )}ki=1 , {ci ← Evalek (gi , c(Ji ) )}i=k+1 , {Decsk (ci ) | mj0i = mj1i }qi=1 },
+
+where the probability is over the randomness of A and in Enc and Eval.
+    Typically the same security notion is weaker in the non-adaptive model than
+in the adaptive model, as some attacks are only feasible in the latter model.
+We show that this is also the case for homomorphic approximate encryption
+schemes. As before, the encryption scheme described in the following proof is
+not intended to be used. It is just a theoretical construction, provided simply
+for the purpose of showing that a scheme may satisfy one deﬁnition but not the
+other.
+664     B. Li and D. Micciancio
+
+Proposition 2. Assume there exist an IND-CPA-secure exact homomorphic
+encryption scheme and a secure pseudorandom permutation. Then there exists a
+homomorphic approximate encryption scheme that is non-adaptively IND-CPAD -
+secure, but it is not adaptively (2, 2)-IND-CPAD -secure.
+
+Proof (sketch). Let E be an IND-CPA-secure exact HE scheme, and let H :
+{0, 1}κ × {0, 1}κ → {0, 1}κ be a pseudorandom permutation. We can deﬁne
+another pseudorandom permutation F :
+                                             −1
+                    ∀x ∈ {0, 1}κ . FK (x) = HK  (HK (x) ⊕ 1).
+
+Notice that FK (FK (x)) = x for all x ∈ {0, 1}κ .
+    We now modify E to obtain a homomorphic approximate encryption scheme
+E  with the same encryption and evaluation algorithms but modiﬁed key gener-
+ation and decryption algorithms:
+
+– KeyGen (1κ ): Sample (sk, pk, ek) ← E.KeyGen(1κ ) and K ← {0, 1}κ (for the
+  pseudorandom permutation F ). Return (sk , pk, ek), where sk = (sk, K).
+– Decsk (c) = m + π(r), where m = E.Decsk (c), r = FK (sk) if m = 0, and
+  r = FK (m) otherwise, and (π, π −1 ) is an encoding scheme from {0, 1}κ to
+  small numbers.
+
+   One can check that FK is a pseudorandom permutation in the non-adaptive
+model. So Decsk can be simulated without knowing the secret key (sk, K) in the
+non-adaptive model, and hence our new scheme is non-adaptively IND-CPAD -
+secure. However, an adaptive adversary A can ﬁrst ask to encrypt 0 and then
+ask to decrypt the corresponding ciphertext to get e = π(FK (sk)). Next, A asks
+to encrypt π −1 (e) = FK (sk) and then asks to decrypt its ciphertext. At this
+point A can fully recover sk using the decryption result π −1 (e) + π(sk). So E  is
+not adaptively (2, 2)-IND-CPAD -secure.                                           
+                                                                                  
+
+
+4     Attacks to Homomorphic Encryption for Arithmetics
+      on Approximate Numbers
+
+In this section we describe a key recovery attack against the CKKS scheme,
+including both theoretical and practical analysis. Based on such attack, we can
+conclude that the CKKS scheme is not IND-CPAD secure. Note that our attack
+is much stronger than a simple indistinguishability attack: we show how to
+eﬃciently recover the secret (decryption) key of the scheme! Clearly, once the
+secret key has been recovered, it is easy to break the formal IND-CPAD secu-
+rity deﬁnition. While recovering the secret key makes our attacks stronger, any
+security analysis of improved variants of CKKS or other approximate encryption
+schemes should still target IND-CPAD as a security goal, and not simply protect
+the scheme against full key recovery.
+      On the Security of Homomorphic Encryption on Approximate Numbers           665
+
+4.1   Theoretical Outline
+The technical idea behind the attack is easily explained by exemplifying it on a
+symmetric key version of LWE encryption. (Breaking the CKKS scheme involves
+additional complications due to the details of the encoding/decoding functions
+discussed below.) We recall that in a passive attack (against a symmetric key
+encryption scheme Es (m)), the adversary can observe the encryption Es (m) of
+any message m of its choice. In LWE encryption, the key is a random vector
+s ∈ Znq , and a (possibly encoded) message m ∈ Zq is encrypted as Es (m) =
+(a, b) where a ∈ Znq is chosen at random, and b = s, a + m + e (mod q) for
+a small random integer perturbation e ∈ Z. If the encryption scheme works on
+“approximate numbers”, (m + e) is treated as an approximation of m, and the
+decryption algorithm outputs Ds (a, b) = b − s, a = m + e.
+    Our most basic attack involves an adversary that asks for an encryption of
+m = 0, so to obtain a ciphertext ct = (a, b) where b = s, a + e (mod q). The
+adversary then asks to compute the identity function id(x) = x on it. (This is the
+same as performing no computation at all.) Finally, it asks for an approximate
+decryption of the result, and computes
+
+          c = b − Decs (ct) = (s, a + e) − (m + e) = s, a    (mod q).        (1)
+
+This provides a linear equation s, a = c (mod q) in the secret key. Collect-
+ing n such linear equations and solving the resulting system (e.g., by Gaussian
+elimination) recovers the secret key s with high probability.
+    It is easy to see that there is nothing special about the message 0, or the fact
+that no computation is performed: as long as the adversary knows the cipher-
+text ct (possibly the result of a homomorphic computation) and gets to see
+the approximate decryption of ct, the same attack goes through. However, the
+actual scheme described in [18] and subsequent papers, and their open source
+implementations include several modiﬁcations of the above scheme, introduced
+to make the scheme more useful in practice, but which also make the attack
+less straightforward. We brieﬂy describe each of these modiﬁcations, and how
+the attack is adapted. In the most general case, our attack requires not just the
+solution of a linear system of equations, but the use of lattice reduction for the
+(polynomial time) solution of a lattice approximation problem.
+
+Public key. First, CKKS is a public key encryption scheme, where, as standard in
+lattice based encryption, the public key can be seen as a collection of encryptions
+of 0 values. This makes no diﬀerence in the attack, as the ciphertexts still have the
+same structure with respect to the secret key, and the (approximate) decryption
+algorithm is unmodiﬁed. Switching to a public key system has the only eﬀect of
+producing larger noise vectors e in ciphertexts.
+
+Ring lattices. In order to achieve practical performance, all instantiations of
+the CKKS scheme make use of cyclic/ideal lattices [40] and the Ring LWE
+problem [38,39]. Speciﬁcally, the vectors a, s are interpreted as (coeﬃcients of)
+polynomials a, s in the power-of-two cyclotomic rings O(2N ) popularized by the
+666     B. Li and D. Micciancio
+
+SWIFFT hash function [36,37,43] and widely used in the implementation of
+lattice cryptography since then. In a sense, switching to ideal lattices makes
+the attack only more eﬃcient: the linear equation s, a = c (mod q) becomes
+                            (2N )
+an equation a · s = c ∈ Oq         in the cyclotomic ring modulo q, which can be
+solved (even using a single ciphertext) by computing the (ring) inverse of a, and
+recovering s as
+                                  s = a−1 · c ∈ Oq .                          (2)
+    A little diﬃculty arises due to the choice of q. The ﬁrst implementation of
+CKKS, the HEAAN library [30] sets q to a power of 2 to simplify the treatment
+of ﬂoating point numbers. Subsequent instantiations of CKKS use a prime (or
+square-free) q of the form h·2n +1 together with the Number Theoretic Transform
+for very fast ring operations[37]. For a (suﬃciently large) prime q, the probability
+of a random element a being invertible is very close to 1, but this is not the case
+when q is a power of two. If a is not invertible, we can still recover partial
+information about the secret key s, and completely recover s by using multiple
+ciphertexts.
+
+Euclidean embedding. In order to conveniently apply the CKKS scheme on prac-
+tical problems, the input message space is set to CN/2 for some N that is a power
+of 2, the set of vectors with complex entries, or, more precisely, their ﬂoating
+point approximations. A message z ∈ Ck , for some integer 1 ≤ k ≤ N/2, can
+be considered as a vector in CN/2 (by padding it with 0 entries), and it is then
+encoded to                                        
+                  m = Encode(z; Δ) = Δ · ϕ−1 (z) ∈ ZN ≡ O,
+where Δ is some precision factor. The “decode” operation Decode : O → Ck
+sends an integer polynomial m to
+
+                        Decode(m; Δ) = ϕ(Δ−1 · m) ∈ Ck ,
+
+where the entries corresponding to the 0-paddings are dropped. Decode is an
+approximate inverse of Encode as z = Decode(Encode(z; Δ); Δ) is close (but not
+exactly equal) to z.
+    This is slightly more problematic for our attack, because a passive adversary
+only gets to see the result of ﬁnal decryption z ∈ Ck , rather than the ring element
+m = a·s+b ∈ O that is required by our attack, in addition to the ciphertext ct =
+(a, b). Moreover, given the approximate nature of the encoding/decoding process,
+Decode(m ) is not even the exact (mathematical) transformation ϕ(Δ−1 ·m ), but
+only the result of an approximate ﬂoating point computation. We address this
+by setting k = N/2 (so, at least the vector Decode(m ) has the right dimension
+over C), and re-encoding the message output by the decryption algorithm to
+obtain Encode(Decode(m )).
+    At this point, depending on the concrete choice of parameters of the scheme,
+we may have Encode(Decode(m )) = m , in which case we can carry out the
+above attack by setting up a system of linear equations or computing inverses
+in the cyclotomic ring. We summarize this case in the following theorem.
+      On the Security of Homomorphic Encryption on Approximate Numbers         667
+
+Theorem 1 (Linear Key-Recovery Attack against CKKS). Fix a par-
+ticular instantiation of the CKKS scheme under the Ring-LWE assumption of
+dimension N and modulus q, and ﬁx a key tuple (sk, pk, ek) ← KeyGen(1κ ).
+Given k = O(N ) ciphertext cti for 1 ≤ i ≤ k, that are either encryp-
+tions under pk or homomorphic evaluations under ek, and given their approx-
+imate decryption results zi = Decode(Decsk (cti ); Δ) with a scaling factor Δ, if
+Encode(zi ; Δ) = Decsk (cti ) for all 1 ≤ i ≤ k, then we can eﬃciently recover the
+secret key sk with high probability.
+    Moreover, if the ciphertext modulus q is a prime or a product of distinct
+primes, then the above holds for all k ≥ 1.
+
+4.2   Analysis of Encoding/Decoding Errors
+To see for what concrete parameters the linear attack can be applied, we take a
+closer look at the error introduced by the encoding and decoding computation.
+In practice, since N is a power of 2, the classical Cooley-Tukey FFT algorithm
+is used to implement the transformation ϕ and its inverse ϕ−1 , and the compu-
+tation is done using ﬂoating-point arithmetic that could cause round-oﬀ errors.
+    Fix a ciphertext ct, and let m = Decsk (ct) ∈ O be its approximate decryp-
+tion (before decoding) with a scaling factor Δ. Let ẑ = Decode(m ; Δ) be the
+computed value of z = ϕ(Δ−1 · m ). To carry out the attack, we compute the
+encoding of ẑ with the scaling factor Δ: ﬁrst we apply inverse FFT to compute
+u = Δ · ϕ−1 (ẑ ), and then we round its computed value û to m = û ∈ O. Let
+ε = û − m be the encoding error, where m is the coeﬃcient vector of m . We
+see that Encode(Decode(m ; Δ); Δ) = m if and only if ε∞ = û − m ∞ < 12 .
+    Assume the relative error in computing the Cooley-Tukey
+                                                       √
+                                                                FFT in dimension
+N is at most μ in l2 norm. Then ẑ − z 2 ≤ μ · ΔN m 2 , û − u2 ≤ μ(1 +
+μ) · m 2 , and u − m 2 ≤ μ · m 2 . It follows that
+
+              ε∞ = û − m ∞ ≤ û − m 2 ≤ (2μ + μ2 )m 2 .
+
+    In [13], Brisebarre et al. presented tight bounds on the relative error μ in
+applying the Cooley-Tukey FFT algorithm on IEEE-754 ﬂoating-point numbers.
+According to their estimate, μ ≈ 53 · 2−53 for N = 216 and double-precision
+ﬂoating-point numbers. So, we expect to see Encode(Decode(m ; Δ); Δ) = m in
+such setting, i.e., ε∞ > 12 , when m 2 > 245 . (As we will see in the next
+section, our experimental results using existing CKKS implementations suggest
+this is a very conservative estimation.) The rescaling operation can be used
+to reduce the size of the approximate plaintext m , which is already used to
+maximize the capacity of homomorphic computation in CKKS.
+
+Lattice attack. In case Encode(Decode(m )) ≈ m is only an approximation of
+what we want for the linear key recovery attack, it is still possible to recover sk
+by solving a (polynomial time) lattice approximation problem.
+Theorem 2 (Lattice Attack against CKKS). Fix a particular instantiation
+of the CKKS scheme under the Ring-LWE assumption of dimension N and
+668     B. Li and D. Micciancio
+
+modulus q, and ﬁx a key tuple (sk, pk, ek) ← KeyGen(1κ ). Given a ciphertext
+ct ∈ Oq2 with a scaling factor Δ, and given an approximate decryption z =
+Decode(Decsk (ct); Δ) of√ct, if the encoding error ε = Δ · ϕ−1 (z ) − Decsk (ct)
+                    N
+satisﬁes ε2 ≤ 2− 2 · (q N − h), where h = HW(s) ≤ N is the Hamming weight
+of s, then the secret key sk can be eﬃciently recovered.
+
+Proof (sketch). Let ct = (a, b) for some a, b ∈ Oq . We consider the following
+approximate CVP instance. Let A = φ(a) ∈ ZN ×N be the negacyclic matrix
+representation of a. Consider the following matrix
+                                       
+                               A qIN
+                        B=               ∈ Z(N +1)×(2N ) ,
+                               1t 0t
+
+where 1t = [1, . . . , 1] is a N -dimensional row vector of all 1 entries. Let L =
+L(B) be the integer lattice generated by B, let u = Δ · ϕ−1 (z ) ∈ RN , and let
+t = (u − b, 0)t ∈ RN +1 , where b is the coeﬃcient vector of b. Our CVP instance
+asks to ﬁnd v ∈ L such that v − t2 ≤ δ for some δ > 0.
+    To set the parameter δ, notice that v0 = (m − b, 1, s) is a lattice point, and
+v0 −t22 = ε22 +1, s . On the other hand, if m −b = Ar+qw for some r, w ∈
+                           2
+  N                   
+Z , then v1 = (m − b, 1, r) ∈ L is also a lattice point. We have v1 − t22 =
+ε − ε 22 + 1, r . Note that r = A−1 (m − b) + A−1 ε (mod q) = s + A−1 ε
+                     2
+
+(mod q). In CKKS, s is chosen from a uniform distribution             coeﬃcients
+                                                             on ternary
+{±1, 0} with Hamming weight h ≤ N , so | 1, r | ≥ | 1, A−1 ε − h|. We can
+assume that ε is independent of m −b, so A−1    ε (mod
+                                                           q) is√close √ to uniform,
+and so it holds with high probability that | 1, A−1 ε | ≤ 2 3 · q N . When
+             N      √                           √      √
+ε2 ≤ 2− 2 · (q N − h), we can set δ = 2 3 · q N and obtain m − b with
+high probability by solving such CVP instance in polynomial time. Then, we can
+mount the linear attack as in Theorem 1.                                            
+                                                                                    
+
+
+5     Experiments
+The basic idea of our linear attack is so simple that it requires no validation.
+However, as described in the previous section, a concrete instantiation of the
+CKKS scheme may include a number of details that make the attack more
+diﬃcult in practice. Given the simplicity of our attack, we also considered the
+possibility that the implementations of CKKS may not correspond too closely
+to the theoretical scheme described in the papers, and included some additional
+countermeasures to defend against the attack.
+    To put our linear attack to a deﬁnitive test, we implemented it against pub-
+licly available libraries HEAAN [30], PALISADE [41], SEAL [47], and HElib [31]
+that implement the CKKS scheme, and we ran our attack over some homo-
+morphic computations that are commonly used in real world privacy-preserving
+machine-learning applications. Our experimental results against the libraries are
+summarized in Tables 1 and 2. For most of the parameter settings, our attack
+can successfully and quite eﬃciently recover the secret key, showing it is widely
+      On the Security of Homomorphic Encryption on Approximate Numbers             669
+
+
+ Algorithm 1: The pseudocode outlining our key recovery attack experi-
+ ments.
+   Input: Lattice parameters (N, log q), initial scaling factor Δ0 , plaintext bound
+          B, and circuit g.
+ 1 Sample (sk, pk, ek) ← KeyGen(N, log q, Δ0 ), where (1, s) = sk
+                  N/2
+ 2 Sample z ← C       such that |zi | ≤ B for all 1 ≤ i ≤ N/2
+ 3 Encrypt ctin ← Encpk (Encode(z; Δ0 ))
+ 4 Evaluate ctout ← Evalek (g, ctin )
+              
+ 5 Decrypt z ← Decode(Decsk (ctout ); Δ), where Δ is the scaling factor in ctout
+                          
+ 6 Encode m ← Encode(z ; Δ)
+                   −1
+ 7 Compute s ← a       · (m − b) ∈ Oq , where (b, a) = ctout
+            
+ 8 return s = s
+
+
+
+
+applicable to these CKKS implementations. In the following, we discuss our
+experiment and the relevant implementation details of these libraries, and we
+brieﬂy analyze the results. We also consider RNS-HEAAN [46], an alternative
+implementation similar to HEAAN that includes RNS (residue number system)
+optimizations, obtaining similar results.
+    We did not implement the lattice based attack. The main diﬃculty in run-
+ning the lattice attack in our experiment is that it requires lattice reduction in
+very large dimension, beyond what is currently supported by state of the art
+lattice reduction libraries. However, the theoretical running time of the attack is
+polynomial, and the corresponding parameter settings should still be considered
+insecure. In the following, we refer to our linear attack as the attack.
+
+5.1   Implementation of Our Attack and Experiments
+A pseudocode outline of our experiment programs is presented in Algorithm 1.
+Such programs model the situations where an attacker can inﬂuence an honest
+user to perform certain homomorphic computations and can obtain both the ﬁnal
+ciphertexts and the decrypted approximate numbers. A successful run indicates
+that the target CKKS implementation is not IND-CPAD -secure.
+    For concrete homomorphic computations, we choose to compute the variance
+of a wide range of input data to exemplify how our attack may be aﬀected by
+large underlying plaintexts in extreme cases. Speciﬁcally, our program encrypts
+the input data to a single ciphertext ctin in the full packing mode, and then
+it performs one homomorphic squaring, followed by several homomorphic rota-
+tions and summations to homomorphically compute the sum of squares, and
+ﬁnally it does a homomorphic multiplication by a constant 2/N to obtain ctout
+that encrypts the variance. We also compute the logistic function (1 + e−x )−1
+and exponential functions ex using their Maclaurin series up to a degree d, to
+check whether our attack may be aﬀected by the bigger noises and the possibly
+adjusted scaling factors due to multi-level homomorphic computations. Once the
+homomorphic computation is done, our program decrypts ctout to approximate
+numbers z , and mounts our linear attack as in Steps 6 and 7 of Algorithm 1.
+670      B. Li and D. Micciancio
+
+Table 1. The results of applying our attack on homomorphically computed variance
+of N/2 = 215 random complex numbers of magnitude 1 ≤ B ≤ 29 . We carried out
+the attack against all main open source implementations of CKKS, obtaining similar
+results. Numbers are packed into all slots, and are encoded using various initial scaling
+factors Δ0 . For each parameter combination (Δ0 , B), we ran our programs 100 times
+against each library. A “” indicates that, for all these libraries with the particular
+parameters, the attack always succeeded to recover sk. A few cells where a number
+is shown, correspond to extreme parameters where some runs failed to recover sk,
+and the number is the maximum (over all libraries) of the average l∞ norms of the
+encoding error ε. These settings are still subject to attacks based on lattice reduction,
+see Sects. 4.2 and 5.3 for details.
+
+                     Attack applied to HEAAN, PALISADE, SEAL, HElib
+                    B          1 2 22 23 24 25 26    27  28    29
+          Variance log Δ0 = 30                    
+                   log Δ0 = 40                    
+                   log Δ0 = 50       1.21 5.41 20.65 80.19
+
+
+
+We remark that all these homomorphic computations are very common in appli-
+cations of the CKKS scheme.
+    In our programs, we use the data structures and public APIs provided by
+each library to carry out the key recovery computation4 . Note that an attacker
+is free to use any method, not necessarily these public interfaces, to carry out
+the attack.
+
+
+5.2    Details on Diﬀerent Implementations of CKKS
+
+We considered the latest versions of all these libraries: HEAAN version 2.1 [30],
+PALISADE version 1.10.4 [41], SEAL version 3.5 [47], and HElib version 1.1.0 [31]
+and RNS-HEAAN [46]. All these libraries implement the transformation ϕ and
+its inverse using the classical Cooley-Tukey FFT algorithm on double-precision
+ﬂoating-point numbers. Still, they contain several distinct implementation details
+relevant to our attack.
+
+Multi-precision integers vs. double-CRT representation. All versions of HEAAN
+(version 1.0 as in [18], version 1.1 as in [16], and the most recent version 2.1)
+use multi-precision integers to represent key materials and ciphertexts. Conse-
+quently, HEAAN achieves very good accuracy in approximate decryption, but
+at the same time it rarely introduces any encoding error, resulting in a great
+success rate in our key recovery experiment.
+   To improve eﬃciency, the residual number system, as known as double-CRT
+representation, is adopted to the CKKS scheme in [17], and it is implemented
+
+4
+    The source code of our attack implementations are available at https://github.com/
+    ucsd-crypto/CKKSKeyRecovery.
+     On the Security of Homomorphic Encryption on Approximate Numbers              671
+
+Table 2. The results of applying our attack to homomorphically computed logistic and
+exponential functions on random real numbers of magnitude B ∈ {1, 2, 8} packed into
+full N/2 = 215 slots, evaluated using their Maclaurin series of degree d ∈ {5, 10}. For
+each parameter setting, we ran our experimental program 100 times for each library,
+and here “” indicates sk was recovered in all these runs against a particular library.
+A few cells where a number is shown, correspond to extreme parameters when some
+runs failed to recover sk, and the number is the average l∞ norm of the encoding error
+ε in these runs. For HElib, “n/a” indicates the parameters are not supported by the
+library.
+
+                        Attack applied to HEAAN, PALISADE, SEAL, HElib
+                          HEAAN      PALISADE        SEAL     HElib
+                Δ0   B d = 5 d = 10 d = 5 d = 10 d = 5 d = 10 d = 5 d = 10
+  Logistic      230 1                                                 
+                240 1                                           3.1    6.7
+                250 1                                           8.2    8.2
+  Exponential 230 1                                                   
+                  2                                             n/a    n/a
+                  8                                             n/a    n/a
+              240 1                                             1.9    8.2
+                  2                                             n/a    n/a
+                  8                                             n/a    n/a
+              250 1                                             8.1    8.2
+                  2                                             n/a    n/a
+                  8     7.6    15.2     8.1    18.2    2.2    4.3     n/a    n/a
+
+
+
+in RNS-HEAAN. Other libraries also implement the RNS variant of CKKS, with
+some diﬀerent details:
+– During decryption, RNS-HEAAN uses only the ﬁrst RNS tower of ciphertexts;
+  so it expects the scaled plaintext to be much smaller than the 60-bit prime
+  modulus in the ﬁrst tower. Other libraries convert the double-CRT format
+  to multi-precision integers before applying the canonical embedding; so they
+  support a larger plaintext space and are more accurate.
+– During rescaling, RNS-HEAAN uses a power-of-2 rescaling factor, while the
+  other libraries’ rescaling factors are the primes or close to primes in the moduli
+  chain. In particular, PALISADE optimizes the rescaling factors to reduce the
+  errors and precision loss in many homomorphic operations [32].
+
+As observed in our experiment, among the RNS implementations of CKKS, our
+attack was more successful against the libraries using more accurate element
+representations and scaling factors.
+PALISADE . In addition, PALISADE uses extended precision ﬂoating-point arith-
+metic in Decode, which has 64-bit precision on X86 CPUs. This further improves
+672     B. Li and D. Micciancio
+
+the accuracy of approximate decryption, but perhaps unintentionally making our
+attack more successful by a tiny margin (comparing to other libraries).
+HElib. Unlike other libraries, HElib adjusts the scaling factor used in Encode and
+many homomorphic operations according to the estimated noise size and the
+magnitude of the plaintext. It expects the input numbers to have magnitude
+at most 1 for optimal precisions. So our experiment with HElib chooses random
+input only within the unit circle.
+RNS-HEAAN. Looking back to RNS-HEAAN, its implementation of Decode intro-
+duces a small round-oﬀ error in a conversion from uint64_t to double. As a
+result, such (seemingly unexpected) implementation choice may lead to reduced
+precision (by only a few bits), but it also results in more failed runs in our exper-
+iment. Still, when our attack fails, the encoding errors are quite small, and so
+RNS-HEAAN is still subject to the lattice reduction attack. We tried to “ﬁx” this
+by more carefully converting between number systems, and we immediately see
+a much better success rate for our attack.
+
+5.3   Experiment Results
+We set up all libraries with the highest supported lattice dimension N = 216 ,
+which also corresponds to the highest security level. By the analysis in Sect. 4.2
+(and also observed in our experiment), the larger the dimension is, the higher
+the chance an encoding error may show up (leading to failed attack runs). On
+the other hand, since the claimed security decreases with larger values of the
+modulus q, we set it to around 350 bit, which is a secure, yet realistic value for
+FHE schemes. According to common evaluation methodologies [1], the associated
+LWE problem provides a level of security well above 256 bits. (Speciﬁcally, in
+dimension N = 216 , it is estimated that 256-bits of security are achieved even
+for moduli q with over 700 bits.)
+    In all our experiments, we use the full packing mode with N/2 slots. For
+the variance computation, we generate random input numbers with magnitude
+B ≤ 29 . For the experiment on the logistic and the exponential functions, we
+set the maximal degree of their Maclaurin series to d ≤ 10, which provides good
+approximation for inputs smaller than 1.
+    Our experiments are executed in a 64-bit Linux environment running on an
+Intel i7-4790 CPU. The attack is very eﬃcient, especially for the RNS-CKKS
+implementations, as the key recovery computation can beneﬁt from using NTT
+and parallelization. Each individual run in our experiment ﬁnishes within sev-
+eral seconds to just one minute, with most of the running time taken by the
+key generation and encryption/homomorphic evaluation operations, rather than
+the attack itself. For each homomorphic computation task, for each parameter
+setting, and for each library, we run our attack 100 times to record the suc-
+cess rate and the encoding error ε. The results of the experiments with HEAAN,
+PALISADE, SEAL, and HElib are presented in Tables 1 and 2. As shown in these
+tables, our attack always succeeded to recover the secret key in most parameter
+settings against all the libraries, especially for typical input sizes and scaling
+     On the Security of Homomorphic Encryption on Approximate Numbers          673
+
+factors. The failed cases in both tables correspond to the extreme parameters
+where the l2 norm of the underlying plaintext exceeds 252 , showing better practi-
+cal performance than the worst case analysis in Sect. 4.2. (There are more failed
+cases with HElib because its adjusted scaling factors are typically larger and so
+are the plaintexts.) Comparing the results on the logistic and the exponential
+functions, we conclude that a deeper level of homomorphic computation has no
+signiﬁcant eﬀect on our attack, and the runs in the last row of Table 2 failed due
+to larger plaintext sizes. In particular, the encoding error ε with SEAL is smaller
+than other libraries because its implementation of Decode incurs less round-oﬀ
+errors in scaling by Δ−1 .
+    We did a limited number of experiments with RNS-HEAAN because it has a
+small plaintext space. Nonetheless, we see a consistent but small encoding error
+of size ε∞ ≤ 27 in our RNS-HEAAN experiments when B 2 Δ0 ≈ 250 .
+
+
+6   Conclusion
+
+We proposed new security deﬁnitions, extending the traditional IND-CPA secu-
+rity notion, that properly capture the passive security requirement for (homo-
+morphic) approximate encryption schemes. The necessity of adequate security
+notions for approximate encryption reminds us that correctness and security are
+two essential issues for cryptographic systems that must be considered at the
+same time. From a theoretical perspective, we initiated the study of IND-CPAD
+security for approximate computation, by presenting implication and separation
+results between variants of the deﬁnition. There are still many very interesting
+research directions and open questions regarding IND-CPAD security as well as
+simulation-based security. We leave further study of these new security notions
+to future work.
+    For our attack against the CKKS scheme, as it essentially recovers the encryp-
+tion noise ẽ of the ciphertext, a natural countermeasure to harden the CKKS
+scheme is to modify the decryption algorithm, so that it does not output m + ẽ,
+but only an approximation that does not depend on the secret key and encryp-
+tion randomness. Below we discuss some speciﬁc ways to do that. We remark
+that our suggestions are just simple countermeasures to mitigate the eﬀect of the
+attacks described in our work. Finding a more solid solution, provably achiev-
+ing the notion of IND-CPAD security proposed in this paper, is left as an open
+problem.
+
+Gaussian noise. Perhaps the most natural way to do that (from an LWE perspec-
+tive) is to add Gaussian noise to the result of the decryption function, similar to
+the noise introduced by the encryption algorithm. While this makes the schemes
+perhaps more robust, it does not seem an adequate countermeasure. The reason
+is that an attacker may repeatedly request decryptions of the same ciphertext. If
+the noise is unbiased, it can be easily reduced by taking several decryptions, and
+computing their average. The result will not be exact, but the noise can be made
+arbitrarily small by using a suﬃciently large (still polynomial) number of calls,
+674     B. Li and D. Micciancio
+
+so that it can be eliminated either using rounding and Gaussian elimination, or
+applying the theoretical lattice-based attacks described in Sect. 4.2.
+
+Deterministic noise or rounding. To avoid the above weakness, one can eﬀec-
+tively limit the number of decryption calls to 1 per ciphertext by adding a
+deterministic noise in the decryption algorithm, e.g., as a pseudorandom func-
+tion applied to the ciphertext (and key derived from the decryption key.) This is
+similar to the noise ﬂooding techniques used in many lattice cryptographic con-
+texts such as bootstrapping and circuit privacy of homomorphic encryption. It is
+perhaps not practical to apply noise ﬂooding generically to achieve unbounded
+IND-CPAD security, as it requires a superpolynomial modulus, but it might be
+feasible to achieve a bounded q-IND-CPAD security for any a-priori ﬁxed q, using
+techniques similar to [3,8,22]. A rigorous analysis is required not only for security
+but also for practical eﬃciency and tradeoﬀs in the accuracy of the approximate
+computation, and we leave this to future work.
+
+Exact decryption. One can set up parameters in such a way that (m + ẽ)/Δ =
+m/Δ, at least with high probability, where the rounding operation is taken to
+certain precision. This eﬀectively replaces the idea of approximate decryption
+with an exact decryption algorithm, but for a modiﬁed message. This could be a
+more promising direction to enhance the CKKS scheme, and it requires a careful
+analysis of encryption noises together with rounding errors. Intuitively, instead
+of interpreting a ciphertext as encoding an approximate number m+ ẽ, we regard
+them as encryptions of an approximate value (m + ẽ)/Δ. We can then deﬁne
+the operations supported by the homomorphic encryption scheme in such a way
+to ensure exact, deterministic behavior, both for homomorphic computations
+and ﬁnal decryption.
+    Since the resulting scheme satisﬁes the standard notion of correctness for
+encryption (even if, perhaps, for a less standard set of operations than simple
+addition and multiplication), it can be easily analyzed using the traditional def-
+inition of security, and it is immediate to show that the scheme is secure under
+passive attacks based on a standard (Ring) LWE assumption.
+
+
+Responsible Disclosure
+We disclosed details of our attack to the developers of HEAAN, SEAL, HElib,
+and PALISADE at the beginning of October 2020 (and also to Lattigo [34] at a
+later time, after porting our attack to the GO programming language used by
+that library), before making our paper public. All teams were very responsive,
+and they quickly acknowledged that our attack works and it represents a serious
+threat that needs to be addressed. They have taken various actions, addressing
+the vulnerability to diﬀerent degrees, ranging from warning the users that any
+use of the decryption function (except in very controlled environments where the
+result of decryption is kept private,) to implementing some mitigation strategy
+along the lines discussed in the previous section. In particular, we have tested
+     On the Security of Homomorphic Encryption on Approximate Numbers              675
+
+the latest development versions of HElib and PALISADE, and we can conﬁrm
+our attack is no longer eﬀective against them. Developing and implementing a
+variant of CKKS which provably achieves IND-CPAD with only a modest decrease
+in performance is left to future work.
+
+Acknowledgment. We would like to thank Mark Schultz, Jessica Sorrell, and the
+SAIT research team for useful discussions. We would like to thank Victor Shoup and
+Jingwei Chen for pointing out errors in an earlier version of this paper.
+
+
+References
+ 1. Albrecht, M., et al.: Homomorphic encryption security standard. Technical
+    report, HomomorphicEncryption.org, Toronto, Canada, November 2018. https://
+    homomorphicencryption.org/standard/
+ 2. Badawi, A.A., Hoang, L., Mun, C.F., Laine, K., Aung, K.M.M.: Privft: private
+    and fast text classiﬁcation with homomorphic encryption. CoRR, abs/1908.06972
+    (2019)
+ 3. Bai, S., Lepoint, T., Roux-Langlois, A., Sakzad, A., Stehlé, D., Steinfeld, R.:
+    Improved security proofs in lattice-based cryptography: using the Rényi divergence
+    rather than the statistical distance. J. Cryptol. 31(2), 610–640 (2018)
+ 4. Bellare, M., Desai, A., Jokipii, E., Rogaway, P.: A concrete security treatment of
+    symmetric encryption. In: 38th Annual Symposium on Foundations of Computer
+    Science, FOCS 1997, pp. 394–403. IEEE Computer Society (1997)
+ 5. Bergamaschi, F., Halevi, S., Halevi, T.T., Hunt, H.: Homomorphic training of
+    30,000 logistic regression models. In: Deng, R.H., Gauthier-Umaña, V., Ochoa,
+    M., Yung, M. (eds.) ACNS 2019. LNCS, vol. 11464, pp. 592–611. Springer, Cham
+    (2019). https://doi.org/10.1007/978-3-030-21568-2 29
+ 6. Boemer, F., Costache, A., Cammarota, R., Wierzynski, C.: nGraph-HE2: a high-
+    throughput framework for neural network inference on encrypted data. CoRR,
+    abs/1908.04172 (2019)
+ 7. Boemer, F., Lao, Y., Cammarota, R., Wierzynski, C.: nGraph-HE: a graph com-
+    piler for deep learning on homomorphically encrypted data. In: CF 2019, pp. 3–13.
+    ACM (2019)
+ 8. Bogdanov, A., Guo, S., Masny, D., Richelson, S., Rosen, A.: On the hardness of
+    learning with rounding over small modulus. In: Kushilevitz, E., Malkin, T. (eds.)
+    TCC 2016, Part I. LNCS, vol. 9562, pp. 209–224. Springer, Heidelberg (2016).
+    https://doi.org/10.1007/978-3-662-49096-9 9
+ 9. Brakerski, Z.: Fully homomorphic encryption without modulus switching from clas-
+    sical GapSVP. In: Safavi-Naini, R., Canetti, R. (eds.) CRYPTO 2012. LNCS, vol.
+    7417, pp. 868–886. Springer, Heidelberg (2012). https://doi.org/10.1007/978-3-
+    642-32009-5 50
+10. Brakerski, Z., Gentry, C., Vaikuntanathan, V.: (Leveled) fully homomorphic
+    encryption without bootstrapping. ACM Trans. Comput. Theory 6(3), 13:1–13:36
+    (2014)
+11. Brakerski, Z., Vaikuntanathan, V.: Fully homomorphic encryption from ring-LWE
+    and security for key dependent messages. In: Rogaway, P. (ed.) CRYPTO 2011.
+    LNCS, vol. 6841, pp. 505–524. Springer, Heidelberg (2011). https://doi.org/10.
+    1007/978-3-642-22792-9 29
+676     B. Li and D. Micciancio
+
+12. Brakerski, Z., Vaikuntanathan, V.: Eﬃcient fully homomorphic encryption from
+    (standard) LWE. SIAM J. Comput. 43(2), 831–871 (2014)
+13. Brisebarre, N., Joldes, M., Muller, J., Nanes, A., Picot, J.: Error analysis of some
+    operations involved in the Cooley-Tukey fast fourier transform. ACM Trans. Math.
+    Softw. 46(2), 11:1–11:27 (2020)
+14. Chen, H., Chillotti, I., Song, Y.: Improved bootstrapping for approximate homo-
+    morphic encryption. In: Ishai, Y., Rijmen, V. (eds.) EUROCRYPT 2019, Part II.
+    LNCS, vol. 11477, pp. 34–54. Springer, Cham (2019). https://doi.org/10.1007/978-
+    3-030-17656-3 2
+15. Chen, H., Laine, K., Player, R.: Simple encrypted arithmetic library - SEAL v2.1.
+    In: Brenner, M., et al. (eds.) FC 2017. LNCS, vol. 10323, pp. 3–18. Springer, Cham
+    (2017). https://doi.org/10.1007/978-3-319-70278-0 1
+16. Cheon, J.H., Han, K., Kim, A., Kim, M., Song, Y.: Bootstrapping for approximate
+    homomorphic encryption. In: Nielsen, J.B., Rijmen, V. (eds.) EUROCRYPT 2018,
+    Part I. LNCS, vol. 10820, pp. 360–384. Springer, Cham (2018). https://doi.org/
+    10.1007/978-3-319-78381-9 14
+17. Cheon, J.H., Han, K., Kim, A., Kim, M., Song, Y.: A full RNS variant of approxi-
+    mate homomorphic encryption. In: Cid, C., Jacobson, M. (eds.) SAC 2018. LNCS,
+    vol. 11349, pp. 347–368. Springer, Cham (2018). https://doi.org/10.1007/978-3-
+    030-10970-7 16
+18. Cheon, J.H., Kim, A., Kim, M., Song, Y.: Homomorphic encryption for arithmetic
+    of approximate numbers. In: Takagi, T., Peyrin, T. (eds.) ASIACRYPT 2017, Part
+    I. LNCS, vol. 10624, pp. 409–437. Springer, Cham (2017). https://doi.org/10.1007/
+    978-3-319-70694-8 15
+19. Cheon, J.H., Kim, D., Park, J.H.: Towards a practical clustering analysis over
+    encrypted data. IACR Cryptology ePrint Archive 2019/465 (2019)
+20. Dathathri, R., et al.: CHET: compiler and runtime for homomorphic evaluation of
+    tensor programs. CoRR, abs/1810.00845 (2018)
+21. Dathathri, R., et al.: CHET: an optimizing compiler for fully-homomorphic neural-
+    network inferencing. In: PLDI 2019, pp. 142–156. ACM (2019)
+22. Ducas, L., Stehlé, D.: Sanitization of FHE ciphertexts. In: Fischlin, M., Coron,
+    J.-S. (eds.) EUROCRYPT 2016, Part I. LNCS, vol. 9665, pp. 294–310. Springer,
+    Heidelberg (2016). https://doi.org/10.1007/978-3-662-49890-3 12
+23. Gentry, C.: Fully homomorphic encryption using ideal lattices. In: STOC 2009, pp.
+    169–178. ACM (2009)
+24. Gentry, C., Halevi, S., Smart, N.P.: Homomorphic evaluation of the AES circuit. In:
+    Safavi-Naini, R., Canetti, R. (eds.) CRYPTO 2012. LNCS, vol. 7417, pp. 850–867.
+    Springer, Heidelberg (2012). https://doi.org/10.1007/978-3-642-32009-5 49
+25. Goldwasser, S., Micali, S.: Probabilistic encryption. J. Comput. Syst. Sci. 28(2),
+    270–299 (1984)
+26. Halevi, S., Shoup, V.: Algorithms in HElib. In: Garay, J.A., Gennaro, R. (eds.)
+    CRYPTO 2014, Part I. LNCS, vol. 8616, pp. 554–571. Springer, Heidelberg (2014).
+    https://doi.org/10.1007/978-3-662-44371-2 31
+27. Halevi, S., Shoup, V.: Bootstrapping for HElib. In: Oswald, E., Fischlin, M. (eds.)
+    EUROCRYPT 2015, Part I. LNCS, vol. 9056, pp. 641–670. Springer, Heidelberg
+    (2015). https://doi.org/10.1007/978-3-662-46800-5 25
+28. Halevi, S., Shoup, V.: Faster homomorphic linear transformations in HElib. In:
+    Shacham, H., Boldyreva, A. (eds.) CRYPTO 2018, Part I. LNCS, vol. 10991, pp.
+    93–120. Springer, Cham (2018). https://doi.org/10.1007/978-3-319-96884-1 4
+29. Han, K., Hong, S., Cheon, J.H., Park, D.: Logistic regression on homomorphic
+    encrypted data at scale. In: AAAI 2019, pp. 9466–9471. AAAI Press (2019)
+     On the Security of Homomorphic Encryption on Approximate Numbers                677
+
+30. HEAAN (release 2.1). SNUCRYPTO (2018). https://github.com/snucrypto/
+    HEAAN
+31. HElib (release 1.1.0). IBM (2020). https://github.com/homenc/HElib
+32. Kim, A., Papadimitriou, A., Polyakov, Y.: Approximate homomorphic encryption
+    with reduced approximation error. Cryptology ePrint Archive, Report 2020/1118
+    (2020). https://eprint.iacr.org/2020/1118
+33. Kim, D., Song, Y.: Approximate homomorphic encryption over the conjugate-
+    invariant ring. In: Lee, K. (ed.) ICISC 2018. LNCS, vol. 11396, pp. 85–102.
+    Springer, Cham (2019). https://doi.org/10.1007/978-3-030-12146-4 6
+34. Lattigo 2.0.0. EPFL-LDS, October 2020. http://github.com/ldsec/lattigo
+35. Li, Z., Galbraith, S.D., Ma, C.: Preventing adaptive key recovery attacks on the
+    Gentry-Sahai-Waters leveled homomorphic encryption scheme. IACR Cryptology
+    ePrint Archive 2016/1146 (2016)
+36. Lyubashevsky, V., Micciancio, D.: Generalized compact knapsacks are collision
+    resistant. In: Bugliesi, M., Preneel, B., Sassone, V., Wegener, I. (eds.) ICALP
+    2006, Part II. LNCS, vol. 4052, pp. 144–155. Springer, Heidelberg (2006). https://
+    doi.org/10.1007/11787006 13
+37. Lyubashevsky, V., Micciancio, D., Peikert, C., Rosen, A.: SWIFFT: a modest pro-
+    posal for FFT hashing. In: Nyberg, K. (ed.) FSE 2008. LNCS, vol. 5086, pp. 54–72.
+    Springer, Heidelberg (2008). https://doi.org/10.1007/978-3-540-71039-4 4
+38. Lyubashevsky, V., Peikert, C., Regev, O.: On ideal lattices and learning with errors
+    over rings. J. ACM 60(6), 43:1–43:35 (2013)
+39. Lyubashevsky, V., Peikert, C., Regev, O.: A toolkit for ring-LWE cryptography.
+    In: Johansson, T., Nguyen, P.Q. (eds.) EUROCRYPT 2013. LNCS, vol. 7881, pp.
+    35–54. Springer, Heidelberg (2013). https://doi.org/10.1007/978-3-642-38348-9 3
+40. Micciancio, D.: Generalized compact knapsacks, cyclic lattices, and eﬃcient one-
+    way functions. Comput. Complex. 16(4), 365–411 (2007)
+41. PALISADE lattice cryptography library (release 1.10.4). PALISADE Project
+    (2020). https://gitlab.com/palisade/
+42. Park, S., Lee, J., Cheon, J.H., Lee, J., Kim, J., Byun, J.: Security-preserving sup-
+    port vector machine with fully homomorphic encryption. In: SafeAI@AAAI 2019.
+    CEUR Workshop Proceedings, vol. 2301. CEUR-WS.org (2019)
+43. Peikert, C., Rosen, A.: Eﬃcient collision-resistant hashing from worst-case assump-
+    tions on cyclic lattices. In: Halevi, S., Rabin, T. (eds.) TCC 2006. LNCS, vol. 3876,
+    pp. 145–166. Springer, Heidelberg (2006). https://doi.org/10.1007/11681878 8
+44. Raisaro, J.L., Klann, J.G., Wagholikar, K.B., Estiri, H., Hubaux, J.-P., Murphy,
+    S.N.: Feasibility of homomorphic encryption for sharing I2B2 aggregate-level data
+    in the cloud. AMIA Summits Transl. Sci. Proc. 2017, 176–185 (2018)
+45. Regev, O.: On lattices, learning with errors, random linear codes, and cryptogra-
+    phy. J. ACM 56(6), 34:1–34:40 (2009)
+46. RNS-HEAAN. SNUCRYPTO (2018). https://github.com/KyoohyungHan/
+    FullRNS-HEAAN
+47. Microsoft SEAL (release 3.5). Microsoft Research, Redmond, April 2020. https://
+    github.com/Microsoft/SEAL
+48. Sun, X., Yu, F.R., Zhang, P., Xie, W., Peng, X.: A survey on secure computation
+    based on homomorphic encryption in vehicular ad hoc networks. Sensors 20(15),
+    4253 (2020)
+
