@@ -1,0 +1,2493 @@
+[PDF_PAGE 1]
+                        IACR Communications in Cryptology                                  https://doi.org/10.62056/a3qjmpgxq
+                        ISSN 3006-5496, Vol. 3, No. 1, 44 pages.
+
+
+
+                                      Anonymous Credentials from ECDSA
+
+                                                       Matteo Frigo            and abhi shelat
+
+                                                               Google, Cambridge, MA, USA
+
+
+
+                                Abstract.Anonymous digital credentials allow a user to prove possession of an
+                                attribute that has been asserted by an identity issuer without the user revealing any
+                                extra information about themselves. For example, a user who has received a digital
+                               passportcredentialcanprovetheir“ageis> 18”withoutrevealinganyotherattributes
+                                such as their name or date of birth.
+                                Despitetheirclearapplicationtoprivacy-preservingauthentication,anonymouscre-
+                                dential schemes have been difficult to deploy at scale.  Part of the difficulty arises
+                                becauseschemesintheliterature,suchasBBS+[CDL16],usenewcryptographicprim-
+                                itivesthatrequiresystem-widechangestoexistingissuerinfrastructure. Inaddition,
+                                issuers often require digital identity credentials to bedevice-boundby incorporating
+                                thedevice’ssecureelementintothepresentationflow. Asaresult,schemeslikeBBS+
+                                require updates to the hardware on every user’s device.
+                               We propose new ZK techniques which enable the construction of an anonymous
+                                credentialschemeforthelegacyEllipticCurveDigitalSignatureAlgorithm(ECDSA)
+                                signature scheme. By adding efficient ZK arguments for statements aboutSHA256 and
+                                document parsing for ISO-standardized identity formats, we construct the first ZK
+                               proof of posession of a credential that can be deployedwithoutchanging any issuer
+                               processes,withoutchanges to mobile devices, andwithoutrequiring non-standard
+                                cryptographic assumptions. Furthermore, our proof system itself only relies on SHA-
+                                256 as its complexity assumption.
+                                Producing ZK proofs about ECDSA signatures has been a bottleneck for other ZK
+                               proof systems because standardized curves such as P256 use finite fields which do
+                                not support efficient number theoretic transforms. We overcome this bottleneck by
+                                designingaZKproofsystemaroundsumcheckandtheLigeroargumentsystem,by
+                                designing efficientmethods for Reed-Solomon encodingover the required fields,and
+                                by designing specialized circuits for ECDSA.
+                                OurproofsforECDSAcanbegeneratedinaslittleas≈ 20ms. Whenincorporatedinto
+                                afullystandardizedidentityprotocolsuchastheISOMDOCstandard,oursystemcan
+                                generate a zero-knowledge proof for the MDOC presentation flow in a few hundred
+                                mson mobile devices. These advantagesmake ourscheme apromising candidatefor
+                               privacy-preserving digital identity applications.
+
+                        1   Introduction
+
+                        Chaum [Cha85] introduced the idea of ananonymous credential system, orpseudo-nym
+                        systemasamethodtoprovideindividualsfullcontroloverthedisseminationofpersonal
+                        information. Suchasystemconsists ofusers,issuers,and relyingparties. Issuersgivea
+                        set of digital credentials to a user; users can prove to a relying party that they possess
+                        credentials satisfying a property without revealing anything more than the fact that they
+                        hold credentials that satisfy the property. Colluding relying parties are unable to link
+                        a specific user to a pair of interactions they participate in. Even a colluding issuer and
+                        relying party should not be able to link a specific user to a session.
+
+                            E-mail:matteof@google.com(Matteo Frigo),shelat@google.com(abhi shelat)
+
+
+                        This work is licensed under a“CC BY 4.0”license.
+                        Received: 2025-10-08                                                 Accepted: 2025-12-02
+
+
+
+
+
+
+
+
+
+Checkforupdates
+[PDF_PAGE 2]
+2                                                                                     Anonymous Credentials from ECDSA
+
+
+    Early constructions of such systems based on specific signature schemes imposed
+unwieldyrestrictions onusage. Lysyanskaya,Rivest, SahaiandWolf[LRSW99]devised
+a scheme based on one-way functions and generic zero-knowledge protocols.  They
+proposed a more efficient construction based on a non-standard discrete-logarithm as-
+sumption,butitonlysupportedunlinkabilityunderrestrictionsoncredentialissuance
+andusage. Brands[Bra99]introducesaselectivedisclosuresystembasedoncertificates,
+but it does not support unlinkable reuse of credentials.
+    Camenisch and Lysyanskaya [CL01] introduced a bespoke credential system that
+satisfied all of the multi-use and unlinkability properties desirable in a credential sys-
+tem, but their scheme was both computationally expensive and relied on a non-standard
+cryptographicassumption. Theyobservedthatakeyproblemforananonymouscreden-
+tial scheme is to design a signature scheme for which there is also an efficient proof of
+knowledgeofasignature. Later,Camenisch,Drijvers,and LehmannpresentedtheBBS+
+credential scheme [CDL16] as an efficient method to prove knowledge of a signature and
+thus construct an anonymous credential system.
+    Kosbaetal.[KZM+15]proposetheuseofgeneralpurposezkSNARKStobuildanony-
+mous credentials based onstandardizedsignature schemes.  In one of their schemes, a
+credential consists of a 1KB message that is signed using RSA-PSS with a 2048-bit key
+andSHA-256asthehashfunction. Ausercanproveoneinequalitybetweenavaluein
+the message and an external one (i.e., the basic age-over-X application). Their prover
+runs in54–108s depending onparameters. Later, Delignat-Lavaud,Fournet, Kohlweiss,
+andParno[DLFKP16]constructedazkSNARKsystemforprovingpossessionofanX509
+certificateforRSAsignatures,whichrequiresparsingtheASN.1formatintheZKcircuit.
+Theirsystemtook31stoproducejusttheRSAsignatureproof,andtookbetween61-160s
+for the entire anonymous credential presentation. In addition to the impractical time to
+present a credential, both of these proof systems also require a costlytrusted parameter
+setup, and they also require using pairing-friendly curves like the BBS+ scheme.
+    Rosenberg et al. [RWGM23] build anonymous credentials using general ZK tech-
+niques applied tonon-standardizedsignature and hash schemes. Their system exploits a
+blockchain to establishcommon knowledge: an issuer must augment a public data structure
+whentheyissueacredentialtoauser. Theuserreferstothispublicdatastructurewhen
+they present a credential. As a result, their system reduces the credential presentation
+problem to a ZK proof of set membership.  In addition, they use the (non-standard)
+Poseidon hash function to make more efficient ZK proofs concerning set membership.
+Altogether, the addition of the blockhain and the use of Poseidon allows their proof
+system to run between 460–542ms.  An alternative formulation using (non-standard)
+Schnorr signatures over a (non-standard) pairing-friendly curve runs faster in 130ms.
+Unfortunately, their prover requires up to 800mb of memory to produce a proof, and
+as before, atrusted parameterthat is several 100s of megabytesin additionto relying on
+pairing-friendly curves.
+[PDF_PAGE 3]
+Matteo Frigo, abhi shelat                                                                                                             3
+
+
+ImpedimentsWhiletherehavebeenattemptstodeploycredentialsystemsfordigital
+identity applications, such efforts encounter three major roadblocks.
+    First, many identity issuers have deployed hardware security modules that only
+supportstandardizedRSA or ECDSA signatures. Such organizations may be unwilling
+or incapable of updating their infrastructure to support credential systems that rely on
+newer cryptographic assumptions such as pairing-friendly curves or lattices.
+    Asecondproblemisthatcredentialsareissuedbymultipleorganizations(e.g.,state
+DMVs), and relying parties need to support all of them. The task of producing asingle
+commontrusted parameterviaa securemulti-partycomputationceremony involvingall
+issuersseemshighlyimpractical. Thissuggeststhateventheproposedanonymouscre-
+dentialschemesdiscussedabovethatarebasedonstandardizedcryptographyareunsuitable
+becausetheirproofsystemsrequire bilinear pairingsandlargetrustedsetupparameters.
+    Another criticalimpediment is thepotential forscaled abuseofanonymous credentials.
+If credentials can be copied from one malicious user to another, then the system may
+not be able to provide any guaranteed soundness.  Because an anonymous credential
+does not leak any information other than the shared attributes during a presentation flow,
+it is more difficult to discover and/or revoke copied credentials just by observing the
+presentationflows. Thisproblemariseseveninthesettingofcertificatesystemsthatonly
+offer selective disclosure properties.
+    Toaddressthiscopiedcredentialproblem,issuersofdigitalidentitycredentialsrequire
+users to hold their credential using trusted hardware.  Modern mobile devices often
+contain asecure elementwhich is a hardware module designed to be tamper-resistant,
+side-channelresistant,andthussecureagainstmostkeyextractionattacks. Theidentity
+protocols in the ISO MDOC standard, for example, specify issuance and presentation
+flows that require the secure element on the receiving device to store a portion of the
+credential. Most deployed secure elements only support legacy standardized signature
+schemes such as RSA and ECDSA, and in particular, they do not support performing
+operations on pairing-friendly curves,lattices, or even well-deployed signature schemes
+such as EdDSA. It requires a decade to upgrade these elements in the field, which makes
+the adoption of schemes such as BBS+ impractical.
+
+1.1   Anonymous Credentials from ECDSA
+To address all of the noted shortcomings, namely (a) efficiency, (b) requirement to use
+standardized signature schemes, and (c) lack of trusted setups, we present new methods
+toconstructallofthecomponentsnecessarytobuildaperformantanonymouscredential
+that relies only on ECDSA signatures.
+    The main contribution in this paper is the construction of an efficient proof of knowl-
+edge of an ECDSA signature; we also develop the other tools necessary for an issuer to
+issueasetofcredentialsorattributestoauser. Wethencombinetheseintoaprotocolthat
+allows a user to demonstrate possession of an arbitrary subset of those credentials to a
+relying party. Technically, this step yields a proof of possessionof a signature, which can
+be bootstrapped to an anonymous credential using standard techniques for pseudo-nym
+creation from a PRF. This paper will focus on constructing and benchmarking these key
+primitives.
+    Incontrast topriorwork onZK forECDSA(see §5.3forcomparisons), ourproposed
+proofof knowledge of anECDSA signatureruns in almostthe same time asa BBS+ proof,
+and it only relies on the security of a collision-resistant hash function such as theSHA256
+function.  The key to our approach is to combine two recent ZK proof techniques: an
+optimized verifiable computation protocol that is based on sumcheck, and the Ligero ZK
+proof system [AHIV23] that is based on the IOP (or more precisely, IPCP) model. The
+use of sumcheck in recent ZK constructions [WTas +18] shows promise: it avoids having
+tocomputeansuper-lineartimeNumberTheoreticTransform(NTT)onthefullwitness
+[PDF_PAGE 4]
+4                                                                                     Anonymous Credentials from ECDSA
+
+
+for a given circuit. Instead, it is possible to run a sumcheck-based verification protocol
+in roughlylineartime in the size of the theorem-verifying circuit. Moreover, verifiable
+computationprotocolsthatarebasedonsumcheckareinformation-theoreticallysecure
+astheyrequirenocomputationalassumptions. Similarly,theLigeroproofsysteminthe
+IPCP model requires the instantiation of a secureproof oracle, which can also be achieved
+using Merkle trees that only rely on the random oracle. In practice, we instantiate our
+protocols in a non-interactive manner, and thus rely on the random oracle model for the
+soundness and zero-knowledge properties.
+
+
+Key ResultsOne obstacle to proving knowledge of an ECDSA signature is common
+to elliptic curves that have been standardized. Standardized curves for ECDSA, such
+as the NIST P256 curve, specify finite fields that do not have the roots of unity needed
+for efficient NTT algorithms.  Consequently, prior workemulatesthe arithmetic of the
+P256 field inanotherfinite field thatis optimized for ZKproofs. Evenusing very clever
+arithmetic tricks, this overhead amounts to 40–100x increase in arithmetic operations.
+    We overcome this bottleneck using several techniques. First, we design an NTT in
+aquadraticfield extensionwhichallowsus toperformNTTs (infieldsthatdo nothave
+proper roots of unity) at only≈ 1.5x the cost of doing so in an NTT-friendly prime of the
+same size.
+    We also develop a novel Reed-Solomon encoding approach which can exploit the
+subfieldstructureofthefield,yieldingaconstant-factorimprovementinproofsizeover
+the standard NTT-based methods.  Instead of defining the Reed-Solomon code as a
+polynomialinterpolationovertherootsofunity,wedefinethecodeasaninterpolation
+overanarithmeticsequenceofevaluationpointsinthebasefield. Wepresentamethodto
+performtheinterpolationoverthesepointsusingalinearconvolution. Thus,whenour
+witness values are over a small subfield or base field, even though the NTT itself may be
+carriedoutoveralargerextensionfield,theresultingcodewordremainsinthesubfield,
+yielding a smaller proof.
+    Some applications require zero-knowledge arguments about the pre-image of cer-
+tainnaturallyboolean functions such as                      SHA256. Following the work of Diamond and
+Posen [DP25, DP24], we confirm the speedup possible with using the extension field
+GF(     2k) to perform the sumcheck. In this case, the standard NTT algorithms no longer
+apply, and we instead use the family of additive FFTs [LCH14]. Specifically, we develop
+a newbidirectional truncatedadditive FFT to solve the problem of polynomial interpola-
+tion over cosets. As our benchmarks show, this operation provides almost an order of
+magnitude speedup in basic algebraic operations.
+    Our next contribution stems from the specific circuits we developed for verifying
+ECDSAsignatures,verifyingthepre-imageofSHA-256,andforparsingnesteddocument
+formats such as CBOR that are specified in current identity credential standards such as
+ISO MDOC. These components are necessary in order to satisfy our goal of constructing
+proof of posession forlegacycredential formats.
+    We alsopresent amethod to improveperformance whena ZK credentialverification
+taskinvolvesbothECDSAsignaturesandSHA-256hashes. Priorproofsystemsverifya
+singlearithmeticcircuitdefinedoveronefinitefieldF. However,asourbenchmarksshow,
+itissubstantiallyfastertoverifypropertiesaboutSHA-256preimagesusingabinaryfield
+extension instead of a prime field. A natural approach is to verify parts of a statement
+under acircuitoverFp, whileverifying other constraints undera more convenient field
+GF(     2k). Aproblemariseswhenacommonwitnessvaluemustbeusedinbothpartsof
+this circuit. A malicious prover may include inconsistent copies of this witness value
+in the two circuits. To address this problem, we design awitness consistency protocolin
+whichwitnessesthatarecommittedintwodifferentZKproofsoverdifferentfieldscanbe
+proven to be consistent with high probability. Our approach is to include the evaluation
+[PDF_PAGE 5]
+Matteo Frigo, abhi shelat                                                                                                             5
+
+
+of a random MAC on the witness—a computationthat is small and easy to simulate over
+anyfieldinbothFandGF(     2k). Wemeasuretheoverheadofthisconsistencycheckand
+showthataftertheSHA-256pre-imageverificationexceedsafewblocks,ourconsistency
+method becomes more efficient.
+
+Special notes about this applicationSome recentsuccinctZK NARK systems produce
+proofs on the order of hundreds of bytes by exploiting a very large trusted parameter
+setup. In an anonymous credential system that involves many issuers, relying parties,
+andusers,suchagloballytrustedsetupceremonyisimpracticaltocoordinate. Thispaper
+focuses on ZK solutions thatdo notrequire any trusted setup.
+    Additionally, while the system we develop is succinct in proof size, many recent
+ZK systems are also succinct in verifier-time. In our anonymous credential application,
+however, it is more important to conserveprover time, because the prover is often the
+user’s mobile device.
+
+Contemporaneous workWoo et al. [         WOS+25] present an independent construction of
+aZK proofof posessionforlegacysignaturessuchas ECDSA.Theirconstruction takes
+a different strategy and results in a proof for ECDSA that is several times slower and
+also requires the public key of the signer to be a component of the theorem statement
+(thereby making it unsuitable, for example, to be applied in the MDOC protocol). This
+paperincludesnewtechniquesforsumcheck,RSencoding,andtwo-fieldtheorems,as
+well as different techniques for arithmetizing ECDSA and SHA-256. See §5.3for more
+discussion.
+
+Open source availabilityThe system described in this paper is available as open source
+athttps://github.com/google/longfellow-zk.
+
+2   Zero-Knowledge Argument System
+
+We construct a zero-knowledge argument (ZKARG) system by composing the Ligero
+proof system [AHIV23] with a public-coin verifiable computation (VC) protocol that is
+basedonthesumcheckprotocol. AVCprotocolallowsaprovertoconvinceaverifierthat
+C(x) =       0in time and space that is smaller than  |C|   . Such protocols have been implicit
+in the literature since the introduction of sumcheck [LFKN92]. See Thaler [Tha22] for
+standard cryptographic definitions (omitted here for space).
+    Our approach to constructing a ZK argument follows the one of Hyrax [WTas+18],
+whichisaninstantiationoftheideafromBen-Oretal.[BOGG+88]. Specifically,oninputa
+circuitC,publicinput x,andwitnessw,theproverfirstsendsacommitmentcomtowand
+commitment parameters. The prover andverifier then interactivelyproduce acommitted
+transcript T for a VC protocol on input(C ,x)  ; specifically, when the VC protocol instructs
+the prover to send its ith message mi to the verifier, it instead sends a commitmentt′i to
+that message; the verifier always responds to the prover’sith commitment with a random
+challenge as per the usual public-coin VC protocol and defers performing all of the
+prescribed verification steps. Finally, the prover and verifier engage in a zero-knowledge
+proof for the theorem “(t ′1,...,t′ℓ) is a commitment to transcript t and t is an accepting
+VC transcriptfor(C ,x)  ." Inparticular,the ZK proof forthis theorem implicitlyensures
+that all of the verifier’s VC steps hold with respect to the original transcriptt.
+    Theresultingcompositionenjoysefficiencies. BecauseVCproducesasuccinctproof
+withrespecttoC,theLigeroproofinoursystemisasymptoticallysmallerthanastandalone
+LigeroproofforC(x)=       0. Asweshowbelow,thissignificantlyimprovestheperformance
+of the overall system because the most costly component of Ligero, the NTT, is applied to
+[PDF_PAGE 6]
+6                                                                                     Anonymous Credentials from ECDSA
+
+
+asmall transcriptfor C(x)=       0instead ofa full tableaufor thecomputationof   C(x)      . Note
+that the VC protocol is not a zero-knowledge protocol, but Ligero is, and in this case, the
+composition yields a protocol that satisfies the zero-knowledge property.
+    In the rest of this section, we explain each component in more detail, and provide
+more formal descriptions of the protocol and its performance.
+
+2.1   Verify Interactive Protocol
+Wedescribeaverifiablecomputation(VC)protocolderivedfromalineofworkbasedon
+the sumcheck protocol [GKR08,CMT12,Tha13,WJB                                            +17,WTas     +18].
+
+SumcheckThe sumcheck interactive protocol [                   LFKN92] allows a Prover to efficiently
+convince a Verifier that a claimed value equals the sum of a polynomial evaluated at
+everypoint onthe booleanhypercube. Herewe quotea performancetheoremtaken from
+Thaler [Tha22] characterizing sumcheck.
+Theorem1([  Tha22, Proposition4.1]).Let         g bea v-variatepolynomial ofdegreeat most d in
+each variable, defined over a finite fieldF. For any specified H∈F     , letLH be the language of
+polynomials g (given as an oracle) such that
+
+                              H=    ∑                    ...  ∑      g(b    1,...,b     v).                                    (1)
+                                     b1∈{0,1}     ∑b2∈{0,1} bv∈{0,1}
+Thesum-checkprotocolis aninteractiveproofsystemforLH withcompletenesserrorδc = 0and
+soundness errorδ    s≤vd/|F|.
+    Moreover,if deg(g)=O(                1),thentheprotocolrequires v roundsofcommunication,thetotal
+communication cost is O(v)       field elements, the verifier time isO(v)+T(g)                , and the prover’s
+time is O(M(g))             where T represents the cost of 1 evaluation of g and M represents the cost of
+evaluating g on the hypercube.
+    As a notational convenience, we often use capital letters to represent a vector of
+variables over{0,1}. For example, lettingB= (b                                      1,...,b     v), we write:
+
+                                              H=    ∑
+                                                     B∈{0,1}            v g(B)
+
+or evenH=        ∑B g(B)as shorthand for Equation (1).
+
+Applying sumcheck for circuit verification Thaler [  Tha22] provides background on
+sumcheck and an overview of the application of sumcheck to the task of verifiable
+computing. In particular, as first shown in [GKR08], sumcheck can be applied to the task
+of verifying that C(x) =       0where   C alayered circuitstarting with layer0as the output
+layer, anddas the input layer.
+    Wepresentanoptimizedvariantinthisfamilyofprotocolsthatbuildsonobservations
+by Cormode et al. [CMT12], Thaler [Tha13], and other follow-ups [WJB+17, WTas+18].
+Ourimprovementsconsistofasimplificationofthewiringpredicate,adifferentapproach
+to the layer-to-layer reduction, and different methods to compute the evaluation of the
+sparse wiring predicate.
+    In our formulation, layer j of the circuit computes an array Vj[0,...,wj−1] of output
+wiresgivenanarrayVj+1  [0,...,wj+1  −1]ofinputwires,whicharetheoutputsoflayer(j+
+1).  Let ωj  =⌈log      2(w  j)⌉ .  Instead of the separate addition and multiplication gates
+of[GKR08],wesupportonlyone(degree-2)“gate”whichcomputesthegenericquadratic
+form:
+                            Vj[i]=     ∑             Qj[i,ℓ,r]·V            j+1  [ℓ]·V      j+1  [r],
+                                      ℓ,r∈{0,1}             ωj+1
+[PDF_PAGE 7]
+                                   Matteo Frigo, abhi shelat                                                                                                             7
+
+
+                                   We callQthequadandQ                                      j[i,ℓ,r]thequad term.
+                                        Byconvention,theinputwireVj[0]= 1foralllayers,andthusthequadrepresentation
+                                   handlestheaddandmultiplicationgatesinauniformmanner. Forexample,thisquadform
+                                   approachreducesthedepthofthestandardellipticcurveadditionformulafrom5to3.
+                                   By convention, an input satisfies the circuit if all outputsV                 0[i]of layer 0 are 0.
+                                        Thearraysdefined above naturally specify multi-variate—and specifically multi-
+                                   linear—polynomials. Weusetilde-notationtodenotetheuniquemulti-linearextensionfor
+                                   an array. For example,  ˜Vj(i)   represents the unique multi-linear extension that interpolates
+                                   the arrayV            j[i].
+                                        Atthebeginningoftheprotocol,theverifierpicksarandompointr0∈F   ω0. Because
+                                   outputs are expected to be0, the verifier expects        ˜V0(r  0)= 0. Our process begins withtwo
+                                   claims(c  0,0,c0,1)=(0,0) on the values  ˜V0(r  0). In this first step, both claims are on values
+                                   onthe sameevaluationpoint, butinlater rounds,theseclaims willbeon differentpoints.
+                                   VerifyP,V  (C,x)for statementC(x)=0:
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Protocol 2.2. VerifyP,V  (C,x)for statementC(x)=0
+   The depth-d circuit C is defined over fieldF. Prover and Verifier hold input(C ,x)  .
+   Let (Q  0,...,Qd−1   ) be the quad form for each layer of C, and define wj to be the
+   number ofwires inlayer j andωj =⌈log      2(w  j)⌉ . Let Vj[i]   representthe valueof the
+   ith output wire in layerj. Verifier rejects if any check fails.
+
+       1.Verifier samplesr←F                           ω0 and setsr        0,b  ←r,c        0,b  ←0 forb∈{0,1}.
+
+       2.Forj=0,1,...,d−1:    // Prover assertsc                                                     j,b  =  ˜Vj(r  j,b ),b∈{0,1}.
+
+             (a)Verifier sendsα                   j←Fand setsY=α                         j·c j,0 +(1−α         j)c  j,1 .
+             (b)Define the 2ω         j+1   -variate polynomial
+
+                                   gj(L,R)=  αj·  ˜Qj(r  j,0 ,L,R)+(1−α                  j) ˜Qj(r  j,1 ,L,R)  
+                                                   · ˜Vj+1  (L)·       ˜Vj+1  (R)
+
+                   inL=L           0,...,L ωj+1  −1   andR=R                0,...,R ωj+1  −1  .
+             (c)Prover and Verifier apply sumcheck to the claim:
+
+                                                       Y=     ∑                 gj(L,R)
+                                                              L,R∈{0,1}               ωj+1
+
+                   The sumcheck protocol produces two random pointsℓ and r, a value y,The next theorem is adapted from a similar one in Thaler [Tha22].
+                   and a claim thatTheorem 3([ Tha22]). Let    C bea depth-d layeredcircuitoverF whose jth layer haswidth wj, lety           ?=g    j(ℓ,r).
+             (d)Prover sends claimsωj =⌈log(w                j)⌉and let Z=2       ∑dj ωj.c                     j+1,0   =  ˜Vj+1  (ℓ)andc               j+1,1   =  ˜Vj+1  (r).
+             (e)Verifier checks:
+
+                               y  ?=αj·  ˜Qj(r  j,0 ,ℓ,r)+(1−α                j) ˜Qj(r  j,1 ,ℓ,r) ·c j+1,0  ·c j+1,1
+
+                   and continues with points(r                j+1,0   ,r j+1,1  )= (ℓ,r)and claimsc                         j+1,b     .
+
+       3.Verifier verifies the claimsc                  d,b?=  ˜Vd(r  d,b  )by direct evaluation of   ˜Vd(r  d,b  ).
+[PDF_PAGE 8]
+8                                                                                     Anonymous Credentials from ECDSA
+
+
+    VerifyP,V  (C ,x)   isa Z-roundinteractiveprotocolforthetheorem C(x)=       0thathascomplete-
+ness error 0, soundness errorO(Z/|F|)and total communicationΘ(Z)field elements.
+    Moreover,theverifiercomputationconsistsofsamplingΘ(Z)        elementsfromF,performing
+Θ(Z)        operations inF, and performing one dot product between the input x and a vectorwith
+tensorformderivedfromtherandomlysampledchallenges. TheProvercomputationconsistsof
+O(|C|)field operations.
+
+    The notationsz(C,x)represents this protocol’s transcript length on instance(C,x).
+
+RemarksAchieving the stated runtime requires careful, but well-known optimizations
+of sumcheck for the Prover and Verifier and an efficient method to evaluate the wiring
+predicate  ˜Q ateachlayer. Step2ecan bemovedoutsideofthe loop. Moreover, allofthe
+verifier’s checks in Sumcheck in step2ccan also be moved outside of the loop. In this
+formulation,theVerifiercanbesplitintotheinteractivepartthatincludesstep1,2(a),and
+the random sampling steps in 2(c), and a second part that performs all of the checks in
+steps2c,2e, and3. We denote this second part as check                                  V(C,x).
+
+SIMD optimizationIt is well known that when                        C validates multiple copies of the same
+smallercircuit,itis possible toachieveverifiersuccinctnessorspeedupintime[CMT12,
+Tha13, WJB+17].  These extensions can be added to our formulation, but are omitted
+because our system does not require verifier succinctness.
+
+2.2   Ligero Zero-Knowledge System
+The Ligero [AHIV23] protocol is a zero-knowledge interactive PCP that represents an
+optimized instantiation of the “MPC-in-the-head" technique. The proof size is roughly
+square-root in the size of the circuit, and the proof system only assumes the existence of a
+cryptographichashfunction. NotethatanIPCPisaspecialcaseofanIOPinwhichthe
+prover sends a proof oracle only in the first round, and subsequent rounds only require a
+standard message response to the verifier’s challenge instead of an oracle1.
+    Whereas the previous section considered a circuit C with input x, we now further
+split the input into a pair(x ,w)   where x represents thepublic inputthat is known to both
+Prover and Verifier, and w is theprivate witnessthat is known only to the Prover.  See
+Ligero [AHIV23] for standard definitions of ZK Proof of Knowledge.
+    We now identify the components of the Ligero protocol.  The LigeroCommit(x                         ,w)
+method allows a Prover to produce a short commitment com to inputs (x ,w)  .  Next,
+proverandverifierrespectivelyrunLigeroProver oninputs(C ,x,w,com)        andLigeroVerify
+on inputs(C ,x,com)       , and finally, the verifier method outputs accept or reject. Ames et
+al. [AHIV23] characterize the performance of Ligero:
+
+Theorem 4([  AHIV23, 5.4]). Fix parameters         n,m,ℓ,k,t,e such that e<(n−k)/               2and   n>
+2k+e     . Let C:F    ni →F     be an arithmetic circuit of size s, where|F| ≥ℓ+n            , m·ℓ >n         i+s
+and k>ℓ+t      . Thenthenon-interactiveprotocol(P ′,V′) compiledfromprotocolZKIPCP(C                ,F)
+using the BCS16-transformation is a non-interactive random-oracle proof with:
+
+    •  AdaptivesoundnesserrorϵFS(C ,T,λ)=T·ϵ(C)+                3(T  2+1)/ 2λ andadaptiveknowledge
+       errorϵ    FS−K   (C,T,λ)=T·ϵ(C)+3(T                                         2+1)/2        λ against T-query provers;
+
+    •  Adaptive soundness error ϵQFS(C ,T,λ) =Θ(T·ϵ                  FS(x))    and adaptive knowledge error
+       ϵQFS−K   (C ,T,λ) =Θ(T·ϵ                  FS(C))     against T−O(q(C)log(len(C)))                               -query quantum
+       provers;
+
+   1ThetreatmentofsubsequentProvercommunicationasmessagesinsteadoforaclesconsistingofasingle
+point enables a simpler and more efficient compilation from IOP to protocol.
+[PDF_PAGE 9]
+                                 Matteo Frigo, abhi shelat                                                                                                             9
+
+
+                                     •Statistical zero-knowledge z  ′(C,λ)=4len(C)/2                         λ/4
+                                 where
+                                                                                               (n+2)
+                                                                ϵ(C)=ϵ            K(C)=max          |F|        ,(1−e/n)                  t ,
+
+                                                                     len(C)=n+(k+ℓ−1)+(2·k−1)
+
+                                 and V′ makes t queries of symbols of sizeF       4m+5      .
+
+                                 ImprovementInAppendixCofanupdatedversionof[                        AHIV23],theauthorsconclude
+                                 that the overall soundness error can be bounded by
+                                                                 "                    k+ℓ       t       2k    t              #
+                                                                   (1−e/n)                 t+n     +      n      + n+3|F|
+
+
+                                 We use this formula when setting security parameters.
+
+                                 2.3   ZK Protocol
+                                 OurfirstcontributionistonotetheefficiencyofusingtheLigerozero-knowledgeprotocol
+                                 toverifythe             checkV verifier. Thisultimatelyyields azero-knowledge protocolfor acircuit
+                                 C(x    ,w) =    0that is substantially more efficient than using Ligero (or as we show, any
+                                 other previously known setup-free ZK system) for the same circuit.
+                                 ZK protocol(P,V)for circuitC(x,w)=0:
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Protocol 2.5. ZK protocol(P,V)for circuitC(x,w)=0
+  ThecircuitC isdefinedoverfieldF. Proverholdsinput(C ,(x ,w))   andVerifierholds
+  input(C,x).
+
+      1.P,Vcompute the sizeℓ←sz(C)of the Verify transcript.
+
+      2.Psamplespad←F                              ℓ and setsw     ′←(w,pad)as the witness.
+
+      3.Pcomputescom←LigeroCommit(w                                 ′)and sendscomtoV.
+
+      4.P,VrunVerify                  P,V  (C,(x,w))with these changes:
+              •  WheneverVerifyP instructs the prover to send the ith message mi ∈F   to
+                  V,Psendst              ′i←m     i+pad    i.
+              •  WhenVerifyV instructs the verifierto send theith random challenge ri, VRemarksThe prover in line2commits to                 |w|+ℓ         elements, which can be substantially
+                  returnsr              i.smallerthanthe|C|    elementsthattheLigeroprovermustcommittoifitisapplieddirectly
+                                 to C. The Ligero commitment involvesrelatively expensiveReed-Solomonencodingover
+          At the end, P,V hold an encryptedsumcheck transcript T′ = ((t ′i,ri))i∈[0,ℓ]        for
+          instance(C,(x,w)).
+
+      5. Define the circuit C′(x ,w′,T′) to firstdecryptthe transcript                    T= ((t     i =t  ′i−
+          padi,r i))i∈[0,ℓ]       , and then runcheck      V(C,(x,w),T).
+
+      6.P    and V run LigeroProve(C       ′,(x ,w′),T′,com)        and LigeroVerify(C        ′,x,T′,com)
+          respectively;Voutputs the result.
+[PDF_PAGE 10]
+10                                                                                    Anonymous Credentials from ECDSA
+
+
+F. ThisimprovementisespeciallyimportantwhenFdoesnotnativelyhavesuitableroots
+of unity, as is the case for the ECDSA circuit.
+    The Ligero prover runs on circuit C′ which decrypts the transcript (via the one-time
+pad,i.e.,usingonefieldoperationperelementofT′)andrunsthecheckV circuit. Roughly,
+C′ performs a small number of field operations and thencomputes one dot product with
+(x ,w)  .  Moreover, this dot product occurs between the hidden witness and a publicly
+computable challenge vector derived from the random challenges sent by the verifier.
+This public vector also has atensor-formthat is induced by the Verify protocol.
+    The main detail concerns how to “commit” to the transcript of the VC protocol: we
+use a one-time pad encryption in a way that allows an efficient Ligero proof about the
+checkV verifier. Namely, the one-time pad commitment creates linear Ligero constraints
+that are efficient to process. Our formulation only requires Ligero to handled quadratic
+constraints where d is the depth of the original circuit (typically a small integer< 20),
+whereas the original circuit may contain thousands of multiplications.
+    In more detail, the verifier operations in sumcheck reduce to two cases. Recall that
+the verifier holds a “left-hand side" or claim c∈F    , which represents the summation
+of a multilinear-extension polynomial over the hyper-cube at a random point. As the
+sumcheck loop begins, the prover responds with a low-degree polynomial p of degree 2
+expressed in the first variable of the hypercube. The first case of the check is to ensure
+that p(  0)+p(     1) =c   , that is, to verify that the polynomial p aligns with the main claim
+of the sumcheck. Next, the verifier samples a randomr∈Fand evaluatesp(r)to define
+the next left-handside claim. For our purposes, the evaluation at r can be writtenas the
+dot-product⟨λ  r,(p(   0),p(  1),p(  2))⟩  for the Lagrange interpolation values λr. This loop
+proceeds over all of the variables of the sumcheck. Recall that our sumcheck (eliding the
+copy variables) is of the form q(l   ,r)·w(l)·w(r)                   where q represents the quad-form wiring
+predicate. After allℓ variables are processed, the verifier is left with an identity of the
+form⟨λ  rℓ,pℓ⟩=q(L        ,R)·w(L)·w(R)                       where rℓ was thelast random challenge, thecapital
+L,R representvectorsofallℓ challenges,and pℓ isthelastpolynomialsentbytheprover.
+    Inourprotocol,theverifierreceivesapadded,orencryptedformofeachsumcheck
+message. For example, instead of receiving the polynomial in the form of evaluations
+{p(i)}           0,1,2, it instead receives{p(i)+pad                             i}0,1,2 with different pads used for eachpolyno-
+mial. Inthelaststep,insteadofreceivingw(L)       andw(R)       ,theverifierreceivesw(L)+pad             L
+andw(R)+pad                      R. These{pad                i},pad    L, andpad         R values are committed beforehand.
+    Becausetheverifiercannotdirectlychecktheencryptedsumcheckmessages,itinstead
+usesLigero constraintsonthe committedpad valuesto ensurethesame. Inthe firststep,
+the verifier can add thelinearLigero constraint that               pad0+pad    1 is equal to the values
+(p(   0)+pad    0)+(p(   1)+pad    1)−c      which are public values included in the encrypted
+transcript. This check ensures that c=p(      0)+p(     1). In the next step, p(r)      can again be
+defined by adding constraints on the public padded values{p(i)+pad             i}i=0,1,2    and the
+Lagrangecoefficientsforevaluationatr. Inthisway,theremainingpolynomialconstraints
+can be expressed via linear constraints on the pad values in the commitment.
+    The final check that ⟨λ  rℓ,pℓ⟩=q(L        ,R)·w(L)·w(R)                       requires adding linear and
+quadratic Ligero constraints on the pad. Expanding public terms yields two relations:
+
+  (w(L)+pad               L)·(w(R)+pad                   R)=w(L)·w(R)+w(L)pad                                         R+w(R)pad                L+pad    L·pad R
+                                            =w(L)·w(R)+w(L)pad                                         R+w(R)pad                L+pad    L·pad R
+                                               +2pad       L·pad R−2pad       L·pad R
+                                            =w(L)·w(R)+(w(L)+pad                                         L)pad  R
+                                               +(w(R)+pad               R)pad  L−pad    L·pad R
+                         ⟨λ,p     ℓ+pad   ℓ⟩=⟨λ,p          ℓ⟩+⟨λ,pad          ℓ⟩
+
+LetQ=q(L,R), which can be computed by the verifier. Combining, and re-arranging:
+[PDF_PAGE 11]
+Matteo Frigo, abhi shelat                                                                                                           11
+
+
+Claim.⟨λ                  rℓ,p ℓ⟩=Q·w(L)·w(R)if and only if
+
+ ⟨λ  rℓ,p ℓ+pad   ℓ⟩−Q(w(L)+pad                       L)(w(R)+pad               R)=⟨λr       ℓ,pad ℓ⟩−Q(w(L)+pad                       L)pad  R
+                                                                     −Q(w(R)+pad                        R)pad  L
+                                                                     +Q·pad          L·pad R
+
+    The left hand-side of the claim includes only public values from the transcript, and
+the right-handside consists of linear constraints onpad,padL, andpadR and aquadratic
+constraint onpad      L·pad R.
+    To reduce the size of the transcript, it is well-known that p(  1) can be removed, and
+the verifier can implicitly infer its value as c−p(      0) for the purpose of interpolating
+at p(r)     . This observation can be incorporated into the constraints generated above; in
+particular,theverifiercanmaintainasymbolicrelationshiponeach p(r)     ,anddeducea
+single constraint that involves allpadvariables for the layer,pad               L, andpad         R.
+
+Theorem 6.If    C is a depth-d and width-w circuit overF, and if Ligero is a zero-knowledge
+protocolwithadaptiveknowledgesoundnesserrorϵFSK(|C|     ,T,λ)   andstatisticalzero-knowledge
+error z′(C ,λ)  ,thenProtocol2.5isanhonest-verifierzero-knowlegeprotocolwithcompleteness,
+knowledge soundness error bounded by O(η(|C|            ,|F|)+d·log(w)/|F|)                                and zero-knowledge
+error bounded by z′(C,λ).
+
+Proof.(Sketch) The completeness property follows by inspection.
+    To argue the claim on knowledge soundness error, it remains to analyze an extractor
+algorithmE               ′ for the protocol. The extractorE             ′P ∗(C,x)for this system receives the circuit
+C,thepublicinput x,andoracleaccesstoaprover P∗ andperformsthefollowingstepsin
+ordertooutputawitness w forthestatement C(x    ,w)=    1. Extractor   E′ runstheprotocol
+with P∗ until the beginning of step6in order to produce the values          com and T′. It then
+runs theLigero extractoralgorithmon thecircuit C′,com, T′ and x anduses thestate of
+P∗ at the beginning of step6as an oracle in order to simulate the Ligero prover. If the
+Ligeroextractorfails,then E′ alsofails. IftheLigeroextractorsucceedsbyoutputtinga
+witness w′, then E′ parses w′ into(w ,pad)      , and then uses pad to decrypt the transcript
+T←T      ′⊕pad    (abusing notation). E′ then runs the sumcheck verifier on C,x,T. If the
+sumcheckverifiersucceeds,then E′ verifiesthatC(x    ,w)   succeeds,andifso,outputs w. If
+either the sumcheck verifier fails, or the circuit check fails, thenE      ′ fails.
+    Byconstruction,if E′ outputsavalue,itisguaranteedtobeavalidwitnessbecausethe
+final stepof E′ explicitly verifiesthatC(x    ,w)=    1. Withoutloss of generality, weassume
+thattheLigeroextractorbehavessimilarly,incurringallofitsknowledgesoundnesserror
+only when it fails to output a witness. Thus, bounding the error of E′ (by union bound)
+only requires analyzing three failure cases. The first occurs if the Ligero extractor fails.
+ThisisboundedbytheknowledgesoundnesserrorgiveninTheorem4. Thesecondoccurs
+if the Ligero extractor outputs a witness,but the witness does not satisfy the sumcheck
+verifier. Thisprobabilityis0bytheabove-mentionedsoundesspropertyofLigero,andthe
+construction of the checkV circuit. Finally, it is possible that the Ligero extractor outputs a
+witness w thatsatisfiesthesumcheckverifier,butnonethlessdoesnotsatisfythecircuit:
+C(x    ,w) =    0. In this case, transcript   T represents a soundness failure for the sumcheck
+verifier. ThestatisticalsoundnessgapoftheverifyprotocolfromTheorem1boundsthis
+value. Altogether, the union bound of these 3 events yields the bound on soundness error
+given in the theorem statement.
+    The zero-knowledge property follows directly from the Ligero simulator run on the
+augmented circuit C′. Specifically, the simulator for Protocol2.5proceeds as follows. In
+the first step, it samples a random encrypted transcript T′. It then invokes the Ligero
+simulator on input statement(C ′,x,T′), which produces an output com,π. Finally, the
+simulator outputscom,T                   ′,pi.
+[PDF_PAGE 12]
+12                                                                                    Anonymous Credentials from ECDSA
+
+
+    Toanalyzethesimulator,observethatthedistributionof T′ producedbythesimulator
+is identical to that produced by an honest prover, as T′ is a one-time pad encryption
+in both cases.  Since the statements (C ′,x,T′) are identically distributed, we can rely
+directly on the zero-knowledge property of Ligero. Specifically, Theorem4guarantees
+anhonest-verifier simulatorforLigerowithzero-knowledgeerror boundedbyz′(C ,λ)  .
+Consequently, this value also bounds the probability of distinguishing the simulated
+output from an honest execution, matching the claim.
+
+2.4   Applying the Fiat-Shamir Transform
+
+We apply the Fiat-Shamir transform on our basic protocol to construct a non-interactive
+protocol,andarguesoundnessbyapplyingtheround-by-round Soundnesslemmapre-
+sented by Canetti et al [CCH +18].
+
+Theorem 7([  CCH+18]). Suppose that   Π= (P     ,V)    is a2 r-message public-coin interactive
+proof for a language L with perfect completeness, polylog(n)            total bits of prover-to-verifier
+communication,and round-by-round soundnesswith acorresponding statefunction State. Let
+Xn denote the set of partial transcripts (including the input and all messages sent) and let Yn
+denote the set of verifier messages whenΠ is executed on an input of length n. If a hash family
+H={H           n :X n →Y     n} is RState-correlation intractable and evaluable in time  ˜O(n)       , then there
+exists(Gen,              ˜P,    ˜V)that constitutean adaptively sound publicly verifiable argument for L.
+
+    Canetti et al [CCH+18] argue that sumcheck is round-by-round sound withO(d/|F|)              .
+Ligero is also a round-by-round sound withO(η(C              ′)/|F|).
+    It remains to argue that the implementation of the random oracle is correlation-
+intractable with respect to the round-by-round state function for sumcheck and Ligero.
+In practice, whether an implementation of the random oracle satisfies this correlation-
+intractability property becomes an implicit assumption.  Towards that, we adapt best
+practicesin designingthe oracleimplementation. To avoidissuesof adaptivesoundness,
+ourprotocolselectstherandomoracleafterpickingthecircuittoprove. Wealsochoosea
+random oraclethat hashigher circuit depthand requiresmoregates to compute than the
+circuit C. Furthermore,the size ofthe transcript usedas a queryto the oracleto generate
+the Verifier’schallenges are guaranteedto be largerthanC. Weincorporate the Prover’s
+first message, an identifier for the circuit, the input and output of the theorem statement
+aswellasastringof0-bytesthatislargerthan|C|    intotheprefixofthetranscript. These
+choices are easy to implement and add very little processing time to the protocol. On the
+other hand, they seemingly avoid attacks such as the one suggested by Khovratovich,
+Rothblum,andSoukhanov[KRS25]againstcorrelation-intractabilityinwhichtherandom
+oracleiscomputedwithintheZKprotocoltherebyallowingtheoutputofthecircuittobe
+relatedtotheverifier’schallenge. Asanadditionalproperty,weensurethateachqueryto
+the random oracle can be uniquely mapped into a protocol transcript. To facilitate this
+property, the type and length of each message is incorporated into the query string.
+
+3   Optimization
+
+3.1   Reed-Solomon encoding over prime fields
+
+TheLigeropolynomialcommitmentspecificallyrequiresReed-Solomoncodes,asopposed
+togenericerror-correctingcodes. Ligerointerpretsthemessage(anarrayoffieldelements)
+astheevaluations ofalow-degree polynomial atcertainpoints,and whilethechoiceof
+the points does not matter for soundness, it does affect performance. We describe our
+choices for prime fieldsF            q here and binary fields in Section3.2.
+[PDF_PAGE 13]
+Matteo Frigo, abhi shelat                                                                                                           13
+
+
+    A natural set of evaluation points would be ωi, for a root of unity ω, so that FFT-
+basedmethodscanbeusedforinterpolation. However,thischoiceleadstocomplicated
+interactions between the factorization of (q−    1), the length of the codeword, and the
+efficiencyoftheinterpolation. Inparticular,FP256   whereP256istheNISTprimeP256=
+2256−2    224+2    192+2    96−1 has no usable roots of unity.
+    Instead, we define amessageto consist of the evaluations of a polynomial                p(x)       of
+degree at most d at points x∈{F  q(i):     0≤i≤d}         , whereFq(i)=imodq                is thenatural
+injection of integer i into the fieldFq. Similarly, acodewordof length                  m consists of the
+m evaluations{p(F       q(i)):     0 ≤i<m}          . These definitions are well-formed for fields of
+sufficientlylargecharacteristic,andtheonlyremainingproblemishowtocomputethe
+polynomial interpolation.
+
+
+Interpolation via ConvolutionGiven the evaluations                        p(i)     at integer points0        ≤i≤d       ,
+we want tocompute p(k)      for all integers k in some range. As in[CMT12, Section 2.1], our
+generalstrategy isto reduce polynomialinterpolationto convolution,and thenapplythe
+most convenient convolution algorithm.
+    Specifically, we usethe following identity, whichholds over theintegers: For integer
+k>d,                                               k                  1
+                    p(k)=(−1)                d·(k−d)d    · ∑         k−i      ·(−1)          i dip(i).                     (2)
+                                                          0≤i≤d
+    Except forscaling by constants,Equation (2)    is indeeda (linear) convolution: Multiply
+theinput p(i)     elementwisebytheconstants(− 1)i(di),convolvewiththekernel(k−i)      −1  ,
+and divide elementwise by the constants(− 1)d·(k−d)        (kd) yielding p(k)     . Equation (2)
+also holds(modq)whenk<q. We now present a proof of this folklore identity.
+
+Lemma1.(Lagrangeinterpolation)Let    p(k)      beapolynomialofdegreeatmost d overafield. For
+all k we have                                             k  d−k
+                                       p(k)=    ∑          i     d−i       p(i).                                             (3)
+                                                 0≤i≤d
+
+Proof.Letq(k)be the right-hand side of Equation (3). We want to prove thatp=q.
+    The binomial coefficient (xr) is a polynomial in x of degree at most r.  Thus q(k)      is
+a polynomial of degree at most d. We now prove that p(k) =q(k)               for0    ≤k≤d        , and
+therefore that the two polynomials are the same.
+    Assume0          ≤k≤d        . If i=k    ,the i-thtermof the sumis p(k)     . If i>k    ,wehave(ki)= 0,
+and thus the i-th term of the sum is0. If      i<k    , we have(d−kd−i   ) = 0, and thus   i-th term of
+the sum is also 0. Thusq(k)=p(k)as desired.
+
+Lemma2.(Lagrangeinterpolationviaconvolution.) Let    p(k)      beapolynomialofdegreeatmost d
+over a field. For k>d, we have
+                                                   k                  1
+                    p(k)=(−1)                d·(k−d)d    · ∑         k−i      ·(−1)          i dip(i).                     (2)
+                                                          0≤i≤d
+
+Proof. Theproof isastraightforward manipulationofEquation(3)    toseparate theterms
+that depend onkfrom those that depend oniand onk−i.
+    We use the well-known binomial negation of the upper index
+                                          −r
+                                             s     =(−1)         s r+s−1s
+[PDF_PAGE 14]
+14                                                                                    Anonymous Credentials from ECDSA
+
+
+to make the upper index non-negative in(d−kd−i   ), as follows.
+                               k  d−k                              k−i−1
+                                 i    d−i       =(−1)         d−i  ki   d−i         .
+
+Expandingthebinomialcoefficientsontheright-handsideintofactorialsandsimplifying,
+we have
+
+                               =   (−1)         d−i          k!i!(k−i)!        ·      (k−i−1)!(d−i)!(k−d−1)!
+
+                               =   (−1)         d−ik−i      ·                 k!i!(d−i)!(k−d−1)!
+                                                        d                      k
+                               =   (−1)         d−ik−i      · 1d!  ·i·(k−d)·d!·  d
+                                                  d                   k
+                               =   (−1)         d−ik−i      ·i·(k−d)·  d
+                                                                                k
+                               =   (−1)         d·    1k−i    ·(−1)          i di·(k−d)d,
+
+from which Equation (2) follows.
+
+Remark1. The equality                               k          k−1
+                                         (k−d)       d   =k        d
+
+offers a way to compute(kd) in linear time forkranging over an interval.
+    Alternatively, Equation (2)    gives the explicit form of a special case of the matrix
+factorization V−10   V1 =D    0CD1, where Vi are Vandermonde, C is Cauchy, and Di are
+diagonal [Gow92, Theorem 1].
+    Many alternatives exist to compute convolutions over finite fields.  If the order of
+the multiplicative group of the field factors into small primes, then the convolution
+canbecomputedinO(nlogn)               fieldoperationsviasomeformofFFT.Withoutbreaking
+the field abstraction, Nussbaumer’s algorithm [Nus80] computes a convolution over
+arbitraryfieldsusingO(nlognloglogn)                       fieldoperations. (Seealso[Knu97,Exercise4.6.4-
+59].) Alternatively,onecancomputeconvolutionsinaprimefieldFp bycomputingthe
+convolutionoverintegersandreducingtheanswer modp        . Inturn,theintegerconvolution
+can be computed in a larger FFT-friendly prime fieldFq. Choosing q≥np      2 is sufficient
+for representing the integer result exactly.
+    In our case, the ECDSA signature is standardized over a small set of elliptic curves
+such as P256, P384, P521.  Each curve is defined over a specificbasefinite field               Fq for
+primeqwhichisnotFFTfriendly. However,everyoddprimeqisoftheformq=r·       2ℓ−1,
+and the quadratic extensionFq2 contains roots of unity of order2      ℓ, because the order of
+themultiplicative groupis q2−1=(q+    1)(q−    1) and2      ℓ divides(q+    1)=r·     2ℓ. While
+this fact is not useful in the trivial caseℓ=   0, in the specific case of the ECDSA primes
+one can pick ℓ large enough that the FFT over the extension field is viable.  Zhang et
+al. [ZXZS19] make the same observation in the case q is a Mersenne prime q=   2ℓ−1.
+Thus,fortheECDSAprimes,theconvolutioniscomputedinthebasefieldviatwoFFTsin
+thequadraticextension,withprecomputationofthetransformoftheconvolutionkernel.
+Because the inputs to the convolution are in the base field, we use a radix-4 variant of the
+real-valued FFT [SJB87] for efficiency, as opposed to lifting the input into the extension
+field and computing a full extension-field FFT.
+[PDF_PAGE 15]
+Matteo Frigo, abhi shelat                                                                                                           15
+
+
+3.2   Reed-Solomon encoding over binary fields
+
+Infieldsofcharacteristic2,1                      +1= 0andthechoiceofinterpolationpointsinSection3.1
+does not apply. Instead, as in [LCH14,DP24], a more complex choice is needed.
+    GF(     2k) forms a vectorspace of dimension k over GF(     2). Fixonce and for all abasis βi
+of this vector space, where0  ≤i<k       .  (See Section3.3for a concrete choice of basis.)
+Writing ji for the i-th bit of the binary representation of j, that is, j=  ∑0≤i<k        ji2i and
+ij ∈ {0,1}, we inject integer j into a field elementF(j)       by interpreting the bits of j as
+coordinates in terms of the basis:
+
+                                            F(j)=    ∑      jiβi .                                                         (4)
+                                                     0≤i<k
+
+Then, as in Section3.1, we define the message to be encoded to consist of the evaluations
+of a polynomial p(x)      of degree at most d at the d+  1points   x∈ {F(i):           0 ≤i≤d}         .
+Similarly, a codeword of lengthmconsists of themevaluations{p(F(i)): 0≤i<m}.
+    TheparticularchoiceoftheinjectionF(j)     ,asopposedforexample toF(j)=ω            j for
+some appropriate root of unityω, is motivatedby the existence oftheadditive FFT, which
+solves the interpolation problem inO(mlogd)operations.
+    We use the additive FFT first presented by Lin, Chung, and Han [LCH14], which
+buildsuponpreviousalgorithmswithhigherasymptoticcomplexity. Linetal.definea
+novel polynomial basisfor polynomials as an alternative to the usual monomial basis         xi,
+and give an algorithm for evaluating a degree-(d−    1) polynomial at all d points in a
+subspace, for d=   2ℓ, and for polynomials expressed in the novel basis. The algorithm
+can be executed backwards to reconstruct the coefficients in the novel basis given the
+evaluation points. See [LANHC16, LCK+18] for alternative presentations of the same
+idea.
+    Whilethealgorithmin[LCH14]isrecursive,DiamondandPosen[DP24,Algorithm2]
+reformulatethealgorithmasatriply-nestedloop,resemblingcommonimplementations
+oftheCooley-TukeyFFT.2 Inaddition,DiamondandPosenextendthealgorithmtoobtain
+2ℓ+R     evaluations of a polynomial of degree less than2        ℓ, whereas [LCH14] evaluates
+2ℓ points at an arbitrary coset of a subspace.
+    Ourcontributionistoshowhowtoavoidrestrictionssuchas d and m beingpowersof
+two,eventhoughtheadditiveFFTalgorithmsonlyworkfor2     ℓ sizes. Fortheevaluationof
+apolynomialofarbitrarydegree d,weusethetriply-nestedloopformulationofDiamond
+andPosenwithR=    0,augmentedwiththeoriginalcosetparameterfrom[  LCH14]. We
+pad the array of coefficients with zeros to reach size2      ℓ, and evaluate sufficiently many
+cosets to obtain the desiredmevaluations, possibly discarding unneeded points.
+    Thereconstructionofthepolynomialcoefficientsinthenovelbasisgivend+  1eval-
+uations is more challenging when d+  1is not a power of two. We cannot simply pad
+the evaluations with2        ℓ−(d+       1) zeroes and apply the inverse additive FFT, since this
+process wouldproducea polynomial ofdegree2   ℓ−1andnot   d. To solvethis problem,
+we adapt the inversetruncated FFTof van der Hoeven [                   vdH04] to work with the additive
+FFTalgorithm. Thetruncated FFTcomputesa subsetof theoutputs ofthe FFT, andvan
+derHoeven[vdH04]presentsanelegantalgorithmforinvertingtheprocess. Whilethe
+truncated FFT literature is mostly concerned with saving field operations or avoiding
+storingimplicitzeroes,weprefertolookatthealgorithmasabidirectionalFFT,asfollows.
+Consider a linear transformation
+                                             Y0           X0
+                                              Y1   =A     X1     ,
+
+
+
+   2TheCooley-TukeyFFTrequiresa bit-reversal ofeitherthe inputorthe output,butthe DiamondandPosen
+algorithm does not, so the two algorithms are not quite the same.
+[PDF_PAGE 16]
+16                                                                                    Anonymous Credentials from ECDSA
+
+
+where Xi andYi arecolumnvectorsof ni elements. Fortheconcretecasewhere A isthe
+Fourier matrix, or its additive variant, the forward FFT computes Y given X, and the
+inverse FFT computes X given Y. We call an algorithm that computes Y1 and X0 given
+Y0 and X1 abidirectional FFT. Thus, a bidirectional FFT algorithm computes either the
+forward or inverse transform, as well as many combinations thereof.
+
+Details of the additive FFTWe follow the notation introduced by Diamond and
+Posen [DP24].  Let Ui be the span of the prefix {β  k  :  0 ≤k<i}          of the basis.  De-
+fine thesubspace vanishing polynomial      Wi(x) =   ∏u∈U      i(x−u)          and its normalized variant
+bWi(x)=W        i(x)/W         i(β  i).
+    Polynomials Wi arelinearized:                    Wi(x+y) =W               i(x)+W        i(y)   .  See [vzGG96, Lemma
+2.3], where this fact is stated without proof.  See Mateer’s thesis [Mat08, Theorem 15]
+for a proof.  Linearization is crucial for the efficiency of the additive FFT, and it also
+allows for the efficient computation ofWi(x)   : If x=  ∑k xkβk in terms of the basis, then
+Wi(x)=   ∑k xkWi(β  k).
+    Moreover, Wi+1  (x) =W        i(x)W      i(x+β         i) because Ui+1    =U    i∪(β     i +U    i), and thus
+Wi+1  (x)  =W        i(x)(W      i(x)+W        i(β  i)) holds by linearity.   Together with the base case
+W0(x)=x      , these twoproperties allow forefficient computation ofWi(β  j) andbWi(β  j) for
+all necessaryiandj. We precompute and store        bWi(β  j)in an array bW[i][j].
+    The additive FFT [LCH14] evaluates a polynomial
+
+                                           p(x)=    ∑
+                                                     0≤k<2             ickXk(x)
+for all x is an cosetUi+α   , given thecoefficients      ck of the polynomial’s expansion in terms
+of thenovel polynomial basis      Xk(x)   . Running the algorithm backwards (the inverse FFT)
+computes the coefficients from the evaluations. Lin et al. [LCH14, Equation 6] give an
+explicit formula for the basis Xk(x)   , but the precise form of Xk(x)    does not really matter
+forinterpolationas longasX    k(x)isapolynomial ofdegreek. Thatis,one canstartfrom
+the evaluations over Ui, compute the coefficients, and evaluate the polynomial over a
+coset Ui+α    to obtain new evaluations, and nowhere does one have to know the exact
+form of the basis.3
+    Algorithm1shows pseudo-code for our implementation of the additive FFT, largely
+lifted from [DP24, Algorithm 2], and of its inverse.   We show procedure  TWIDDLE,
+which computes the “twiddle factors,” as presented in the literature, but in the actual
+implementation we compute all twiddle factors at the same time via the recurrence
+TWIDDLE(i   ,u+   2k) =bW[i][k]+TWIDDLE(i               ,u)  , which yields an algorithm for doubling
+the size of an array of twiddle factors in linear time.
+
+DetailsofthebidirectionalFFTIgnoringbit-reversalpermutations,thecomputation
+graph of the additive FFT is the same as the one of the ordinary Cooley-Tukey FFT.
+(See Figure1.) Given     n input coefficients C[  .] in the novel polynomial basis, a loop of
+elementarybutterflyoperations decomposes the input even                                   Ce[.] and off Co[.] arrays, to
+which the transform is applied recursively yielding the evaluation arrayE[.].
+    In the bidirectional FFT setup, the inputs consist of evaluations E[i]     for a prefix0     ≤
+i<k     of E, and coefficients C[i]      for a suffix k≤i<n          of C. The goal is to compute the
+remainingcoefficientsandevaluations. Tothisend,weadaptthediscussionfrom[vdH05,
+Section 6] to the case of additive FFT.
+
+   3The situation is somewhat analogous to Newton finite-difference methods of interpolation, where one starts
+withtheevaluationsandcomputesabunchofadditionsandsubtractions,obtainingevaluationsatadditional
+points. Inonesense,someintermediatevaluescanbeinterpretedastheexpansionofthepolynomialintermsof
+theNewtonbasis,butinanothersense,onecanviewthemethodasanalgorithmforinterpolationwithoutany
+mention of the Newton basis.
+[PDF_PAGE 17]
+Matteo Frigo, abhi shelat                                                                                                           17
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Algorithm 1Additive FFT [DP24, Algorithm 2]
+    procedureFFT(ℓ,α,B[])
+         ▷Require: Array  B ofsize2      ℓ containingthecoefficientsoftheexpansion p(x)=
+             ∑0≤k<2         ℓ B[k]X        k(x)in terms of the novel polynomial basis X      k(x).                         ◁
+         ▷Ensure: B[k]←p(F(k+α)), whereF(.)is defined in Equation(4).                    ◁
+         for alli: 0≤i<ℓindescendingorder ofido
+               s←2       i
+               for allu: 0≤2s·u<2                      ℓ do
+                     t←TWIDDLE(i,2s·u+α)
+                     for allv: 0≤v<sdo
+                           BUTTERFLY-FWD(B,2s·u+v,s,t)
+
+    procedureIFFT(ℓ,α,B[])
+         ▷Inverse of procedureFFT.                                                                          ◁
+         for alli: 0≤i<ℓinascendingorder ofido
+               s←2       i
+               for allu: 0≤2s·u<2                      ℓ do
+                     t←TWIDDLE(i,2s·u+α)
+                     for allv: 0≤v<sdo
+                           BUTTERFLY-BWD(B,2s·u+v,s,t)
+    procedureTWIDDLE(i,u)
+         Letu       k denote thek-th bit ofu, i.e.,u=               ∑kuk2k.
+         return∑kuk·bW[i][k]
+    procedureBUTTERFLY-FWD(B[],w,s,t))
+          B[w]←B[w]+t·B[w+s]
+          B[w+s]←B[w+s]+B[w]
+
+    procedureBUTTERFLY-BWD(B[],w,s,t))
+          B[w+s]←B[w+s]−B[w]
+          B[w]←B[w]−t·B[w+s]
+
+    procedureBUTTERFLY-DIAG(B[],w,s,t))
+         (B[w],B[w+s])←(B[w]−t·B[w+s],B[w]+B[w+s])
+[PDF_PAGE 18]
+                                                                                          18                                                                                    Anonymous Credentials from ECDSA
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                          Figure 1:Flowgraphof theordinary additiveFFT,which isthesame astheonefor the
+                                                                                          Cooley-Tukey FFT if one ignores bit-reversal permutations. The “butterflies” with two
+                                                                                          inputs and two outputs denote that the output is some2       ×2linear transformation of
+                                                                                          theinput. Linandothers[LCH14]drawasligthlydifferentdiagramfactoringthelinear
+                                                                                          transformation into triangular matrices, but for our purposes this level of detail is not
+                                                                                          important.
+
+
+                                                                                               Consider the elementaryforward butterflyin procedure                         BUTTERFLY-FWD      in Algo-
+                                                                                          rithm1.   Let           (a ,b)  =  (B[w]          ,B[w+s])             before applying the butterfly operation, and
+                                                                                          (c,d)=(B[w],B[w+s])after applying the operation. Then the butterfly computes
+                                                                                                                                        c        1     t       a
+                                                                                                                                        d   =     1  t+1         b   .                                                     (5)
+
+                                                                                          Similarly thebackward butterflyoperation in                     BUTTERFLY-BWD      computes the inverse
+                                                                                          transformation          a                             t+1 −t          c
+                                                                                                                                       b   =      −1      1       d   .                                                   (6)
+
+                                                                                               Thekeyinsight[vdH05,Equation(7)]ofthebidirectionalFFTalgorithmisthediagonal
+                                                                                          butterfly( BUTTERFLY-DIAG), which proceeds forward onband backwards onc:
+                                                                                                                                         a        −t  1      b
+                                                                                                                                          d   =     1     1    c    .                                                      (7)
+
+                                                                                               The symmetric case of computing (b ,c)   from (a ,d)   is also viable for the ordinary
+                                                                                          Cooley-Tukey FFT [vdH05, Equation (8)]. However, the corresponding equation for the
+                                                                                          additive FFT         b                                          −1   1      a
+                                                                                                                                   c   =(1+t)       −1  ·   1    t      d                                      (8)
+
+                                                                                          requires(1+t)     to be invertible, which is not guaranteed in our case. This is the reason
+                                                                                          why we chose theconvention that a prefix of theevaluations are known, as opposed toa
+                                                                                          prefix of the coefficients. With this choice, we only need (7) but not (8).
+                                                                                               Consider again Figure1, and assume that     k≥n/       2. Thus, the entire output of the
+                                                                                          top N/   2-FFT block is known, the entire   Ce[.] can be obtained from the inverse FFT of
+                                                                                          the known prefix of E[  .]. Given Ce[.] and the known suffix C[i]      for i≥n−k         , diagonal
+
+
+
+
+
+C[0]                                     Ce[0]                        E[0]
+
+C[1]                                     Ce[1]         N/2            E[1]
+
+C[2]                                     Ce[2]                        E[2]
+                                                      aFFT
+C[3]                                     Ce[3]                        E[3]
+
+
+C[4]                                     Co[0]                        E[4]
+
+C[5]                                     Co[1]         N/2            E[5]
+
+C[6]                                     Co[2]                        E[6]
+                                                      aFFT
+C[7]                                     Co[3]                        E[7]
+[PDF_PAGE 19]
+Matteo Frigo, abhi shelat                                                                                                           19
+
+
+Algorithm 2Bidirectional FFT, adapted from [vdH05, §6]
+   procedureBIDIRECTIONAL-FFT(i,α,k,B[])
+       ▷Require:Array   Boflengthn=   2i,whosefirstkelementsareevaluationsofapolynomial
+          and the rest are coefficients of the same polynomial in the novel polynomial basis. ◁
+       ▷Ensure:Overwrite   B withan arraywhose firstk elementsarecoefficients andthe rest
+          are evaluations.                                                                         ◁
+       ifi>0then
+            i←i−1
+            s←2       i
+            t←TWIDDLE(i,α)
+            ifk<sthen
+                for allv:k≤v<sdo
+                     BUTTERFLY-FWD(B,v,s,t)
+                 BIDIRECTIONAL-FFT(i,α,k,B)
+                for allv: 0≤v<kdo
+                     BUTTERFLY-DIAG(B,v,s,t)
+                 FFT(i,α+s,B[s:])
+            else
+                 IFFT(i,α,B)
+                for allv:k−s≤v<sdo
+                     BUTTERFLY-DIAG(B,v,s,t)
+                 BIDIRECTIONAL-FFT(i,α+s,k−s,B[s:])
+                for allv: 0≤v<k−sdo
+                     BUTTERFLY-BWD(B,v,s,t)
+
+
+butterflies compute Co[i]   for i≥k−n/           2. The result is a bidirectional FFT problem of
+size n/  2: a suffix of length   n/  2−(k−n/            2) of Co and a prefix of length k−n/       2of the
+bottom half of E. This bidirectional subproblem is solved recursively, thus computing the
+missing elementsof E and Co. Given the entire Ce and Co, themissing C’s arecomputed
+via backward butterflies.
+    Symmetric considerations apply to the case k<n/       2. See Algorithm2for complete
+pseudo-code of the bidirectional FFT algorithm.
+    Even though the FFT algorithm reduces a problem of size n to two subproblems of
+size n/  2,thebidirectionalFFTalgorithmproducesonebidirectionalproblemofsize   n/  2
+and anotherproblem ofsize n/  2whichis eithera fully forwardor a fullybackward FFT.
+Thus, assuming an optimized implementation of the latter transform, the overhead of
+therecursionis minimal: O(logn)             recursivecallsandO(logn)             computationsoftwiddle
+factors. Inpractice,theperformanceofthebidirectionalFFTisessentiallythesameasthat
+of the fully forward or fully backward FFT.4
+
+
+Details of Reed-Solomon encodingOur original interpolation problem takes                  d+  1
+evaluations of a degree-d polynomial p(F(i))          for0    ≤i≤d        as input, and must compute
+p(F(i))          for0    ≤i<m       , where d and m are arbitrary (i.e., not necessarily powers of 2).
+Letℓ beminimalsuchthat d<   2ℓ. RunthebidirectionalFFTalgorithmwith n=   2ℓ and
+k=d+       1,assumingthatthefirst  k coefficientsareunknownandtheremainingarezero.
+The bidirectional FFT produces the first missing(n−k)         evaluations, as well as the full
+arrayof k coefficients. Thenthe forwardFFTcan berun onasmany cosetsasneeded to
+producemevaluations.
+
+
+   4Withsomecare,therecursioncanberemovedentirely,butwefoundtherecursion-freealgorithmneedlessly
+confusing.
+[PDF_PAGE 20]
+20                                                                                   Anonymous Credentials from ECDSA
+
+
+3.3   Reduction of the Ligero proof size
+
+Soundness requires using large fields such as GF(     2128).   We implement GF(     2128) as
+GF(     2)[x]/(Q(x))                where Q(x) =x             128+x    7+x    2+x+      1. With this choice of   Q(x)      , x is a
+generator of the multiplicative group of the field.
+    Almost all messages in our system consist of witnessbitsin              {0,1} that are packed
+into arrays of size less than2          14. Recalling Reed-Solomon encoding from Section3.2, if
+the message is an array of elements in some subfield ofGF(     2128), and if the evaluation
+pointsarealsoelementsinthesamesubfield,thentheentirecodewordconsistsofsubfield
+elementsanditcanberepresentedcompactly. Inordertoensurethatallevaluationpoints
+are in the subfield, it suffices to chooseβi as a basis of the subfield rather than the entire
+field.
+    Thus, wechoose GF(     216) as thesubfield ofGF(     2128), with g=x     (2  128−1)/(2             16−1)     as the
+generatorofGF(     216),andβi =g    i for0    ≤i<     16asthebasisofthesubfield. Thisallowsus
+to encode elements in our commitment scheme with 16-bits instead of 128. Whenever we
+have a choice, we inject witness bits and small integers into the subfield via Equation(4)   .
+    This optimization introduces the problem of determining whether a general field
+element u∈GF(          2)[x]/(Q(x))                belongs to the subfield, and if so, to determine u’s repre-
+sentation u=  ∑0≤i<16        uiβi in terms of the basis βi. We solve this problem via standard
+Gaussian elimination. First, interpret elements of GF(     2128) as rowvectors of 128 elements
+ofGF(     2) withrespect tothemonomial basis xj;this conventionallowstworowvectors
+tobeaddedviaasingle128-bitxorinstruction. Wethenformamatrix B whose i-throw
+consists of the row vector βi. With these conventions, we need to solve the rectangular
+system xB=u      for x, which we do via preliminary LU factorization that reduces B to
+row-echelon form, followed by standard solution of triangular systems. The solution
+costsO(n)        rowoperations for n=   16, whichis efficient since row operations takea single
+wide xor instruction. In our system, the time spent on projections onto the subfield is
+negligible.
+    In our implementation, the subfield optimization only reduces proof size, specifically
+during I/O time to serialize and deserialize field elements. We perform all arithmetic
+operationsinthe fullfield. Diamond andPosen[DP24]arguefor atowerrepresentation
+of the field which makes subfields explicit, and which can exploit subfield arithmetic
+when possible.
+
+3.4   Input consistency over different Fields
+The round-by-round soundness property requires that the sumcheck and verify protocols
+use a field of size at least2          128.  Ligero commitments require a subfield of size at least
+O( p|(x,w)|)           ,where(x ,w)   isthesizeoftheinputtothecircuit C. Thus,itisusuallymost
+efficient to run sumcheck over a field extension of a sufficiently large base field. However,
+theECDSAcircuitimposesadifferentconstraint: namelythatefficientlyverifyingelliptic
+curve operations over curve P256requires the circuit to be defined over a specific256-bit
+field.
+    RecalltheZKtheorem(e ,pk)  whichverifiesthatthereexistsamessagemandsignature
+(r ,s)  such that e=SHA256(m)                       , and(r ,s)  is an ECDSA signature on e under public key
+pk. A circuit that verifies this statement overFp256  incurs the overhead of verifying the
+sha256 hash of m over a larger primefield than is necessaryfor soundness. Similarly, a
+circuitthatverifiesthefulltheoremoverF2128 incursthe≈ 100xoverheadofsimulating
+the arithmetic for the elliptic curve.
+    A natural approach for higher efficiency is to perform the ECDSA verification of
+instance(e ,pk)  usingcircuit Csig intheoptimalFp256  field,andperformtheSHAverifi-
+cation of the instance(e ,m)    using circuit Ch over the optimal binary field. The concern
+is that a cheating prover may use 2 inconsistent values of e in the 2 different circuits in
+[PDF_PAGE 21]
+                               Matteo Frigo, abhi shelat                                                                                                           21
+
+
+                               two different fields.  In this section, we describe a technique to ensure consistency of
+                               inputswhentheverificationofthetheoremoccursusingtwoormoreprooffields,ormore
+                               generally, two or more proof systems.
+                                    Our solution for input consistency is to augment each circuit in the two fields with
+                               a message authentication code (MAC) verification of the common input e. We use the
+                               information-theoreticMACa,b (x)=ax+b             where5 thearithmeticisperformedoverF2128.
+                               In the ECDSA circuit, this requires simulating the arithmetic ofF2128 over the prime field
+                               Fp256 . Forsmallinputs,thiscomputationincurslittleoverhead: eachcircuitisaugmented
+                               to take as a public input me =MAC    k(e)   , and as a private input, the key k= (a   ,b) , and
+                               each circuit internally computes the MAC oneand compares it with the public input.
+                                    A secondary issue relates to how the key k is chosen. Allowing the verifier to select
+                               k may break the zero-knowledge property; allowing the prover to select k breaks the
+                               soundness,sincetheprovercanintentionallyselectakeythatallowstwodifferentvalues
+                               of e tohavethesameMACvalue. Inourscheme,thiskeyisjointlysampledbytheProver
+                               andVerifier. Specifically,theProverfirstcommitstoitssharekp =(a  p,bp) aswellasthe
+                               secretinpute. Theverifiernextrandomlysampleskv andsendsittotheProverintheclear.
+                               TheProverthencomputesthekey k=k       p+k    v,andthenuses k tocomputethemaconthe
+                               sharedinput e,andthen sendstheMACvalue me totheverifier. The verifierusesme asa
+                               public input to both circuit Ch and circuit Csig. Both of these circuits include a check to
+                               verify that me =MAC(e)          using the Prover’s private key sharekp and the Verifier’s public
+                               inputk            v.
+                               Two-fields ZK protocol(P                    2,V2):
+
+
+
+
+
+
+
+
+
+
+
+
+Protocol 3.8. Two-fields ZK protocol(P                    2,V2)
+  Letcircuit C1(x  1,w1,w)   bedefinedover fieldF1 and C2(x  2,w2,w)   definedoverF2,
+  andlet w∈{  0,1}c bethecommoninputtoboththatisembeddedintotherespective
+  Fi in the natural way, and x1,w1 ∈F  ∗1 and x2,w2 ∈F  ∗2. Both parties hold(x  1,x2),
+  and the prover additionally holds(w               1,w 2,w).
+
+       •Define circuits    ˆCi((x  i,m,k      v),(w     i,w,k      p))wherek     p,k v∈{0,1}     256 as follows:
+
+            —AssertC                    i(x  i,w i,w)=0
+            —   AssertMACk(w)=m        where k=k       p⊕k    v with all computation performed
+                 in GF(2         128).
+
+       •P  ,V run thefirst 3steps ofProtocol2.5oncircuit                 ˆC1 and thenon  ˆC2 with their
+          respective inputs except with the following changes:
+
+             3.Psamplesk                          p←GF(2              128)2 and then computes
+
+                                     comi←LigeroCommit((w                                        i,w,k      p,pad i),F   i)
+
+                 and sends toVfor        ˆC1 and then for  ˆC25When the common valueeis known not to be 0, theMACcan be optimized toa·x.
+                 (a)Vsamplesk                             v←GF(2              128)2 and sends toP.
+                 (b)Pcomputesm←MAC                                         kv⊕k    p(w)and sends toV.
+
+       •  Run step4 ofProtocol2.5for                  ˆC1 with publicinput(x  1,m,kv) and privateinput
+          (w  1,w,kp) and then the same for  ˆC2 with public input(x  2,m,kv) and private
+          input(w              2,w,k      p)to define transcripts   ˆT1 and ˆT2.
+
+       •Run steps 5,6 for    ˆC1 and then the same for  ˆC2.
+[PDF_PAGE 22]
+22                                                                                   Anonymous Credentials from ECDSA
+
+
+Theorem 9.If    C1 and C2 are circuits over fieldsF1 andF2, and if MACk is an information-
+theoreticmessageauthenticationcodewithstatisticalsecurityλs,ifProtocol2.5isazero-knowledge
+protocol with adaptive knowledge soundness error η(|C      1|,|C 2|) , then Protocol3.8is a zero-
+knowlege protocol with knowledge soundness errorO(η(|C            1|,|C    2|)+λ     s).
+
+Proof. (Sketch)ThemodifiedprotocolisacompositionofProtocol2.5. Thecompleteness
+follows by inspection.  It is more convenient to present a self-contained argument for
+zero-knowledge and soundness; the argument follows the one for Theorem6.
+    Toconstructaknowledge-soundnessextractoralgorithm Eforthiscomposedprotocol,
+runtheextractorfor C1 andfor C2 sequentiallyagainsttheprover P∗ ofProtocol3.8. The
+onlyissueisthattheextractorforCi expectstoreceiveonlymessagesfromtheCi instance.
+This syntactic issue is handled by simulating the honest public-coin verifier for P∗ and
+filtering the appropriate messages for the extractor.  If either extractor fails, then the
+composedprotocolextractorfails. Supposetheextractorfor C1 outputs(x  1,w1,w,pad1)
+andthesecondextractoroutputs(x  2,w2,w′,pad2). Ifw̸=w     ′,thenthecomposedextractor
+fails. Otherwise, output(x                  1,x 2,w 1,w,w      2,w)and halt.
+    RecallthattheextractorforProtocol2.5eitherfailsoroutputsawitnessthatsatisfies
+the circuit that defines its theorem statement.  Thus, extractor E fails if either of the
+individual extractors fails or if the random key sampled for the MAC leads to a MAC
+collision on different input values.  The second clause of this claim follows from the
+two constraints imposed on  ˆC1 and  ˆC2 above. Namely, because the circuits verify that
+MACk(w) =m        and MACk(w ′) =m    respectively, the condition that w̸=w     ′ only occurs
+when theMAC       k fails by a collision.
+    By a standard union bound argument over the failure probability of the individual
+extractors and the statistical soundness parameter of the MAC, the combined extractor
+succeedswithallbutnegigibleprobability. Therunningtimeofthecomposedextractoris
+bounded by a function of the running times for the individual extractors and the honest
+verifier strategy, and thus polynomial-time in the running time of a malicious prover
+oracle.  In particular, the Ligero extractor is straight-line extractable in the observable
+Random-oraclemodel,and thusthereisno overhead totherunningtime inthatcontext.
+Similarly, the round-by-round soundness ofthe protocol remains the sameconditioned
+on the security of the MAC.
+    To argue zero-knowledge, consider the following simulator algorithm: Run steps
+3a to sample a random kv and instead of 3b, sample a random m.  This now defines
+the public input (x  1,m,kv) and (x  2,m,kv).  Sample a random encrypted transcript  ˆT′1
+and ˆT′2 of the appropriate length for circuits  ˆC1 and  ˆC2. Invoke the Ligero simulator on
+inputstatement( ˆC′1,(x  1,m,kv), ˆT′1),whichproducesan outputcom1,π1,andthen dothe
+same for the second circuit. Finally, the simulator outputs a transcript in the properly
+interleaved order using these components. The argument thatthis simulator produces an
+indistinguishable output from the real invocation of the protocol relies on a reduction to
+the indistinguishability of the Ligero simulator. As this is a bounded-size composition
+of two runs, this reduction is straightforward, and proceeds by hybrid argument. The
+originalexperimentconsistsofthe realexecutionoftheprotocol. Inthe firsthybridstep,
+the simulator for the  ˆC1 is invoked using the same kv and correct mac value m on w to
+produce a transcript. These messages replace the real execution. A distinguisher here
+immediately breaks the ZK property of Ligero on the first instance (using the auxiliary
+input of a true witness for the second theorem and w). In the next hybrid, the same is
+donefor  ˆC2. Atthispoint,the experimentnolongeruses w1,w2. Inthenexthybrid, the
+mac value m is randomlysampled instead of computedusing w. This stepis statistically
+closebythehidingpropertyoftheMAC.Atthispoint,nowitnessisusedinthesimulator
+algorithm; infact, this last hybrid is equivalent to the experiment in the definition of
+zero-knowledge for this protocol, which establishes the result.
+[PDF_PAGE 23]
+Matteo Frigo, abhi shelat                                                                                                           23
+
+
+    Note that when the extractor for Ligero is straightline (e.g., in the random oracle
+model), then the composed extractor for Protocol3.8is also straightline, and thus com-
+poses efficiently when run with other protocols.
+
+4   Circuit design
+
+4.1   ECDSA Signature Verification
+Thissectiondescribestheconstructionofanarithmeticcircuitthatverifiestheexistenceof
+an ECDSA signature under public key Q= (pk      x,pky) for the hashed message e=H(m)            .
+Following the Sec-1 [Cer09] specification, which is identical to the ANSI X9.62.2005
+standard, an ECDSA signature verification proceeds as follows:
+
+Algorithm 3ECDSA-Verify(Q,H(m),r,s)[Cer09]
+ 1:Derive integerefromH(m).
+ 2:Verify thatr,s∈[1,q−1].
+ 3:Computeu                         1 =es  −1     modqandu                      2 =rs  −1     modq.
+ 4:ComputeR=(r                              x,r y)=G·u         1+Q·u         2 and verifyR̸=id.
+ 5:Verify thatr=(r                x  modq).
+
+    Several of these steps occur over the integers or in the fieldFq, whereas our checks
+mustbeperformedinthefieldFp. Towardsthisgoal,theverificationcircuitdefinedin
+Alg4succeeds on an input         x only if an easily computable tuple t(x)      induces Alg.3to
+succeed. Furthermore, the circuit is almost perfectly complete, with only a handful of
+cases that do not pass our checks but do pass the official spec—this is acceptable in all
+applications that we consider, even when malicious signers are considered.
+
+Algorithm 4Verification CircuitV(Q,H(m),r,s,r                                           y)
+
+ 1:Derive integerefromH(m).
+ 2:Verify thatr,s∈[1,q−1]
+ 3:Verify thatQ,R=(r,r                          y)∈EandR̸=id.
+ 4:Verifyid=G·e+Q·r−R·s
+
+    The main difference in the two procedures is that the later avoids computations of
+inverses modulo q and performs checks to ensure that points are on the elliptic curve
+group.
+
+Theorem 10.If      V(Q    ,H(m)       ,r,s,ry) succeeds where r,s∈[    0,2⌈logp⌉     −1] and ry ∈F   p, then
+ECDSA(Q,H(m),r,s)from Sec-1 [Cer09] succeeds.
+
+Verifying a multi-scalar multiplicationThe most expensive step to verify in Alg.4is
+step4,whichverifiesthat          G·e+Q·r−R·s                      isequaltotheidentityelement. Byproviding
+the intermediate values as witnesses, we produce a low-depth circuit that computes the
+left-handside. Specifically,thecomputationconsistsofastandarddouble-and-addloop
+over the bits of the exponents. In the ith iteration, the bits ei,ri,si are used to index a table
+thatcontainseightcombinationsofthe G,Q,and R elements. Thecurrentaccumulator
+is doubled and the result of the table lookup is added. As described, the input of the
+i+ 1st iterationwoulddependontheoutputofthe ith iteration,resultinginadeepcircuit.
+Instead, we provide the outputs of each iteration as witnesses, and compare the output
+ofthebasicdouble-and-addblocktotheinputforthenextblock. Tofurtherreducethe
+depth,the7non-zerotablevaluesaregivenaswitnessesandverifiedbythecircuit. Afull
+[PDF_PAGE 24]
+24                                                                                   Anonymous Credentials from ECDSA
+
+
+accounting for the resulting circuit size for ECDSA verification is given in Table1. The
+circuit compiler exploits shared terms and thus the total is slightly less than the sum.
+
+                     Table 1:Circuit size and depth for ECDSA verification.
+
+
+                                                    DEPTH      QUADS      TERMS      INPUTS
+                   Multi-exponentiation              7      20,561     39,598        1,038
+                   Range check + rest                 12                -               -                -
+                   Total                                         12      24,477     49,646        1,038
+
+
+4.2   SHA-256
+TheSHA-256 hashfunction iterativelyapplies acompression functionto successive64-
+byte blocks of the input message. A large n-bit message m is first divided into 64-byte
+blocks;thebasicblockfunctionisappliedtotheith blocktoproduceacompressed32-byte
+output, which is then combined with the i+ 1st block. The final message block must be at
+most55bytes, asitispaddedwith zerosand thenaugmentedbyan8-byte encodingof n.
+    To verify a message of at most64        k−  9bytes, our circuit evaluates   k SHA-256 basic
+block functions.   A basic block of the compression function takes as input eight 32-bit
+state values, designated by letters A–H, 64 bytes of the message, and produces a new
+state value. The block uses the Ch, Maj,Σ          0, andΣ        1 functions and addition modulo 232.
+
+
+                          Ch(E,F,G)=(E∧F)⊕(E∧¬G)
+                         Maj(A,B,C)=(A∧B)⊕(A∧C)⊕(B∧C)
+                                 Σ0(A)=(A≫2)⊕(A≫13)⊕(A≫22)
+                                  Σ1(E)=(E≫6)⊕(E≫11)⊕(E≫25)
+
+Thestatevalues B,C,D,F,G,H areassignedthevaluesof A,B,C,E,F,Grespectively. The
+valuesAandEare updated as
+
+                A=W       i⊞K    i⊞H⊞Ch(E,F,G)⊞Σ                                    1(E)⊞Maj(A,B,C)⊞Σ                                          0(A)
+                 E=W       i⊞K    i⊞H⊞Ch(E,F,G)⊞Σ                                    1(E)⊞Maj(A,B,C)⊞D
+
+where⊞represents addition modulo 2      32.
+
+Verifying Modular AdditionVerification ofaddition modulo2                                        32 can be an expensive
+operation. The straightforwardmethoduses aBoolean addercircuit,e.g, ripple-carryor
+parallel-prefix,torecomputetheoutput. Infact,verificationoftheadditionA⊞B=C            can
+beperformedbyaconstant-depthcircuitif A, BandCareprovidedasinputsbyusingthe
+fact that the i-th carry bit can be inferred from the equation C[i] =A[i]⊕B[i]⊕carry[i]                                      .
+Thus oneonly needs toverify thatthe carry hasbeen propagatedcorrectly,as opposed to
+actuallypropagatingthecarry. Goingfurther,wepresenttwomoreefficientmethods to
+verifythisoperationthatexploitpropertiesofthefinitefieldandthefactthatwecompute
+sums modulo 232 of a small numbertof termsT[i], where concretelyt≤7.
+    If the characteristic of the field is greater than2          32·t , then the addition of t terms in
+the field does not overflow. Let s=  ∑0≤i<t        T[i]     in the field arithmetic, and let r be the
+claimed value of the sum modulo2                  32, interpreted as a field element. Letz=s−r          in the
+field. Then z=   0 (mod  232) iff∏0≤i<t      (z−    232i) =  0, where the latter check occurs by
+means of a tree of multiplications in the field.
+[PDF_PAGE 25]
+Matteo Frigo, abhi shelat                                                                                                           25
+
+
+        Table 2:Circuit size and depth for 1 SHA-256 block over 2 different fields.
+
+
+                              PACKING      DEPTH      QUADS       TERMS      INPUTS
+                    FP256      -                             7      51,334    187,316        6,657
+                              2                             9      66,760    217,040        3,585
+                              3                           10      77,357    241,455        2,625
+                    F2128      -                           13      66,747    107,610        6,657
+                              2                           14      66,751    152,527        3,585
+                              3                           15      74,842    168,030        2,625
+
+
+    If the characteristic of the field is small, as with GF(     2128), we apply the previous
+method to the multiplicative group of the field instead of the additive group. Let g be
+a generator of the multiplicative group, and assume that order(g)>            232t.  Then gs =
+∏0≤i<t        gT[i]    assumesoneof t possiblevalues gr+2      32i for0    ≤i<t       ,whichcanbecompared
+against via a tree of multiplications in the field, as before.6
+    Table2reports the sizes of instantiations of our          SHA256 circuits in both fields using
+differentpackingparameters. To reduce the number of inputs, and thus the size of the
+commitment, we can pack severalbitwitnesses into a single witness, and then apply a
+simple polynomial to extract the individual bits from the witness.
+
+4.3   CBOR parsing
+MDOC credentials are encoded in the Concise Binary Object Representation [BH20]
+format (CBOR). For the purposes of this paper7, a CBOR datum is either an integer
+(signed or unsigned), a boolean, an array of bytes, an array of CBOR datums, or a map
+fromdatumtodatum. Thefirstbyteoftheencodingofadatumconsistsof athree-bittag,
+denotingthevarioustypes(integer,array,map,etc.),andafive-bitcount. Smallintegers
+are encoded inline in the count. For larger integers, the count encodes the size of the
+integer,whichisthenstoredinsubsequentbytesofthedocument. Ifthetagindicatesthat
+thedatumisanarrayoramap,thecountsimilarlyencodesthenumberofelementsinthe
+array or the number of pairs in the map, with the actual contents stored in subsequent
+bytes in the document.
+    Letin[i]      bethe i-thbyteofinput,wherein[i]      isitselfanarrayofeightinputwireseach
+carrying abit.In the contextof our proof system,the parsing circuit is expected to assert
+the truth of statements such as the following:
+       Thetop-leveldocumentis amapthatcontainsa pairwhosekeyisthe string
+       valueDigests and whose value is another map.   The valueDigests map
+       contains a pair whose key is the stringorg.iso.18013.5.1 and whose value
+       is another map. The org.iso.18013.5.1 map contains a pair whose key is
+       theunsignednumber4andwhosevalueisabytearrayoflength32,whicha
+       SHA256 hash of ...
+    To verifysuch assertions, ourcircuit is givenwitnesses that mark thepositions of the
+relevant datums in the input; this enables the circuit to efficiently reconstruct the tree
+structureofthedocument. Weemployaparallel-prefixalgorithm toreducecircuitdepth.
+Inthe“combinational”arithmeticcircuitmodel,thewholeinputisgiventoafixed-size
+circuit,andthusthesizeofdocumentsarelimitedto N bytesforsomeconstant N known
+
+   6In the special case where the field has a (multiplicative) root of unity of order2       32, we can choose g to be
+suchroot,andobtainmodulo-2                   32 arithmetic“forfree”. Thisspecialcasedoesnotapplytothefieldsusedbyour
+circuits.
+   7CBOR supports a few more cases such as floating-point numbers, which we ignore.
+[PDF_PAGE 26]
+26                                                                                   Anonymous Credentials from ECDSA
+
+
+Algorithm 5Sequential algorithm for tokenization.
+ 1:  procedureTOKENIZE(N,in[])
+ 2:       ▷ProcedureDECODE    (notshown)producesanarraylengthwherelength[i]             isthelength
+            in bytes of the token that starts at position in[i].                                             ◁
+ 3:      (token,length)←DECODE(N,in)
+ 4:       ▷Now set header[i]←trueif and only if a token actually starts a position i.            ◁
+ 5:       header[0]←true
+ 6:       slen[0]←length[0]
+ 7:       fori=1toN−1do
+ 8:           header[i]←((slen[i−1]−1)=0)
+ 9:           ifheader[i]then
+10:                slen[i]←length[i]
+11:           else
+12:                slen[i]←(slen[i−1]−1)
+13:       return(token,header)
+
+
+atcircuit-generationtime. Similarly,becausethemodeldoesnotcontainastacktosupport
+arbitrarily nested arrays and maps, we restrict the parser to L nesting levels, for some
+constantL.
+
+Toy CBORTo illustrate the main problems and solutions in CBOR parsing, we focus
+our discussion on parsing a context-free CBOR-like toy language defined below.
+    Atoy-CBORdocumentconsists ofa sequenceofbytes                        in[i]      thatare grouped intotokens.
+The token starting at positioniis defined as follows.
+
+Case0x00≤in[i]<0x10.                                        The token is Int(in[i])             , that is, a four-bit integer.  The next
+       token starts at positioni+1.
+
+Casein[i]=0x10.                           The tokenisInt(in[i+              1]), thatis, theeight-bit integerstored atin[i+
+       1]. The next token starts at positioni+2.
+
+Case0x20≤in[i]<0x30.The token isArray(in[i]). The next token starts at positioni+
+       1.
+
+Casein[i]=0x30.The token isArray(in[i+1]). The next token starts at positioni+2.
+
+Otherwise:Error.
+
+    In addition to the lexical structure of tokens, toy CBOR has a context-free syntactic
+structurewhichwe informallydefinebygivinga recursive-descentparserforit. Specifi-
+cally, the parser reads the first token from the stream, consuming it. If the token isInt(k)         ,
+theparser returnsthe integer k. OtherwisethetokenisArray(k)             ,in whichcasetheparser
+calls itself recursively k times, returning anarray of length k containing the results of the
+recursive calls.
+    FullCBORhasbotharichertokenstructure,includingvariable-lengthintegersand
+strings, and a richer syntactic structure, including both arrays and maps, but the main
+difficulties already arise in our Toy version.
+
+LexerThe first step is to identify token boundaries. Given input           in of length N, Algo-
+rithm5producesan array             headersuchthatheader[i]             istrueifand onlyifatokenstartsat
+position i. Thus, assertions ofthe form “an arraystarts at position i” mustassert header[i]
+first.
+[PDF_PAGE 27]
+Matteo Frigo, abhi shelat                                                                                                           27
+
+
+Algorithm 6Algorithm for tokenization with witnesses
+ 1:  procedureTOKENIZEW(N,in[],header[])
+ 2:      (token,length)←DECODE(N,in)
+ 3:      slen[0]←length[0]
+ 4:      fori=1toN−1do
+ 5:           ifheader[i]then
+ 6:                slen[i]←length[i]
+ 7:           else
+ 8:                slen[i]←(slen[i−1]−1)
+ 9:      assert(header[0])
+10:      fori=1toN−1do
+11:           assert(header[i]⇐⇒(slen[i−1]−1)=0)
+12:      return(token,header)
+
+
+    We omitprocedure DECODE    in Algorithm5becauseit iscomplex but notinsightful.
+One should think of it as combinational logic which, for each input position i, decodes
+the bits of in[i]      into a set of signals that indicate whether the token is an integer or an
+array and computes a fieldvaluelength[i]             that represents the length of the token sothat
+the next token starts at position i+length[i]                .  For toy CBOR, length[i]∈ {             1,2} can be
+computed solely from in[i]     , whereas the real CBOR requires peeking at in[i+      1] and
+possibly subsequentinput bytes. Being actually a circuit and nota procedure, DECODE
+speculatively computes length[i]             for all positions i, irrespective of whether or not a token
+actuallystartsatposition i. Intheactualimplementation, DECODE    mustalsocopewith
+invalid tokensand outputa validity status, and wemust assert that header[i]             implies that
+the token at positioniis valid.
+
+Reducing the depth of lexingGiven that an upper bound to             N is known at circuit-
+generationtime,onecouldunrolltheloopinAlgorithm5andgenerateacircuit. However,
+suchacircuitwouldbeofdepthO(N)       ,whichisinefficientforasumcheck-basedprover.
+We now use well-known parallel-prefix techniques to reduce the depth of the circuit.
+    If header[i]             were always false in line9of Algorithm5(which is not the case), then the
+update equation for slen would be slen[i] =slen[i−                     1]+A[i]         for A[i] =−        1, which is an
+instanceof aprefixsumorscan. Because                    slen[i] =      ∑j≤i    A[j]     , each slen[i]         can becomputed
+indepthO(logn)             simplybybuildinganindependenttreeofaddersforeach i. Various
+algorithms,collectivelycalledparallel-prefix,allowcomputationindepth                O(logn)             ofslen[i]
+for all i while maximizing reuse of common subexpressions. See Blelloch [Ble90] and
+references therein for details.
+    The full update equation
+
+                      slen[i]=ifheader[i]thenlength[i]elseslen[i−1]+A[i],                        (9)
+
+again for A[i] =−        1, has the form of asegmented scan. Logarithmic-depth circuits exist
+that can compute slen[      .] given header[          .], length[          .], and A[  .] =−   1as inputs.  See [  Ble90,
+Section 1.5] for a general technique to transform segmented scans into unsegmented
+scans.
+    The segmented scan technique would solve our circuit-depth problem, except that
+segmented scans require the segment marker header[          .] to be provided as input to the
+circuit, whereas in our case, header[i]             is computed as afunction of slen[i−         1] in line8. To
+work around this problem, we provide booleans header[i]             as witnesses, one per byte input
+position, and use Algorithm6as our starting point instead of Algorithm5.
+    ItisnotimmediatelyobviousthatAlgorithm6andAlgorithm5areequivalent,because
+Algorithm6computes                      slen[      .] from an untrusted witness header[          .] and then it asserts
+[PDF_PAGE 28]
+28                                                                                   Anonymous Credentials from ECDSA
+
+
+Algorithm 7Sklansky [Skl60] parallel prefix algorithm
+   procedureSCAN-ADD(i                                       0,i 1,B[])
+       ▷In-place, set B  out[i 0]=B    in[i 0]and B out[i]=B       in[i]+B       out[i−1]for i           0 <i<i          1.      ◁
+       ifi   1−i    0 >1then
+            im←i     0+⌊(i        1−i    0)/2⌋
+            SCAN-ADD(i               0,i m,B)
+            SCAN-ADD(i               m,i 1,B)
+            for alli:i         m≤i<i          1 do
+                 B[i]←B[i]+B[i                            m−1]
+
+
+Algorithm 8Sequential algorithm for updating tree addresses.
+   procedureUPDATE-COUNTERS(i,counters[][],token[],header[])
+       ▷Giventhetreeaddress counters[i]                 andtheoutput(token ,header)           ofthetokenizer,com-
+          pute counters[i+1].                                                                                ◁
+       counters[i+1]←counters[i]
+       ifheader[i]then
+            Letl[i]∈{l∈Nat :counters[i][l]̸=0∧∀m>l:counters[i][m]=0}
+            counters[i+1][l[i]]←counters[i][l[i]]−1
+            iftoken[i]=Array(k)then
+                 counters[i+1][l[i]+1]←k
+
+
+that header[          .] is correctly computed from slen[      .], whereas Algorithm5interleaves the
+computation of slen[      .] and header[          .].  The correctness of Algorithm6can be proven by
+induction onthe loop variable i, inessence mimicking thecontrol flow ofAlgorithm5. If
+theassertioninline9holds,then         slen[      0]andheader[          0]arebothcorrect. Ifthestatevariables
+are correct for (i−   1) and the assertion in line11holds, then            header[i]              is correct, and
+thusslen[i]         iscorrectaswell because theupdateofslen[i]         isthesamefor bothalgorithms.
+    Ofthemanyconcreteparallel-prefixalgorithms,weusetheSklansky[Skl60]form(see
+Algorithm7), which has                      O(nlogn)               gates and depth lgn   . The Brent-Kung form [BK82],
+among others, requires only O(n)        gates, but it has twice the depth as the Sklansky
+algorithm. In the layered circuits required by sumcheck, values need to be propagated
+across each layer, and thus a lower depth is preferable even at the cost of extra gates.
+
+
+Reconstruction of tree structureA toy-CBOR document ultimately represents a tree.
+Onecanvieweachtokeninthedocumentasatreenode: AtokenInt(k)          representsaleaf,
+and a token Array(k)              represents an inner node with k children. On this tree, we define
+thetree addressof a node asfollows. Theroothas depth           l=  0, and its tree address is the
+array[1]. The treeaddress of a node at depth(l+   1) is[p[   0],p[  1],...,(p[l]−       1),j] , where
+p is the tree address of the parent, and j is child number. We use peculiar conventions
+that facilitate computation of tree addresses in a circuit. First, note the use of(p[l]−       1)
+inthetreeaddressofthechild,asopposedtotheperhapsmorenatural p[l]    . Second, we
+number children in decreasing order left to right. The right-most child (the one parsed
+last) has j=  1, and the child number of a left sibling is one plus the child number of
+its right sibling. With these conventions, the last element in the tree address is always
+nonzero.
+    Whilethetreeaddressisavariable-lengtharray,inacircuitwerepresentitasanarray
+ofwires offixedsize L,where L isthe maximum nestingdepthsupported bythecircuit,
+implicitlypaddedwithzeroes. Thus, intheactualcircuit,alltreeaddressesarestoredin
+an arraycounters[i][l]of wires, indexed by position and nesting depth.
+    Assumingwehavethetreeaddressofeveryposition i thatstartsatoken(i.e.,where
+[PDF_PAGE 29]
+Matteo Frigo, abhi shelat                                                                                                           29
+
+
+                 Table 3:Circuit size and depth for CBOR parsing overF              2128.
+
+
+                             MSG(B)    DEPTH          QUADS           TERMS      INPUTS
+                                   247            37       210,785       261,236        2,227
+                                   503            40       477,197       581,910        4,531
+                   F2128         1079            45    1,166,296    1,396,955        9,715
+                                 1591            46    1,810,432    2,160,157      14,323
+                                 2231            48    2,638,206    3,126,391      20,083
+                                 2551            48    3,018,335    3,583,464      22,963
+
+
+header[i]             is true), we can make assertions such as “this node at depth (l+   1) is a child
+of that node at depth l”, by comparing prefixes of the tree addresses up tol. Therefore,
+havingthetreeaddressavailableallowsustogeneratecircuitsthatcheckassertionsabout
+the syntactic structure of the document.
+    The only remaining problem is now to design a circuit that computes the tree address.
+While tree addresses are defined fortokens, or equivalently, for positions                 i such that
+header[i]              holds, in a circuit it is more convenient to compute counters[i]                 for every i.  If
+header[i]             is false, we definecounters[i] =counters[i−                                    1], which is well-defined as long as
+header[0]is true.
+    As before, we firstpresenta sequential algorithm forcomputing tree addresses, and
+thenconvertitintoalow-depthcircuit. OurstartingpointisAlgorithm8,whichcomputes
+counters[i+                 1] given counters[i]                 and the output of the tokenizer. If header[i]             is false, the
+procedure sets counters[i]←counters[i−                                      1], as we postulated. Otherwise, let l (explicitly
+called l[i]    in thecode) bethehighest depthsuch that counters[i][l]̸=                    0, whichis thedepth
+of the tree node by definition of tree address. Thus,counters[i+                1][l]   gets the tree address
+counters[i][l]                   of its left sibling minus one, as per our conventions on the numbering of
+children. If the token at position i starts an array of length k, we extend the tree address
+byonedepthcounters[i+                1][l+   1]←k     ,where,againbyconvention, k isthechildnumber
+of the leftmost child in the array (the first array element).
+    Asin thecase ofthetokenizer, onecouldunrollthecircuitforall i,obtaining adeep
+circuit that computes all counters[i]                 starting with counters[             0] = [1,0,0,...] .  To reduce
+the depth, we provide l[i]    as witness to break the dependencies, at which point the
+computationof counters[i][l]                   isreduced to L segmentedscan operations,oneperdepth l,
+plus assertions that the witnesses are correct.
+
+CircuitsizesTable3presentsthecostofparsingCBORdocumentsofvaryingsizes. The
+message sizes correspond to messages that can be hashed withSHA256 using an integral
+number of blocks. The table refers to one point in design space, but other tradeoffs are
+possible.
+
+5   Evaluation
+
+WeimplementedourZKprotocolinroughly20,000linesofC++codewithanadditional
+15,600 lines corresponding to unit tests or benchmarks. Our implementation uses only a
+single thread; our reported wall-clock timings thus reflect total computation.
+    We report benchmarks for several components of an anonymous credential system.
+WecollectedtheseperformancenumbersusingtheC++benchmarkpackageonanamd_64
+machine,acloudx86_64machine, aPixel9phone,aniPhone15plus,andanApple M4
+Macbook Air. The amd_64 platform is an AMD Ryzen 9 7950X released in September
+2022. This machine has Zen4 cores with base clock 4.5 Ghz; we only used 1 thread for
+[PDF_PAGE 30]
+30                                                                                   Anonymous Credentials from ECDSA
+
+
+                          Table 4:NTT benchmarks over different fields.
+
+                                                               Time (in ms)
+                                               212        214        216      218      220       222
+                                 F2128       0.061    0.281      1.28    5.75    25.7      137
+                                 Fp64         0.046    0.235      1.19    5.48    23.6      105
+                     amd64       Fp128       0.126    0.609      3.02    13.4    59.2      276
+                                 Fp256  2     0.433      2.03      9.51    43.6     223    1160
+                                 F2128       0.042    0.194    0.883    4.14    18.4     88.8
+                                 Fp64         0.064    0.338      1.79    8.22    35.4      152
+                      cloud      Fp128       0.177    0.860      4.35    19.4    85.1      378
+                                 Fp256  2     0.658      3.08      14.3    73.1     362    1800
+                                 F2128       0.061    0.305      2.38    10.3    47.7      196
+                                 Fp64         0.066    0.309      1.71    7.32    33.4      165
+                     Pixel 9     Fp128       0.196    0.972      4.85    21.3    96.3      452
+                                 Fp256  2     0.651      3.02      14.1    67.0     322    1410
+                                 F2128       0.034    0.163    0.744    3.40    15.5     77.2
+                                 Fp64         0.057    0.268      1.44    6.24    29.3      128
+               iPhone 15+        Fp128       0.155    0.767      3.70    17.1    75.1      335
+                                 Fp256  2     0.454      2.18      10.0    45.5     219    1106
+                                 F2128       0.024    0.114    0.513    2.66    12.0     52.7
+                                 Fp64         0.034    0.160    0.913    3.91    18.3     90.1
+                    M4 Air       Fp128       0.103    0.508      2.57    11.5    52.6      228
+                                 Fp256  2     0.338      1.67      7.70    37.6     181      954
+
+
+benchmarkingandallowedthemachinetoscaleitsownclock. The“cloud"platformis
+ac4-highcpu-8 instance,running inthecentral1-c availabilityzone inGoogleCloud.
+ThismachinehasfourIntelXeonPlatinum8581CCPU(cpufamily6,model207)cores
+running at approximately 3.2GHz with 16gb of RAM. The Pixel 9 platform, released
+August 2024, contains a Google Tensor G4 whose performance core is a Cortex-X4 (3.1
+GHz). TheiPhone15+,releasedSeptember2023,usesanA16Bionicchipwith2perfor-
+mancecores (3.46GHz). TheMacM4Air, releasedMarch2025, contains4performance
+coresthatclaimtooperateatapproximately4.4Ghz. Whencollectingtimingsonphones,
+benchmarks are run on the performance core and spaced to reduce thermal throttling.
+    We use SHA256 to implement the collision-resistant hash function, and the random
+oracle, resulting in a 128-bit computational security parameter. For our Ligero commit-
+ment, we use a rate 1/7 code and open 132 columns, which corresponds to roughly
+110bits ofsecurity. Westore prime-fieldelements inMontgomery formand implement
+field multiplication using the 64x64-bit scalar multiplier instead of SIMD instructions.
+For GF(     2128) we use 128-bit SIMD registers on both arm64 and x86_64, and implement
+multiplication using the 64x64-bit carryless multiplier, which is implemented by x86_64
+and by the arm64 AES instruction set. We do not use AVX256, AVX512, or GFNI.
+
+5.1   Algebraic primitives
+ThefirstbenchmarkinTable4showstheperformanceofourNTTimplementationacross
+different fields and processors.  TheFp128   andFp64   fields both have at least2          32 roots
+of unity.  As noted before, FP256   does not have roots of unity, and therefore we must
+[PDF_PAGE 31]
+Matteo Frigo, abhi shelat                                                                                                           31
+
+
+                           Table 5:Reed-Solomon encoding performance.
+
+                                                                 Time (in ms)
+                                                210        212        214      216      218       220
+                                   F2128      0.052    0.247      1.14    5.50    24.3      114
+                      amd64        Fp64        0.104    0.538      2.73    12.3    53.5      258
+                                   Fp128      0.309      1.46      6.90    30.4     135      659
+                                   Fp256        1.01      4.67      21.3    97.0     503    2570
+                                   F2128      0.037    0.173    0.797    3.75    17.5     79.7
+                                   Fp64        0.142    0.727      3.75    17.3    74.7      333
+                        cloud      Fp128      0.450      2.12      10.1    44.8     200      900
+                                   Fp256        1.59      7.37      33.8     168     802    3940
+                                   F2128      0.050    0.242      1.26    5.87    29.2      145
+                      Pixel 9      Fp64        0.148    0.743      3.98    17.2    82.1      381
+                                   Fp128      0.476      2.51      12.0    53.5     239    1089
+                                   Fp256        1.62      7.41      33.9     159     743    3204
+                                   F2128      0.032    0.154    0.726    3.29    15.3     73.2
+                                   Fp64        0.131    0.574      2.87    13.3    61.2      324
+                iPhone 15+         Fp128      0.384      1.76      8.10    36.4     166      916
+                                   Fp256        1.15      5.31      23.9     107     497    2420
+                                   F2128      0.022    0.111    0.503    2.23    11.2     60.5
+                                   Fp64        0.076    0.346      1.94    8.29    42.3      187
+                      M4 Air       Fp128      0.247      1.23      5.78    25.8     120      522
+                                   Fp256      0.781      3.66      16.7    76.7     361    1982
+
+
+useaquadraticextension,andthespecializedRealFFTalgorithmtointroducethemfor
+computing the NTT. As a result, we see roughly 4-5x penalty in performance in this field
+versus the128-bit prime fields. In all cases,the GF(2128) field isthe most performant field
+by a factor of at least2x. The        Fp64 , while not sound, is presented as a baselineto gauge
+ourimplementationagainstothersandhighlighttheoverheadsbetweendifferentfields
+and extensions.
+
+
+Reed-SolomonEncodingTable5reportsonReed-Solomonencodingbenchmarksused
+intheLigerocommitment. Eachtestmeasuresthetimetoencodeonearrayofsize n into
+acodewordofsize4      n (i.e.,rate 1/4  ). Recallfrom§3thatourReed-Solomonencoding,or
+polynomial interpolation algorithm for prime fields relies on a convolution, which itself
+requires2NTTsandmultiplicationbypre-computedconstants. Inconstrast,theencoding
+in GF(     2128) field uses 1 bidirectional FFT and 4 FFTs of the same size as the input. The
+table confirms that this results in 2–3x speedups.
+
+
+Comparison to Linear-time codesGolovnevet. al[                               GLS+23] and Xie, Zhang, and
+Song [XZS22] propose the use of linear-time encodable error-correcting codes to con-
+struct a polynomial commitment scheme. It is not immediately clear how to augment
+either to support ZK verification of linear and quadratic constraints (instead, both of
+those schemes were designedto answer the final queryin a sumcheck-based verifiable
+computation protocol). Moreover, such codes have poor distance properties, and thus
+require manyqueries totheoracle, resultinginproof sizesthatare anorderof magnitude
+larger. For example, the Brakedown scheme is described with distance1              /20and rate3          /5,
+[PDF_PAGE 32]
+32                                                                                   Anonymous Credentials from ECDSA
+
+
+       Table 6:Encoding time for Linear-time encodable codes over a 128-bit field.
+
+                                                          Time (in ms)              Queries
+                                                    214      216      218     220     needed
+
+                    Brakedown    cloud      4.95    19.5    79.1    364         6,593Pixel 9    5.27    20.9    79.7    354         6,593
+
+
+Table 7:Timing for our ZK proof of knowledge of an    n-block pre-image to theSHA256
+circuit (§4.2) over         GF(     2128).  The “Total Prover ZK" row reports the total prover time
+(including verify and commitment, etc) to produce the proof.
+
+                                                             OurZK Protocol, Time (ms)
+                                                     n=1         2         4         8         16       32
+
+                amd64    IP Step                       6.13    12.0    23.8    47.9      96.1     192Total Prover ZK       12.5    20.2    35.6    67.4       130     243
+
+
+                 cloud    IP Step                         5.4    10.6    21.1    42.4      85.6     182Total Prover ZK       13.5    20.9    36.3    66.7    133.5     244
+
+
+                Pixel 9    IP Step                       8.18    16.7    35.5    75.2       153     316Total Prover ZK       22.0    34.5    61.9     116       223     426
+
+
+          iPhone 15+    IP Step                       4.66    9.08    18.1    36.5      74.2     154Total Prover ZK       12.8    20.5    35.7    65.6       117     230
+
+
+               M4 Air    IP Step                       3.03    5.60    12.1    23.1      44.7    99.2Total Prover ZK       5.51    9.00    16.0    30.4      58.9     116
+
+
+
+and therefore requires at least 6500 queries.
+    Table6alsoshowsthatknownlinear-timecodesareslightlyslowerthanourRS                Fp64
+codeandsubstantiallyslower thanourGF(2         128)code fortherelevantparameterregime.
+We benchmark theBrakedown implementation oflinear-time encodable codesover 128-
+bit fields.  Because that scheme requires at least 6,500 queries to the codeword, their
+benchmark begins at2    14. For our parameter regimes, the coefficient for their linear-time
+encoding scheme seems to be larger than our quasi-linear Reed-Solomon encoding in
+GF(2         128), as our implementation begins at +4x faster and remains 3x faster atn=2             20.
+
+5.2   SHA256 hash verification
+
+Many ZK proof systems publish benchmarks for proving knowledge of a SHA256 pre-
+image. OurSHA256n(e ,m)    circuitverifiesthattheprivatemessagem canbehashedusing
+at most nSHA256   block operations (i.e.,|m|<      64n−   9bytes) and hashes to the public
+value e. This circuit corresponds to the one described in §4.2with bit-packing2. Our
+timing results for 1–32 blocks appear in Table7.  The “IP Step” row reports the time
+requiredtocreatetheverifytranscriptforthecircuit. TheTotalZKrowreportsthetotal
+provertime (includingverify and commitment, etc) toproduce theproof. Table8reports
+commitment parameters required for one block ofSHA256.
+
+5.2.1   Comparison with Ligero
+As mentioned in the introduction, Ligero requires committing to a 3 witnessess for every
+quadratic constraint in the circuit. As a result, the size of the Ligero commitment for a
+[PDF_PAGE 33]
+Matteo Frigo, abhi shelat                                                                                                           33
+
+
+Table 8:Commitment size parameters for 1 block of our    SHA256-preimage proof in
+different fields.
+
+                      SHA2561     |w|   Witness/row    Row size    # rows
+                      Fp               3,100                      682               212            12
+                      GF(2         128)   2,810                      341               2  11            20
+
+Table 9:Sizeof theLigero instancefor    n blocksof SHA256asderived froman optimal
+R1CS expression of SHA256.
+
+                                                                    SHA256n(·)
+                                                             n=1               2               4
+
+                   R1CS      Witnesses                      29,853      60,381    121,437Constraints                   29,725      60,053    120,709
+
+                               Total Witnesses          129,500    261,484    525,452
+                   Ligero      Quadratic                      29,725      60,053    120,709
+                               Witness/row forw     3,149        6,426        6,426
+                               Quadratic rows              1,511        3,149        3,149
+                               Encoded Row size             215            216            216
+                               Number of rows                104           103           201
+
+
+given circuit C isO(|C|)         , whichcan bemany times largerthan thecorresponding verify
+transcript for C(x)=       0. In this section, we provide concrete evidence forthis claim with
+respect to the SHA256 circuit.
+    BecauseLigeroperformsbetterwithacircuitthatoptimizesforthetotalnumberof
+quadratic constraints, we used thecircom system to generate an R1CS instance for our
+family of SHA256n circuits described above. Recall that an R1CS instance consists of a
+witnesstableau w andalistofconstraintsintheformof A·B−C=             0where   A,B,C are
+linearcombinationsofawitnessvector w. SmallerR1CSinstancesnaturallyrequirefewer
+multiplications to verify. We converted this R1CS into Ligero constraints following the
+description in their paper. Namely, for each A,B,C, we introduce new Ligero witnesses
+αi,βi,κi respectively that are constrained to be equal to the linear combination of the
+original witness w. We then introduce a new witness valueγi =α    i·β i, and then add a
+linearconstraintthatverifiesγi−κ    i = 0. Intotal,weintroduce4newwitnesses, 4linear
+constraints and1 quadratic constraint foreach R1CS constraint. For R1CS constraintsthat
+have an empty C term, i.e., C=   0, we apply a simple optimization to remove the extra
+witness value and the fourth linear constraint. Altogether, we form a Ligero commitment
+using all of the base R1CS witnesses plus the extra witnesses needed by Ligero to check
+R1CS. Table9reports both of these figures. In addition, each quadratic constraint on a
+witness requires adding acopyof the two terms and their product as witnesses. All of
+these witnesses are partitioned into rows of size w, with the additional constraint that the
+copies of the three witnesses for a quadratic constraint need to be on separate rows at
+thesameindex,andcanonlyincludehalfasmanyperrow. AchievingZKalsorequires
+reservingspotsineachrowforarandompad,andadding2additionalrandomrows. A
+number of additional constraints govern the size of w. For each Ligero commitment, we
+loop over allfeasible parameters, and chose a parameter set that minimizes the size ofthe
+commitment. These optimal choices are also presented in Table9.
+    We benchmark our implementation of Ligero on these instances for c48 and report
+timings in Table10. For theseproblems,the most expensive component of Ligero isthe
+commitment stage. For soundness,Ligeroshould usea field ofsize atleast2          128, which
+[PDF_PAGE 34]
+34                                                                                   Anonymous Credentials from ECDSA
+
+
+Table 10:Ligero ZK Prover time for verifying the SHA256 pre-image of an       n-block
+message. ThefirstlinereportsthetimetoCommittothewitnesstableau. Thisbenchmark
+wasrunusingtheFp64  field,whichisnotsufficientforsoundness. Ligeroisessentially
+20x slower on c48.
+
+                                                                    Time (ms)
+                                                              n=1        2          4
+
+                    cloud    Commit                                  222        384      736Total ZK Prover                     273        493      939
+
+                              Overhead wrt this work      20x      23.5x    26x
+                              [WHV24]                                250        450      750
+
+
+canperhapsbeimplementedusingadegree-2ordegree-4fieldextensionofasmallerbase
+field. To be fair, we report benchmarks using a 64-bit prime. While this parameter setting
+is not as sound as our own implementation, it demonstrates that our system is at least
+roughly20xfasterfor         n=   1,2,or4blockmessages,thussupportingourintroductoryclaim.
+Ultimately, our numbers in Table10roughly match those presented by Wang, Hazay,
+andVenkitasubramaniamintheoptimizedLigetron[WHV24,Fig6(a)]implementation,
+whichshowsroughly 250ms, 450ms, 750msfor n=   1,2,4blocksrespectively;albeitthe
+Ligetronbenchmarkuses4threads ona4-coremachinewitha50-bitprime,andhigher
+statistical security parameter, so the comparison is imperfect.
+    The≈ 20x performance improvement of our system over pure-Ligero can be partly
+explained by inspecting the witness size as per Table8for a single         SHA256 block. Thefull
+witnessinourproofsystemcontainsroughly9xfewerrows(11vs104)withablocksize
+that is 4x smaller, roughly reflecting a 36x reduction in work to produce the commitment;
+however, our results use a 128-bit field and thus incur a roughly 2x overhead with respect
+toF    p64  used in Table10.
+
+
+5.2.2   Other Comparisons
+
+Diamond and Posen [DP25, DP24] implement a commitment scheme and a verifiable
+computation protocol (not zero-knowledge) in the Binius [bin] system. They provide a
+SHA256 benchmark that verifies 32 independent applications of the SHA compression
+function; their x64 implementation also exploits nativegfni instructions. On cloud, their
+benchmark, when run on a single core, runs in 498ms (versus our verify which runs in
+192ms). Although their benchmark numbers are larger than ours, the performance gap
+closes as n increases; their system incorporates ideas that may also apply and speedup
+our implementation in future work.
+    The stone-prover is an implementation of a succinct argument system based on
+the STARK protocol [BSBHR18] that requires no trusted setup parameters. Unlike our
+system which handles arithmetic circuits, this system handles generalprogramsthat
+are expressed for a bespokeCPU. This generality imposes an inherent overhead; prior
+publishedbenchmarks [GLS+23]show thatthe STARK provertime islargerthan Ligero.
+To confirm, on cloud, producing a proof that verifies SHA256 on a 1 block message
+required adegree boundof 4,194,304 and took 106,000ms of prover time.  Processing a
+2-block message took the same time (as it also fit into the degree bound). The 4-block
+message could not be processed on our cloud machine due to memory limits.
+    WedidnotbenchmarkSHA256onproofsystemswhichrequireatrustedparameter.
+Prior work [GLS +23] already shows that these systems require more prover time.
+[PDF_PAGE 35]
+Matteo Frigo, abhi shelat                                                                                                           35
+
+
+Table 11:Benchmark for verification of      n ECDSA signatures. The circuit used here is
+describedin§4.1overfield     Fp256 . TheTotalProvertimeconsistsoftheLigerocommitment
+time, the time to produce the Verify transcript, and other small steps.
+
+                                                                            Time (ms)
+                                                                      n=1         2         3
+                                         Ligero com                     18.9    22.3    26.9
+                                         Verify transcript            7.77    15.6    21.9
+                            amd64        Total ZK                         29.0    41.0    53.0
+
+                                         Verifier                            18.8    26.0    32.0
+                                         Ligero com                     25.3    29.6    35.9
+                                         Verify transcript            10.2    20.3    28.7
+                              cloud      Total ZK                         38.4    54.1    69.6
+
+                                         Verifier                            24.9    34.8    42.9
+
+                                         Ligero com                     34.5    40.7    48.9
+                                         Verify transcript            14.0    29.0    41.2
+                            Pixel 9      Total ZK                         53.3    75.7    98.1
+
+                                         Verifier                            33.5    46.5    57.2
+
+                                         Ligero com                     18.6    22.1    27.2
+                                         Verify transcript              8.0    16.7    24.0
+                      iPhone 15+         Total ZK                         30.7    43.3    56.6
+
+                                         Verifier                            20.8    28.8    35.8
+
+                                         Ligero com                     13.1    15.4    18.9
+                                         Verify transcript              5.9    12.7    16.3
+                            M4 Air       Total ZK                         20.4    29.8    37.9
+
+                                         Verifier                            14.3    21.2    23.8
+
+
+5.3   ECDSA signature verification
+Wenowreportperformanceresultsonthisproblem: Given(e ,pk)    ,proveknowledgeof
+(r ,s)  such that ecdsaVerify(pk         ,e,r,s) =  1. A related version of the problem, required in
+the MDOCcredential use-case, hidespk as awitness. As describedin §4.1, our circuitfor
+both of these problems uses 1085 witnesses to complete the verification in low-depth.
+    Table11reportsthebasicZKbenchmarksforthisproblem. Thisbenchmarkdemon-
+strates thatcontrary to folklore, azero knowledge proof ofpossession of asignaturefor
+ECDSA—which requires roughly 20ms to 50ms depending on the hardware—is within a
+small factor of performance for a basic BBS+ proof of possesion of a signature.
+
+Comparison tothe BBS+ schemeWe ranthe             pairing_crypto package [Pai24] withthe
+BLS12-381curveandSHA256onsignaturesthatincluded100attributesandpresentations
+thatrevealed3attributes. Onc48,theBBS+proofgenerationsteprequired10.2msand
+the verify step required8ms; our ECDSA proof generation method is within     ≈ 4x the
+performance. However,theBBSmicrobenchmarkdoesnotaccountforadditionaltasks
+neededtoperformacredentialshowoperation,suchasverificationthatthecertificatehas
+[PDF_PAGE 36]
+36                                                                                   Anonymous Credentials from ECDSA
+
+
+not expired.
+
+
+Comparisons to other ZK-ECDSAWoo et al. [                     WOS+25] present a ZK proof ofposses-
+sionofanECDSAsignatureusingavariantoftheSpartanZKsystemwithanappropriate
+ECDSAfinitefield. Spartanis alsobasedonasumcheck primitive,butinsteadofusing
+layered circuits, it processes R1CS (which requires more committed witnesses).  As a
+result, their prover runs in 900ms, or at least 25X slower than ours. In addition, their
+optimizationspecificallyreliesona“sidecar”protocolinwhichthepublickey pkisknown
+to the verifier; this requirement does not work when pk must be hidden in the witness
+commitment,e.g.,whenverifyingthedevice-bindingformdocsignaturesinwhichthe
+device public key must be private. As a result, this technique cannot be used for legacy
+credential applications like MDOC.
+    The circom-ecdsa project [0xP22] solves a similar task for secp256k1 using the
+Groth16 proof system; it requires both a trusted setup string and bilinear pairings. The
+trusted parameter is 973MB, and proof generation required 140,000ms when restricted to
+asinglecore. Thespartan-ecdsa[Per23]projectclaimstoproduceaZK-proof,butitonly
+hidesthescomponentofthesignature,whilerequiringRtobepublic—itisthereforenota
+fullZKproofofknowledgeofasignatureanddoesnotworkforanonymouscredentials.
+
+6   Applications
+
+We apply our proof system to applications for digital identity.
+
+6.1   A simple anonymous credential
+
+Belenkiy etal. [BCKL08] introduce the notion ofa P-signatureas a component thatyields
+aconstruction ofananonymous credentialscheme. Briefly, aP-signature schemeletsa
+user (1) obtain a signature on a committed message without revealing the message, and
+(2) construct a non-interactive zero-knowledge proof of knowledge of(F(msg)       ,σ)   such
+that VerifySig(pk               ,msg,σ) =   1.  In the formal security notion, Belenkiy et al. [  BCKL08,
+Definition 3] write, “Note that we require that only the user’s input msg is hidden from
+the issuer, but not necessarily the user’s outputσ. The reason that this is sufficient is
+thatin actualapplications (forexample, in anonymouscredentials), auser wouldnever
+show σ in the clear; instead, he would just prove that he knows σ." In this way, the
+formaldefinitionisweakerthanthatofblindsignaturesthataresometimesrequiredfor
+anonymouscredentials. Itsufficesfortheusertoproduceapublickey(e.g.,forECDSA,
+as this is a commitment to the corresponding secret key for this scheme), and incorporate
+the public keyas a component in thesignature. In this way, this step is already subsumed
+in many modern identity protocols which require device binding. It is also clear that
+property (2), sometimes abbreviated as theproof of posession, for the P-signature is the
+difficultpropertytoachieve inpriorwork. This proof of possessionisthesame primitive
+that we construct above in §4.1.
+    In analogy to [BCKL08, Theorem 1], we claim
+
+Theorem 11(Informal). If ECDSA is a secure signature scheme, and Protocol2.5is a zero-
+knowledge argument scheme, then there exists a secure P-signature scheme for ECDSA.
+
+    Finally, applying Lemmas 2 and 3 from [BCKL08] imply the existence of a formal
+anonymous credential scheme from ECDSA (and implicitly SHA-256).
+    We reportdetails to thepractioner on howto instantiate theproof of posessionrequired
+by a P-signature construction for a few concrete schemes.
+[PDF_PAGE 37]
+Matteo Frigo, abhi shelat                                                                                                           37
+
+
+Simple document formatWe designed a document format for credentials that is based
+on the machine readable zone (MRZ) format used in passports and then report on the
+construction of (2).
+
+                  0    1    2    3    4    5    6    7    8    9   10  11  12  13  14  15  16  17  18  19  20  21  22  23  24  25  26  27  28  29  30  31
+                                                     firstname
+                                                     lastname
+                         dob          G    age overx           validFrom            validUntil
+
+                                                        dpkx
+                                                        dpky
+
+                 issuerid                    Attributes
+
+
+                        Figure 2:A simple format for a 183-byte credential.
+
+    InFig2,wedescribea183-bytecredentialthatallowsforatleast60standardattributes
+to be encoded, in addition to a device public key for device-bounded checks, and time
+valuestoindicatethevalidityperiod. Notably,thisformatrequiresonly3SHA256blocks
+to hash, and itrequires no parsing todetermine the byte-location of anattribute. For this
+credential, we develop a simple benchmark to prove that the credential holder is older
+than 18 (which amounts tochecking the value of byte 74 in the format). See Algorithm9
+for the specific theorem being proven.
+
+Algorithm 9Toy Credential Verification
+Require:x=(pk,a,id,tr,now)andw=(MSO,pk                                                                            dx,pk dy)
+ 1:Verify the following constraints:
+
+                                    e1 =SHA256(MSO[0 : 183])
+                                     a=MSO[id]
+                       (pk  dx,pk dy)=MSO[96 : 160]
+                                 tstart =MSO[48 : 56]
+                                  tend =MSO[56 : 64]
+                                 tstart <t    now <t    end
+                                  true=p256.verify((r                                      1,s 1),e   1,PK II)
+                                  true=p256.verify((r                                      2,s 2),H(tr||hdr),(pk                     dx,pk dy))
+
+    The benchmark in Table12shows that this toy format achieves performance that is
+withinafactorofBBS+proofverification(withoutincorporatingthetimetoformatthe
+BBS+ attributes or check credential validity).
+
+6.2   Proof of posession for MDOC credentials
+
+ISO standard 18013-5 [18021] specifies a digital identity format that is used in mobile
+driver licenses and national identity formats.  For example, the Arizona, California,
+Colorado,Georgia,MarylandandNewMexicoissuedriverlicensesintheMDOCformat
+to certain mobile devices. See AppendixAfor details.
+    The MDOC format supports a form ofselective disclosurein which the holder of an
+MDOC can reveal a subset of the attributes that are asserted in the credential.  This
+disclosure format is implemented by including salted hashes of the attribute values in
+[PDF_PAGE 38]
+38                                                                                   Anonymous Credentials from ECDSA
+
+
+                           Table 12:Toy credential benchmark overF                  p256 .
+
+
+                                            DEPTH       QUADS           TERMS      INPUTS
+                     Toy Circuit                 12     592,555    1,799,704      20,171
+
+
+                                            Prover Time (ms)             Proof size (kb)
+                           amd64               290                                 291
+                             cloud               396                                      -
+                           Pixel 9               572                                      -
+                     iPhone 15+               289                                      -
+                           M4 Air               223                                      -
+
+
+the credential format that is signed by the issuer.  The salted-hash technique has two
+well-known privacy flaws. If Alice uses the same MDOC credential to assert identities
+to relying parties P1 and P2, it is possible for P1 and P2 to combine their views of the
+presentationprotocolinordertotracktheuseracrosssessions. Forexample,theexpiration
+times, or device key values can be used to track a user or link a user between different
+relyingparties. Asimplecounter-measureistorequiretheusertousedifferentMDOCs
+foreachrelyingparty—thismeasurecomesatacostforboththeissuer,whonowmust
+issue 1000s of mdocs to each user, and the user, who must maintain state to ensure the
+unique property. A more serious flaw enables the issuer of the MDOC to collaborate with
+the relying party in order to identity users across sessions. This flaw has delayed the
+deployment of MDOC for some applications.
+
+
+ZK for MDOCA solution to the above issuer-RP collusion problem for the MDOC
+format is to modify the presentation protocol so that the user instead produces a zero-
+knowlegeproofthat“theirmdocverifieswithrespecttotherequestedattributes.” Specifi-
+cally, we aim to convince the verifier of the theorem statement shown in Algorithm10
+while leaking no extra information:
+
+Algorithm 10MDOC Verification
+Require:x= (PK                         II,attr,Z,tr,time)  and w consists of a 2551 byte string MSO, a length
+             len,ahashe1,ahashh2,anindexX,asignaturepair(r  1,s1),aparsingwitnesses
+             c, a 32-byte nonce, a pair(pk  dx,pkdy), a pair of strings tstart,tend, a header hdr
+             and a signature(r    2,s 2)
+ 1:Verify the following relations:
+
+                                     e1 =SHA256(MSO[0 :len])
+                                     h2 =MSO[valueDigests][org.iso.18013.5.1][X]
+                                     h2 =SHA256(nonce,attr,Z)
+                       (pk  dx,pk    dy)=MSO[deviceKeyInfo][deviceKey][−2,−3]
+                                 tstart =MSO[validityInfo][validFrom]
+                                   tend =MSO[validityInfo][validUntil]
+                                 tstart <t    now <t    end
+                                  true=p256.verify((r                                      1,s 1),e   1,PK II)
+                                  true=p256.verify((r                                      2,s 2),H(tr||hdr),(pk                     dx,pk dy))
+[PDF_PAGE 39]
+Matteo Frigo, abhi shelat                                                                                                           39
+
+
+    Importantly, the public values for this theorem are (PK  II, attr, Z, tr, time) —these
+values are shared between the prover (the user with the credential) and the verifier (the
+relying party). Here, PKII is the publickey of the identity-issuer, Z is an attributevalue
+to disclose, e.g, like the “age_over_18” boolean, and attr is the name of this attribute
+(as written in the MSO), tr is the liveness transcript, and tnow is used to verify that the
+mdoc has not expired. The rest of the values in the statement are hidden, in the sense
+thattheverifierisconvincedthatsuchvaluesexist,butdoesnotlearnthemthroughthe
+interaction. Notice that the private witness h2 is compared twice: once as the a string
+included in the MSO and once as the result of the hash of a concatenation of private
+and public strings. Performance is reported in Table13on several processors; all figures
+areagainmeasuredonasingle-coreusingasinglethread. Themostexpensivepartofthe
+proofgeneration concernstheSHA256 hashof theMSO. Ourbenchmark implementsthe
+two-field optimization, with the SHA256 circuit verified in GF(2        128).
+
+Table 13:ProvertimeforZKMDOCpresentationoftheage-over-18attributeforan      MSO
+of at most 2231 bytes. The circuit corresponds to Alg.10.
+
+                                              Prover (ms)    Verifier (ms)
+                                 amd_64                   526                    252
+                                    cloud                   589                    286
+                                  Pixel 9                   931                    508
+                             iPhone 15+                   437                    229
+                            Mac M4 Air                   294                    142
+
+
+
+ExtensionsThisbasicapplicationcanbeconvenientlyextendedtosupportmoreprivacy
+features. For example, it is easyto also hidethe identity ofthe issuer byproving that the
+issuerisamemberofacertifiedlistofissuers. Itispossibletosupportthedisclosureof
+multipleattributesinsteadof1atlittlecost. Finally,itispossibletosupporttherevocation
+of MDOC credentials in zero-knowledge by using a ZK list-membership technique the
+authors have documented in specification forums.
+
+References
+
+[0xP22]0xParc. Circom-ecdsa. https://github.com/0xPARC/circom-ecdsa, 2022.
+
+[18021]          ISO/IEC FDIS 18013-5.   Personal identification—iso-compliant driving
+                licence—part 5: Mobile driving licence (mdl) application, 2021.
+
+[AHIV23]     ScottAmes,CarmitHazay,YuvalIshai,andMuthuramakrishnanVenkita-
+                subramaniam. Ligero: Lightweight sublinear arguments without a trusted
+                setup.Des. Codes Cryptogr., 91(11):3379–3424, 2023.            doi:10.1007/s10623-0
+                23-01222-8.
+
+[BCKL08]     Mira Belenkiy, Melissa Chase, Markulf Kohlweiss, and Anna Lysyanskaya.
+                P-signatures and noninteractive anonymous credentials.  In Ran Canetti,
+                editor,TCC2008: 5thTheory ofCryptography Conference,volume 4948,2008.
+                doi:10.1007/978-3-540-78524-8_20.
+
+[BH20]          CarstenBormannandPaulE.Hoffman. ConciseBinaryObjectRepresenta-
+                tion (CBOR). RFC 8949, December 2020. URL: https://www.rfc-editor.
+                org/info/rfc8949,doi:10.17487/RFC8949.
+[PDF_PAGE 40]
+40                                                                                   Anonymous Credentials from ECDSA
+
+
+[bin]      Binius implementation.gitlab.com/IrreducibleOSS/binius.git.
+
+[BK82]           BrentandKung. Aregularlayoutforparalleladders.IEEETransactionson
+               Computers, C-31(3):260–264, 1982.doi:10.1109/TC.1982.1675982.
+
+[Ble90]          Guy E. Blelloch.   Prefix sums and their applications.   Technical Report
+               CMU-CS-90-190, Schoolof Computer Science,Carnegie Mellon University,
+               November 1990.
+
+[BOGG+88]  MichaelBen-Or,OdedGoldreich,ShafiGoldwasser,JohanHåstad,JoeKilian,
+               Silvio Micali,and Phillip Rogaway. Everything provableis provable inzero-
+               knowledge. InShafiGoldwasser,editor,AdvancesinCryptology–CRYPTO’88,
+               volume 403, 1988.doi:10.5555/88314.88333.
+
+[Bra99]          Stefan Brands.Rethinking Public Key Infrastructure and Digital Certificates.
+               PhD thesis, Eindhoven Institute of Technology, 1999.
+
+[BSBHR18]   EliBen-Sasson,IddoBentov,YinonHoresh,andMichaelRiabzev. Scalable,
+               transparent, and post-quantum secure computational integrity, 2018.
+
+[CCH+18]    RanCanetti,YileiChen,JustinHolmgren,AlexLombardi,GuyN.Rothblum,
+               RonD.Rothblum,andDanielWichs. Fiat-shamirfromsimplerassumptions,
+               2018.
+
+[CDL16]        Jan Camenisch, Manu Drijvers, and Anja Lehmann. Anonymous attestation
+               using the strong diffie hellman assumption revisited.  In Michael Franz
+               and Panos Papadimitratos, editors,Trust and Trustworthy Computing, 2016.
+               doi:10.1007/978-3-319-45572-3_1.
+
+[Cer09]          Certicom.  Sec 1: Elliptic curve cryptography, v2.0.  Standards document,
+               2009.
+
+[Cha85]         DavidChaum. Securitywithoutidentification: Transactionsystemstomake
+               big brother obsolete.Communications of the ACM, 10(28):1030–1044, 1985.
+               doi:10.1145/4372.4373.
+
+[CL01]           Jan Camenisch and Anna Lysyanskaya.    An efficient system for non-
+               transferable anonymouscredentials with optionalanonymity revocation. In
+               BirgitPfitzmann,editor,AdvancesinCryptology–EUROCRYPT2001,volume
+               2045, 2001.doi:10.1007/3-540-44987-6_7.
+
+[CMT12]       Graham Cormode, Michael Mitzenmacher, and Justin Thaler.   Practical
+               verifiedcomputationwithstreaminginteractiveproofs. InShafiGoldwasser,
+               editor,ITCS2012: 3rdInnovationsinTheoreticalComputerScience,pages90–
+               112, 2012.doi:10.1145/2090236.2090245.
+
+[DLFKP16]   AntoineDelignat-Lavaud,CedricFournet,MarkulfKohlweiss,andBryan
+               Parno. Cinderella: Turningshabbyx.509certificatesintoelegantanonymous
+               credentialswiththemagicofverifiablecomputation.In2016IEEESymposium
+               onSecurityandPrivacy,SanJose,CA,USA,May22–26,2016.IEEEComputer
+               Society Press.doi:10.1109/SP.2016.22.
+
+[DP24]          BenjaminE.DiamondandJimPosen. Polylogarithmicproofsformultilinears
+               overbinarytowers. CryptologyePrintArchive,Paper2024/504,2024. URL:
+               https://eprint.iacr.org/2024/504.
+[PDF_PAGE 41]
+Matteo Frigo, abhi shelat                                                                                                           41
+
+
+[DP25]          Benjamin E. Diamond and Jim Posen. Succinct arguments over towers of
+               binary fields. In Serge Fehr and Pierre-Alain Fouque, editors,Advances in
+               Cryptology – EUROCRYPT 2025, 2025. URL:        https://eprint.iacr.org/20
+               23/1784,doi:10.1007/978-3-031-91134-7_4.
+
+[GKR08]       Shafi Goldwasser, Yael Tauman Kalai, and Guy N. Rothblum. Delegating
+               computation:  interactive proofs for muggles.  In Richard E. Ladner and
+               CynthiaDwork,editors,40thAnnualACMSymposiumonTheoryofComputing,
+               2008.doi:10.1145/269943.
+
+[GLS+23]      AlexanderGolovnev,JonathanLee,SrinathSetty,JustinThaler,andRiadS.
+               Wahby.   Brakedown:  Linear-time and field-agnostic snarks for r1cs.   In
+               HelenaHandschuhand AnnaLysyanskaya,editors,Advances inCryptology–
+               CRYPTO 2023, Part II, volume 14082, 2023.   doi:10.1007/978-3-031-38545
+              -2_7.
+
+[Gow92]       Roderick Gow. Cauchy’s matrix,the Vandermonde matrix andpolynomial
+               interpolation.BulletinoftheIrishMathematicalSociety,28:45–52,March1992.
+
+[Knu97]        DonaldE.Knuth.Theartofcomputerprogramming,volume2(3rded.): seminu-
+               merical algorithms.  Addison-Wesley Longman Publishing Co., Inc., USA,
+               1997.
+
+[KRS25]        DmitryKhovratovich,RonD.Rothblum,andLevSoukhanov. Howtoprove
+               false statements: Practical attacks on fiat-shamir. In Yael Tauman Kalai and
+               Seny F. Kamara, editors,Advances in Cryptology – CRYPTO 2025, Part VI,
+               volume 16005, 2025.doi:10.1007/978-3-032-01887-8_1.
+
+[KZM+15]    Ahmed  Kosba,  Zhichao  Zhao,  Andrew  Miller,  Yi  Qian,  T-H.  Hubert
+               Chan, Charalampos Papamanthou, Rafael Pass, abhi shelat, and Elaine
+               Shi. C∅C∅: A framework for building composable zero-knowledge proofs.
+               eprint/2015/1093, 2015.
+
+[LANHC16] Sian-JhengLin,TareqY.Al-Naffouri,YunghsiangS.Han,andWei-HoChung.
+               Novel polynomial basis with fast Fourier transform and its application
+               to reed–solomon erasure codes.IEEE Transactions on Information Theory,
+               62(11):6284–6299, 2016.doi:10.1109/TIT.2016.2608892.
+
+[LCH14]       Sian-Jheng Lin, Wei-Ho Chung, and Yunghsiang S. Han. Novel polynomial
+               basisanditsapplicationtoreed-solomonerasurecodes. In2014IEEE55th
+               AnnualSymposiumonFoundationsofComputerScience,pages316–325.IEEE
+               Computer Society Press, 2014.doi:10.1109/FOCS.2014.41.
+
+[LCK+18]     Wen-DingLi,Ming-ShingChen, Po-ChunKuo,Chen-MouCheng, andBo-
+               Yin Yang.  Frobenius additive fast Fourier transform.  InISAAC’18, 2018.
+               URL: https://arxiv.org/abs/1802.03932, arXiv:1802.03932, doi:
+               doi.org/10.1145/3208976.3208998.
+
+[LFKN92]     CarstenLund, LanceFortnow,HowardKarloff, andNoam Nisan. Algebraic
+               methods for interactive proof systems.J. ACM, 39:859–868, October 1992.
+               doi:10.1145/146585.146605.
+
+[LRSW99]     Anna Lysyanskaya, Ron Rivest, Amit Sahai, and Stefan Wolf. Pseudonym
+               systems. In Howard M. Heys and Carlisle M. Adams, editors,SAC 1999: 6th
+               Annual International Workshop on Selected Areas in Cryptography, volume 1758,
+               1999.doi:10.1007/3-540-46513-8_14.
+[PDF_PAGE 42]
+42                                                                                   Anonymous Credentials from ECDSA
+
+
+[Mat08]         Todd Mateer.Fast Fourier transform algorithms with applications. PhD thesis,
+               ClemsonUniversity,2008. URL:https://cr.yp.to/f2mult/mateer-thesi
+               s.pdf.
+
+[Nus80]        Henri J. Nussbaumer.  Fast polynomial transform algorithms for digital
+               convolution.IEEE Transactions on Acoustics, Speech, and Signal Processing,
+               28:205–215, 1980.  URL: https://api.semanticscholar.org/CorpusID:
+               121556373,doi:10.1109/TASSP.1980.1163372.
+
+[Pai24]          Pairingcrypto bbsimplementation. https://github.com/mattrglobal/p
+               airing_crypto, 2024.
+
+[Per23]Personae. https://github.com/personaelabs/spartan-ecdsa.git, 2023.
+
+[RWGM23]   Michael Rosenberg, Jacob White, Christina Garman, and Ian Miers.  zk-
+               creds: Flexible anonymous credentials from zksnarks and existing identity
+               infrastructure. In2023IEEESymposiumonSecurityandPrivacy,SanFrancisco,
+               CA, USA, May 21–25, 2023. IEEE Computer Society Press. doi:10.1109/SP
+               46215.2023.10179430.
+
+[SJB87]          H. Sorensen, D. Jones, and C. Burrus.  Real-valued algorithms for the fft.
+               InICASSP’87.IEEEInternationalConferenceonAcoustics,Speech, andSignal
+               Processing, volume 12, pages 1831–1834, 1987.              doi:10.1109/ICASSP.1987.
+               1169490.
+
+[Skl60]          Jack Sklansky. Conditional-sum addition logic.IRE Trans. Electron. Comput.,
+               9:226–231, 1960.  URL: https://api.semanticscholar.org/CorpusID:
+               41264042,doi:10.1109/TEC.1960.5219822.
+
+[Tha13]         Justin Thaler. Time-optimal interactive proofs for circuit evaluation. In Ran
+               Canetti andJuan A. Garay, editors,Advancesin Cryptology – CRYPTO 2013,
+               Part II, volume 8043, 2013.doi:10.1007/978-3-642-40084-1_5.
+
+[Tha22]Justin Thaler. Proofs, arguments, and zero-knowledge. Manuscript, 2022.
+
+[vdH04]        Joris van der Hoeven.  The truncated fourier transform and applications.
+               InProceedings of the 2004 International Symposium on Symbolic and Algebraic
+               Computation,ISSAC’04,page290–296,NewYork,NY,USA,2004.Association
+               for Computing Machinery.doi:10.1145/1005285.1005327.
+
+[vdH05]        JorisvanderHoeven. NotesonthetruncatedFouriertransform, 2005. URL:
+               https://www.texmacs.org/joris/tft/tft.pdf.
+
+[vzGG96]      JoachimvonzurGathenandJürgenGerhard. Arithmeticandfactorizationof
+               polynomialoverf2(extendedabstract). InProceedingsofthe1996International
+               Symposium on Symbolic and Algebraic Computation, ISSAC ’96, pages 1–9,
+               New York, NY, USA, 1996. Association for Computing Machinery.  doi:
+               10.1145/236869.236882.
+
+[WHV24]      Ruihan Wang, Carmit Hazay, and Muthuramakrishnan Venkitasubrama-
+               niam.  Ligetron: Lightweight scalable end-to-end zero-knowledge proofs
+               post-quantum zk-snarks on a browser.  In2024 IEEE Symposium on Secu-
+               rity and Privacy, San Francisco, CA, USA, May 19–23, 2024. IEEE Computer
+               Society Press.doi:10.1109/SP54263.2024.00086.
+[PDF_PAGE 43]
+Matteo Frigo, abhi shelat                                                                                                           43
+
+
+[WJB+17]     Riad S Wahby, Ye Ji, Andrew J Blumberg, abhi shelat, Justin Thaler, Michael
+               Walfish, and Thomas Wies. Full accounting for verifiable outsourcing. In
+               Bhavani M. Thuraisingham, David Evans, Tal Malkin, and Dongyan Xu,
+               editors,ACM CCS 2017: 24th Conference on Computer and Communications
+               Security, 2017.doi:10.1145/3133956.3133984.
+
+[WOS+25]    Anna Woo, Alex Ozdemir, Chad Sharp, Thomas Pornin, and Paul Grubbs.
+               Efficientproofsofpossessionforlegacysignatures. InIEEES&P2025,2025.
+               doi:10.1109/SP61157.2025.00080.
+
+[WTas+18]   RiadS.Wahby,IoannaTzialla,abhishelat,JustinThaler,andMichaelWalfish.
+               Doubly-efficient zksnarks without trusted setup.  Ineprint/2017/1132 and
+               2018 IEEE Symposium on Security and Privacy. IEEE Computer Society Press,
+               2018.doi:10.1109/SP.2018.00060.
+
+[XZS22]        Tiancheng Xie, Yupeng Zhang, and Dawn Song.  Orion: Zero knowledge
+               proof withlinearprovertime. In Yevgeniy Dodisand Thomas Shrimpton,
+               editors,AdvancesinCryptology–CRYPTO2022,PartIV,volume13510,2022.
+               doi:10.1007/978-3-031-15985-5_11.
+
+[ZXZS19]      JiahengZhang,TianchengXie,YupengZhang,andDawnSong. Transparent
+               polynomialdelegationanditsapplicationstozeroknowledgeproof. In2020
+               IEEE Symposium on Security and Privacy. IEEE Computer Society Press, 2019.
+               doi:10.1109/SP40000.2020.00052.
+[PDF_PAGE 44]
+44                                                                                   Anonymous Credentials from ECDSA
+
+A   The MDOC standard
+
+MDOCs are specified in ISO 18013-5.  Here we summarize the relevant portion that
+concerns a binary string which can be parsed into a hierarchical MSO object of the form:
+
+{"version":  "1.0",  "digestAlgorithm":  "SHA-256",
+"docType":  "org.iso.18013.5.1.mDL",
+"valueDigests":  {
+    "org.iso.18013.5.1":
+         {13:  h’B628...69D2’,
+         14:  h’8CFE...604C’,
+       ...
+    "org.iso.18013.5.1.aamva":  {
+         15:  h’1034...402A’,
+         ...
+         8:  h’7AC6...8485’}
+    },
+"deviceKeyInfo":  {
+         "deviceKey":  {1:  2,  -1:  1,
+               -2:  h’7B8F...F321’,
+               -3:  h’859E...772C’}
+    },
+"validityInfo":  {
+         "signed":  0("2023-10-11T13:18:15Z"),
+         "validFrom":  0("2023-10-11T13:18:15Z"),
+         "validUntil":  0("2023-11-10T13:18:15Z")
+    }
+}
+
+    Inourcontext,anMDOCcredentialconsistsofabinaryserializationofthisMSOobject
+that is signed by an IdentityIssuer (II), whose public signing key PKII is well-known;
+denote the signature(r,s). The notationMSO[valueDigests][org.iso.18013.5.1][14]
+represents the SHA-256 hash of a tuple consisting of the strings abbreviated as(id , nonce,
+attrid,attrvalue):
+
+    "digestID":  14,
+    "random":  h’8c082af3d5d78b98bcc00bd26fae5130’,
+    "elementIdentifier":  "age_over_18",
+    "elementValue":  true
+
+    Ausercandisclosetheage_over_18attributeintheMDOCcredential byproviding
+a signature of the MSO and the SHA256 preimage (consisting of an encoding of those 4
+strings)to the14th hash included incorrectnamespace listof thevalueDigestsfield of
+the MSO. This asserts that the property “age_over_18” was included in the bundle that
+the IdentityIssuer signed, while hiding the other attributes that were signed.
+    Topreventusersfrombreakingsoundnessbycopyingcredentials,theMSO containsa
+device-bound public key PKd in fieldsMSO[deviceKeyInfo][deviceKey][-2] and[-3].
+The secret key for this public key is stored in asecureelementon the user’s device. When
+the MDOC was issued, the IdentityIssuer verifies that the SKd is attested by asecure
+element. When a user presents this MDOC, in addition to           (r ,s)  and the preimage of the
+attribute, the user’s device computes a fresh signature on a transcript of the identity
+request under the PKd signing key. This requirement for a signature to be computed by
+trustedhardwaremakesitimpracticaltouseBBS+becausesecureelementsdonotsupport
+pairing-friendly curves.

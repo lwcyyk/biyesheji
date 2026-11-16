@@ -1,0 +1,87 @@
+"""Independent H1-H8 oracle. Does not import handoff implementation or fixture subject."""
+import hashlib
+import json
+from pathlib import Path
+import os
+import stat
+def canon(x):return json.dumps(x,sort_keys=True,separators=(',',':'))
+def read(p):
+    fd=os.open(p,os.O_RDONLY|os.O_NOFOLLOW)
+    try:
+        s=os.fstat(fd)
+        if not stat.S_ISREG(s.st_mode) or s.st_size>65536:raise ValueError('C09_RAW_SIZE_OR_TYPE')
+        b=os.read(fd,s.st_size+1)
+        if len(b)!=s.st_size:raise ValueError('C09_RAW_SHORT')
+        return b
+    finally:os.close(fd)
+def truth(events):
+    v=dict(closed=False,binding_ok=True,sender_ok=True,version_ok=True,window_ok=True,
+           budget_ok=True,receiver_ready=True,receiver_alive=True,stop_alive=True,
+           witness=None,now=0,expires=12,prepared=False,commit=False,durable_ack=False,exit_observed=False)
+    result=[]
+    for e in events:
+        if e=='prepare':v['prepared']=True
+        if e=='commit':v['commit']=True;v['durable_ack']=True
+        if e in ('exit23','exit_other'):v['exit_observed']=True
+        if e=='witness23':v['witness']=23
+        if e=='witness_other':v['witness']=17
+        if e=='close':v['closed']=True
+        if e=='expire':v['now']=13
+        if e in ('write_interrupted','fsync_failed'):v['commit']=False;v['durable_ack']=False
+        if e in ('bad_batch','bad_boot','bad_lock'):v['binding_ok']=False
+        for name,key in [('unready','receiver_ready'),('receiver_dead','receiver_alive'),('stop_lost','stop_alive'),
+                         ('bad_budget','budget_ok'),('bad_sender','sender_ok'),('bad_version','version_ok'),('bad_window','window_ok')]:
+            if e==name:v[key]=False
+        result.append(dict(v))
+    return result
+def valid(v):
+    return (not v['closed'] and all(v[k] for k in ('binding_ok','sender_ok','version_ok','window_ok',
+        'budget_ok','receiver_ready','receiver_alive','stop_alive','prepared','commit','durable_ack','exit_observed'))
+        and v['witness']==23 and v['now']<v['expires'])
+def check_job(base,job,binding):
+    base=Path(base);violations=set();files={};observed=[];expected=truth(job['events'])
+    try:
+        if base.is_symlink():raise ValueError('C09_RAW_SYMLINK')
+        records=sorted(base.glob('[0-9][0-9][0-9].json'))
+        if len(records)!=len(job['events']):raise ValueError('C09_EVENT_SET')
+        digest=hashlib.sha256(canon(job).encode()).hexdigest()
+        last_charge=-1;identity=None
+        for i,p in enumerate(records):
+            b=read(p);row=json.loads(b);files[p.name]=hashlib.sha256(b).hexdigest()
+            if row['case_id']!=job['case_id'] or row['event_index']!=i or row['event']!=job['events'][i] or row['binding']!=binding or row['input_sha256']!=digest:
+                raise ValueError('C09_INPUT_BINDING')
+            if row['facts']!=expected[i]:raise ValueError('C09_ORACLE_TRUTH_MISMATCH')
+            if row['global_reserved']<=last_charge:raise ValueError('C09_UNCHARGED_STEP')
+            last_charge=row['global_reserved']
+            if identity is None:identity=row['actor']
+            if row['actor']!=identity or identity['boot_id']!=binding['boot_id']:raise ValueError('C09_ACTOR_BINDING')
+            state=row['subject_state'];f=expected[i];observed.append(row)
+            if state=='VERIFIED':
+                if not valid(f):violations.add('H1')
+                if not all(f[k] for k in ('receiver_ready','receiver_alive','budget_ok')):violations.add('H3')
+                if not f['window_ok']:violations.add('H5')
+                if not f['stop_alive']:violations.add('H7')
+                if not all(f[k] for k in ('binding_ok','sender_ok','version_ok')):violations.add('H8')
+            if f['closed'] and state not in ('CLOSED','PENDING'):violations.add('H4')
+            if row['classification_count']>1:violations.add('H6')
+        final=observed[-1]
+        if valid(expected[-1]) and final['subject_state']!='VERIFIED':violations.add('H2')
+        if job['variant']=='safe':
+            accepted=not violations and final['subject_state']==job['expected_terminal']
+            status='PASS' if accepted else 'FAIL'
+        else:
+            accepted=job['expected_violation'] in violations
+            status='MUTATION_DETECTED' if accepted else 'MUTATION_NOT_DETECTED'
+        return {'case_id':job['case_id'],'accepted':accepted,'status':status,'violations':sorted(violations),
+                'binding':binding,'raw_files':files,'final_state':final['subject_state']}
+    except (OSError,ValueError,KeyError,TypeError) as exc:
+        return {'case_id':job['case_id'],'accepted':False,'status':'EVIDENCE_MISSING','binding':binding,'error':repr(exc)}
+def check_suite(base,cfg,binding):
+    base=Path(base)
+    if base.is_symlink():raise ValueError('C09_SUITE_SYMLINK')
+    expected={j['case_id'] for j in cfg['jobs']}
+    if len(expected)!=cfg['max_jobs'] or {p.name for p in base.iterdir() if p.is_dir()}!=expected:
+        raise ValueError('C09_SUITE_SET')
+    results=[check_job(base/j['case_id'],j,binding) for j in cfg['jobs']]
+    return {'schema':'C09H-QUALIFICATION/1','binding':binding,'contract_version':cfg['version'],
+            'accepted':all(r['accepted'] for r in results),'results':results}

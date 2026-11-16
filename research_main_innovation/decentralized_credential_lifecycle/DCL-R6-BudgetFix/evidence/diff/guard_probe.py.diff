@@ -1,0 +1,101 @@
+warning: in the working copy of 'D:\毕业设计\DCL-R6-isolated-verification\batch02\FROZEN_LC\src\guard_probe.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'D:\毕业设计\DCL-R6-isolated-verification\lc03\src\guard_probe.py', LF will be replaced by CRLF the next time Git touches it
+diff --git "a/D:\\毕业设计\\DCL-R6-isolated-verification\\batch02\\FROZEN_LC\\src\\guard_probe.py" "b/D:\\毕业设计\\DCL-R6-isolated-verification\\lc03\\src\\guard_probe.py"
+index a64da85..75d4714 100644
+--- "a/D:\\毕业设计\\DCL-R6-isolated-verification\\batch02\\FROZEN_LC\\src\\guard_probe.py"
++++ "b/D:\\毕业设计\\DCL-R6-isolated-verification\\lc03\\src\\guard_probe.py"
+@@ -1,4 +1,4 @@
+-"""Frozen C00-C12 Linux resource probes. Static LC delivery, never run in LC.
++"""Frozen C00-C12 Linux resource probes. Static BudgetFix delivery, never run in LC.
+ 
+ Probe child loops use explicit parent-prepaid operation bounds. Business
+ modules are never imported here. No production credentials or network target.
+@@ -23,23 +23,34 @@ def record(case,**kw):
+     return {'case':case,'category':'RESOURCE_CALIBRATION','actual':kw,'sample':G.stamp()}
+ def mark(case,**kw): G.write(G.OUT/(case+'.ready.json'),{'case':case,**kw,**G.stamp()})
+ def prepaid_child(case,budget,operations):
+-    for _ in range(operations): budget.visit()
++    task_id={'C02':'C02.memory.v1','C03':'C03.shared.v1','C04':'C04.fifth-task.v1'}[case]
++    reservation=budget.reserve_exact(task_id,operations)
++    fact=reservation.dispatch_once()
+     path=G.OUT/(case+'.child.json')
+     argv=[G.PYTHON,'-I','-S','-B',str(G.SOURCE/'guard_probe.py'),'--batch-root',str(G.ROOT),
+-          '--child',case,'--output',str(path),'--prepaid',str(operations)]
++          '--child',case,'--output',str(path),'--prepaid',str(operations),
++          '--task-id',task_id,'--lease-id',fact['lease_id']]
++    G.execution_deadline(case)
++    started=G.stamp();started_mono_ns=G.monotonic_ns()
++    G.timing_event('child.spawn_request')
+     r=subprocess.run(argv,stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE,
+                      timeout=max(.1,min(240,G._TICKET['case_deadline']-G.now())),check=False)
++    exited=G.stamp();exited_mono_ns=G.monotonic_ns();G.timing_event('child.wait_return')
+     G.write(G.OUT/(case+'.child_process.json'),{'argv':argv,'exit_code':r.returncode,
+         'stdout':r.stdout.decode(errors='replace'),'stderr':r.stderr.decode(errors='replace'),
+-        'prepaid_operations':operations,'sample':G.stamp()})
++        'prepaid_operations':operations,'reservation_fact':fact,'spawn_request':started,
++        'wait_return':exited,'observed_process_span_ns':exited_mono_ns-started_mono_ns,
++        'exit_time_scope':'wait-return observation; exact kernel exit instruction is unobserved','sample':G.stamp()})
+     if r.returncode!=0 or not path.exists(): raise G.AdmissionBlocked('CHILD_PROBE_FAILED')
+     result=G.read(path)
+-    if result['operations']>operations: raise G.AdmissionBlocked('CHILD_PREPAID_BOUND_EXCEEDED')
++    if not(0<=result['operations']<=result['credit_used']<=operations) or result['lease_id']!=fact['lease_id']:
++        raise G.AdmissionBlocked('CHILD_PREPAID_BOUND_EXCEEDED_OR_IDENTITY_CHANGED')
+     return result
+-def child(case,output,prepaid):
++def child(case,output,prepaid,task_id,lease_id):
+     t=G.ticket(case);G.kernel_admission(t)
+     if os.getppid()!=t['main_identity']['pid'] or G.identity(os.getppid())!=t['main_identity']:
+         raise G.AdmissionBlocked('PROBE_PARENT_MISMATCH')
++    credits=G.claim_exact(task_id,prepaid,lease_id)
+     operations=0; data={}; ok=False
+     if case=='C02':
+         page=os.sysconf('SC_PAGE_SIZE'); bound=128*(1+(1024*1024)//page)
+@@ -48,8 +59,8 @@ def child(case,output,prepaid):
+         chunks=[]; failed=False; samples=[]
+         try:
+             for _ in range(128):
+-                operations+=1; block=bytearray(1024*1024)
+-                for j in range(0,len(block),page): operations+=1;block[j]=37
++                credits.visit();operations+=1; block=bytearray(1024*1024)
++                for j in range(0,len(block),page): credits.visit();operations+=1;block[j]=37
+                 chunks.append(block)
+                 samples.append(G.proc_memory())
+         except MemoryError: failed=True
+@@ -61,12 +72,12 @@ def child(case,output,prepaid):
+         size=16*1024**2; page=os.sysconf('SC_PAGE_SIZE')
+         if prepaid!=size//page: raise G.AdmissionBlocked('WRONG_SHARED_PRECHARGE')
+         with (G.OUT/'C03.shared').open('r+b') as f, mmap.mmap(f.fileno(),size) as m:
+-            for j in range(0,size,page): operations+=1;m[j]=43
++            for j in range(0,size,page): credits.visit();operations+=1;m[j]=43
+             data={'held':G.proc_memory(),'maps':G.mapping_snapshot(),'first_byte':m[0]}
+             ok=m[0]==43
+     elif case=='C04':
+         before=G.cg_snapshot(Path('/sys/fs/cgroup')/G.PARENT)
+-        denied=False; error=None; operations=1
++        denied=False; error=None;credits.visit();operations=1
+         try:
+             p=subprocess.Popen([G.PYTHON,'--version'],stdin=subprocess.DEVNULL,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+         except OSError as exc: denied=exc.errno==errno.EAGAIN;error=repr(exc)
+@@ -77,7 +88,11 @@ def child(case,output,prepaid):
+         data={'fifth_task_denied_EAGAIN':denied,'error':error,'before':before,'after':after,
+               'rlimit_nproc':list(resource.getrlimit(resource.RLIMIT_NPROC))}
+     else: raise ValueError(case)
+-    G.write(output,{'status':'PASS' if ok else 'FAIL','case':case,'operations':operations,'actual':data,'sample':G.stamp()})
++    G.write(output,{'status':'PASS' if ok else 'FAIL','case':case,'operations':operations,
++        'task_id':task_id,'lease_id':lease_id,'credit_total':credits.N,'credit_used':credits.used,
++        'unused_burned':credits.N-credits.used,'debited_but_not_observed_operations':credits.used-operations,
++        'actual':data,'timing':G.timing_snapshot(),'sample':G.stamp()})
++    credits.close()
+     return 0 if ok else 65
+ 
+ def run_case(case,budget):
+@@ -204,7 +219,8 @@ def main():
+     p=argparse.ArgumentParser();p.add_argument('--batch-root',required=True)
+     p.add_argument('--child',choices=('C02','C03','C04'),required=True)
+     p.add_argument('--output',required=True);p.add_argument('--prepaid',type=int,required=True)
+-    a=p.parse_args();return child(a.child,G._inside(a.output,G.OUT),a.prepaid)
++    p.add_argument('--task-id',required=True);p.add_argument('--lease-id',required=True)
++    a=p.parse_args();return child(a.child,G._inside(a.output,G.OUT),a.prepaid,a.task_id,a.lease_id)
+ if __name__=='__main__':
+     try: code=main()
+     except BaseException as exc: print(repr(exc),file=sys.stderr);code=65

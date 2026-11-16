@@ -1,0 +1,155 @@
+--- a/routers/authz_filter.go
++++ b/routers/authz_filter.go
+@@ -15,6 +15,7 @@
+ package routers
+ 
+ import (
++	"github.com/casdoor/casdoor/ci01audit"
+ 	stdcontext "context"
+ 	"encoding/json"
+ 	"fmt"
+@@ -520,7 +521,9 @@
+ func ApiFilter(ctx *context.Context) {
+ 	urlPath := getUrlPath(ctx)
+ 	// before the subject is read: it may sign out a session left by another application's token
+-	if !checkDynamicClientSession(ctx, urlPath) {
++	ci01Gate := checkDynamicClientSession(ctx, urlPath)
++	ci01audit.Record("client_gate_return", ci01Gate, getSessionUser(ctx))
++	if !ci01Gate {
+ 		return
+ 	}
+ 
+@@ -532,6 +535,7 @@
+ 		subOwner, subName, username = getImpersonateUser(ctx, subOwner, subName, username)
+ 	}
+ 	ctx.Input.SetData("currentUserId", username)
++	ci01audit.Record("subject_identified", username != "", username)
+ 
+ 	// the Session row belongs to the signed-in user, not to the impersonated one
+ 	if sessionUser := getSessionUser(ctx); sessionUser != "" {
+@@ -565,7 +569,9 @@
+ 
+ 	isAllowed := true
+ 	for _, obj := range objects {
++		ci01audit.Record("global_permission_enter", true, urlPath)
+ 		allowed, err := authz.IsAllowed(subOwner, subName, method, urlPath, obj.Owner, obj.Name, extraInfo)
++		ci01audit.Record("global_permission_result", allowed && err == nil, urlPath)
+ 		if err != nil {
+ 			responseError(ctx, err.Error())
+ 			return
+--- a/routers/base.go
++++ b/routers/base.go
+@@ -15,6 +15,7 @@
+ package routers
+ 
+ import (
++	"github.com/casdoor/casdoor/ci01audit"
+ 	stdcontext "context"
+ 	"encoding/json"
+ 	"fmt"
+@@ -274,7 +275,9 @@
+ 
+ // clearSessionOfToken signs out the session that AutoSigninFilter created from an access token
+ func clearSessionOfToken(ctx *context.Context) error {
++	ci01audit.Count("clear_source_identity_calls")
+ 	for _, key := range []string{"username", "SessionData", "accessToken", "scope", "aud", object.SessionSigninTokenId} {
++		ci01audit.Count("clear_source_delete_attempts")
+ 		err := ctx.Input.CruSession.Delete(stdcontext.Background(), key)
+ 		if err != nil {
+ 			return err
+--- a/controllers/user.go
++++ b/controllers/user.go
+@@ -15,6 +15,7 @@
+ package controllers
+ 
+ import (
++	"github.com/casdoor/casdoor/ci01audit"
+ 	"encoding/json"
+ 	"fmt"
+ 	"strings"
+@@ -264,6 +265,7 @@
+ // @Success 200 {object} controllers.Response The Response object
+ // @router /update-user [post]
+ func (c *ApiController) UpdateUser() {
++	ci01audit.Record("controller_enter", true, "UpdateUser")
+ 	id := c.Ctx.Input.Query("id")
+ 	userId := c.Ctx.Input.Query("userId")
+ 	owner := c.Ctx.Input.Query("owner")
+@@ -434,6 +436,7 @@
+ 		isPasswordChanged = true
+ 	}
+ 
++	ci01audit.Record("controller_permission_pass", true, "UpdateUser")
+ 	affected, err := object.UpdateUser(id, &user, columns, isAdmin)
+ 	if err != nil {
+ 		c.ResponseError(err.Error())
+--- a/controllers/account.go
++++ b/controllers/account.go
+@@ -15,6 +15,7 @@
+ package controllers
+ 
+ import (
++	"github.com/casdoor/casdoor/ci01audit"
+ 	"context"
+ 	"encoding/json"
+ 	"fmt"
+@@ -779,6 +780,7 @@
+ // @Success 200 {object} object.Userinfo The Response object
+ // @router /userinfo [get,post]
+ func (c *ApiController) GetUserinfo() {
++	ci01audit.Record("controller_enter", true, "GetUserinfo")
+ 	if c.GetSessionUsername() == "" {
+ 		// RFC 6750 section 3.1: a request without an access token gets a challenge without an error code
+ 		c.Ctx.Output.Header("WWW-Authenticate", "Bearer")
+@@ -790,6 +792,7 @@
+ 		return
+ 	}
+ 
++	ci01audit.Record("controller_permission_pass", true, "userinfo_signed_in")
+ 	scope, aud := c.GetSessionOidc()
+ 	host := c.Ctx.Request.Host
+ 
+--- a/object/application.go
++++ b/object/application.go
+@@ -15,6 +15,7 @@
+ package object
+ 
+ import (
++	"github.com/casdoor/casdoor/ci01audit"
+ 	"errors"
+ 	"fmt"
+ 
+@@ -361,6 +362,7 @@
+ }
+ 
+ func GetApplicationByUserId(userId string) (application *Application, err error) {
++	ci01audit.Count("application_by_user_lookup")
+ 	_, name, err := util.GetOwnerAndNameFromIdWithError(userId)
+ 	if err != nil {
+ 		return nil, err
+@@ -379,6 +381,7 @@
+ }
+ 
+ func GetApplicationByClientId(clientId string) (*Application, error) {
++	ci01audit.Count("application_by_client_lookup")
+ 	application := Application{}
+ 
+ 	realClientId, sharedOrg := clientId, ""
+--- a/object/token.go
++++ b/object/token.go
+@@ -15,6 +15,7 @@
+ package object
+ 
+ import (
++	"github.com/casdoor/casdoor/ci01audit"
+ 	"crypto/sha256"
+ 	"encoding/hex"
+ 	"fmt"
+@@ -198,6 +199,7 @@
+ }
+ 
+ func GetToken(id string) (*Token, error) {
++	ci01audit.Count("source_token_id_lookup")
+ 	owner, name, err := util.GetOwnerAndNameFromIdWithError(id)
+ 	if err != nil {
+ 		return nil, err

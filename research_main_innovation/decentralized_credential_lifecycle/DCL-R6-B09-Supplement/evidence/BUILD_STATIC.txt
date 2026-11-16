@@ -1,0 +1,129 @@
+"""Administrative source transformation only. No target import or execution."""
+import ast
+import io
+import json
+from pathlib import Path
+import tokenize
+
+W=Path(r'D:\毕业设计\DCL-R6-isolated-verification\cr09')
+E=Path(r'D:\毕业设计\research_main_innovation\decentralized_credential_lifecycle\DCL-R6-B09-Supplement\evidence')
+changes=[]
+def translated(value):
+    return value.replace('batch08','batch09').replace('BATCH08','BATCH09').replace('cr01','cr09')
+# Only offline literal tokens / JSON values in the new source workspace change.
+# Runtime code never performs batch-name string replacement.
+for p in sorted([*W.glob('src/*.py'),*W.glob('host/*.py')]):
+    raw=p.read_bytes().decode('utf-8');ls=raw.splitlines(keepends=True);offsets=[0]
+    for line in ls:offsets.append(offsets[-1]+len(line))
+    edits=[]
+    for token in tokenize.generate_tokens(io.StringIO(raw).readline):
+        if token.type!=tokenize.STRING:continue
+        try:value=ast.literal_eval(token.string)
+        except (ValueError,SyntaxError):continue
+        if isinstance(value,str) and translated(value)!=value:
+            new=translated(value);a=offsets[token.start[0]-1]+token.start[1];b=offsets[token.end[0]-1]+token.end[1]
+            edits.append((a,b,repr(new)));changes.append({'file':str(p.relative_to(W)),'line':token.start[0],'old':value,'new':new})
+    for a,b,new in reversed(edits):raw=raw[:a]+new+raw[b:]
+    if edits:p.write_bytes(raw.encode('utf-8'))
+def convert(x,pointer=''):
+    if isinstance(x,str):return translated(x)
+    if isinstance(x,list):return [convert(v,pointer+'/'+str(i)) for i,v in enumerate(x)]
+    if isinstance(x,dict):return {translated(k):convert(v,pointer+'/'+k) for k,v in x.items()}
+    return x
+for p in W.glob('inputs/*.json'):
+    old=json.loads(p.read_bytes());new=convert(old)
+    if new!=old:p.write_text(json.dumps(new,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+(W/'inputs/dclr6batch08.slice').rename(W/'inputs/dclr6batch09.slice')
+
+def edit(name,old,new,count=1):
+    p=W/name;s=p.read_text(encoding='utf-8')
+    if s.count(old)!=count:raise RuntimeError('NEEDLE_COUNT:'+name+':'+str(s.count(old))+':'+old[:80])
+    p.write_text(s.replace(old,new),encoding='utf-8')
+    changes.append({'file':name,'change':'reviewed binding/gate wiring','old':old,'new':new,'occurrences':count})
+
+identity={
+ 'schema':'DCL-BATCH-IDENTITY/1','revision':'B09-AdmissionFix-static-1/r1','batch_id':'batch09',
+ 'source_root':'/var/lib/dcl-r6/cr09','runtime_root':'/var/lib/dcl-r6/batch09','slice':'dclr6batch09.slice',
+ 'service_prefix':'dclr6batch09-', 'host_package':'D:/毕业设计/DCL-R6-isolated-verification/cr09',
+ 'host_control':'D:/毕业设计/research_main_innovation/decentralized_credential_lifecycle/DCL-R6-B09-Supplement/authorization/batch09-r1',
+ 'linux_control':'/mnt/d/毕业设计/research_main_innovation/decentralized_credential_lifecycle/DCL-R6-B09-Supplement/authorization/batch09-r1',
+ 'authorization_filename':'execution_authorization.json','authorization_text_filename':'BATCH09_AUTHORIZATION_TEXT.txt',
+ 'operator_text_filename':'TASK_REQUEST.txt','cases':['C%02d'%i for i in range(13)]+['C09H','RANGE','FORMAL','STOP']}
+(W/'inputs/batch_identity.json').write_text(json.dumps(identity,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+
+edit('src/guard.py',"SOURCE = Path(__file__).resolve().parent", "SOURCE = Path(__file__).resolve().parent\nsys.path.insert(0,str(SOURCE))\nimport batch_identity as N\nNAMESPACE=N.load(SOURCE.parent)\ndef batch_unit(case):return N.unit(NAMESPACE,case)")
+edit('src/guard.py',"ROOTS = (Path('/var/lib/dcl-r6/cr09'), Path('/var/lib/dcl-r6/batch09'))", "ROOTS = (Path(NAMESPACE['runtime_root']),)")
+edit('src/guard.py',"PARENT = 'dclr6' + ROOT.name + '.slice'", "PARENT = NAMESPACE['slice']")
+edit('src/guard.py',"str(SOURCE)!='/var/lib/dcl-r6/cr09/src'", "str(SOURCE)!=NAMESPACE['source_root']+'/src'")
+edit('src/guard.py',"a['scope'] not in ('CALIBRATE_S1S9_THEN_F1_F4','C00_DIAGNOSTIC_ONLY')", "a['scope'] not in ('CALIBRATE_S1S9_THEN_F1_F4','CALIBRATE_S1S9_ONLY')")
+edit('src/guard.py',"    if a['profile'] != 'CPY312-UBU24/1'", "    if (a.get('static_revision')!=NAMESPACE['revision'] or a.get('batch_identity_sha256')!=digest(SOURCE.parent/'inputs/batch_identity.json') or a.get('ledger_gate_contract_sha256')!=m['ledger_gate_contract_sha256']):\n        raise AdmissionBlocked('B09_REVISION_OR_IDENTITY_BINDING')\n    if a['scope']=='CALIBRATE_S1S9_ONLY' and (a.get('Calibrate_only_explicitly_approved') is not True or a.get('Full_conditional_chain_explicitly_approved') is not False):\n        raise AdmissionBlocked('CALIBRATION_ONLY_SCOPE_REQUIRED')\n    if a['profile'] != 'CPY312-UBU24/1'")
+edit('src/guard.py',"unit='dclr6batch09-'+case.lower()+'.service'", "unit=batch_unit(case)",count=2)
+edit('src/guard.py',"unit_show('dclr6batch09-stop.service')", "unit_show(batch_unit('STOP'))")
+edit('src/guard.py',"'--unit=dclr6batch09-stop.service'", "'--unit='+batch_unit('STOP')")
+edit('src/guard.py',"    return {'batch_id':ROOT.name,'boot_id':s['boot_id'],'T0':s['T0'],", "    return {'batch_id':ROOT.name,'boot_id':s['boot_id'],'T0':s['T0'],\n            'batch_identity_sha256':digest(SOURCE.parent/'inputs/batch_identity.json'),")
+# Add one aggregate ledger case while retaining the original seventeen recipes.
+edit('src/guard.py',"        row=candidate['results'][0]\n        if recipe=='status':", "        if recipe=='ledger_anomaly':\n            import ledger_gate_regression\n            ledger=ledger_gate_regression.run_suite(sys.modules[__name__])\n            results.append({'case_id':spec['case_id'],'status':'REJECT_LEDGER_ANOMALY',\n                'rejected_by':'REJECT_LEDGER_ANOMALY','ledger':ledger,'before':stamp(),'after':stamp()})\n            continue\n        row=candidate['results'][0]\n        if recipe=='status':")
+edit('src/guard.py',"    for row in rows:\n        if row['status']!='MUTATION_DETECTED'", "    if len(expected)!=18 or set(expected)!={j['case_id'] for j in cfg['gate_negative_cases']}:\n        raise AdmissionBlocked('GATE_18_CONTRACT')\n    for row in rows:\n        if expected[row['case_id']]['recipe']=='ledger_anomaly':\n            import ledger_gate_regression\n            proof=ledger_gate_regression.verify_qualification(sys.modules[__name__],binding)\n            if row['status']!='REJECT_LEDGER_ANOMALY' or row.get('ledger')!=proof or proof['mutants_detected']!=4:\n                raise AdmissionBlocked('LEDGER_GATE_REQUIRED_AUDIT')\n            continue\n        if row['status']!='MUTATION_DETECTED'")
+edit('src/guard.py',"range_evidence.check_global_ledger(OUT/'visits.bin',VISIT_CAP,binding)", "__import__('ledger_gate').require_current(sys.modules[__name__],binding)",count=3)
+
+edit('src/boot_continuity.py',"ROOT=Path('/var/lib/dcl-r6/batch09')", "if str(SOURCE) not in sys.path:sys.path.insert(0,str(SOURCE))\nimport batch_identity as N\nNAMESPACE=N.load(SOURCE.parent)\nROOT=Path(NAMESPACE['runtime_root'])")
+edit('src/boot_continuity.py',"m['version']!='C00Ready-static-1'", "m['version']!='B09-AdmissionFix-static-1'")
+edit('src/boot_continuity.py',"binding={'batch_id':'batch09','static_manifest_sha256':audit['manifest_sha256'],", "binding={'batch_id':NAMESPACE['batch_id'],'scope':auth['scope'],\n             'authorization_receipt_sha256':hashlib.sha256(auth_raw).hexdigest(),\n             'batch_identity_sha256':digest(SOURCE.parent/'inputs/batch_identity.json'),\n             'static_manifest_sha256':audit['manifest_sha256'],")
+edit('src/boot_continuity.py',"auth.get('scope') not in ('CALIBRATE_S1S9_THEN_F1_F4','C00_DIAGNOSTIC_ONLY')", "auth.get('scope') not in ('CALIBRATE_S1S9_THEN_F1_F4','CALIBRATE_S1S9_ONLY')")
+edit('src/boot_continuity.py',"    if auth['scope']=='C00_DIAGNOSTIC_ONLY'", "    if auth.get('static_revision')!=NAMESPACE['revision'] or auth.get('batch_identity_sha256')!=digest(SOURCE.parent/'inputs/batch_identity.json') or auth.get('ledger_gate_contract_sha256')!=m['ledger_gate_contract_sha256']:\n        raise Rejected('B09_IDENTITY_RECEIPT')\n    if auth['scope']=='CALIBRATE_S1S9_ONLY' and (auth.get('Calibrate_only_explicitly_approved') is not True or auth.get('Full_conditional_chain_explicitly_approved') is not False):raise Rejected('BC_CALIBRATION_ONLY_SCOPE')\n    if auth['scope']=='C00_DIAGNOSTIC_ONLY'")
+edit('src/boot_continuity.py',"        os.execve(lock['launch_command'][0],lock['launch_command'],env)", "        launch=lock['launch_commands_by_scope'][auth['scope']]\n        os.execve(launch[0],launch,env)")
+edit('src/boot_continuity.py',"actual_binding={'batch_id':G.ROOT.name,'static_manifest_sha256'", "actual_binding={'batch_id':G.ROOT.name,'scope':auth['scope'],\n          'authorization_receipt_sha256':G.digest(G.ROOT/'inputs/execution_authorization.json'),\n          'batch_identity_sha256':G.digest(G.SOURCE.parent/'inputs/batch_identity.json'),'static_manifest_sha256'")
+edit('src/boot_continuity.py',"a['scope']!='CALIBRATE_S1S9_THEN_F1_F4' or a.get('SameProcess_C09_resume_explicitly_approved')", "a['scope'] not in ('CALIBRATE_S1S9_THEN_F1_F4','CALIBRATE_S1S9_ONLY') or a.get('SameProcess_C09_resume_explicitly_approved')")
+edit('src/boot_continuity.py',"'C00_READY_QUALIFICATION.json')", "'C00_READY_QUALIFICATION.json','GATE_LEDGER_QUALIFICATION.json')")
+edit('src/c09_handoff.py',"G.unit_show('dclr6batch09-stop.service')", "G.unit_show(G.batch_unit('STOP'))")
+# Register one fixed Root:989/0640 qualifier; directory and publication semantics stay intact.
+edit('src/root_ipc.py',"'RANGE_QUALIFICATION.json','RESOURCE_QUALIFICATION.json',", "'RANGE_QUALIFICATION.json','RESOURCE_QUALIFICATION.json','GATE_LEDGER_QUALIFICATION.json',")
+
+# Necessary raw checker strengthening; producer/precharge/credit semantics stay unchanged.
+edit('src/range_evidence.py',"    running=0;pending=None;records=0;tasks=set()", "    running=0;pending=None;records=0;tasks=set();last_commit=None")
+edit('src/range_evidence.py',"            req=row.get('request')", "            if any(type(row.get(k)) is not int for k in ('before','after','amount','cap')) or not 0<=row['before']<row['after']<=cap:\n                raise EvidenceError('GLOBAL_RANGE_OR_CAPACITY')\n            req=row.get('request')")
+edit('src/range_evidence.py',"('before','after','amount','cap','request'))", "('before','after','amount','cap','request','protocol','boot_id'))")
+edit('src/range_evidence.py',"                running=row['after'];pending=None", "                running=row['after'];pending=None;last_commit=row")
+edit('src/range_evidence.py',"    return {'used':used,'cap':cap,'records':records,'healthy':True}", "    if last_commit is not None and intent!=last_commit:raise EvidenceError('GLOBAL_LAST_INTENT_MISMATCH')\n    return {'used':used,'cap':cap,'records':records,'healthy':True}")
+
+edit('host/windows_entry.py',"import time", "import time\nimport sys")
+old="    receipt_path=Path('D:\\\\毕业设计\\\\research_main_innovation\\\\decentralized_credential_lifecycle\\\\DCL-R6-batch09\\\\evidence\\\\execution_authorization.json')"
+p=W/'host/windows_entry.py';s=p.read_text(encoding='utf-8')
+line=next(line for line in s.splitlines() if 'receipt_path=Path(' in line)
+edit('host/windows_entry.py',line,"    sys.path.insert(0,str(package/'src'))\n    import batch_identity as N\n    identity=N.load(package)\n    receipt_path=Path(identity['host_control'])/identity['authorization_filename']")
+edit('host/windows_entry.py',"    h=lambda q:hashlib.sha256(q.read_bytes()).hexdigest()", "    h=lambda q:hashlib.sha256(q.read_bytes()).hexdigest()\n    text_path=receipt_path.parent/identity['operator_text_filename']\n    if (auth.get('batch_id')!=identity['batch_id'] or auth.get('static_revision')!=identity['revision'] or\n        auth.get('batch_identity_sha256')!=h(package/'inputs/batch_identity.json') or\n        auth.get('scope') not in lock['allowed_scopes'] or auth.get('authorization_text_sha256')!=h(text_path)):\n        raise SystemExit('B09_HOST_AUTHORIZATION_BINDING')")
+
+jobs=[]
+for kind,family in [('healthy',None),('missing_commit','PAIR'),('duplicate_commit','PAIR'),('pair_mismatch','PAIR'),('wrong_order','PAIR'),('overflow','CAPACITY'),('batch','BATCH'),('boot','BOOT'),('lock','IDENTITY'),('foreign_journal','FOREIGN_PATH'),('truncated','TRUNCATION'),('digest','DIGEST'),('sequence_gap','SEQUENCE'),('missing_evidence','MISSING')]:
+    jobs.append({'case_id':'L.'+kind,'kind':kind,'family':family,'variant':'safe','mutant':None})
+for kind,family,mutant in [('missing_commit','PAIR','ignore_commit_missing'),('overflow','CAPACITY','ignore_cumulative_overflow'),('batch','BATCH','ignore_batch_mismatch'),('digest','DIGEST','ignore_log_digest')]:
+    jobs.append({'case_id':'M.'+mutant,'kind':kind,'family':family,'variant':'mutant','mutant':mutant})
+ledger={'schema':'GATE-LEDGER-ANOMALY/1','version':'B09-AdmissionFix-static-1','batch_id':'batch09','jobs':jobs,
+    'prepay_per_job':32,'root_reaudit_per_job':1,'completed_visits':595,'hard_visits':640,
+    'max_records_per_specimen':5,'max_artifact_bytes':131072,'gate_count':18,
+    'existing_B_coverage':{'grant_above_durable_reserve':['S1','S3','S4'],'visits_above_local_credit':['S9'],'growth_after_closed':['S8']},
+    'format_notes':'Native format has no transaction_id or record checksum; pair identity is before/after/amount/cap/request/protocol/boot. Byte digests belong to Root snapshot envelopes.',
+    'actual_execution':'UNRUN','source':'Fresh isolated native-format bytes; live and historical ledgers are excluded'}
+(W/'inputs/ledger_gate_contract.json').write_text(json.dumps(ledger,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+p=W/'inputs/safety_contract.json';safety=json.loads(p.read_bytes())
+assert len(safety['gate_negative_cases'])==17
+safety['gate_negative_cases'].append({'case_id':'GATE-LEDGER-ANOMALY','recipe':'ledger_anomaly','expected_prefix':'REJECT_LEDGER_ANOMALY'})
+safety['gate_negative_count']=18;safety['ledger_gate_contract']='ledger_gate_contract.json';safety['completed_global_visit_upper_bound']=19825
+p.write_text(json.dumps(safety,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+lockp=W/'inputs/execution_lock.json';lock=json.loads(lockp.read_bytes());lock['source_version']='B09-AdmissionFix-static-1';lock['freeze_revision']=1;lock['export_lock_revision']='B09-r1'
+lock['allowed_scopes']=['CALIBRATE_S1S9_THEN_F1_F4','CALIBRATE_S1S9_ONLY']
+lock['authorization_sources']={'receipt':identity['linux_control']+'/execution_authorization.json','text':identity['linux_control']+'/TASK_REQUEST.txt'}
+lock['launch_commands_by_scope']={'CALIBRATE_S1S9_THEN_F1_F4':lock['launch_command'],'CALIBRATE_S1S9_ONLY':lock['calibrate_only_launch_command']}
+lock['authorization_receipt_required_fields']+=['static_revision','batch_identity_sha256','ledger_gate_contract_sha256','Calibrate_only_explicitly_approved']
+lock['gate_negative_count']=18;lock['ledger_gate_limits']={'jobs':18,'mutants':4,'completed_visits':595,'hard_visits':640,'new_gate_loop_charge':1,'range_completed_total':19825,'range_hard_limit':20000}
+for key in ('boot_continuity_schedule','readiness_schedule','root_ipc_schedule','c09_schedule','calibration_schedule'):
+    lock[key]=[s.replace('negative17','negative18').replace('GATE17','GATE18').replace('GATE_NEGATIVES','GATE_NEGATIVES').replace('17_GATE','18_GATE').replace('negative17','negative18') for s in lock[key]]
+lock['current_authorization']='STATIC_ONLY; both future dynamic receipts remain absent'
+lock['status']='STATIC_FROZEN_CANDIDATE_UNRUN';lock['ledger_gate_schedule']='Root RANGE audit: original17 plus GATE-LEDGER-ANOMALY aggregate18 specimens; independent raw check before qualification'
+lockp.write_text(json.dumps(lock,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+mp=W/'inputs/static_manifest.json';m=json.loads(mp.read_bytes());m['version']='B09-AdmissionFix-static-1';m['freeze_revision']=1;m['export_lock_revision']='B09-r1';m['inherited_semantics']='C00Ready-static-1/r2'
+m['input_binding_scope']='batch09-r1; all inherited C/READY64/BC40/IPC56/H34/S34 plus gate18 with isolated ledger aggregate'
+m['test_resource_limits']['gate_negative_cases']=18;m['test_resource_limits']['completed_visit_upper_bound']=19825
+m['ledger_gate_delta']=lock['ledger_gate_limits'];mp.write_text(json.dumps(m,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+(E/'STATIC_TRANSFORMATION_LOG.json').write_text(json.dumps({'offline_changes':changes,'target_imports':0,'runtime_replacements':0,'target_runs':0},ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+print(json.dumps({'offline_edits':len(changes),'ledger_subcases':len(jobs),'gate_cases':len(safety['gate_negative_cases']),'runtime_runs':0,'hash_freeze':'PENDING_STATIC_REVIEW'}))

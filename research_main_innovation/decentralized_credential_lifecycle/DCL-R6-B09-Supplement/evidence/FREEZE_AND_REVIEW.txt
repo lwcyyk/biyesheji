@@ -1,0 +1,143 @@
+"""Host static freeze/review; AST and bytes only, no target imports or calls."""
+import ast
+import collections
+import difflib
+import hashlib
+import json
+from pathlib import Path
+import shutil
+from datetime import datetime,timezone
+
+B=Path(r'D:\毕业设计\research_main_innovation\decentralized_credential_lifecycle')
+I=Path(r'D:\毕业设计\DCL-R6-isolated-verification');W=I/'cr09';OLD=I/'cr01';O=B/'DCL-R6-B09-Supplement';E=O/'evidence'
+def h(p):return hashlib.sha256(Path(p).read_bytes()).hexdigest()
+def load(p):return json.loads(Path(p).read_bytes())
+def put(p,x):Path(p).write_text(json.dumps(x,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+assert not (E/'STATIC_WORKSPACE_LOCK.json').exists()
+m=load(W/'inputs/static_manifest.json');x=load(W/'inputs/execution_lock.json')
+# Current bounds and schemas are explicit; old_calibration_hard retains its
+# deliberately named historical-delta value.
+x['readiness_limits']['new_calibration_hard']=62546
+x['readiness_modes']={'CALIBRATE_S1S9_ONLY':'Complete calibration/gate18; close; F1/F4 excluded',
+    'CALIBRATE_S1S9_THEN_F1_F4':'Complete calibration/gate18, actual current qualification, F1 then F4'}
+x['execution_roots']=['/var/lib/dcl-r6/batch09']
+x['scope']='Frozen batch09-r1 only; either separately approved full chain or calibration-only; gate18 required; no closed-window escalation'
+x['ledger_gate_contract_sha256']=h(W/'inputs/ledger_gate_contract.json');x['batch_identity_sha256']=h(W/'inputs/batch_identity.json')
+x['source_version']='B09-AdmissionFix-static-1';x['static_revision']='B09-AdmissionFix-static-1/r1'
+oldbound=list(m['bound_inputs'])
+m['bound_inputs']={rel:h(W/rel) for rel in oldbound+['inputs/batch_identity.json','inputs/ledger_gate_contract.json']}
+m['source_hashes']={p.name:h(p) for p in sorted((W/'src').glob('*.py'))}
+for stem in ['boot_contract','c09_contract','root_ipc_contract','readiness_contract','safety_contract','child_contracts','runtime_critical','runtime_tree_lock']:
+    m[stem+'_sha256']=h(W/'inputs'/(stem+'.json'))
+m['batch_identity_sha256']=h(W/'inputs/batch_identity.json');m['ledger_gate_contract_sha256']=h(W/'inputs/ledger_gate_contract.json')
+m['business_plan_original_sha256']=h(W/'inputs/business_plan_original.json')
+m['unit_template_hashes']={str(k).replace('batch08','batch09'):h(W/'inputs/dclr6batch09.slice') for k in m['unit_template_hashes']}
+m['static_revision']='B09-AdmissionFix-static-1/r1';m['resource_enforcement']='UNRUN_NEW_VERSION';m['runtime_compatibility']='UNRUN_CURRENT_PLATFORM'
+put(W/'inputs/static_manifest.json',m)
+x['static_manifest_sha256']=h(W/'inputs/static_manifest.json');x['windows_entry_sha256']=h(W/'host/windows_entry.py');x['unit_slice_sha256']=h(W/'inputs/dclr6batch09.slice')
+for key in ['boot_contract_sha256','c09_contract_sha256','root_ipc_contract_sha256','readiness_contract_sha256','safety_contract_sha256','child_contracts_sha256']:
+    x[key]=m[key]
+put(W/'inputs/execution_lock.json',x)
+
+errors=[];syntax=[];graphs={}
+for p in sorted([*W.glob('src/*.py'),*W.glob('host/*.py')]):
+    raw=p.read_bytes();tree=ast.parse(raw,filename=str(p));ast.parse(raw,feature_version=(3,12));compile(raw,str(p),'exec')
+    syntax.append({'relative':p.relative_to(W).as_posix(),'sha256':h(p),'host_syntax':'PASS_STATIC','python312_grammar':'PASS_STATIC','compile_memory_only':'PASS_STATIC'})
+    graphs[p.relative_to(W).as_posix()]={node.name:{'line':node.lineno,'end_line':node.end_lineno,
+        'calls':sorted({ast.unparse(n.func) for n in ast.walk(node) if isinstance(n,ast.Call)})}
+        for node in tree.body if isinstance(node,(ast.FunctionDef,ast.ClassDef))}
+assert len(syntax)==28
+assert not list(W.rglob('*.pyc')) and not list(W.rglob('__pycache__'))
+put(E/'SYNTAX_AND_CALL_GRAPH.json',{'sources':syntax,'call_graph':graphs,'target_imports':0,'target_execution':0,'native_compile':'UNRUN'})
+
+def defs(p):return {n.name:n for n in ast.parse(p.read_bytes()).body if isinstance(n,(ast.FunctionDef,ast.ClassDef))}
+protected=['f1_model.py','f1_check.py','f4_dp.py','f4_reference.py','compare.py','guard_probe.py','range_core.py','range_fixtures.py','run_batch.py','service_readiness.py']
+bytechecks=[{'file':n,'unchanged':(W/'src'/n).read_bytes()==(OLD/'src'/n).read_bytes(),'sha256':h(W/'src'/n)} for n in protected]
+assert all(row['unchanged'] for row in bytechecks)
+budget=['_reserve','_counter_lock','Budget','claim_exact','_task_contract','_validate_fact','_append_journal','reserve_counter','init_counter','count','_fact_path','budget_health','execution_deadline','halt_budget','validate_state_document','validate_execution_binding','require_fresh_initialization']
+before=defs(OLD/'src/guard.py');after=defs(W/'src/guard.py')
+astchecks=[{'function':n,'unchanged':ast.dump(before[n],include_attributes=False)==ast.dump(after[n],include_attributes=False)} for n in budget]
+assert all(row['unchanged'] for row in astchecks)
+for n in ['eligibility','ticket_policy','service_policy','read_capability','child_admission','identity','boot','now']:
+    a=defs(OLD/'src/boot_continuity.py')[n];z=defs(W/'src/boot_continuity.py')[n]
+    astchecks.append({'function':'boot.'+n,'unchanged':ast.dump(a,include_attributes=False)==ast.dump(z,include_attributes=False)})
+assert all(row['unchanged'] for row in astchecks)
+# Apart from the Receiver unit lookup, the ACK / witness / fresh-read protocol is intact.
+for n,node in defs(OLD/'src/c09_handoff.py').items():
+    if n=='checked_receiver':continue
+    equal=ast.dump(node,include_attributes=False)==ast.dump(defs(W/'src/c09_handoff.py')[n],include_attributes=False)
+    assert equal,n
+for n,node in defs(OLD/'src/root_ipc.py').items():
+    if n in ('policy','directories'):continue
+    assert ast.dump(node,include_attributes=False)==ast.dump(defs(W/'src/root_ipc.py')[n],include_attributes=False),n
+put(E/'PROTECTED_SEMANTICS_CHECK.json',{'byte_checks':bytechecks,'AST_checks':astchecks,'C09_protocol_except_receiver_lookup':'PASS_STATIC','RootIPC_except_namespace_and_fixed_qualifier_registration':'PASS_STATIC','new_mechanism_implemented':False,'strict_separation_instances':0})
+
+def imports(name):
+    t=ast.parse((W/'src'/name).read_bytes());out=[]
+    for node in ast.walk(t):
+        if isinstance(node,ast.Import):out.extend(a.name for a in node.names)
+        elif isinstance(node,ast.ImportFrom):out.append(node.module)
+    return out
+independent=imports('ledger_gate_oracle.py')
+assert not set(independent)&{'guard','range_core','range_evidence','ledger_gate','ledger_gate_regression'}
+cfg=load(W/'inputs/safety_contract.json');oldcfg=load(OLD/'inputs/safety_contract.json');ledger=load(W/'inputs/ledger_gate_contract.json')
+assert cfg['gate_negative_cases'][:17]==oldcfg['gate_negative_cases']
+assert len(cfg['gate_negative_cases'])==18 and len({j['case_id'] for j in cfg['gate_negative_cases']})==18
+assert len(ledger['jobs'])==18 and len({j['case_id'] for j in ledger['jobs']})==18
+assert sum(j['variant']=='mutant' for j in ledger['jobs'])==4
+subject=(W/'src/ledger_gate_regression.py').read_text();gate=(W/'src/guard.py').read_text();bootstrap=(W/'src/boot_continuity.py').read_text()
+assert 'ledger_gate_regression.run_suite' in gate and 'ledger_gate_regression.verify_qualification' in gate
+assert "len(expected)!=18" in gate and "proof['mutants_detected']!=4" in gate
+assert "if k!='authorization_receipt_sha256'" in bootstrap
+assert "q['global_before']" in subject and "G.safety_charge()" in subject
+assert "CALIBRATE_S1S9_ONLY" in bootstrap and '--calibrate-only' in x['launch_commands_by_scope']['CALIBRATE_S1S9_ONLY']
+assert '--calibrate-only' not in x['launch_commands_by_scope']['CALIBRATE_S1S9_THEN_F1_F4']
+hits=[]
+for p in sorted(W.rglob('*')):
+    if p.is_file() and p.suffix in ('.py','.json','.slice'):
+        for i,line in enumerate(p.read_text(encoding='utf-8').splitlines(),1):
+            if any(k in line for k in ('batch08','BATCH08','cr01')):hits.append({'file':p.relative_to(W).as_posix(),'line':i,'text':line})
+assert not hits,hits
+put(E/'BINDING_AND_GATE_STATIC_CHECK.json',{'old_identity_hits_in_active_package':hits,'old17_preserved':True,'top_level_gate_cases':18,'ledger_specimens':18,'ledger_mutants':4,'oracle_imports':independent,'oracle_logical_independence':'PASS_STATIC','namespace_runtime_replace_calls':0,'sealed_receipt_self_hash_cycle':'REMOVED_BEFORE_FREEZE','private_raw_public_root_qualifier_split':'PASS_STATIC','mode_B_model_entry_closed_by_scope':'PASS_STATIC','actual_test_results':'UNRUN'})
+
+oldset={p.relative_to(OLD).as_posix():p for p in OLD.rglob('*') if p.is_file()};newset={p.relative_to(W).as_posix():p for p in W.rglob('*') if p.is_file()}
+diff=[];rows=[]
+for name in sorted(set(oldset)|set(newset)):
+    a=oldset.get(name);z=newset.get(name)
+    oldraw=a.read_bytes() if a else b'';newraw=z.read_bytes() if z else b''
+    if oldraw!=newraw:
+        diff.extend(difflib.unified_diff(oldraw.decode('utf-8').splitlines(keepends=True),newraw.decode('utf-8').splitlines(keepends=True),fromfile='before/'+name,tofile='after/'+name))
+    rows.append({'relative':name,'before_sha256':h(a) if a else None,'after_sha256':h(z) if z else None,'change':'ADDED' if a is None else ('RENAMED_OR_REMOVED' if z is None else ('UNCHANGED' if oldraw==newraw else 'MODIFIED'))})
+(E/'FULL_DIFF.patch').write_text(''.join(diff),encoding='utf-8')
+put(E/'FILE_DIFF_INDEX.json',rows)
+shutil.copytree(W,E/'SOURCE_AFTER')
+files=[{'relative':p.relative_to(W).as_posix(),'bytes':p.stat().st_size,'sha256':h(p)} for p in sorted(W.rglob('*')) if p.is_file()]
+put(E/'STATIC_WORKSPACE_LOCK.json',{'schema':'BS-workspace/1','version':'B09-AdmissionFix-static-1/r1','host':str(W),'future_linux':'/var/lib/dcl-r6/cr09','files':files,'source_programs':28,'inputs':14,'runtime_pycs':0,'deployed_this_turn':False,'native_tests_run':0,'frozen_utc':datetime.now(timezone.utc).isoformat()})
+put(E/'RESOURCE_BOUND_RECALCULATION.json',{'old_full_calibration_hard':62546,'C00_C12':37034,'READY_hard':512,'joint_C09H_IPC_BC_hard':5000,'RANGE_hard':20000,'new_full_calibration_hard':62546,'calibration_soft_visits':100000,'original_RANGE_completed_bound':19229,'ledger_driver_initial':595,'ledger_two_reaudits':36,'ledger_completed':631,'ledger_hard':640,'extra_gate_loop':1,'new_RANGE_completed_bound':19861,'new_RANGE_using_ledger_hard':19870,'range_hard_margin':130,'full_batch_visits':1000000,'remaining_after_hard_calibration':937454,'wall_seconds':1800,'calibration_seconds':300,'stop_at_relative':1740,'AS_bytes':1073741824,'payload_tasks':4,'new_processes':0,'new_services':0,'new_ledger_evidence_fsync_calls':112,'extra_global_transactions_completed':632,'extra_global_fsync_upper':5688,'extra_total_fsync_upper_without_other_metadata':5800,'global_transactions_calibration_upper':25556,'transaction_fsync_upper':230004,'local_claim_fsync_upper':6,'actual_T0':None,'actual_R':None})
+
+# Read actual historical bytes without importing / replaying a target checker.
+perf=[]
+for batch in ['batch04','batch05']:
+    p=I/batch/'native_snapshot/out/C02.child_process.json';d=load(p)
+    perf.append({'batch':batch,'metric':'C02 child observed spawn-to-wait return','seconds':d['observed_process_span_ns']/1e9,'clock':'CLOCK_BOOTTIME delta','source':str(p),'sha256':h(p),'scope':'Child path only; complete service and new version excluded'})
+    for q in sorted((I/batch/'native_snapshot/out').glob('C*.timing.json')):
+        d=load(q)
+        fsyncs={k:{'count':v['count'],'total_ns':v['total_ns'],'max_ns':v['max_ns']} for k,v in d.get('timing',{}).items() if k.endswith('.fsync')}
+        perf.append({'batch':batch,'metric':q.stem,'observed_fsync_aggregates':fsyncs,'source':str(q),'sha256':h(q),'scope':'Observed instruments; excludes uninstrumented work; no future upper bound'})
+jpath=B/'DCL-R6-batch04/evidence/JOURNAL_TIMELINE.json';j=load(jpath);r=[a for a in j['rows'] if a['unit']=='dclr6batch04-c02.service']
+start=next(a['boottime_seconds'] for a in r if a['message'].startswith('Starting '));end=next(a['boottime_seconds'] for a in r if 'Deactivated successfully' in a['message'])
+perf.append({'batch':'batch04','metric':'C02 service journal Starting to Deactivated','seconds':end-start,'clock':'journal MONOTONIC within one boot','source':str(jpath),'sha256':h(jpath),'scope':'Service envelope; boot-time field name in old summary is preserved, clock domains are kept separate'})
+prior=load(B/'DCL-R6-batch08-Diag/evidence/RESOURCE_ACCOUNTING.json')
+perf.append({'batch':'batch08','metric':'C00+READY64 diagnostic T0 to close','seconds':10.267560352,'clock':'CLOCK_BOOTTIME delta','source':str(B/'DCL-R6-batch08-Diag/evidence/RESOURCE_ACCOUNTING.json'),'sha256':h(B/'DCL-R6-batch08-Diag/evidence/RESOURCE_ACCOUNTING.json'),'scope':'C00/READY64/stop only; excludes remaining full chain'})
+put(E/'HISTORICAL_PERFORMANCE_EVIDENCE.json',{'rows':perf,'new_version_measurements':0,'full_chain_measured':False,'time_verdict':'TIME_FEASIBILITY_UNRESOLVED'})
+
+identity=load(W/'inputs/batch_identity.json')
+base_template={k:None for k in x['authorization_receipt_required_fields']}
+base_template.update(batch_id='batch09',static_revision=identity['revision'],profile='CPY312-UBU24/1',limits=[1000000,1800,1740,1073741824,4],static_manifest_sha256=h(W/'inputs/static_manifest.json'),execution_lock_sha256=h(W/'inputs/execution_lock.json'),authorization_text_sha256=None,special_mapping_scope='ORDINARY_AS_ACCOUNTED;KERNEL_SPECIALS_SEPARATELY_REVIEWED',test_mode='RANGE_ONLY/1',handoff_profile='C09-DURABLE-RPC/1',root_ipc_profile='ROOT-IPC/1',boot_continuity_profile='BC-SINGLE-SESSION/1',source_mode='SOURCE_ONLY/1',readiness_profile='C00-READY/1',C00_diagnostic_explicitly_approved=False,RootIPC_helpers_explicitly_approved=False,SingleSession_exec_explicitly_approved=False,SameProcess_C09_resume_explicitly_approved=False,Calibrate_only_explicitly_approved=False,Full_conditional_chain_explicitly_approved=False,status='TEMPLATE_UNAPPROVED')
+for k in ('safety_contract_sha256','c09_contract_sha256','root_ipc_contract_sha256','boot_contract_sha256','readiness_contract_sha256','batch_identity_sha256','ledger_gate_contract_sha256'):
+    base_template[k]=m[k]
+for mode,scope in [('A','CALIBRATE_S1S9_THEN_F1_F4'),('B','CALIBRATE_S1S9_ONLY')]:
+    template=dict(base_template,scope=scope)
+    put(E/('DYNAMIC_'+mode+'_AUTHORIZATION_TEMPLATE.json'),template)
+put(E/'STATIC_RESULT.json',{'version':'B09-AdmissionFix-static-1/r1','BS-1':'PASS_STATIC','BS-2':'PASS_STATIC','BS-3':'UNRESOLVED','BS-4':'CONDITIONAL_PASS','TIME_FEASIBILITY':'TIME_FEASIBILITY_UNRESOLVED','recommendation':'B_CALIBRATION_ONLY_AFTER_NEW_EXPLICIT_AUTHORIZATION','manifest_sha256':h(W/'inputs/static_manifest.json'),'execution_lock_sha256':h(W/'inputs/execution_lock.json'),'source_files':28,'input_files':14,'target_executions':0,'T0':None,'R':None,'RESOURCE_GATE_PASS':'NOT_OBTAINED','F1':'UNRUN_RESOURCE_GATE','F4':'UNRUN_RESOURCE_GATE','IMPLEMENTATION_GATE':'CLOSED','STRICT_SEPARATION_INSTANCES':0})
+print(json.dumps({'frozen_files':len(files),'source_programs':len(syntax),'source_diff_counts':dict(collections.Counter(r['change'] for r in rows)),'old_namespace_hits':len(hits),'protected_byte_files':len(bytechecks),'protected_AST_functions':len(astchecks),'gate_cases':18,'ledger_subcases':18,'ledger_mutants':4,'manifest_sha256':h(W/'inputs/static_manifest.json'),'execution_lock_sha256':h(W/'inputs/execution_lock.json'),'C02_batch04_journal_seconds':end-start,'target_executions':0},ensure_ascii=False))

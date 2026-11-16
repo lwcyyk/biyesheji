@@ -1,0 +1,791 @@
+# DCL-R6-B1-CloseReserve-Contract：B1 最小关闭保留合同、配额耗尽安全性与实施准入证明
+
+## 一、任务目标与授权
+
+继续推进硕士毕业设计《面向用户与 AI 智能体的全生命周期密码与凭据管理系统》的 DCL 研究。
+
+当前最新阶段：
+
+`DCL-R6-B1-ApprovalGate`
+
+最终裁决：
+
+`B1_BLOCKED_BY_CLOSE_RESERVE`
+
+当前已经确认：
+
+- BG-1：PASS_STATIC。
+- BG-2：BLOCKED。
+- BG-3：CONDITIONAL_PASS。
+- BG-4：PASS_STATIC。
+- BG-5：PASS_STATIC。
+- BG-6：PASS_STATIC。
+
+已有条件性结论：
+
+- C09观察次数上限：256。
+- C09主日志上限：263条。
+- C09主日志字节上限：345,148 bytes。
+- H≤52。
+- 关闭核心≤212次生产尝试。
+- MR固定reason token≤38 bytes。
+- Root MR marker≤194 bytes。
+- 健康B≤387。
+- 预付数据写入条件上界：266,752 bytes。
+- Root健康相关fsync：2,304次。
+- 新增512条journal行及122,112 bytes条件数据。
+
+当前主要阻断：
+
+**主日志额度耗尽后，必要停止信息的剩余空间、独立隔离和失败责任尚未形成充分证明。**
+
+其他未决项：
+
+- B_close=null。
+- B_other=null。
+- 完整native/admin容量仍未闭合。
+- 完整I/O、内存、FD、syscall及端到端时间未闭合。
+- MR跨实例承认仍为PROPOSED_NOT_EFFECTIVE。
+- RESOURCE_GATE_PASS尚未取得。
+- F1/F4尚未执行。
+
+本次授权范围：
+
+开展B1最小关闭保留合同的只读审计、状态机分析、容量证明、反例构造、失败责任审查及合同定稿准备。
+
+允许：
+
+1. 读取既有冻结源码。
+2. 读取B1审批材料和历史关闭证据。
+3. 分析C09配额耗尽后的真实调用链。
+4. 证明必要关闭记录的数量和字节上界。
+5. 审查RootIPC/BC.Store的持久化与空间隔离条件。
+6. 分析关闭期间的并发、崩溃和I/O故障。
+7. 建立最小关闭保留合同。
+8. 形成独立oracle及负向测试规格。
+9. 形成B1实施前的精确审批材料。
+10. 核算B1实施所需的资源和持久化开销。
+
+本轮禁止：
+
+- 修改c09_handoff.py。
+- 修改guard.py。
+- 修改manager_recovery.py。
+- 修改预算核心。
+- 修改native seal。
+- 修改行政finalizer。
+- 修改256/257守卫。
+- 激活待批配额。
+- 启动WSL动态测试。
+- 执行真实故障注入。
+- 创建T0或预算账。
+- 执行F1/F4。
+
+本轮仅进行审计、证明和合同准备。
+
+## 二、恢复研究上下文
+
+研究根目录：
+
+`D:\毕业设计\research_main_innovation\decentralized_credential_lifecycle`
+
+优先读取：
+
+- `DCL-R6-B1-ApprovalGate/FINAL_DECISION.md`
+- `DCL-R6-B1-ApprovalGate/USER_APPROVAL_CHECKLIST.md`
+- `DCL-R6-B1-ApprovalGate/B1_SCOPE_AND_DEPENDENCY.md`
+- `DCL-R6-B1-ApprovalGate/B1_SEMANTIC_DIFF_PLAN.md`
+- `DCL-R6-B1-ApprovalGate/B1_FILE_LEVEL_MAINTENANCE_REQUEST.md`
+- `DCL-R6-B1-ApprovalGate/CAPACITY_NULL_BLOCKERS.md`
+- `DCL-R6-B1-ApprovalGate/RESOURCE_AND_TIME_IMPACT.md`
+- `DCL-R6-B1-ApprovalGate/FULLCHAIN_ADMISSION_DEPENDENCY.md`
+- `DCL-R6-ResidualBounds-Decision/FINAL_DECISION.md`
+- `DCL-R6-ResidualBounds-Decision/RESIDUAL_15_GAP_MATRIX.md`
+- `DCL-R6-C09-PendingQuota-Closure/FINAL_DECISION.md`
+- `DCL-R6-C09-CloseReserve-Closure/FINAL_DECISION.md`
+- `DCL-R6-C09-CloseReserve-Closure/CLOSE_RESERVE_BOUND_PROOF.md`
+- `DCL-R6-C09-CloseReserve-Closure/UNRESOLVED_BOUND_CHECKLIST.md`
+
+同时检查实际冻结源码：
+
+1. c09_handoff.py。
+2. guard.py。
+3. manager_recovery.py。
+4. RootIPC相关实现。
+5. BC.Store及其持久化实现。
+6. 预算journal。
+7. STOP_REQUEST与CLOSED写入。
+8. waitpid和退出见证。
+9. native seal输入。
+10. 行政finalizer输入。
+
+具体文件名和路径以真实项目为准。
+
+先核验源码摘要，禁止根据历史报告猜测当前行号。
+
+## 三、第一阶段：重建B1真实语义调用链
+
+本阶段最高优先级。
+
+已有审查确认：
+
+- guard.py约799–800行调用observe_exit。
+- observe_exit位于c09_handoff.py约254–277行。
+- 调用在H锁内进入分类和event处理。
+- 当前caller消费VERIFIED/CLOSED。
+- 单独增加EXHAUSTED返回值会使调用方重新进入循环。
+- 直接将EXHAUSTED映射为CLOSED会进入close=False路径。
+- 已选定的候选语义是使用既有异常衔接，释放H锁后进入约808和817两层M.abort。
+
+必须根据当前真实源码重新核对上述位置。
+
+### 3.1 建立完整调用图
+
+输出：
+
+`B1_CLOSE_CALL_GRAPH.md`
+
+完整覆盖：
+
+1. guard入口。
+2. observe_exit。
+3. H锁获取。
+4. 观察额度检查。
+5. PENDING分类。
+6. event处理。
+7. H锁释放。
+8. 第一层M.abort。
+9. 第二层M.abort。
+10. STOP_REQUEST。
+11. Root停止。
+12. waitpid。
+13. CLOSED。
+14. native seal相关收据。
+15. 行政证据收尾。
+
+每个调用节点记录：
+
+- 函数。
+- 调用者。
+- 返回值。
+- 前置条件。
+- 锁持有状态。
+- 可能产生的日志。
+- 可能产生的预算变化。
+- 失败出口。
+
+### 3.2 明确超额观察语义
+
+必须严格区分：
+
+- VERIFIED。
+- CLOSED。
+- EXHAUSTED。
+- 真实异常。
+- UNKNOWN。
+
+分析以下情况：
+
+**情况A：EXHAUSTED直接返回。**
+
+证明调用方是否可能持续循环，以及是否产生额外观察或错误日志。
+
+**情况B：EXHAUSTED映射CLOSED。**
+
+检查close=False分支是否绕过必要停止和回收。
+
+**情况C：通过既有异常路径退出。**
+
+验证释放H锁后进入M.abort是否能够覆盖完整停止路径。
+
+重点检查：
+
+- 异常是否发生在锁内。
+- 锁是否一定释放。
+- M.abort是否重复执行。
+- 第一层与第二层abort是否产生重复收据。
+- Root是否承担实际关闭责任。
+- 调用方是否仍会继续循环。
+- CLOSED是否被正确持久化。
+
+最终给出唯一推荐语义及其证明责任。
+
+## 四、第二阶段：建立最小必要关闭证据集合
+
+本阶段只处理B1正常和配额耗尽后必须保留的关闭信息。
+
+暂时不要求解决完整4,450/4,451/4,452容量合同。
+
+先定义：
+
+`B1_CLOSE_REQUIRED_EVIDENCE`
+
+按照真实调用链确定必要证据。
+
+至少审查：
+
+- 当前batch_id。
+- 当前boot_id。
+- 首次失败原因。
+- PENDING额度耗尽事实。
+- STOP_REQUEST。
+- ABORTING。
+- CLOSED。
+- Root停止见证。
+- 受控角色退出见证。
+- waitpid或等效退出结果。
+- 最终预算状态。
+- 关闭原因。
+- 必要的native seal输入。
+- 行政收尾所需的最小索引。
+
+对每项说明：
+
+1. 为什么必须保存。
+2. 谁负责生成。
+3. 何时生成。
+4. 是否需要持久化。
+5. 是否允许重复。
+6. 是否必须写入主日志。
+7. 是否可以使用独立受信来源。
+8. 丢失时的裁决。
+
+明确区分：
+
+- B1安全关闭必需证据。
+- native seal完整证明所需证据。
+- 行政审计附加材料。
+- 完整资源资格链的其他证据。
+
+**不能将完整系统所有4,450份证据都强制塞入B1关闭保留区。**
+
+同时不能把B1必需的停止、退出和预算信息推迟到一个可能无法执行的行政归档阶段。
+
+## 五、第三阶段：证明关闭保留记录数上界
+
+已有结论：
+
+- H≤52。
+- 关闭核心≤212次生产尝试。
+- 稳定路径粗界54。
+- 旧scope A_abort≤16。
+- S_stop≤23。
+- Q_seal≤7。
+- W_waitpid≤2。
+
+这些数值必须按原适用域使用。
+
+不得将212次生产尝试直接当成212条唯一日志记录。
+
+### 5.1 逐项映射
+
+建立：
+
+| 类型 | 最大调用次数 | 唯一记录数 | 可能重复数 | 是否计入关闭保留区 |
+|---|---:|---:|---:|---|
+| M.abort第一层 | 待核验 | 待证明 | 待证明 | 待裁决 |
+| M.abort第二层 | 待核验 | 待证明 | 待证明 | 待裁决 |
+| STOP_REQUEST | 待核验 | 待证明 | 待证明 | 待裁决 |
+| stop_event | 待核验 | 待证明 | 待证明 | 待裁决 |
+| stop_result | 待核验 | 待证明 | 待证明 | 待裁决 |
+| waitpid | 待核验 | 待证明 | 待证明 | 待裁决 |
+| MR记录 | 待核验 | 待证明 | 待证明 | 待裁决 |
+| native seal | 待核验 | 待证明 | 待证明 | 待裁决 |
+
+以上为分析模板。
+
+根据真实生产者填入具体值。
+
+### 5.2 线性化与幂等
+
+证明：
+
+- 同一关闭请求不会无限重复消费记录。
+- 同一事件的重复处理不会重复发放关闭额度。
+- 重复M.abort具有明确结果。
+- 并发STOP_REQUEST受到约束。
+- CLOSED后的迟到事件不会重新启动关闭循环。
+- 恢复后不会重新发放已消费额度。
+
+如果某条路径无法证明有限，给出具体可达轨迹。
+
+## 六、第四阶段：证明关闭保留字节上界
+
+这是本轮最重要的数学证明。
+
+对每类必需关闭记录确定：
+
+- 编码schema。
+- 固定字段。
+- 可变字段。
+- 最大字符串长度。
+- UTF-8编码开销。
+- JSON转义开销。
+- 摘要长度。
+- 时间戳长度。
+- 分隔符。
+- 换行。
+- 持久化元数据。
+
+沿用已有局部条件：
+
+- ABORTING≤237 bytes。
+- external_closing≤260 bytes。
+- 正常waitpid≤1,223 bytes。
+- 异常waitpid≤565 bytes。
+- marker=144+R。
+- quota marker在固定43字节reason条件下为189 bytes。
+
+这些值必须再次核对其适用前提。
+
+### 6.1 符号变量
+
+重新解释并核对：
+
+- R。
+- T。
+- B。
+- E。
+- ΣV_j。
+- R_budget。
+
+禁止根据符号名称猜测含义。
+
+从真实编码器和调用方确定最大输入。
+
+### 6.2 关闭字节总量
+
+建立：
+
+\[
+B_{\mathrm{B1-close}}
+=
+\sum_i N_{i,\max}L_{i,\max}
++B_{\mathrm{metadata}}
++B_{\mathrm{reserve}}
+\]
+
+每项只能计入一次。
+
+必须明确：
+
+- 345,148 bytes主日志是否独立。
+- 关闭保留区是否有独立文件或存储区域。
+- 122,112 bytes条件数据是否与其他项目重叠。
+- 266,752 bytes预付数据写入上界是否已经包含相应记录。
+- 512 journal行的真实schema。
+- 2,304次Root健康fsync的调用范围。
+
+不得重复计算已有预付数据。
+
+如果仍有无法实例化的字段，保持null并给出最小缺口。
+
+## 七、第五阶段：证明空间隔离与持久化责任
+
+当前RootIPC/BC.Store已提供权限与发布顺序证据。
+
+仍需证明：
+
+**主PENDING额度耗尽后，关闭保留空间仍然真实可用。**
+
+分别审查：
+
+### 7.1 逻辑配额隔离
+
+- 主日志和关闭保留区是否有独立计数。
+- 主额度耗尽是否影响关闭额度。
+- 关闭额度是否能被普通观察请求消费。
+- 重复关闭是否重复预留。
+- CLOSED后是否冻结额度。
+
+### 7.2 物理空间隔离
+
+检查：
+
+- 是否预先分配物理空间。
+- 是否只建立逻辑字节额度。
+- 是否存在同一文件系统的共享耗尽风险。
+- 其他日志是否可以占用保留空间。
+- fsync和目录元数据是否额外需要空间。
+- 原子重命名是否需要额外临时空间。
+- 磁盘满时关闭记录如何处理。
+
+必须明确区分：
+
+`LOGICAL_QUOTA_RESERVED`
+
+与：
+
+`PHYSICAL_STORAGE_RESERVED`
+
+两者不能自动等价。
+
+### 7.3 持久化失败
+
+分析：
+
+- short write。
+- ENOSPC。
+- EIO。
+- fsync失败。
+- Root死亡。
+- BC.Store不可用。
+- 父进程丢失。
+- 共享marker缺失。
+
+对于每种失败，给出：
+
+- 本地停止行为。
+- 外部停止行为。
+- 进程退出证据。
+- 预算状态。
+- 内部状态。
+- native seal。
+- 行政封存。
+
+不能承诺在任意物理存储故障下都能完成全部持久化。
+
+必须明确受信外部TCB的责任和UNKNOWN边界。
+
+## 八、第六阶段：建立最小关闭子合同
+
+如果能够证明B1最小关闭集合有限，形成：
+
+`B1_MINIMAL_CLOSE_RESERVE_CONTRACT.md`
+
+至少包含：
+
+1. 适用范围。
+2. 主日志配额。
+3. 独立关闭记录类型。
+4. 关闭记录数量上界。
+5. 单条最大字节数。
+6. 总关闭字节上界。
+7. 逻辑空间预留。
+8. 物理空间预留。
+9. 访问权限。
+10. 并发和幂等。
+11. 持久化顺序。
+12. 故障责任。
+13. 超额行为。
+14. UNKNOWN规则。
+15. native seal输入。
+16. 行政finalizer输入。
+17. 失败关闭路径。
+18. 资源消耗。
+19. 生效前提。
+20. 版本绑定。
+
+如果某项没有充分证据，保留null。
+
+### 8.1 与完整容量合同分离
+
+证明B1最小关闭子合同是否足以作为B1的直接准入依据。
+
+其余：
+
+- 完整B_close。
+- B_other。
+- 全raw/native/admin字节。
+- 完整归档资源。
+- 端到端墙钟。
+
+继续由后层容量合同负责。
+
+不得因为B1子合同通过就自动激活完整容量合同。
+
+## 九、第七阶段：安全性质与负向测试
+
+建立独立oracle所需的测试规格。
+
+至少包括：
+
+**CR-1：MainQuotaExhaustion**
+
+主日志额度耗尽后停止新的观察。
+
+**CR-2：CloseReserveAvailability**
+
+主额度耗尽时必要关闭记录仍可使用独立保留空间。
+
+**CR-3：CloseReserveIsolation**
+
+普通PENDING写入无法消费关闭保留额度。
+
+**CR-4：CloseAttemptBound**
+
+关闭和abort路径具有有限次数。
+
+**CR-5：NoAbortLoop**
+
+额度耗尽不会导致调用方无限循环。
+
+**CR-6：NoFalseClosed**
+
+不得将EXHAUSTED直接映射成虚假CLOSED。
+
+**CR-7：LockReleaseBeforeAbort**
+
+需要退出H锁的异常路径确实先释放锁，再进入M.abort。
+
+**CR-8：CloseIdempotence**
+
+重复abort不会重复创建无界记录。
+
+**CR-9：BudgetConservation**
+
+关闭过程不会重置或返还已消耗预算。
+
+**CR-10：FailureResponsibility**
+
+Root、外部TCB及系统管理器的失败责任明确。
+
+**CR-11：UnknownPreservation**
+
+持久化失败时保留UNKNOWN。
+
+**CR-12：EvidencePreservation**
+
+关闭所需的最小原始证据能够得到保留。
+
+为每项建立：
+
+- 正常输入。
+- 失败输入。
+- 并发输入。
+- 崩溃交错。
+- 预期状态。
+- 预期字节。
+- 独立oracle。
+- 变异目标。
+
+本轮只设计测试和静态验证规则。
+
+## 十、第八阶段：B1实施准入重新裁决
+
+根据证明结果判断：
+
+### 情况A：最小关闭子合同完整证明
+
+如果：
+
+- 关闭记录数有限。
+- 字节上界有限。
+- 物理空间或受信存储保障明确。
+- 停止责任完整。
+- 配额耗尽时不存在无界循环。
+- 必需退出与封存输入具有明确来源。
+
+则可以建议：
+
+`B1_CLOSE_RESERVE_CONDITIONAL_PASS`
+
+并形成B1最小维护实施申请。
+
+### 情况B：部分证明
+
+如果数量已经闭合，但物理空间、Root故障或外部存储责任仍未闭合：
+
+`B1_CLOSE_RESERVE_PARTIAL`
+
+明确剩余参数和责任。
+
+### 情况C：存在反例
+
+如果主额度耗尽后仍存在无法保证关闭记录的执行轨迹：
+
+`B1_CLOSE_RESERVE_COUNTEREXAMPLE`
+
+保存最小轨迹并停止B1实施申请。
+
+## 十一、第九阶段：精确实施申请准备
+
+如果B1具备实施条件，下一阶段申请只允许涉及：
+
+- c09_handoff.py。
+- guard.py。
+- 对应合同文件。
+- quota配置。
+- 测试夹具。
+- 独立oracle。
+- harness。
+- review-lock。
+
+manager_recovery.py保持只读接口依赖，除非新证据证明必须修改。
+
+runtime_tree_lock保持只读TCB输入。
+
+五个未来文件位置的具体名称，以本地B1审批材料为准。
+
+实施申请必须提供：
+
+1. 当前SHA-256。
+2. 目标函数及行号。
+3. 语义diff。
+4. 保持的不变量。
+5. 新增测试。
+6. 负向测试。
+7. 变异。
+8. 资源预算。
+9. 回滚方式。
+10. 历史文件保护。
+11. 新版本manifest。
+12. 独立动态验收申请。
+
+本轮不得直接写补丁。
+
+## 十二、审批权限分离
+
+继续维持四类独立决定：
+
+### CAPACITY_CONTRACT_APPROVAL
+
+可单独审议256/263/345148等已具备条件证明的逻辑条款。
+
+### MR_CROSS_INSTANCE_APPROVAL
+
+原14条规则继续PROPOSED_NOT_EFFECTIVE。
+
+### NATIVE_IMPLEMENTATION_AUTHORIZATION
+
+B1源码修改尚未获得授权。
+
+### FULLCHAIN_DYNAMIC_AUTHORIZATION
+
+完整资源资格链尚未获得授权。
+
+任何一项批准不自动授予其他权限。
+
+特别注意：
+
+**本轮完成B1最小关闭合同证明，不等于用户已经批准B1源码修改。**
+
+## 十三、候选机制与原创性
+
+当前成熟通用方法包括：
+
+- 有界追加日志。
+- 预留持久化空间。
+- 独立关闭保留区。
+- 幂等事件。
+- 固定长度错误token。
+- 原子额度计数。
+
+均需要与当前候选逐项比较。
+
+如果现有方法已经覆盖，记录：
+
+`COVERED_BY_G`
+
+不要包装成原创架构。
+
+若提出新的候选机制，先完成可证伪分离声明：
+
+1. 具体输入族。
+2. 度量指标。
+3. 当前最强通用方法G。
+4. 预测严格差距。
+5. 至少一个具体分离实例。
+
+没有具体分离实例，不进入实现阶段。
+
+继续保持：
+
+STRICT_SEPARATION_INSTANCES=0
+
+IMPLEMENTATION_GATE=CLOSED
+
+## 十四、交付文件
+
+建立：
+
+`DCL-R6-B1-CloseReserve-Contract/`
+
+至少交付：
+
+- `B1_CLOSE_CALL_GRAPH.md`
+- `B1_REQUIRED_CLOSE_EVIDENCE.md`
+- `B1_CLOSE_RECORD_COUNT_PROOF.md`
+- `B1_CLOSE_BYTE_BOUND_PROOF.md`
+- `B1_MAIN_AND_CLOSE_QUOTA_SEPARATION.md`
+- `B1_PHYSICAL_RESERVE_AUDIT.md`
+- `B1_PERSISTENCE_FAILURE_MATRIX.md`
+- `B1_FAILURE_RESPONSIBILITY.md`
+- `B1_MINIMAL_CLOSE_RESERVE_CONTRACT.md`
+- `B1_SECURITY_PROPERTIES.md`
+- `B1_REGRESSION_AND_ORACLE_PLAN.md`
+- `B1_RESOURCE_IMPACT.md`
+- `B1_IMPLEMENTATION_ADMISSION_REQUEST.md`
+- `FINAL_DECISION.md`
+
+同步更新：
+
+- CURRENT_VERDICT.md
+- NEXT_ACTION.md
+- EVIDENCE_INDEX.md
+
+所有历史工件保持原字节。
+
+## 十五、最终验收
+
+必须回答：
+
+1. B1真实调用链是否完整重建。
+2. EXHAUSTED处理是否存在无限循环风险。
+3. H锁是否在abort之前释放。
+4. 两层M.abort分别产生哪些记录。
+5. 关闭必需证据究竟有哪些。
+6. 212次生产尝试与唯一记录数是什么关系。
+7. 关闭记录数量能否得到有限上界。
+8. 关闭记录总字节能否得到数值。
+9. 345148 bytes与关闭保留量是否独立。
+10. 512 journal行和122112 bytes属于哪些具体对象。
+11. 266752 bytes是否存在重复计算。
+12. RootIPC/BC.Store是否具备真实物理空间保障。
+13. 主日志额度耗尽时能否保证必要停止记录。
+14. 短写、ENOSPC、EIO下的安全结果是什么。
+15. 外部TCB承担哪些停止责任。
+16. native seal和行政finalizer最低需要哪些输入。
+17. B1是否能够独立于完整容量合同实施。
+18. 最小需要修改哪些文件。
+19. 当前是否具备提交源码实施申请的条件。
+20. 哪些用户审批仍然缺失。
+
+状态使用：
+
+- PROVED
+- CONDITIONAL_PROVED
+- PARTIAL
+- COUNTEREXAMPLE
+- UNRESOLVED
+- BLOCKED
+
+## 十六、立即执行
+
+本次明确授权有限只读审计与合同证明。
+
+按顺序：
+
+1. 读取B1审批门全部材料。
+2. 重建guard→observe_exit→M.abort完整调用链。
+3. 验证EXHAUSTED语义。
+4. 建立B1最小关闭证据集合。
+5. 推导关闭记录数上界。
+6. 推导关闭字节上界。
+7. 审查逻辑空间与物理空间隔离。
+8. 分析Root、Store和外部TCB的失败责任。
+9. 验证配额耗尽后的安全停止路径。
+10. 核对现有512行、122112 bytes和266752 bytes条件数据。
+11. 消除重复计数。
+12. 形成最小关闭保留合同。
+13. 判断B1是否可以独立于完整容量合同实施。
+14. 形成精确源码差异申请。
+15. 更新最终裁决及审批清单。
+
+如果关键关闭空间无法证明，应明确指出最小缺失条件，不得擅自提高配额上限。
+
+如果B1必须依赖完整关闭容量，保留B1_BLOCKED_BY_CLOSE_RESERVE。
+
+**本轮核心目标：证明C09主日志额度耗尽后，系统仍然具有独立、有限、可持久化且责任明确的安全关闭能力，并将B1实施范围收敛为可以单独批准的最小维护任务。**
+
+现在开始 DCL-R6-B1-CloseReserve-Contract。

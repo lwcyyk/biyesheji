@@ -1,0 +1,423 @@
+warning: in the working copy of 'D:\毕业设计\DCL-R6-isolated-verification\batch02\FROZEN_LC\src\guard.py', LF will be replaced by CRLF the next time Git touches it
+warning: in the working copy of 'D:\毕业设计\DCL-R6-isolated-verification\lc03\src\guard.py', LF will be replaced by CRLF the next time Git touches it
+diff --git "a/D:\\毕业设计\\DCL-R6-isolated-verification\\batch02\\FROZEN_LC\\src\\guard.py" "b/D:\\毕业设计\\DCL-R6-isolated-verification\\lc03\\src\\guard.py"
+index a3da39d..f85831f 100644
+--- "a/D:\\毕业设计\\DCL-R6-isolated-verification\\batch02\\FROZEN_LC\\src\\guard.py"
++++ "b/D:\\毕业设计\\DCL-R6-isolated-verification\\lc03\\src\\guard.py"
+@@ -5,6 +5,7 @@ admission checks kernel facts in addition to root-owned authorization records.
+ No role is executed by py_compile. Historical Windows sources stay archived.
+ """
+ import argparse
++from contextlib import contextmanager
+ import errno
+ import fcntl
+ import hashlib
+@@ -31,7 +32,7 @@ PYTHON_SHA = 'e50d468e8b0adfb05733f5b87b3cff34829c4a8c1aea50c865aa8bdfe4bb150f'
+ AS_CAP = 1 << 30
+ VISIT_CAP = 1000000
+ CASES = tuple('C%02d' % i for i in range(13))
+-ROOTS = (Path('/var/lib/dcl-r6/lc01'), Path('/var/lib/dcl-r6/batch02'))
++ROOTS = (Path('/var/lib/dcl-r6/lc03'), Path('/var/lib/dcl-r6/batch03'))
+ def _arg(name, default=None):
+     return sys.argv[sys.argv.index(name)+1] if name in sys.argv else default
+ ROOT = Path(_arg('--batch-root', str(ROOTS[0]))).resolve()
+@@ -42,6 +43,45 @@ _WATCH = None
+ _NORMAL = threading.Event()
+ _LOCKS = {}
+ _LOCKS_LOCK = threading.Lock()
++BUDGET_PROTOCOL = 'EXACT-RANGE/1'
++COUNTER_MAGIC = b'BRNGv001'
++_HALTED = threading.Event()
++_TIMING = {}
++_TIMING_LOCK = threading.Lock()
++_RESERVATION_MINT = object()
++_LOCAL_CREDIT_MINT = object()
++
++def monotonic_ns(): return time.clock_gettime_ns(time.CLOCK_BOOTTIME)
++def _timing(stage, start, end, utc_start, utc_end, error=None):
++    with _TIMING_LOCK:
++        r=_TIMING.setdefault(stage,{'count':0,'total_ns':0,'min_ns':None,'max_ns':0,'errors':0,'first_samples':[]})
++        duration=end-start;r['count']+=1;r['total_ns']+=duration
++        r['min_ns']=duration if r['min_ns'] is None else min(r['min_ns'],duration)
++        r['max_ns']=max(r['max_ns'],duration);r['errors']+=int(error is not None)
++        sample={'begin_boottime_ns':start,'end_boottime_ns':end,'begin_utc_ns':utc_start,
++                'end_utc_ns':utc_end,'duration_ns':duration,'error':error}
++        if len(r['first_samples'])<8:r['first_samples'].append(sample)
++        r['last_sample']=sample
++def timed(stage, fn, *args, **kwargs):
++    begin=monotonic_ns();utc_begin=time.time_ns();error=None
++    try:return fn(*args,**kwargs)
++    except BaseException as exc:error=repr(exc);raise
++    finally:_timing(stage,begin,monotonic_ns(),utc_begin,time.time_ns(),error)
++def timing_event(stage):
++    t=monotonic_ns();u=time.time_ns();_timing(stage,t,t,u,u)
++def timing_snapshot():
++    with _TIMING_LOCK:return json.loads(json.dumps(_TIMING))
++def sync_fd(fd,stage):return timed(stage+'.fsync',os.fsync,fd)
++def halt_budget(reason):
++    _HALTED.set()
++    try:request_stop('BUDGET_HALTED:'+str(reason))
++    except BaseException:pass
++def budget_health():
++    if _HALTED.is_set():raise AdmissionBlocked('BUDGET_HALTED')
++def execution_deadline(case=None):
++    budget_health();s=state();t=_TICKET if _TICKET is not None else ticket(case)
++    if stopped() or now()>=min(s['stop_at'],t['case_deadline']):raise LimitReached('WALL_OR_STOP_LIMIT')
++    return s,t
+ 
+ class AdmissionBlocked(RuntimeError): pass
+ class LimitReached(RuntimeError): pass
+@@ -74,22 +114,22 @@ def trusted(path):
+ def _full(fd, data):
+     # A short write poisons the operation; the caller never grants credit.
+     if os.write(fd, data) != len(data): raise AdmissionBlocked('SHORT_WRITE')
+-def atomic(path, data, root_record=False):
++def atomic(path, data, root_record=False, timing_stage='metadata.atomic'):
+     _check_root()
+     p = _inside(path, ROOT if root_record and os.geteuid() == 0 else OUT)
+     p.parent.mkdir(parents=True, exist_ok=True)
+-    raw = json.dumps(data, ensure_ascii=False, sort_keys=True, indent=2).encode('utf-8')
++    raw = timed(timing_stage+'.encode',lambda:json.dumps(data,ensure_ascii=False,sort_keys=True,indent=2).encode('utf-8'))
+     tmp = p.with_name(p.name + '.tmp.%s.%s' % (os.getpid(), threading.get_ident()))
+     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o640 if root_record else 0o600)
+     try:
+         if root_record:
+             os.fchown(fd,0,pwd.getpwnam('dcl-r6').pw_gid)
+             os.fchmod(fd,0o640)
+-        _full(fd, raw); os.fsync(fd)
++        timed(timing_stage+'.write',_full,fd,raw); sync_fd(fd,timing_stage+'.file')
+     finally: os.close(fd)
+     os.replace(tmp, p)
+     d = os.open(p.parent, os.O_RDONLY | os.O_DIRECTORY)
+-    try: os.fsync(d)
++    try: sync_fd(d,timing_stage+'.directory')
+     finally: os.close(d)
+ def write(path, data): atomic(path, data)
+ def identity(pid=None):
+@@ -141,6 +181,8 @@ def proc_memory():
+             'identity':identity(),'query_before':before,'query_after':stamp()}
+ def manifest():
+     m=trusted(SOURCE.parent/'inputs/static_manifest.json')
++    if str(SOURCE)!='/var/lib/dcl-r6/lc03/src' or str(SOURCE)!=m['source_directory']:
++        raise AdmissionBlocked('UNTRUSTED_SOURCE_DIRECTORY')
+     if sys.platform != 'linux' or tuple(sys.version_info[:3]) != (3,12,3):
+         raise AdmissionBlocked('RUNTIME_VERSION_DRIFT')
+     if str(Path(sys.executable).resolve()) != PYTHON or digest(PYTHON) != PYTHON_SHA:
+@@ -163,15 +205,15 @@ def verify_runtime_tree(m):
+ def authorization():
+     _check_root(); m=manifest()
+     a=trusted(ROOT/'inputs/execution_authorization.json')
+-    if ROOT.name != 'batch02' or a['batch_id'] != 'batch02' or a['scope'] != 'CALIBRATE_THEN_F1_F4':
+-        raise AdmissionBlocked('NO_DYNAMIC_BATCH02_AUTHORIZATION')
++    if ROOT.name != 'batch03' or a['batch_id'] != 'batch03' or a['scope'] != 'CALIBRATE_THEN_F1_F4':
++        raise AdmissionBlocked('NO_DYNAMIC_BATCH03_AUTHORIZATION')
+     if a['profile'] != 'CPY312-UBU24/1' or a['limits'] != [1000000,1800,1740,AS_CAP,4]:
+         raise AdmissionBlocked('CONTRACT_MISMATCH')
+     if a['static_manifest_sha256'] != digest(SOURCE.parent/'inputs/static_manifest.json'):
+         raise AdmissionBlocked('STATIC_LOCK_MISMATCH')
+     if a['execution_lock_sha256'] != digest(SOURCE.parent/'inputs/execution_lock.json'):
+         raise AdmissionBlocked('EXECUTION_LOCK_MISMATCH')
+-    if a['authorization_text_sha256'] != digest(ROOT/'inputs/BATCH02_AUTHORIZATION_TEXT.txt'):
++    if a['authorization_text_sha256'] != digest(ROOT/'inputs/BATCH03_AUTHORIZATION_TEXT.txt'):
+         raise AdmissionBlocked('AUTHORIZATION_SOURCE_MISMATCH')
+     # This is explicit scope acceptance, never a substitute for OS limit checks.
+     if a.get('special_mapping_scope') != 'ORDINARY_AS_ACCOUNTED;KERNEL_SPECIALS_SEPARATELY_REVIEWED':
+@@ -236,75 +278,205 @@ def init_counter(path,cap):
+     if p==OUT/'visits.bin' and os.geteuid()!=0: raise AdmissionBlocked('ROOT_INITIALIZATION_REQUIRED')
+     p.parent.mkdir(parents=True,exist_ok=True)
+     fd=os.open(p,os.O_WRONLY|os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW,0o600)
+-    try: _full(fd,bytes(8)+struct.pack('<QQ',0,cap)); os.fsync(fd)
++    try: _full(fd,COUNTER_MAGIC+struct.pack('<QQ',0,cap)); sync_fd(fd,'budget.initialize')
+     finally: os.close(fd)
+     if os.geteuid()==0:
+         u=pwd.getpwnam('dcl-r6'); os.chown(p,u.pw_uid,u.pw_gid)
+-    atomic(p.with_suffix(p.suffix+'.intent.json'),{'status':'COMMITTED','after':0,'cap':cap})
++    atomic(p.with_suffix(p.suffix+'.intent.json'),{'protocol':BUDGET_PROTOCOL,'status':'COMMITTED','after':0,'cap':cap},timing_stage='budget.initialize.intent')
+     if os.geteuid()==0:
+         os.chown(p.with_suffix(p.suffix+'.intent.json'),u.pw_uid,u.pw_gid)
+ def count(path=None):
+     p=OUT/'visits.bin' if path is None else _inside(path,OUT)
+     with p.open('rb') as f:
+         raw=f.read()
+-    if len(raw)!=24 or raw[:8]!=bytes(8): raise AdmissionBlocked('COUNTER_FORMAT')
++    if len(raw)!=24 or raw[:8]!=COUNTER_MAGIC: raise AdmissionBlocked('COUNTER_FORMAT_OR_PROTOCOL')
+     used,cap=struct.unpack('<QQ',raw[8:])
+     if used>cap: raise AdmissionBlocked('COUNTER_OVERFLOW')
+     return used
+-def reserve_counter(path,cap, fault=None):
+-    p=_inside(path,OUT); local=p!=OUT/'visits.bin'
+-    if fault and not local: raise AdmissionBlocked('FAULT_IN_GLOBAL_LEDGER_FORBIDDEN')
+-    with _LOCKS_LOCK: lock=_LOCKS.setdefault(str(p),threading.RLock())
+-    with lock:
++@contextmanager
++def _counter_lock(path,cap,case=None):
++    budget_health();p=_inside(path,OUT)
++    with _LOCKS_LOCK:lock=_LOCKS.setdefault(str(p),threading.RLock())
++    begin=monotonic_ns();utc=time.time_ns()
++    while not lock.acquire(timeout=.05):execution_deadline(case)
++    fd=None;acquired=False
++    try:
+         fd=os.open(p,os.O_RDWR|os.O_NOFOLLOW)
+-        acquired=False
+-        try:
+-            while not acquired:
+-                try: fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB); acquired=True
+-                except BlockingIOError: guardian_check(); state(); time.sleep(.005)
+-            raw=os.pread(fd,24,0)
+-            if len(raw)!=24 or raw[:8]!=bytes(8): raise AdmissionBlocked('TORN_COUNTER')
+-            used,storedcap=struct.unpack('<QQ',raw[8:])
+-            if storedcap!=cap or used>cap: raise AdmissionBlocked('COUNTER_CAP_MISMATCH')
+-            intent=p.with_suffix(p.suffix+'.intent.json')
+-            old=read(intent)
+-            if old['status']!='COMMITTED' or old['after']!=used or old['cap']!=cap:
+-                raise AdmissionBlocked('AMBIGUOUS_RESERVATION')
+-            if used>=cap: raise LimitReached('VISIT_LIMIT')
+-            record={'status':'PREPARED','before':used,'after':used+1,'cap':cap,**stamp()}
+-            atomic(intent,record)
+-            if fault=='prepared': raise OSError('INJECTED_AFTER_PREPARED')
+-            journal=p.with_suffix(p.suffix+'.journal.jsonl')
+-            j=os.open(journal,os.O_WRONLY|os.O_CREAT|os.O_APPEND|os.O_NOFOLLOW,0o600)
+-            try: _full(j,(json.dumps(record,sort_keys=True)+'\n').encode()); os.fsync(j)
+-            finally: os.close(j)
+-            payload=struct.pack('<Q',used+1)
+-            if fault=='short_write': payload=payload[:3]
+-            n=os.pwrite(fd,payload,8)
+-            if n!=8: raise AdmissionBlocked('SHORT_COUNTER_WRITE')
+-            os.fsync(fd)
+-            if fault=='counter_fsynced': raise OSError('INJECTED_AFTER_COUNTER_FSYNC')
+-            record['status']='COMMITTED'
+-            j=os.open(journal,os.O_WRONLY|os.O_APPEND|os.O_NOFOLLOW)
+-            try: _full(j,(json.dumps(record,sort_keys=True)+'\n').encode()); os.fsync(j)
+-            finally: os.close(j)
+-            if fault=='journal_fsynced': raise OSError('INJECTED_BEFORE_COMMITTED_INTENT')
+-            atomic(intent,record)
+-            return used+1
+-        finally:
+-            if acquired: fcntl.flock(fd,fcntl.LOCK_UN)
++        while not acquired:
++            try:fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB);acquired=True
++            except BlockingIOError:execution_deadline(case);time.sleep(.005)
++        _timing('budget.lock_wait',begin,monotonic_ns(),utc,time.time_ns())
++        execution_deadline(case)
++        raw=os.pread(fd,24,0)
++        if len(raw)!=24 or raw[:8]!=COUNTER_MAGIC:raise AdmissionBlocked('TORN_COUNTER_OR_OLD_PROTOCOL')
++        used,storedcap=struct.unpack('<QQ',raw[8:])
++        old=read(p.with_suffix(p.suffix+'.intent.json'))
++        if storedcap!=cap or used>cap:raise AdmissionBlocked('COUNTER_CAP_MISMATCH')
++        if old.get('protocol')!=BUDGET_PROTOCOL or old.get('status')!='COMMITTED' or old['after']!=used or old['cap']!=cap:
++            raise AdmissionBlocked('AMBIGUOUS_RESERVATION')
++        yield fd,used,p
++    finally:
++        if fd is not None:
++            if acquired:fcntl.flock(fd,fcntl.LOCK_UN)
+             os.close(fd)
++        lock.release()
++
++def _canonical(value):return json.dumps(value,sort_keys=True,separators=(',',':'))
++def _task_contract(task_id,N):
++    if type(N) is not int or N<=0:raise AdmissionBlocked('EXACT_N_MUST_BE_POSITIVE_INTEGER')
++    m=manifest();p=SOURCE.parent/'inputs/child_contracts.json'
++    if digest(p)!=m['child_contracts_sha256']:raise AdmissionBlocked('CHILD_CONTRACT_DRIFT')
++    tasks=trusted(p)['tasks']
++    if task_id not in tasks:raise AdmissionBlocked('UNFROZEN_SUBTASK')
++    spec=tasks[task_id];s=state();t=ticket(spec['case'])
++    page=os.sysconf('SC_PAGE_SIZE')
++    if page!=4096 or spec['page_size']!=page:raise AdmissionBlocked('UNPROVEN_CHILD_PAGE_SIZE')
++    expected={'C02':128*(1+1048576//page),'C03':16777216//page,'C04':1}[spec['case']]
++    if N!=expected or spec['N']!=expected:raise AdmissionBlocked('UNPROVEN_EXACT_N')
++    request={'protocol':BUDGET_PROTOCOL,'batch_id':ROOT.name,'boot_id':s['boot_id'],'T0':s['T0'],
++             'task_id':task_id,'N':N,'case':spec['case'],'source_manifest':digest(SOURCE.parent/'inputs/static_manifest.json'),
++             'contract_sha256':digest(p)}
++    return request,t
++def _fact_path(task_id):
++    return OUT/'reservations'/(hashlib.sha256(task_id.encode()).hexdigest()+'.json')
++def _validate_fact(fact,request,used):
++    if fact.get('request')!=request:raise AdmissionBlocked('TASK_ID_REQUEST_CONFLICT')
++    lo,hi=fact['credit_range']
++    if type(lo) is not int or type(hi) is not int or not(0<=lo<hi<=used) or hi-lo!=request['N']:
++        raise AdmissionBlocked('EXACT_FACT_RANGE_MISMATCH')
++    material={'request':request,'credit_range':[lo,hi],'owner':fact['owner']}
++    if fact['lease_id']!=hashlib.sha256(_canonical(material).encode()).hexdigest():
++        raise AdmissionBlocked('EXACT_FACT_IDENTITY_MISMATCH')
++    if fact['delivery_state'] not in ('UNCLAIMED','CLAIMED'):raise AdmissionBlocked('EXACT_FACT_DELIVERY_STATE')
++def _append_journal(p,record,stage):
++    data=timed(stage+'.encode',lambda:(_canonical(record)+'\n').encode())
++    j=os.open(p.with_suffix(p.suffix+'.journal.jsonl'),os.O_WRONLY|os.O_CREAT|os.O_APPEND|os.O_NOFOLLOW,0o600)
++    try:timed(stage+'.write',_full,j,data);sync_fd(j,stage)
++    finally:os.close(j)
++def _reserve(path,cap,amount=1,request=None,fault=None):
++    budget_health();timing_event('reserve.request')
++    if type(amount) is not int or amount<=0:raise AdmissionBlocked('RESERVATION_AMOUNT')
++    p=_inside(path,OUT);global_ledger=p==OUT/'visits.bin'
++    if fault and global_ledger:raise AdmissionBlocked('FAULT_IN_GLOBAL_LEDGER_FORBIDDEN')
++    if amount!=1 and request is None:raise AdmissionBlocked('RANGE_REQUIRES_FROZEN_TASK')
++    case=request['case'] if request else None
++    try:
++        with _counter_lock(p,cap,case) as (fd,used,p):
++            if request is not None:
++                checked,t=_task_contract(request['task_id'],amount)
++                if checked!=request:raise AdmissionBlocked('REQUEST_BINDING_CHANGED')
++                if _TICKET is None or _TICKET['case']!=case or t['main_identity']!=identity():
++                    raise AdmissionBlocked('EXACT_RESERVATION_OWNER_REQUIRED')
++                fp=_fact_path(request['task_id'])
++                if fp.exists():
++                    fact=read(fp);_validate_fact(fact,request,used)
++                    timing_event('reserve.idempotent_fact_only')
++                    return {'after':used,'fact':fact,'created':False}
++            soft=100000 if global_ledger and (_TICKET is None or _TICKET['case']!='FORMAL') else cap
++            if used+amount>min(cap,soft):raise LimitReached('VISIT_OR_CALIBRATION_LIMIT')
++            record={'protocol':BUDGET_PROTOCOL,'status':'PREPARED','before':used,'after':used+amount,
++                    'amount':amount,'cap':cap,'request':request,**stamp()}
++            intent=p.with_suffix(p.suffix+'.intent.json')
++            atomic(intent,record,timing_stage='budget.intent.prepared')
++            if fault=='prepared':raise OSError('INJECTED_AFTER_PREPARED')
++            _append_journal(p,record,'budget.journal.prepared')
++            payload=struct.pack('<Q',used+amount)
++            if fault=='short_write':payload=payload[:3]
++            written=timed('budget.counter.write',os.pwrite,fd,payload,8)
++            if written!=8:raise AdmissionBlocked('SHORT_COUNTER_WRITE')
++            sync_fd(fd,'budget.counter')
++            if fault=='counter_fsynced':raise OSError('INJECTED_AFTER_COUNTER_FSYNC')
++            record={**record,'status':'COMMITTED',**stamp()}
++            _append_journal(p,record,'budget.journal.committed')
++            if fault=='journal_fsynced':raise OSError('INJECTED_BEFORE_COMMITTED_INTENT')
++            fact=None
++            if request is not None:
++                fact={'protocol':BUDGET_PROTOCOL,'request':request,'credit_range':[used,used+amount],
++                      'owner':identity(),'delivery_state':'UNCLAIMED','executor':None,'reserved_at':stamp()}
++                material={'request':request,'credit_range':fact['credit_range'],'owner':fact['owner']}
++                fact['lease_id']=hashlib.sha256(_canonical(material).encode()).hexdigest()
++                # Registry is durable before the global intent becomes ready.
++                # A crash in this gap leaves PREPARED and closes the batch.
++                atomic(fp,fact,timing_stage='budget.registry.reserved')
++            atomic(intent,record,timing_stage='budget.intent.committed')
++            timing_event('reserve.committed_barriers_done')
++            execution_deadline(case)  # committed late credit is burned, never handed off
++            return {'after':used+amount,'fact':fact,'created':True}
++    except LimitReached:raise
++    except BaseException as exc:
++        if global_ledger:halt_budget(exc)
++        raise
++def reserve_counter(path,cap,fault=None):
++    return _reserve(path,cap,1,fault=fault)['after']
++
++class ExactReservation:
++    def __init__(self,fact,created,_mint=None):
++        if _mint is not _RESERVATION_MINT:raise AdmissionBlocked('INTERNAL_RESERVATION_FACTORY_REQUIRED')
++        self.fact=json.loads(json.dumps(fact));self.created=created;self._issued=False;self._lock=threading.Lock()
++    def dispatch_once(self):
++        with self._lock:
++            if not self.created or self._issued or self.fact['owner']!=identity():
++                raise AdmissionBlocked('RESERVATION_FACT_IS_NOT_FRESH_EXECUTION_CREDIT')
++            execution_deadline(self.fact['request']['case']);self._issued=True
++            timing_event('local_credit.dispatch_once')
++            return json.loads(json.dumps(self.fact))
++class LocalCredits:
++    def __init__(self,fact,t,_mint=None):
++        if _mint is not _LOCAL_CREDIT_MINT or fact.get('executor')!=identity() or fact.get('delivery_state')!='CLAIMED':
++            raise AdmissionBlocked('INTERNAL_CLAIMED_CREDIT_FACTORY_REQUIRED')
++        self.fact=fact;self.N=fact['request']['N'];self.used=0;self._ticket=t
++        self._identity=identity();self._lock=threading.Lock()
++        owner=fact['owner']
++        if os.getppid()!=owner['pid'] or identity(owner['pid'])!=owner:raise AdmissionBlocked('LOCAL_PARENT_IDENTITY_CHANGED')
++        self._parent=os.pidfd_open(owner['pid'])
++        if os.getppid()!=owner['pid'] or identity(owner['pid'])!=owner:
++            os.close(self._parent);raise AdmissionBlocked('LOCAL_PARENT_PIDFD_RACE')
++    def visit(self):
++        begin=monotonic_ns();utc=time.time_ns()
++        with self._lock:
++            if identity()!=self._identity:raise AdmissionBlocked('LOCAL_CREDIT_INCARNATION_MISMATCH')
++            if select.select([self._parent],[],[],0)[0]:raise AdmissionBlocked('LOCAL_CREDIT_PARENT_EXIT')
++            execution_deadline(self.fact['request']['case'])
++            if self.used>=self.N:raise LimitReached('LOCAL_EXACT_CREDIT_EXHAUSTED')
++            self.used+=1  # before the charged operation, including a failed attempt
++        _timing('local_credit.debit',begin,monotonic_ns(),utc,time.time_ns())
++    def close(self):os.close(self._parent)
++def claim_exact(task_id,N,lease_id):
++    request,t=_task_contract(task_id,N);kernel_admission(t)
++    if os.getppid()!=t['main_identity']['pid'] or identity(os.getppid())!=t['main_identity']:
++        raise AdmissionBlocked('LOCAL_CREDIT_PARENT_MISMATCH')
++    try:
++        with _counter_lock(OUT/'visits.bin',VISIT_CAP,request['case']) as (_,used,_):
++            fact=read(_fact_path(task_id));_validate_fact(fact,request,used)
++            if fact['lease_id']!=lease_id or fact['owner']!=t['main_identity']:
++                raise AdmissionBlocked('LOCAL_CREDIT_LEASE_MISMATCH')
++            if fact['delivery_state']!='UNCLAIMED':raise AdmissionBlocked('LOCAL_CREDIT_ALREADY_CLAIMED')
++            fact={**fact,'delivery_state':'CLAIMED','executor':identity(),'claimed_at':stamp()}
++            atomic(_fact_path(task_id),fact,timing_stage='budget.registry.claimed')
++            execution_deadline(request['case'])
++            credits=LocalCredits(fact,t,_LOCAL_CREDIT_MINT);timing_event('local_credit.granted_to_executor')
++            return credits
++    except LimitReached:raise
++    except BaseException as exc:halt_budget(exc);raise
+ class Budget:
+     def __init__(self,local=None):
+         if _TICKET is None: raise AdmissionBlocked('PAYLOAD_CONTEXT_REQUIRED')
+         kernel_admission(_TICKET); guardian_check()
+         self.local=Path(local) if local else None; self.calls=0
+     def visit(self):
+-        guardian_check(); s=state()
+-        if stopped() or now()>=min(s['stop_at'],_TICKET['case_deadline']): raise LimitReached('WALL_OR_STOP_LIMIT')
+-        if _TICKET['case']!='FORMAL' and count()>=100000: raise LimitReached('CALIBRATION_SOFT_VISITS')
+-        reserve_counter(OUT/'visits.bin',VISIT_CAP); self.calls+=1
+-        if self.local: reserve_counter(self.local,17)
++        guardian_check();execution_deadline()
++        try:
++            reserve_counter(OUT/'visits.bin',VISIT_CAP); self.calls+=1
++            if self.local:reserve_counter(self.local,17)
++            execution_deadline();timing_event('single_credit.grant_emit')
++        except LimitReached:raise
++        except BaseException as exc:halt_budget(exc);raise
++    def reserve_exact(self,task_id,N):
++        if self.local:raise AdmissionBlocked('LOCAL_MIRROR_EXACT_RESERVATION_NOT_APPROVED')
++        guardian_check();execution_deadline()
++        request,_=_task_contract(task_id,N)
++        result=_reserve(OUT/'visits.bin',VISIT_CAP,N,request=request)
++        return ExactReservation(result['fact'],result['created'],_RESERVATION_MINT)
+     def close(self): pass
+ 
+ def _run(argv,timeout=15):
+@@ -317,7 +489,7 @@ def unit_show(unit):
+     text=_run(['/usr/bin/systemctl','show',unit,*['--property='+f for f in fields]])
+     return dict(line.split('=',1) for line in text.splitlines() if '=' in line)
+ def service_argv(case):
+-    unit='dclr6batch02-'+case.lower()+'.service'
++    unit='dclr6batch03-'+case.lower()+'.service'
+     props={'User':'dcl-r6','Group':'dcl-r6','Type':'exec','Slice':PARENT,
+            'LimitAS':str(AS_CAP)+':'+str(AS_CAP),'TasksMax':'4','TasksAccounting':'yes',
+            'MemoryAccounting':'yes','MemoryMax':str(4*AS_CAP),'MemorySwapMax':'0',
+@@ -453,12 +625,15 @@ def controller(case):
+         try: _WATCH.wait(timeout=3)
+         except subprocess.TimeoutExpired: _WATCH.kill();_WATCH.wait()
+         err.close()
++        write(OUT/(case+'.timing.json'),{'timing':timing_snapshot(),
++            'scope':'bounded in-memory aggregates; this final write is outside the snapshot; abrupt exit may lose telemetry',
++            'sample':stamp()})
+ def launch_one(case):
+     argv=service_argv(case)
+     lock=trusted(SOURCE.parent/'inputs/execution_lock.json')
+     if argv!=lock['payload_commands'][case]: raise AdmissionBlocked('PAYLOAD_ARGV_DRIFT')
+     _run(argv)
+-    unit='dclr6batch02-'+case.lower()+'.service'; until=now()+14
++    unit='dclr6batch03-'+case.lower()+'.service'; until=now()+14
+     info={}
+     while now()<until:
+         info=unit_show(unit); pid=int(info.get('MainPID','0'))
+@@ -511,7 +686,7 @@ def seal():
+     # Wait for the independent writer to finish before freezing evidence.
+     until=now()+20
+     while now()<until:
+-        if unit_show('dclr6batch02-stop.service').get('ActiveState') in ('inactive','failed'): break
++        if unit_show('dclr6batch03-stop.service').get('ActiveState') in ('inactive','failed'): break
+         time.sleep(.05)
+     else: raise AdmissionBlocked('EXTERNAL_STOP_NOT_CLOSED; evidence remains unsealed')
+     rows={}
+@@ -542,7 +717,7 @@ def launcher(resume=False):
+             t0=now(); s={'status':'CALIBRATING','boot_id':boot_id(),'T0':t0,'stop_at':t0+1740,
+                 'deadline':t0+1800,'launcher_identity':identity(),'resume_count':0,'expected_launcher_exit':None}
+             _root_write(ROOT/'inputs/batch_state.json',s);init_counter(OUT/'visits.bin',VISIT_CAP)
+-            stop_argv=['/usr/bin/systemd-run','--no-block','--unit=dclr6batch02-stop.service','--property=Type=exec',
++            stop_argv=['/usr/bin/systemd-run','--no-block','--unit=dclr6batch03-stop.service','--property=Type=exec',
+                   '--property=Restart=no','--property=User=root',PYTHON,'-I','-S','-B',str(SOURCE/'guard.py'),
+                   '--role','external-stop','--batch-root',str(ROOT)]
+             if stop_argv!=trusted(SOURCE.parent/'inputs/execution_lock.json')['external_stop_command']:
