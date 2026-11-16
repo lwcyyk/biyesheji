@@ -1,0 +1,506 @@
+[PDF_PAGE 1]
+         LRC: Dependency-Aware Cache Management
+                                    for Data Analytics Clusters
+
+                                      Yinghao Yu, Wei Wang, Jun Zhang, Khaled Ben Letaief
+                                             Hong Kong University of Science and Technology
+                          yyuau@connect.ust.hk, weiwa@cse.ust.hk {eejzhang, eekhaled}@ust.hk
+
+
+   Abstract—Memory caches are being aggressively used in to-
+day’s data-parallel systems such as Spark, Tez, and Piccolo. How-
+ever, prevalent systems employ rather simple cache management
+policies—notably  the  Least  Recently  Used  (LRU)  policy—that
+are oblivious to the application semantics of data dependency,
+expressed as a directed acyclic graph (DAG). Without this knowl-
+edge,memorycachingcanatbestbeperformedby“guessing”the
+future data access patterns based on historical information (e.g.,           Fig.  1:  An  example  of  the  data  dependency  DAG  of  an
+the access recency and/or frequency), which frequently results               application. Each block represents a dataset. Blocks A, B,
+in inefﬁcient, erroneous caching with low hit ratio and a long               and C are input datasets already cached in memory. Block D
+response time.                                                               is an intermediate dataset derived from B. Block E (F) is the
+   In this paper, we propose a novel cache replacement policy,               ﬁnal result derived from both A and D (C and D).
+Least  Reference  Count  (LRC),  which  exploits  the  application-
+speciﬁc  DAG  information  to  optimize  the  cache  management.
+LRC evicts the cached data blocks whose reference count is the
+smallest.  The  reference  count  is  deﬁned,  for  each  data  block,       For instance, in Spark, the BlockManager evicts data blocks
+as  the  number  of  dependent  child  blocks  that  have  not  been         that are least recently used (LRU) in the presence of high
+computed  yet.  We  demonstrate  the  efﬁcacy  of  LRC  through              memory pressure [2]. The LRU policy can be highly inefﬁcient
+both empirical analysis and cluster deployments against popular
+benchmarking workloads. Our Spark implementation shows that,                 with low hit ratio. Referring back to the example of Fig. 1,
+compared with LRU, LRC speeds up typical applications by 60%.                suppose that the cache can hold 3 blocks (assuming unit block
+                         I.  INTRODUCTION                                    size), and blocksA,B andC are cached at the beginning. Now
+                                                                             to derive block D and persist it in memory, the LRU policy
+   Data analytics clusters are shifting from on-disk processing              will evict either block A or C, as block B has been recently
+toward in-memory computing. The increasing demand for inter-                 used in the computation of block D, even though it will not
+active, iterative data analytics and the stalling speed of disk I/O          be referenced again in the future. We show through this toy
+force data-parallel systems to persist large volumes of data in              example that simply relying on the historical information can
+memory to provide low latency [1]–[4]. Despite the continuous                result in erroneous cache decisions.
+drop in RAM prices and the increasing availability of high-                     In this paper, we ask how the application semantics of data
+RAM servers, memory cache remains a constrained resource                     dependency should be exploited to optimize cache manage-
+in large clusters. Efﬁcient cache management, therefore, plays               ment? Ideally, the solution should take full use of the DAG
+a pivotal role for in-memory data analytics.                                 information and can be easily implemented as an efﬁcient cache
+   Caching is a classical problem and has been well studied                  management policy with low overhead. In addition, the policy
+in storage systems, databases, operating systems, and web                    should be generally applicable to a wide range of in-memory
+servers. Yet, caching in data-parallel clusters has a deﬁning                computing frameworks.
+characteristic  that  differentiates  it  from  previous  systems:              We propose a novel cache replacement policy, Least Refer-
+cluster applications have clear semantics of data dependency,                ence Count (LRC), that always evicts the data block whose
+expressed as directed acyclic graphs (DAGs) of compute tasks.                reference count is the smallest. The reference count is deﬁned,
+The DAG sketches out the task execution plan which dictates                  for each data block, as the number of unmaterialized child
+the underlying data access pattern, i.e., how data is computed               blocks derived from it.
+and reused as input of descendant tasks. Fig. 1 shows an                        LRC  provides  beneﬁts  over  existing  cache  management
+example DAG, where the computations of data blocks E and                     policies in three aspects. First, LRC can timely detect inactive
+F depend on block D, and the corresponding tasks can only                    data blocks with zero reference count. Such blocks are likely
+be scheduled after block D has been derived from block B.                    not be used again in the remaining computations1 and can
+   However, existing caching policies in prevalent data analytic             be safely evicted from the memory. Second, compared with
+systems [2], [5], [6] are agnostic to the data dependency DAGs.              the historical information such as the block access recency
+Instead, they predict application-speciﬁc data access patterns
+based on historical information (e.g., frequency and recency).                 1Unless re-computation is needed due to machine failures or stragglers.
+[PDF_PAGE 2]
+and frequency, the reference count serves as a more accurate                    Whenever a job is submitted to the Spark driver, its DAG
+indicator of the likelihood of future data access. Intuitively, the          of RDDs becomes readily available to a driver component,
+higher the reference count a block has, the more child blocks                DAGScheduler [2]. The DAGScheduler then traverses the job
+depend on it, and the more likely the block is needed in the                 DAG using depth-ﬁrst search (DFS) and continuously submits
+downstream computations. We show through empirical studies                   runnable tasks (i.e., those whose parent RDDs have all been
+in Sec. II that caching data blocks with the highest reference               computed) to the cluster scheduler to compute unmaterialized
+count increases the hit ratio by up to 119% in comparison with               RDDs. Therefore, the cache manager can easily retrieve the
+caching the most recently used data. Third, the reference count              DAG information from the DAGScheduler. This information
+can be accurately tracked at runtime with negligible overhead,               sheds light into the underlying data access patterns, based on
+making LRC a lightweight solution for all DAG-based systems.                 which the cache manager can decide which RDD block should
+   We have prototyped LRC as a pluggable memory manager                      be kept in memory.
+in Spark (details in Sec. III). To demonstrate the efﬁcacy                      It is worth emphasizing that the availability of data depen-
+of LRC, we have conducted extensive evaluations through                      dency DAGs of compute jobs is not limited to Spark, but
+EC2 deployment, including both the single- and multi-tenant                  generally found in other parallel frameworks such as Apache
+experiments at scale. Compared to LRU—the default cache                      Tez [7]: the Tez programming API allows the programmer to
+managementpolicyinSpark—LRCretainsthesameapplication                         explicitly deﬁne the workﬂow DAG of an application, which
+performance using only 40% of cache spaces. When operating                   is readily available to the Tez scheduler beforehand.
+with the same memory footprint, LRC is capable of reducing                      We caution that the actual data access sequence, though
+the application runtime by up to 60%. Our implementation can                 critically depends on the dependency DAGs, cannot be fully
+be easily adapted to other DAG-based data parallel systems                   characterized beforehand. To see this, we refer back to the
+and can also be extended to multi-tenant cache sharing systems               previous example in Fig. 1. After block D has been computed,
+such as Tachyon [4].                                                         the cluster scheduler submits two task sets, say T1 and T2,
+   The remainder of the paper is organized as follows. In Sec. II,           to respectively compute data blocks E and F (noting that A
+we demonstrate the inefﬁciency of existing cache policies                    and C are assumed to be in memory at the beginning). In this
+by characterizing data access patterns in parallel processing                case, which block, E or F, is computed ﬁrst depends on the
+systems through empirical studies. We present the design of                  scheduling order of T1 and T2, which dictates the access order
+LRC policy and elaborate its implementation details in Sec. III.             of blocks A and C. We see from this simple example that
+Evaluation results are reported in Sec. IV. We survey related                there remains some uncertainty in the data access sequence,
+work in Sec. V and conclude the paper in Sec. VI.                            even with the dependency DAG available a priori. It is such an
+                                                                             uncertainty that rules out the use of the optimal ofﬂine cache
+             II.  BACKGROUND AND MOTIVATION                                  policy, Belady’s MIN [10], to maximize the cache hit ratio.
+   In this section, we give the background information and                   B. Recency- and Frequency-Based Cache Management
+motivate the need for a new cache policy through empirical                      Despite the availability of the dependency DAGs, prevalent
+studies. Unless otherwise speciﬁed, we shall limit our discus-               cachemanagementpoliciesareagnostictowardthisinformation.
+sion to the context of Spark [2]. However, nothing precludes                 Instead, they predict data access patterns based on the historical
+applying the discussion to other frameworks such as Tez [7]                  information, notably recency and frequency.
+and Storm [5].                                                                  •  Least Recently Used (LRU):TheLRUpolicy[11]makes
+A. Semantics of Data Dependency                                                    room for new data by evicting the cached blocks that have
+                                                                                   not been accessed for the longest period of time. LRU
+   Cluster applications such as machine learning, web search,                      is the de facto cache management policy deployed in
+and social network typically consist of complex workﬂows,                          today’s in-memory data analytics systems [2], [4], [5], [7].
+available as directed acyclic graphs (DAGs) to the cluster                         It predicts the access pattern based on the short-term data
+scheduler. These DAGs provide rich semantics of the under-                         popularity, meaning the recently accessed data is assumed
+lying data access patterns, which entails a myriad of cache                        to be likely used again in the near future.
+optimization opportunities that, so far, have not been well                     •  Least  Frequently  Used  (LFU): The LFU policy [12]
+explored.                                                                          keeps track of theaccess frequency of each data block, and
+   In Spark, data is managed through an easy-to-use memory                         the one that has been accessed the least frequently has the
+abstraction called Resilient Distributed Datasets (RDDs) [2].                      highest priority to be evicted. Unlike LRU, LFU predicts
+AnRDDisacollectionofimmutabledatasetspartitionedacross                             the access pattern based on the long-term data popularity,
+a group of machines. Each machine stores a subset of RDD                           meaning the frequently accessed data is assumed to be
+partitions (blocks), in memory or on disk. An RDD can be                           likely used again in the future.
+created directly from a ﬁle in a distributed storage system (e.g.,              Both LRU and LFU are very easy to implement. However,
+HDFS [8], Amazon S3 [9], and Tachyon [4]) or computed                        their obliviousness to the application semantics of data depen-
+from other RDDs through a user-deﬁned transformation. The                    dency frequently result in inefﬁcient, even erroneous, cache
+DAG presents the workﬂow of RDD computations.                                decisions, as we show in the next subsection.
+[PDF_PAGE 3]
+      TABLE I: An overview of SparkBench suite [13].
+
+          Application Type                         Workload
+                                                Logistic Regression
+          Machine Learning                Support Vector Machine (SVM)
+                                               Matrix Factorization
+                                                    Page Rank
+         Graph Computation                        SVD Plus Plus
+                                                  Triangle Count
+                                                       Hive
+             SQL Queries                          RDD Relation
+                                                   Twitter Tag
+         Streaming Workloads                        Page View
+                                              Connected Component
+                                          Strongly Connected Component        Fig. 2: Distribution of inactive data cached during the execution
+           Other Workloads                        Shortest Paths              of SparkBench [13].
+                                                Label Propagation
+                                                 Pregel Operation
+
+
+C. Characterizing the Data Access Pattern
+   Toillustratetheneedforbeingdependency-aware,wecharac-
+terize the data access patterns in typical analytics benchmarks
+through empirical studies. We show that simply relying on
+the recency and frequency information for cache management
+would waste a large portion of memory to persist inactive data
+that will never be used in downstream computations.
+Methodology.  We  ran  SparkBench  [13],  a  comprehensive
+benchmarking suite, in an Amazon EC2 [14] cluster consisting                  Fig. 3: Memory footprints of intermediate data generated and
+of 10 m4.large instances. We measured the memory footprints                   inactive blocks cached during the execution of Connected
+and characterized the data access patterns of 15 applications in
+SparkBench, including machine learning, graph computation,                    Component, an application in SparkBench [13].
+SQL queries, streaming, etc. Table I summarizes the workload
+suite we used in our empirical studies.
+Data Access Patterns. Our experiments have identiﬁed two                      that when a child RDD has been computed, its parents may
+common access patterns across applications.                                   go inactive.
+   1)  Most  data  goes  inactive  quickly  and  will  never  be              Inefﬁciency of LRU and LFU. We learn from the empirical
+referenced again. Fig. 2 shows the distribution of inactive data              studies that the key to efﬁcient cache replacement is to timely
+cached in memory throughout the execution of 15 applications.                 evict inactive data blocks. Unfortunately, neither LRU nor LFU
+We ﬁnd that inactive data accounts for a large portion of                     is capable of doing so. We refer back to the example of Fig. 1,
+memory  footprint  during  the  execution,  with  the  median                 where each block is of a unit size, and the memory cache
+and 95th percentile being 77% and 99%, respectively. The                      can persist three blocks in total. We start with LRU. Without
+dominance of inactive data blocks is in line with the data                    loss of generality, assume that the three blocks A, B, and
+ﬂow  model  where  intermediate  data  is  used  by  “nearby”                 C are already in memory at the beginning, with the recency
+computations in DAGs and therefore has a short life cycle.                    rank C > B > A, i.e., from the most-recently-used (MRU)
+Keeping inactive data long in memory wastes cache spaces,                     position to the least-recently-used (LRU). Fig. 4 illustrates what
+inevitably resulting in low hit ratio.                                        happens in an LRU cache when data block D is materialized
+   2)  Data  goes  inactive  in  waves,  often  aligned  with  the            and then cached. Since block D is derived from B, the latter
+generation of new data. We further micro-benchmarked the                      is ﬁrstly referenced as an input at time t1 and is elevated to
+memory footprint of total generated data against that of inactive             the MRU position. Soon later, block D has been materialized
+data blocks cached during the execution of each application.                  at time t2 and is cached at the MRU position, pushing the
+Fig. 3 shows the results for a representative application that                least-recently-used block A out of the memory. However, this
+computes the connected components of a given graph. The                       would incur expensive tear-and-wear cost, in that block A will
+execution progress is measured in terms of the number of                      soon be reloaded in memory to compute block E. In fact, we
+tasks completed. We see clearly that the data is produced and                 see that the optimal decision is to evict block B, as it becomes
+consumed in waves, shown in Fig. 3 as the lockstep along                      inactive and will never be used again. This simple example
+with the submission of new jobs following the DAG. Meaning                    shows that LRU is unable to evict inactive data in time, but
+[PDF_PAGE 4]
+Fig. 4: An example showing that LRU is unable to timely                       Fig. 5: Distribution of the cache priority ranks of accessed data
+detect and evict inactive data.                                               blocks with respect to recency, frequency, and reference count.
+                                                                              The workloads cover all SparkBench applications [13].
+it has to wait passively until the data demotes to the LRU
+position, which may take a long time.                                         data access. Intuitively, the higher the reference count a block
+   We note that the LFU policy suffers from a similar problem.                has, the more compute tasks depend on it, and the more likely
+In the previous example, to cache block D, the LFU policy                     the block is needed in the near future.
+would evict either block A or C while retaining block B in                       To validate this intuition, we ran SparkBench applications on
+memory, because block B has a historical access record (in                   10m4.largeEC2instances.Speciﬁcally,wheneveradatablock
+the computation of D), but the other two do not.                              is accessed, we measure the cache priority rank (in percentile)
+   To summarize, simply relying on the historical information,                of the block with respect to three metrics: the recency of
+be it access recency or frequency, is incapable of detecting                  last access, historical access frequency, and reference count.
+inactive data in time. Efﬁcient cache management therefore                    A block having a top rank with respect to a certain metric
+must factor in the semantics of data dependency DAG. We                       (say, top 1% in recency) is likely cached in memory if the
+show how this can be achieved in the next section.                            corresponding cache policy is used (say, LRU). Fig. 5 shows the
+     III.  DEPENDENCY-AWARE CACHE MANAGEMENT                                  CDF of the measured ranks across 15 SparkBench applications.
+   In  this  section,  we  present  a  new  cache  management                 We see that the reference count consistently gives higher ranks
+policy, Least Reference Count (LRC), which makes the cache                    than the other two metrics, meaning that it is the most accurate
+replacement decisions based on the data dependency DAG. We                    indicator of which data will be accessed next. For example,
+also describe our implementation in Spark.                                    suppose that the cache can accommodate the top 10% ranked
+                                                                              data blocks, each of a uniform size. Caching data blocks ranked
+A. Least Reference Count (LRC)                                                top in the reference count leads to the highest cache hit ratio
+   We start with the deﬁnition of reference count.                            of 46%, which is 2.19× (46×) compared with the recency
+                                                                              (frequency) rank.
+Deﬁnition 1 (Reference count).  For each data block b, the                    B. LRC-Online
+reference count is deﬁne as the number of child blocks that
+are derived from b, but have not yet been computed.                              We  note  that  accurately  computing  the  reference  count
+   Back to the example of Fig. 1, upon the DAG submission,                    requires extracting the entire data dependency DAG in an
+blocks A, B, and C all have reference count 1, while block                    application. However, in systems such as Spark and Tez, only
+D has reference count 2.                                                      the DAG information of a compute job is readily available,
+   The Least Reference Count (LRC) policy keeps track of the                  upon the job submission. A cluster application typically runs
+reference count of each data block, and whenever needed, it                   as a workﬂow of several jobs. The data dependency between
+evicts the data block whose reference count is the smallest.                  these jobs is usually runtime information not available a priori,
+                                                                              and can be very complex if jobs are executed iteratively. We
+Properties of LRC. The LRC policy has two nice properties                     address this challenge through two approaches.
+that makes it highly efﬁcient.                                                   First, studies of production traces reveal that a large portion
+   First, inactive data with zero reference count can be quickly              of cluster workloads are recurring applications [15], which are
+detected and evicted. Repeating the previous example of Fig. 1,               run periodically when new data becomes available. For these
+let blocks A, B, and C be in memory at the beginning, and                     applications, we can learn their DAGs from previous runs.
+the cache is full. Once block D has been computed, block B                       Second, for the non-recurring applications, such as inter-
+becomes inactive with zero reference count. Block B is hence                  active ad-hoc queries, we propose LRC-Online that online
+evicted to make room for block D.                                             updates the data dependency DAG of the application whenever
+   Second, compared to recency and frequency, reference count                 a new job is submitted. Continuing the example of Fig. 1, we
+serves as a more accurate indicator of the likelihood of future               assume that the computations of block E and F belong to two
+[PDF_PAGE 5]
+Fig.6:AnexampleDAGwhereblocksE andF arerespectively
+computed by Job 1 and Job 2. The former is scheduled earlier
+than the latter.
+
+
+different jobs, as illustrated in Fig. 6. Let Job 1 be submitted
+ﬁrst, and the reference count of block D turns to 1. While                     Fig. 7: Overall system architecture of the proposed application-
+this is inaccurate as block D is also used to compute block F,                 aware cache manager in Spark. Our implementation modules
+LRC-Online will soon correct its value after Job 2 has been                    are highlighted as shaded boxes.
+submitted.
+   LRC-Online extends the application of LRC to the multi-                           TABLE II: Key APIs of our Spark implementation.
+tenant environments, where multiple tenants share common                          API                            Description
+inputdatasets.DespitethepotentialonlineDAGproﬁlingerrors,                         parseDAG                       The  CacheManagerMaster  parses  the
+our experiment results in Sec. IV show that the performance                                                      DAG  information  obtained  from  the
+of LRC-Online remains close to that of LRC with the ofﬂine                                                       DAGScheduler and returns the proﬁled
+DAG information of applications.                                                                                 reference count for each RDD.
+                                                                                  updateReferenceCount           The  CacheManagerMaster  sends  the
+C. Spark Implementation                                                                                          parsed  reference  count  proﬁle  to  the
+   We have prototyped LRC and LRC-Online as a pluggable                                                          corresponding RDDMonitor.
+block manager in Spark. We next elaborate our implementation                      reportRDDStatus                The       RDDMonitor       informs       the
+                                                                                                                 CacheManagerMaster   of   the   status
+details.                                                                                                         of the cached RDD blocks.
+Architecture overview. Fig. 7 gives an architecture overview                      updateReferenceCount           Upon receiving the reference count up-
+of our cache manager, where the shaded boxes highlight our                                                       dating message, the RDDMonitor updates
+                                                                                                                 reference counts of the corresponding
+implementation modules. The cache manager consists of a                                                          RDD blocks.
+centralized controller on the master node and several distributed                 getReferenceCount              When   caching   an   RDD   block,   the
+RDDMonitors that collect cache statistics on worker nodes and                                                    BlockManager searches the local proﬁle
+report to the controller periodically. The controller has two                                                    to get its reference count. If not found,
+                                                                                                                 ask the BlockManagerMasterEndPoint
+key components: (1) AppDAGAnalyzer that learns the data-                                                         for update.
+dependency DAGs from previous runs for recurring applica-                         decrementReferenceCount        When an RDD block is referenced, the
+tions, or in an online fashion for non-recurring applications,                                                   RDDMonitor  deducts  the  its  reference
+and (2) CacheManagerMaster that implements the main logic                                                        count in the maintained proﬁle.
+of the LRC and LRC-Online policies. We summarize the key                          evictBlocks                    When     the     cache     is     full,     the
+                                                                                                                 BlockManager evicts the data with the
+APIs of our implementation in Table II.                                                                          least reference count.
+Workﬂow. Whenever an application is submitted, the Spark
+driver  is  launched  on  the  master  node.  The  driver  cre-                a block access at the worker nodes, CacheManagerMaster
+ates a SparkContext within which two controller modules,
+CacheManagerMaster and AppDAGAnalyzer, are instantiated.                       notiﬁes BlockManagerMasterEndPoint in the driver to send
+By default, the driver also instantiates DAGScheduler to parse                 updated  reference  proﬁle  to  BlockManager  on  the  corre-
+job DAGs and BlockManagerMasterEndpoint to communi-                            sponding workers. The BlockManager on each worker makes
+cate the cache information with the BlockManager of workers.                   the eviction decisions locally based on the reference count
+The driver then informs worker nodes to launch Spark execu-                    proﬁle it receives, and reports the events of block access and
+tors, which results in the deployment of BlockManager and                      eviction to RDDMonitor who then forwards the update to the
+RDDMonitor across the cluster. Once the connection between                     CacheManagerMaster.
+the executor and the driver has been established, RDDMonitor                   D. Discussion
+starts to report RDD block status to CacheManagerMaster,
+who maintains the reference count proﬁle based on the DAG                      Communication  overhead.  To  reduce  the  communication
+information provided by DAGScheduler and AppDAGAnalyzer.                       overhead, each worker maintains the reference count proﬁle
+When the proﬁle needs update due to a job submission or                        locallyandsynchronizeswiththecontrollerthroughaminimum
+[PDF_PAGE 6]
+number  of  message  exchanges.  The  CacheManagerMaster                      TABLE  III:  Impact  of  memory  caches  on  the  application
+sends reference count updates to the corresponding workers                    runtime. We compare against the two extreme cases: caching
+only when necessary. In particular, there are two cases where                 all data in memory versus caching none.
+the update is needed: 1) When a new job DAG is received from                    Workload                           Cache All          Cache None
+the DAGScheduler, the CacheManagerMaster notiﬁes workers                        Page Rank                          56 s               552 s
+to update the reference count of the corresponding RDD blocks;                  Connected Component                34 s               72 s
+2) when an RDD block has been referenced, and the block                         Shortest Paths                     36 s               78 s
+has replicas on the other workers, all those workers should be
+notiﬁed to have a consistent reference count of the block. By                   K-Means                            26 s               30 s
+default, RDD blocks are not replicated across the cluster, and                  Pregel Operation                   42 s               156 s
+our implementation checks the Spark conﬁguration to decide                      Strongly Connected Component       126 s              216 s
+if such an update can be avoided.                                               Label Propagation                  34 s               37 s
+Fault  tolerance.  It  is  possible  that  a  worker  may  lose                 SVD Plus Plus                      55 s               120 s
+connection to the driver at runtime, which results in a task                    Triangle Count                     84 s               99 s
+failure. In this case, the reference count proﬁle maintained                    Support Vector Machine (SVM)       72 s               138 s
+by the CacheManagerMaster will be inaccurate as the failed
+tasks will be rescheduled soon. To address this inconsistency                       TABLE IV: Summary of workload input data size.
+issue,  the  CacheManagerMaster  records  the  job  ID  upon
+receiving  a  job  DAG  from  DAGScheduler.  This  way,  the                                Workload                          Input Data Size
+CacheManagerMaster can quickly detect job re-computation                                    Page Rank                              480 MB
+if the same job ID has been spotted before. The consistency                              Pregel Operation                          120 MB
+check for the reference count can then be applied.                                    Connected Component                          280 MB
+                          IV.  EVALUATION                                                 SVD Plus Plus                            540 MB
+
+   In this section, we evaluate the performance of our cache
+manager through EC2 deployment against typical application                    applications are compute-intensive, and their runtime is mostly
+workloads in SparkBench suite [13]. We ﬁrst investigate how                   dictated by the CPU cycles. Some applications, on the other
+being dependency-aware helps speed up a single application                    hand, need to shufﬂe large volumes of data, and their per-
+with much shorter runtime, and how such a beneﬁt can be                       formance is bottlenecked by the network. These applications
+achieved even when the DAG information is proﬁled online.                     beneﬁt little from efﬁcient cache management and do not see
+We next evaluate the performance of LRC in a multi-tenant                     a signiﬁcant runtime improvement even if the system caches
+environment where multiple applications run in a shared cluster.              all data in memory.
+These  applications  have  data  dependency  in  between  and                    In  order  to  differentiate  from  these  applications,  we  re-
+compete for the memory caches against each other.                             spectively measured the application runtime in two extreme
+Cluster deployment. Our implementation is based on Spark                      cases: 1) the system has large enough memory and caches all
+1.6.1.  In  order  to  highlight  the  performance  difference  of            data, and 2) the system caches no data at all. We summarize
+memoryread-writeanddiskI/O,wedisabledtheOSpagecache                           our  measurement  results  in  Table  III.  We  see  that  some
+using memory buffer by triggering direct disk I/O from/to the                 SparkBench applications, notably K-Means, Label Propagation
+hard disk. We deployed a 20-node EC2 cluster for the single-                  and Triangle Count, have almost the same runtime in the
+tenant experiments and increased the cluster size to 50 nodes                 two cases, meaning that memory caches are irrelevant to their
+for the multi-tenant experiments. Each node we used in the                    performance. We therefore exclude these applications from
+EC2 deployment is an m4.large instance [14], with a dual-                     evaluations but focus on four memory-intensive workloads
+core 2.4 GHz Intel Xeon E5-2676 v3 (Haswell) processor and                    whose performance critically depends on cache management:
+8 GB memory.                                                                  Page Rank, Pregel Operation, Connected Component, and SVD
+A. Single-Tenant Experiment                                                   Plus Plus. Table IV summarizes the input data sizes of these
+                                                                              workloads.
+   We start with a simple scenario where a single tenant runs an              Cache  hit  ratio  and  application  runtime.  We  ran  each
+application in a small private cluster consisting of 20 nodes. We             application using three cache replacement policies, i.e., LRU,
+ran typical application workloads in SparkBench and measured                  LRC, and LRC-Online, with different memory cache sizes.
+the cache hit ratio as well as the application runtime using                  In particular, we conﬁgured storage.memoryFraction in the
+different memory management policies, including LRU, LRC,                     legacy Spark to throttle the memory used for RDD caching to a
+and LRC-Online.                                                               given size. We measured the cache hit ratio and the application
+Relevance of memory caches. It is worth emphasizing that                      runtime against different cache sizes and depict the results in
+memory caches may become irrelevant for some applications.                    Fig. 8 and Fig. 9, respectively. The results have been averaged
+For example, we have observed in SparkBench that some                         over 5 runs.
+[PDF_PAGE 7]
+                   Fig. 8: Cache hit ratio under the three cache management policies with different cache sizes.
+
+
+
+
+
+
+
+
+
+
+
+                Fig. 9: Application runtime under the three cache management policies with different cache sizes.
+
+
+   As expected, the less availability of the memory caches                    We now evaluate how such an online approach can approximate
+in the cluster, the smaller the cache hit ratio (Fig. 8), and                 the LRC policy with ofﬂine knowledge of application DAG.
+the longer the application runs (Fig. 9). Regardless of the                   We see through Fig. 8 and Fig. 9, that LRC-Online is a close
+cache size, the two LRC algorithms consistently outperform                    approximation of LRC for all applications except SVD Plus
+LRU, the default cache management policy in Spark, across all                 Plus. As illustrated in Table V, with online proﬁling, LRC
+applications. The beneﬁts achieved by the LRC policy, in terms                can only speed up the application by 12%, as opposed to 30%
+of the application speedup, varies with different cache sizes                 provided by the ofﬂine algorithm.
+as well as the application workloads. In particular, compared                    We attribute the performance loss of LRC-Online to the
+to the default LRU policy, our LRC algorithm reduces the                      fact that the datasets generated in the current job might be
+runtime of Page Rank by 60% (from 170 s to 64 s) when the                     referenced by another in the future, whose DAG is yet available
+cluster cache size is 5.5 GB. Table V summarizes the largest                  to the DAGScheduler. Therefore, the reference count of the
+runtime savings of LRC over LRU for each application we                       dataset calculated at the current stage may not be accurate.
+evaluated.                                                                    To quantify the inaccuracy of online proﬁling, we measure
+   The efﬁciency of LRC policy can also be illustrated from a                 reference distance, for each data reference, as the number
+different perspective, in that LRC requires much smaller cache                of  intermediate  jobs  from  the  source  job  where  the  data
+spaces than that of LRU, but it is able to achieve the same                   is generated to the destination job where the data is used.
+cache hit ratio. For example, to achieve the target hit ratio of 0.7          Intuitively, the longer the reference distance is, the greater
+for Pregel Operation, LRU requires 0.55 GB memory caches.                     chance  it  is  that  referencing  the  block  in  the  future  may
+In comparison, LRC requires only 0.22 GB, an equivalent of                    encounter a cache miss. This is because without knowing
+60% saving of cache spaces.                                                   the entire application DAG beforehand, LRC-Online can only
+   We make another interesting observation that for different                 tell the data dependency in the current job, and will likely
+applications, the cache hit ratio has different impact on their               evict all the generated data blocks after the source job has
+runtime. For example, the workload of Page Rank suffers from                  completed.
+the most signiﬁcant slowdown, from 67 s to 320 s, when the                       Table VI summarizes the average reference distance of the
+cache hit ratio decreases from 1 to 0.85. The reason is that                  data blocks generated in each application. All applications but
+the computation of Page Rank consists of some large RDDs,                     SVD Plus Plus have reference distance less than 1, meaning that
+and their cache miss critically increases the total runtime. For              most of the generated data is likely used either by the current
+Connected Component, salient slowdown is observed when                        job or the next one. This result is in line with the observation
+the cache hit ratio drops from 0.7 to 0.4; for SVD Plus Plus,                 made in Fig. 3, where intermediate data goes inactive in waves
+we observe a linear slowdown with respect to the decrease of                  and in lockstep with job submission. SVD Plus Plus, on the
+cache hit ratio.                                                              other hand, has the longest reference distance, which explains
+LRC-Online. As discussed in the previous section, when the                    its performance loss with LRC-Online.
+entire application DAG cannot be retrieved a priori, we can                      To summarize, LRC-Online is a practical solution that well
+proﬁle the submitted job DAGs at runtime using LRC-Online.                    approximates  LRC  and  consistently  outperforms  the  LRU
+[PDF_PAGE 8]
+                         TABLE V: Summary of the maximum reduction of application runtime over LRU.
+
+                   Workload           Cache Size      LRU        LRC       LRC-Online       Speedup by LRC        Speedup by LRC-Online
+                   Page Rank             6.6 GB      169.3 s     68.4 s       84.5 s             59.58%                    50.06%
+               Pregel Operation         0.22 GB      121.9 s     66.3 s       75.9 s             45.64%                    37.74%
+             Connected Component         2.2 GB       50.6 s     27.6 s       29.9 s             45.47%                    40.97%
+                 SVD Plus Plus          0.88 GB      254.3 s    177.6 s       223.9 s            30.17%                    11.96%
+
+
+             TABLE VI: Average reference distance.
+
+              Workload                    Average Reference Distance
+              PageRank                                0.95
+           PregelOperation                            0.73
+        ConnectedComponent                            0.74
+             SVDPlusPlus                              1.71
+
+TABLE VII: Summary of workloads used in the multi-tenant
+experiment.
+
+      Tenant Index               Workload              Input Data Size        Fig. 10: Cache hit ratio and total runtime with different cache
+           1-8             ConnectedComponent             745.4 MB            sizes in the multi-tenant experiment.
+           9-16               PregelOperation             66.9 MB
+
+
+policy across applications.
+B. Multi-Tenant Experiment
+   We now investigate how our cache manager performs in a
+multi-tenant environment through a 50-node EC2 deployment.
+Notice  that  the  Spark  driver  uniﬁes  the  indexing  of  jobs
+and  RDDs  for  all  tenants.  Once  a  job  is  submitted,  the
+RDDs in its DAG are indexed incrementally based on the
+uniﬁed index. In this case, the ofﬂine RDD reference count is
+unavailablebecausetheorderofactualjobsubmissionsequence                       Fig.11:Cachehitratioandtotalruntimewithdifferentnumbers
+from multiple tenants is uncertain due to runtime dynamics.                   of tenants.
+Therefore, the data dependency DAG can only be determined
+online. For this reason, we compare the performance of LRC-
+Online against LRU.                                                           years, a vast amount of caching algorithms have been proposed.
+   In the ﬁrst set of experiments, we emulated 16 tenants                     These algorithms run on a single machine and can be broadly
+submitting  jobs  simultaneously  to  the  Spark  driver,  with               divided into two categories:
+different cache sizes. The workload proﬁle of the tenants is                     Recency/frequency-based policies: LRU [11] and LFU [12]
+given in Table VII. In the second experiment, we ﬁxed the                     are the two widely used caching algorithms. As shown in
+total cache size to be 1.26 GB and increased the number of                    Section II, neither algorithm adapts well to the data access
+tenants from 8 to 20.                                                         pattern in data analytic clusters even though they are simple
+   Fig. 10 and Fig. 11 show the results. We ﬁnd that LRC-                     to implement.
+Online is capable of achieving larger performance gains over                     Hint-based policies: Many cache policies evict/prefetch data
+LRU with smaller cache sizes or with more tenants. This                       blocks through hints from applications [22], [23], which are
+suggests  that  leveraging  the  application  semantics  of  data             provided by the programmers to indicate what data will be
+dependency is of great signiﬁcance, especially when the cluster               referenced again and when. Nevertheless, inserting such hints
+memory caches are heavily competed.                                           can  be  difﬁcult  to  the  programmer,  who  has  to  carefully
+                        V.  RELATED WORK                                      examine the underlying data access pattern.
+Traditional Caching on a Single Machine. Memory caching                       Cache Management in Parallel Processing Systems. Despite
+has a long history and has been widely employed in storage                    the signiﬁcant performance impact of memory caches, cache
+systems [16], databases [17], ﬁle systems [18], web servers                   management remains a relatively unchartered territory in data
+[19], operating systems [20], and processors [21]. Over the                   parallel systems. Prevalent parallel frameworks (e.g., Spark
+[PDF_PAGE 9]
+[2], Tez [7], and Tachyon [4]) simply employ LRU to manage                               [2]  M. Zaharia, M. Chowdhury, T. Das, A. Dave, J. Ma, M. McCauley, M. J.
+cached data on cluster machines, which results in a signiﬁcant                                Franklin, S. Shenker, and I. Stoica, “Resilient distributed datasets: A fault-
+performance loss [3], [24].                                                                   tolerant abstraction for in-memory cluster computing,” in Proc. USENIX
+                                                                                              Conf. Networked Syst. Design and Implementation (NSDI), 2012.
+   To our knowledge, the recently proposed MemTune [24] is                               [3]  G. Ananthanarayanan, A. Ghodsi, A. Wang, D. Borthakur, S. Kandula,
+theonlycachingsystemthatleveragestheapplicationsemantics.                                     S. Shenker, and I. Stoica, “PACMan: coordinated memory caching for
+MemTune  dynamically  adjusts  the  memory  share  for  task                                  parallel  jobs,”  in  Proc.  USENIX  Conf.  Networked  Syst  Design  and
+                                                                                              Implementation (OSDI), 2012.
+computation and data caching in Spark and evicts/prefetches                              [4]  H. Li, A. Ghodsi, M. Zaharia, S. Shenker, and I. Stoica, “Tachyon:
+data as needed. As opposed to our proposal that accounts for                                  Reliable, memory speed storage for cluster computing frameworks,” in
+the entire DAG and its dependencies, MemTune only considers                                   Proc. of the ACM Symposium on Cloud Computing, 2014.
+                                                                                         [5]“Storm,” http://storm.apache.org/.
+locally dependent blocks of currently runnable tasks. Moreover,                          [6]  A. Shinnar, D. Cunningham, V. Saraswat, and B. Herta, “M3R: increased
+when it comes to a multi-tenant environment, the complexity                                   performance for in-memory hadoop jobs,” Proc. the VLDB Endowment,
+of MemTune is also multiplied, as MemTune keeps track                                         vol. 5, no. 12, pp. 1736–1747, 2012.
+                                                                                         [7]  B. Saha, H. Shah, S. Seth, G. Vijayaraghavan, A. Murthy, and C. Curino,
+of all the submitted DAGs and traverses them at runtime to                                   “Apache Tez: A unifying framework for modeling and building data
+search for the downstream tasks whenever a task completes.                                    processing applications,” in Proc. ACM SIGMOD.   Melbourne, Victoria,
+In comparison, LRC parses the job DAG upon job submission                                     Australia: ACM, 2015, pp. 1357–1369.
+                                                                                         [8]  K.  Shvachko,  H.  Kuang,  S.  Radia,  and  R.  Chansler,  “The  hadoop
+and only sends the reference count proﬁle to the corresponding                                distributed ﬁle system,” in Proc. IEEE Symp. Mass Storage Systems
+worker node. The reference count updating message is light and                                and Technologies, 2010.   IEEE, 2010, pp. 1–10.
+simple compared to the DAG structure itself, and can be easily                           [9]“Amazon S3,” https://aws.amazon.com/s3/.
+                                                                                        [10]  L. A. Belady, “A study of replacement algorithms for a virtual-storage
+applied to any DAG-based system and even heterogeneous                                        computer,” IBM Systems Journal, vol. 5, no. 2, pp. 78–101, 1966.
+environments running different systems, like Tachyon [4].                               [11]  R. L. Mattson, J. Gecsei, D. R. Slutz, and I. L. Traiger, “Evaluation
+   Recent works [25], [26] have also studied the problem of                                   techniques for storage hierarchies,” IBM Systems journal, vol. 9, no. 2,
+                                                                                              pp. 78–117, 1970.
+cache allocation for multiple users with shared ﬁles in clusters,                       [12]  A. V. Aho, P. J. Denning, and J. D. Ullman, “Principles of optimal page
+where  fairness  is  the  main  objective  to  achieve.  We  view                             replacement,” Journal of the ACM (JACM), vol. 18, no. 1, pp. 80–93,
+these works orthogonal to our proposed research. Once the                                     1971.
+                                                                                        [13]  M. Li, J. Tan, Y. Wang, L. Zhang, and V. Salapura, “Sparkbench: a
+cache space of each application has been allocated by some                                    comprehensive benchmarking suite for in memory data analytic platform
+fair sharing policies, we can leverage the application-speciﬁc                                spark,” in Proc. 12th ACM International Conf. on Comput. Frontiers,
+semantics for efﬁcient cache management.                                                      2015.
+                                                                                        [14]“Amazon Elastic Compute Cloud,” https://aws.amazon.com/ec2/.
+                                                                                        [15]  A.D.Ferguson,P.Bodik,S.Kandula,E.Boutin,andR.Fonseca,“Jockey:
+                      VI.  CONCLUDING REMARK                                                  guaranteed job latency in data parallel clusters,” in Proc. ACM EuroSys,
+   In  this  paper,  we  proposed  a  dependency-aware  cache                                 2012, pp. 99–112.
+                                                                                        [16]  P. M. Chen, E. K. Lee, G. A. Gibson, R. H. Katz, and D. A. Patterson,
+management  policy,  Least  Reference  Count  (LRC),  which                                  “Raid: High-performance, reliable secondary storage,” ACM Computing
+evicts data blocks whose reference count is the smallest. The                                 Surveys (CSUR), vol. 26, no. 2, pp. 145–185, 1994.
+reference count is deﬁned, for each data block, as the number                           [17]  M. Stonebraker, “Operating system support for database management,”
+                                                                                              Commun. ACM, vol. 24, no. 7, pp. 412–418, 1981.
+of dependent child blocks that have not been computed yet.                              [18]  M. N. Nelson, B. B. Welch, and J. K. Ousterhout, “Caching in the sprite
+With LRC, inactive data blocks can be timely detected and                                     network ﬁle system,” Trans. Comput. Sys., vol. 6, no. 1, pp. 134–154,
+evicted, saving cache spaces for more useful data. In addition,                               1988.
+                                                                                        [19]  P. Cao and S. Irani, “Cost-aware WWW proxy caching algorithms.” in
+we showed that reference count serves as an accurate indicator                                Usenix Symp. Internet Technologies and Sys., vol. 12, no. 97, 1997, pp.
+of the likelihood of future data access. We have implemented                                  193–206.
+LRC as a pluggable cache manager in Spark, and evaluated its                            [20]  J. Baker, C. Bond, J. C. Corbett, J. Furman, A. Khorlin, J. Larson,
+                                                                                              J.-M. Leon, Y. Li, A. Lloyd, and V. Yushprakh, “Megastore: Providing
+performance through EC2 deployment. Experimental results                                      scalable, highly available storage for interactive services,” in Proc. Conf.
+show that compared to the popular LRU policy, our LRC                                         on Innovative Data Syst. Research (CIDR), 2011.
+implementation is capable of achieving the same application                             [21]  J. L. Henning, “Spec cpu2000: Measuring CPU performance in the new
+                                                                                              millennium,” Computer, vol. 33, no. 7, pp. 28–35, 2000.
+performance at the expense of only 40% of cache spaces. When                            [22]  P. Cao, E. W. Felten, A. R. Karlin, and K. Li, “Implementation and
+using the same amount of memory caches, LRC can reduce                                        performance of integrated application-controlled ﬁle caching, prefetching,
+                                                                                              and disk scheduling,” ACM Trans. Comput. Sys. (TOCS), vol. 14, no. 4,
+the application runtime by up to 60%.                                                         pp. 311–343, 1996.
+                                                                                        [23]  R. H. Patterson, G. A. Gibson, E. Ginting, D. Stodolsky, and J. Zelenka,
+                         ACKNOWLEDGEMENTS                                                    “Informed prefetching and caching,” in Proc. ACM SOSP, vol. 29, no. 5,
+                                                                                              1995.
+   We thank Chengliang Zhang for helping on the implementa-                             [24]  L. Xu, M. Li, L. Zhang, A. R. Butt, Y. Wang, and Z. Z. Hu, “MEMTUNE:
+tion of LRC-Online and the deployment of multi-tenant experi-                                 Dynamic memory management for in-memory data analytic platforms,”
+ments. We thank the anonymous reviewers for their invaluable                                  in Proc. IEEE International Parallel and Distrib. Process. Symposium
+                                                                                              and Design (IPDPS), 2016.
+feedback. This research was partly supported by the Hong                                [25]  Q. Pu, H. Li, M. Zaharia, A. Ghodsi, and I. Stoica, “FairRide: near-
+Kong Research Grants Council under Grant No. 16200214.                                        optimal, fair cache sharing,” in Proc. USENIX Symp. Networked Syst.
+                                                                                              Design and Implementation (NSDI), 2016.
+                                REFERENCES                                              [26]  M.  Kunjir,  B.  Fain,  K.  Munagala,  and  S.  Babu,  “ROBUS:  Fair
+                                                                                              cache  allocation  for  multi-tenant  data-parallel  workloads,”  preprint
+ [1]  R. Power and J. Li, “Piccolo: Building fast, distributed programs with                  arXiv:1504.06736, 2015.
+      partitioned tables.” in Proc. USENIX OSDI, vol. 10, 2010, pp. 1–14.

@@ -1,0 +1,506 @@
+[PDF_PAGE 1]
+                        Competitive Caching with Machine Learned Advice
+
+
+
+
+                                             Thodoris Lykouris1  Sergei Vassilvitskii2
+
+                           Abstract                                      doingso,the systemmayinvestitseffortsonreducingthe
+      Wedevelopaframeworkforaugmentingonlineal-                          erroron themajorityof inputs,atthe expenseof increased
+      gorithmswithamachinelearnedoracletoachieve                         error on a handful of outliers.  Another problem is that
+      competitiveratiosthatprovablyimproveuponun-                        generalization error guarantees only apply when the train
+      conditionalworstcaselowerboundswhenthe or-                         andtest examplesare drawnfrom the samedistribution. If
+      aclehaslowerror. Ourapproachtreatsthe oracle                       this assumption is violated, either due to distribution drift
+      as a complete black box, andis not dependent on                    or adversarial examples (Szegedy et al.,2014), the machine
+      its inner workings, or the exact distribution of its               learned predictions may be very far from the truth. In all
+      errors. We apply this framework to the traditional                 cases,any systembackedbymachine learningneedstobe
+      cachingproblem creatinganevictionstrategyfor                       robust enough to handle occasional errors.
+      a cache of sizek. We demonstrate that naively                      While machine learning is in the business of predicting the
+      followingtheoracle’srecommendationsmaylead                         unknown, online algorithms provide guidance on how to
+      to very poor performance, even when the average                    act without any knowledge of the future. These powerful
+      error isquite low. Insteadwe show how tomod-                       methodsshowhowto hedgedecisions sothat,regardless of
+      ifytheMarkeralgorithmtotakeintoaccountthe                          whatthefuture holds,theonline algorithm performsnearly
+      oracle’spredictions,andprovethatthiscombined                       as well as the optimal ofﬂine algorithm.  However these
+      approach achieves a competitive ratio that both                    guarantees come at a cost: since they protect against the
+     (i) decreases as the oracle’s error decreases, and                  worstcase,onlinealgorithmsmaybeoverlycautious,which
+     (ii) is always capped byO(logk), which can be                       leadstohighcompetitiveratiosevenforseeminglysimple
+      achieved without any oracle input. We comple-                      problems.
+      mentourresultswithanempiricalevaluationof                          In this work, we ask:  What if the online algorithm is
+      our algorithm on real world datasets, and show                     equipped with a machine learned oracle?  How can one
+      that it performs well empirically even using sim-                  use this oracle to combine the predictive power of machine
+      ple off-the-shelf predictions.                                     learning with the robustness of online algorithms?
+
+                                                                         Wefocusona prototypicalexampleofthisarea: theonline
+1. Introduction                                                          paging,orcachingproblem. Inthissetting,requestsarrive
+                                                                         one at a time to a server equipped with a small amount of
+Despite the success and prevalence of machine learned sys-               memory. Upon processing a request, the server places the
+temsacrossmanyapplicationdomains,therearestillalotof                     answerinthememory(incaseanidenticalrequestcomes
+hurdlesthatoneneedstoovercometodeployanMLsystem                          in the future).  Since the local memory has limited size,
+inpractice(Sculleyetal.,2015). Asthesesystemsarerarely                   the server must decide which of the current elements to
+100% perfect, a key challenge is dealing with errors that                evict. It is well known that if the local memory or cache
+inevitably arise.                                                        hassizek,thenanydeterministicalgorithmhascompetitive
+There are many reasons that learned systems may exhibit                  ratioΩ(k). However,anO(k)boundcanbealsoachieved
+errors when deployed.  First, most of them are trained to                byalmostany reasonable strategy,thusthismetricfails to
+be good on average, minimizing some expected loss.  In                   distinguishbetweenalgorithmsthatperformwellinpractice
+                                                                         andthose thatperform poorly. Thecompetitiveratio ofthe
+  *Equal contribution     1Cornell University, Ithaca, NY, USA           best randomized algorithm is Θ(logk) which, despite far
+2Google Research, New York, NY, USA. Correspondence to:
+Thodoris Lykouris<teddlyk@cs.cornell.edu>, Sergei Vassilvit-             from trivial, is also much higher than observed in practice.
+
+skii<sergeiv@google.com>.                                                In contrast, we show how to use machine learned pre-
+Proceedings of the 35th International Conference on Machine              dictions to achieve a competitive ratio of approximately
+Learning, Stockholm, Sweden, PMLR 80, 2018. Copyright 2018               2+O(min(√η/OPT,logk), when using a hypothesis with
+by the author(s).                                                        totalabsolutelossη (seeSection3foraprecisestatementof
+[PDF_PAGE 2]
+                                          Competitive Caching with Machine Learned Advice
+
+the results). Thus, when the predictions are accurate (small             Beforemovingtothemaintechnicalcontent,weprovidean
+η), our approach circumvents the worst case lower bounds.                example that highlights the main concepts of this work.
+Ontheotherhand,evenwhentheoracleisinaccurate(large
+η),theperformancedegradesgracefullytoalmostmatchthe                      1.2. Example: Faster Binary Search
+worst case bound.                                                        Considertheclassicalbinarysearchproblem. Givenasorted
+
+1.1. Our Contributions                                                   arrayAonnelementsandaqueryelementq,thegoalisto
+                                                                         eitherﬁndtheindexofq inthearray,orstatethatitisnotin
+The conceptualcontributionof the paperlies informalizing                 the set. The textbook method is binary search: compare the
+the interplay between machine learning and competitive                   value ofq to that of the middle element ofA, and recurse
+analysis by introducing a general framework (Section2),                  onthecorrecthalfofthearray. AfterO(logn) probes,the
+and a set of desiderata for online algorithms that use a                 method either ﬁndsq or returns.
+machine learned oracle.                                                  Insteadof using binarysearch,one cantrainaclassiﬁer,h,
+We look for approaches that:                                             to predict the position ofq in thearray. (Althoughthis may
+   •  Make minimal assumptions on the machine learned                    appear to be overly complex,Kraska et al.(2017) empiri-
+     oracle. Speciﬁcally, since most machinelearning guar-               cally demonstrate the advantagesof sucha method.) How
+     anteesareontheexpectedperformance,ourresultsare                     to usesuch aclassiﬁer? Asimple approachis toﬁrst probe
+     parametric as a function of the error in the oracleη,               the locationath(q); ifq is notfound there, weimmediately
+     and not the distribution of the error.                              knowwhetheritissmallerorlarger. Supposeqislargerthan
+   •  Are robust: a better oracle (one with lowerη) should               theelementinA[h(q)] andthearray issortedinincreasing
+     result in lower competitive ratios.                                 order. We probe elements ath(q)+2,h(q)+4,h(q)+8,
+   •  Areworst-casecompetitive: nomattertheperformance                   andsoon,untilweﬁndanelementsmallerthanq (orwehit
+     oftheoracleontheparticularinstance,thealgorithm                     the end of the array). Then we simply apply binary search
+     shouldbehavecomparablytothebestonlinealgorithm                      on the interval that’s guaranteed to containq.
+     for the problem.                                                    Whatisthecostofsuchanapproach? Lett(q)bethetruepo-
+We instantiate the general framework to the online caching               sitionofq inthearray(orthepositionofthelargestelement
+problem, specifying the prediction made by the oracle, and               smallerthanq ifitisnotintheset). Theabsolutelossofthe
+presenting an algorithm that uses that prediction effectively            classiﬁeronq isthenϵq =|h(q)−t(q)|. Ontheotherhand,
+(Section3). Alongthewayweshowthatalgorithmicinnova-                      thecostofrunningtheabovealgorithmstartingath(q)isat
+tionisnecessary: simplyfollowingtherecommendationsof                     most2(log|h(q)−t(q)|) = 2logϵq. If thequeriesq come
+thepredictormayleadtopoor performance, even whenthe                      fromadistribution,thentheexpectedcostofthealgorithm[][          ]
+average error is small (Section3.1). Instead, we adapt the               is: 2Eq    log(|h(q)−t(q)|)        ≤ 2logEq      |h(q)−t(q)|      =
+Marker algorithm (Fiat et al.,1991) to carefully incorporate             2logEq[ϵq], where the inequality follows by Jensen’s in-
+thefeedbackofthepredictor. Theresultingapproach,which                    equality. This gives a trade-off between the performance of
+we call Predictive Marker has guarantees that capture the                the algorithmand theabsolute lossof thepredictor. More-
+best of both worlds: the algorithm performs better as the                over,sinceϵq istriviallyboundedbyn,thisshowsthateven
+error of the oracle decreases, but performs nearly as well as            relatively weak classiﬁers (those with average error of√n)
+the best online algorithm in the worst case.                             this can lead to an improvement in performance.
+Ouranalysisgeneralizestomultiplepotentiallossfunctions
+(such as absolute loss and squared loss). This freedom in                1.3. Related work
+the loss function with the black-box access to the oracle                Ourworkbuildsuponthefoundationalworkoncompetitive
+allowsourresultstobestrengthenedwithfutureprogressin                     analysisandonlinealgorithms; foragreatintroductionsee
+machine learning and reduces the task of designing better                the book byBorodin & El-Yaniv(1998). Speciﬁcally we
+algorithms to the task of ﬁnding better predictors.                      look at the standard caching problem, see, for example,
+Wecomplementourtheoreticalﬁndingswithempiricalre-                        (Motwani & Raghavan,1995).  While many variants of
+sults (Section4). We test the performance of our algorithm               caching havebeen studied over the years, ourmain starting
+on public data using off-the-shelf machine learning mod-                 point will be the Marker algorithm byFiat et al.(1991).
+els.  We compare the performance to the Least Recently                   As we mentioned earlier, competitive analysis fails to dis-
+Used(LRU)algorithm,whichservesasthegoldstandard,                         tinguish between algorithms that perform well in practice,
+the original Marker algorithm, as well as directly using                 and those that perform well only in theory. Several ﬁxes
+thepredictor. In allcases,thePredictiveMarker algorithm                  havebeenproposedtoaddresstheseconcerns,rangingfrom
+outperforms known approaches.                                            resource augmentation, where the online algorithm has a
+[PDF_PAGE 3]
+                                          Competitive Caching with Machine Learned Advice
+
+larger cache than the ofﬂine optimum  (Sleator & Tarjan,                 auctions. Theirworkhasamixofofﬂinecalculationsand
+1985), to models of real-world inputs that restrict the inputs           online predictions and focuses on the speciﬁc problem of
+analyzed by the algorithm, for example, insisting on local-              revenue optimization.Kraska et al.(2017) demonstrated
+ity of reference  (Albers et al.,2002), or the more general              empiricallythatintroducingmachinelearnedcomponentsto
+Working Set model (Denning,1968).                                        classicalalgorithms(intheircaseindexlookups)canresult
+Theideaofmakingassumptionsontheinputtoprovebetter                        insigniﬁcantspeedandstoragegains. However,unlikethis
+boundsisalsocommon. Themostpopularoftheseisthat                          work,theirresultsareexperimental,andtheydonotprovide
+the data arrive in a random order. This is a critical assump-            trade-offs on the performance of their approach vis-`a-vis
+tionin thesecretary problem,and, moregenerally, inother                  the error of the machine learned oracle.
+streamingalgorithms,seeforinstancethesurveybyMcGre-
+gor(2014). While theassumption leads to algorithms that                  2. Online Algorithms with ML Advice
+give goodinsight into the structure of the problem, itrarely             In this section, we introduce a general formulation to com-
+holds true, and is often very hard to verify.                            bine online algorithms with machine learning predictions,
+The prior work that is closest in spirit to ours looks for               whichwetermOnlinewithMachineLearnedAdvicemodel
+algorithms that optimistically assume that the input has a               (OMLA). Before introducing the model, we review some
+certain structure, but also have worst case guarantees when              basicnotionsfrommachinelearningandonlinealgorithms.
+thatfailstobethecase. Onesuchassumptionisthatthedata                     Machine learning basics. We are given a feature spaceX,
+arecomingfromastochasticdistributionandwasstudiedin                      describingthesalientcharacteristics ofeachitemandaset
+thecontextofonlinematching(Mirroknietal.,2012)and                        of labelsY. An example is a pair(x,y), wherex∈X de-
+bandit learning (Bubeck & Slivkins,2012); both of these                  scribesthespeciﬁcfeaturesoftheexample,andy∈Y gives
+worksprovideimprovedguaranteesiftheinputisstochastic                     the corresponding label. In the binary search application,x
+but retain the worst-case guarantees.  On a related note,                canbethoughtasthequeryelementq searchedandy asits
+Ailon et al.(2011) consider “self-improving” algorithms                  true positiont(x).
+thateffectivelylearntheinputdistribution,andadapttobe
+nearly optimal in that domain.                                           Ahypothesisisamappingh :X →Y andcanbeprobabilis-
+A more general approach was suggested byMahdian et al.                   tic inwhich case theoutput onx∈X is someprobabilisti-
+(2012), who assume the existence of an optimistic, highly                callychoseny∈Y. Inbinarysearch,h(x) correspondsto
+competitive algorithm, and then provide a meta algorithm                 the predicted position of the query.
+with a competitive ratio that interpolates between that of               To measure the performance of a hypothesis, we ﬁrst deﬁne
+the worst-case algorithm and that of the optimistic one.                 a loss functionℓ : Y ×Y → R≥0.  When the labels lie
+Although this sounds similar to our approach, one of our                 in a metric space, we deﬁne absolute lossℓ1(y,ˆy) =|y−
+key challenges lies in developing an algorithm that can use              ˆy|, squared lossℓ2(y,ˆy) = (y − ˆy)2, and classiﬁcation
+thepredictionseffectively. Asweshow, naivelyfollowing                    lossℓc(y,ˆy) = 1y̸=ˆy.  Given a sequence of labels,σ =
+the predictions can lead to disastrous results.                          y1,y2,...,yn and a set of predictions ˆσ = ˆy1,...,ˆyn, we
+Inotherwords,wedonotassumeanythingaboutthedata,                          will abuse notation and deﬁneℓ(σ,ˆσ) as the total loss on
+or the availability of good algorithms that work in restricted           the sequence,ℓ(σ,ˆσ) =∑ni=1ℓ(yi,ˆyi).
+settings.  Rather, we use the oracle to implicitly classify              Competitive analysis.  To obtain worst-case guarantees
+instances into “easy” and “hard” depending on their pre-                 for an online algorithm (that must make decisions when
+dictability.  The “easy” instances are those on which the                elementsarrive),wecompareitsperformancetothat ofan
+latest machinelearning technology, beit perceptrons, deci-               ofﬂineoptimum(withthebeneﬁtofhindsight). Letσ bethe
+sion trees, SVMs, Deep Neural Networks, GANs, LSTMs,                     inputsequence ofelements foraparticular onlinedecision
+or whatever may come in the future, has small error. On                  makingproblem,costA(σ)bethecostincurredbyanofﬂine
+these instances our goal is to take advantage of the oracle,             algorithmAonthisinput,and cost⋆(σ)bethecostincurred
+and obtain low competitive ratios.  (Importantly, our ap-                bytheoptimalofﬂinealgorithm. ThenalgorithmAiscalled
+proachiscompletelyagnostictotheinnerworkingsofthe                        α-competitive if costA(σ)≤α· cost⋆(σ).
+predictorandtreatsitasablackbox.) The“hard”instances                     Caching. Thecaching(oronlinepaging)problemconsiders
+arethosewithpoorpredictionqualitywherewehavetorely                       a system with two levels of memory: a slow memory of
+on classical competitive analysis to obtain good results.                sizem, and a fast memory of sizek. A caching algorithm
+Veryrecently,twopapersexploreddomainssimilartoours.                      is faced with a sequence of requests for elements.  If the
+Medina&Vassilvitskii(2017)showedhowtouseamachine                         requested element is in the fast memory, a cache hit occurs
+learned oracle to optimize revenue in repeated posted price              and the algorithm satisﬁes the request at no cost.  If the
+[PDF_PAGE 4]
+                                         Competitive Caching with Machine Learned Advice
+
+requesteditemisnotinthefastmemory,acachemissoccurs,                      petitivealgorithms: theyareneverworsethanthealgorithms
+the algorithm fetches the item from the slow memory, and                 that do not use the ML oracle, and perform as well as the
+places it in the fast memory before satisfying the request.              ofﬂine optimum when the oracle is perfect.
+If the fast memory is full, then one of the items must be                Caching with ML Advice. To instantiate the framework
+evicted. Theevictionstrategyforms thecore ofthecaching                   for the caching problem, we deﬁne the oracle, the label
+onlinealgorithmic problem. The goalisto ﬁndan eviction                   spaceofthepredictions,andtheirsemantics. Theelement
+policy that results in the fewest number of cache misses.                spaceZ corresponds to the universe of elements that may
+OMLA Deﬁnition. We ﬁrst specify the input and the pre-                   be requested. The input sequenceσ =z1,z2,···,zn is the
+dictions made by the machine learned oracle. The online                  actualsequenceofelementsrequested(ﬁxedinadvanceand
+input consists of a set of elementsZ. For a speciﬁc input                oblivioustothechoicesofthealgorithmbutunknowntoit).
+σ, its elements are denoted byz1,z2,... and its length by                Each elementzi ∈ Z has corresponding featurexi. This
+|σ|. Formalizing the machine learning task, we assume a                  featurecanencapsulateeverythingthatisknownaboutzi at
+feature spaceX and a label spaceY. Thei-th elementzi                     the timei, forexample, thetimes thatzi arrived in the past.
+has featuresxi ∈ X and a labelyi ∈ Y.  In deﬁning the                    The exact choice ofX is orthogonal to our setting, though
+framework we are not concerned with the semantics of the                 of course richer features typically lead to smaller errors.
+labels,i.e. whatisthequantitythathispredictingorhowit
+wastrained—weareonlyinterestedinitsperformance. We                       The machine learning task is to predict the next time a
+deﬁne the respective total loss functions:                               particular element will appear. The label spaceY is thus a
+   •  Total Classiﬁcation Loss:ηc =∑                                     setofpositionsinthesequence,Y =N+. Givenasequence
+                                             iℓc(yi,h(xi)),              z1,z2,...,zn,yi = minτ>i{τ :zτ =zi}. If the element
+   •  Total Absolute Loss:η1 =∑iℓ1(yi,h(xi)), and                        is never seen again, we setyi =n + 1.  Note thatyi is
+   •  Total Squared Loss:η2 =∑iℓ2(yi,h(xi)).                             completelydetermined bythe sequenceσ. We useh(xi) to
+Deﬁnition 1. IntheOnlinewithMachineLearnedAdvice                         denote the outcome of the prediction on an element with
+(OMLA) model, we are given:                                              featurexi; to simplify notation, we denote it byhi.
+   •  An inputσ = {z1,z2,...,z|σ|}; eachzi ∈ Z has
+     featuresxi∈X and labelsyi∈Y.                                        3. Algorithms
+   •  Ahypothesisfunctionh :X →Y thatpredictsalabel
+     for eachx∈X.                                                        We now delve deeper into the caching problem, and present
+   •  For a speciﬁc inputσ and hypothesish, we deﬁneηc,                  competitive algorithms that use the ML oracle.  We ﬁrst
+     η1, andη2 as described above.                                       show that simply trusting the oracle and following its pre-
+Our goal is tocreate online algorithms that use the adviceh              dictionscanleadtopoorresultsevenwhentheoracleisrela-
+to achieve a good competitive ratio. Note that, in each prob-            tivelygood. Thismotivatestheneedtocombinetheoracle’s
+lem instance,the algorithmsdepend both onthe semantics                   predictionswithclassictoolsfromcompetitiveanalysis,we
+oftheprediction(i.e. whatisbeingpredicted)andthequal-                    show how to combinethe two anddevelop aconsistent and
+ity ofthe predictorh as measuredbyη. Importantly,we do                   robust algorithm.
+not alter the deﬁnitionof the competitive ratio—we expect
+our algorithms to work well on any sequenceσ; however,                   3.1. Black-box approaches
+the competitive ratio may depend on the total lossη.                     An immediate way to use the oracle is to treat its output
+Suppose that an algorithmA uses a predictorh with lossη                  as the truth. This corresponds to a strategy that evicts the
+to achieve a competitive ratioc(η).                                      elementthatispredictedbyhtoappearfurthestinthefuture.
+Deﬁnition 2.Aisα-robustforsome functionα(η),ifc(η)                       This approach,however,can lead tobad competitive ratios,
+is non-decreasing andc(η) =O(α(η)).  In addition, we                     evenwhen theoracleisquite accurateonaverage. Consider
+callAβ-consistentifc(0) =β.                                              the case whenk = 2 and there are three elementsa,b,c.
+We note that the above deﬁnition is with respect to the                  Theinitialconﬁgurationofthecachehasa,b,atwhichpoint
+observed qualityη of the predictor. If the instances come                c comes. The actual sequence has lengthT and, after the
+fromaspeciﬁc distributionD,then onecanalsodeﬁnethe                       ﬁrst element, consists ofbcbcbcbc.... In contrast, for these
+generalizationerror, ¯η =ED[η]. Aslongasα(η)isconcave,                   elements,theoraclepredictsacbcbcbc...,i.e. itpredictsthat
+(e.g.α(η) = logη),η canbesubstitutedwith ¯η byapplying                   a willreappear instantly,butiscorrect aboutallfuture pre-
+Jensen’s inequality. (See Section1.2for an example.)                     dictions.  The optimal approach in this example has one
+                                                                         cachemisswhilethealgorithmincursT cachemisses,be-
+Deﬁnition 3.  Letc⋆ denote the ofﬂine optimum. A isγ-                    cause it never evictsa. Thus the algorithm has a cache miss
+competitiveifc(η)≤γc⋆ for all values ofη.                                almost every time, leading to an unbounded competitive ra-
+Theholygrailistoﬁnd1-consistent,robust,andmostcom-                       tio, even thoughthe average absolute lossisη1/T = 1. Itis
+[PDF_PAGE 5]
+                                          Competitive Caching with Machine Learned Advice
+
+tempting to “ﬁx” this approach by evicting elements whose                theperformanceoftheoptimalofﬂinealgorithmtothenum-
+predicted times have passed; however, one can construct                  berofcleanelementsLbyprovingthat OPT≥ 2L(Lemma
+similarexamplesthereaswell(seesupplementarymaterial).                    1). The second comes from bounding the performance of
+The problem is that there is an element that should be re-               thealgorithmasafunctionofthe numberofcleanelements
+moved but the algorithm is tricked into keeping it in the                by provingthat itis atmostL·Hk in expectation (Lemma
+cache. To deal with this in practice, most popular heuristics            2). Forcompleteness, weprovide theproofs ofthe lemmas
+suchasLRU(LeastRecentlyUsed)andFIFO(FirstInFirst                         in the supplementary material.
+Out) avoid evicting recent elements when some elements                   Lemma1((Fiatetal.,1991))               . LetLbethenumberofclean
+have been dormant for a longtime. However, this imposes                  elements. Then the optimal algorithm suffers at leastL/2
+a strict eviction policy, and incorporating the information              cache misses.
+provided by the oracle is not straightforward.                           Lemma2((Fiatetal.,1991))               . LetLbethenumberofclean
+Theaboveexampleshighlightthedifﬁcultyinﬁndingrobust                      elements.  Then the expected number of cache misses of
+algorithms, i.e. those that leadto low error whenthe oracle              theMarkeralgorithmisL·Hk whenrandomlytie-breaking
+error is small. We remark that turning a robust algorithm                across unmarked elements.
+intoacompetitiveonecanbedoneinablackboxmanner,                           PredictiveMarker. DelvingintotheanalysisoftheMarker
+albeitsuboptimally. Thisisshownbythefollowingtheorem                     algorithm, observe that it never evicts marked elements
+whose proof is deferred to the supplementary material.                   when there are unmarked elements present. This gives an
+Theorem 1.  For thecaching problem, letA be anα-robust                   upper bound ofO(k) on the competitive ratio for any tie-
+algorithm andB aγ-competitive algorithm. We can then                     breakingrulethatselectsanunmarkedelementforeviction.
+create a black-box algorithmALG that is both 9α-robust                   It is natural then to use the predictions made by the oracle
+and9γ-competitive.                                                       fortie-breaking,speciﬁcallybyevictingtheelementwhose
+Whiletheaboveapproachgivesablack-boxmannertotrans-                       predicted next appearance time is furthest in the future.
+formconsistent algorithmsintoconsistent andcompetitive                   When the oracle is perfect (and has zero error), then stale
+ones,itis far fromefﬁcientorpractical. Inthenextsection                  elements never result in cache misses, and therefore, by
+we show how to carefully modify a proposed consistent                    Lemma1,thealgorithmhasacompetitiveratioof             2. Onthe
+algorithm to make it more competitive.                                   other hand,by usingthe Markeralgorithm andnot blindly
+                                                                         trusting the oracle, guarantees a worst-case ratio ofO(k).
+3.2. Predictive Marker Algorithm                                         Thisisapromisingdirection,howeveranimperfectoracle
+We now present our main technical contribution, an oracle-               mayleadtohighcompetitiveratiosandperformmuchworse
+based  adaptation  of  the  Marker  algorithm  (Fiat  et  al.,           than the best ofﬂine algorithm. The problem arises when
+1991) that achieves a competitive ratio of         2 · min(2 +           theerrorsoftheoracleareconcentratedinonephase,here
+2√η1/OPT,2Hk) where OPT is the ofﬂine optimum on                         the above algorithm may have a high competitive ratio. We
+theparticularinstanceandHk = 1+1/2+···+1/kdenotes                        thereforefocuson creatingatie-breakingrule thatgivesa
+thek-th Harmonic number.                                                 2-consistent algorithm: as the oracle error goes to 0, the
+                                                                         competitive ratio goes towards 2 while, at the same time
+Classic  Marker  algorithm  We  begin  by  recalling  the                being (approximately) competitive, i.e.  keeping a worst-
+Marker algorithmand theanalysis ofits performance. The                   caseO(Hk) competitive ratio.
+algorithm runs in phases. At the beginning of each phase,                Toachievethis,wecombinetheoracle-basedtie-breaking
+all elementsare unmarked. When an element arrives and is                 rule with the random tie-breaking rule. Suppose an element
+already in the cache, the element is marked. If it is not in             e is evicted during the phase. We construct a blame graph
+thecache,arandomunmarkedelementisevicted,thenewly                        to understand the reason whye is evicted. There are two
+arrivedelement isplacedin thecache andismarked. Once                     cases: either itwasevicted whena cleanelementc arrived,
+all elements are marked and a new cache miss occurs, the                 in which case we add a directed edge frome toc, or it
+phase ends and we unmark all of the elements.                            was evicted because a stale elements arrived, buts was
+For the purposes of analysis, an element is called clean for             previously evicted.  In this case, we add a directed edge
+phaser if it appears during phaser, but does not appear                  frome tos. Note that the graph is always a set of chains
+duringphaser−1. Incontrast,elementsthatalsoappeared                      (paths). The total length of the chains represents the total
+in the previous phase are called stale.  The marker algo-                number of evictions incurred by the algorithm during the
+rithmhas competitive ratioof2Hk−1andthe analysisis                       phase,whereasthenumberofdistinctchainsrepresentsthe
+tight (Achlioptas et al.,2000). We use a slightly simpler                number of clean elements; we call the lead element in a
+analysisthatachievescompetitiveratioof2Hk below. The                     chain, its representative and denote it byω(r,c), wherer is
+cruxoftheupperboundliesintwolemmas. Theﬁrstrelates                       the index of the phase andc the index of the chain.
+[PDF_PAGE 6]
+                                        Competitive Caching with Machine Learned Advice
+
+Ourmodiﬁcationissimple—whenastaleelementarrives,                       Algorithm1PredictiveMarkerwithoracle-basedandran-
+it evicts a new element in an oracle-based manner if the               dom tie-breaking based on clean chains
+correspondingcleanelementhasslack(itschainhaslength                    Require:  CacheC of sizek initially empty (C←∅).
+less thanHk).   Otherwise it evicts a random unmarked                   1: Initialize phase counterr ← 1, unmark all elements
+element. (In expectation this results in at mostHk elements                (M←∅), and set roundi← 1.
+addedtoanyonechainduringthecourseofthephasebythe                        2: Initialize clean element counterℓr ← 0 and clean set
+analysisofLemma2). Thisguaranteesthatthecompetitive                        S ←∅.
+ratio is at most4Hk in expectation; we make the argument                3: Elementzi arrives,andtheoraclegivesapredictionhi.
+formalinTheorem2. Thecruxtotheanalysisisthefactthat                        Save predictionp(zi)←hi.
+thechainsaredisjoint,thustheinteractionsbetweeneviction                 4: ifzi results in cache hit (zi∈C or|C|<k)then
+canbedecomposedcleanly. Wegiveaformalversionofthe                       5:     Add to cacheC←C∪{zi} and go to step 26
+algorithm in Algorithm1.                                                6: end if
+                                                                        7: if the cache is full and all cache elements are marked
+3.3. Analysis                                                              (|M| =k) then
+To analyze the performance of the proposed algorithm, we                8:     Increasephase (r←r+1), initializecleancounter
+begin with a technical deﬁnition that captures how slowly a                   (ℓr ← 0), save current cache (S →C) as the set of
+lossfunctionℓcangrow. Lemma3instantiatesthisquantity                          elementsthatarepossiblystaleinthenewphase,and
+forclassicallosses(foraproof,seesupplementarymaterial).                       unmark elements (M←∅).
+                                                                        9: end if
+Deﬁnition 4.  LetAT =a1,a2,...,aT, be a sequence of                    10: ifzi is a clean element (zi/∈S)then
+increasingintegersoflengthT,thatisa1<a2<...<aT,                        11:     Increase number of clean elements:ℓr←ℓr +1.
+andBT  =b1,b2,...,bT  a sequence of non-decreasing                     12:     Initialize size of new clean chain:n(r,ℓr)← 1.
+reals of lengthT,b1 ≤b2 ≤... ≤bT.  For a ﬁxed loss                     13:     Select to evict unmarked element with highest pre-
+functionℓ, we deﬁne its spreadSℓ :N+→R+ as:                                   dicted time:e = argmaxz∈C−Mp(z).
+        Sℓ(m) = min{T :  minAT,BTℓ(AT,BT)≥m}                           14: end if
+                                                                       15: ifzi is a stale element (zi∈S)then
+                                                                       16:     Itistherepresentativeofsomecleanchain. Letc be
+Lemma3. Forabsoluteloss,ℓ1(A,B) =∑i|ai−bi|,the                                this clean chain:zi =ω(r,c).
+spread ofℓ1 isSℓ1(m)≤√4m+1.                                            17:     Increase length of clean chainn(r,c)←n(r,c)+1.
+Forsquaredloss,ℓ2(A,B) =∑(ai−bi)2,thespreadofℓ2                        18:     ifn(r,c)≤Hk then
+isSℓ2(m)≤   3√14m.                                                     19:         Select toevictunmarkedelement with highestpre-
+We now provide the main theorem of the paper.                                    dicted time:e = argmaxz∈C−Mp(z).
+                                                                       20:     else
+Theorem2. Supposethattheoraclehastotallossη undera                     21:         Select to evict a random unmarked elemente ∈
+lossfunctionℓwithspreadboundedbySℓ. IfSℓ isconcave,                              C−M.
+then the competitive ratio is at most                                  22:     end if
+                      (          (η     )        )                     23:     Update cache by evictinge:C←C∪{zi}−{e}.
+             2·min      1+2Sℓ      OPT     ,2Hk    .                   24:     Sete as representative for the chain:ω(r,c)←e.
+                                                                       25:  end if
+Proof.  Fix a phase of the marker algorithm, consider a par-           26:  Mark incoming element (M←M∪{zi}), increase
+ticularcleanelementcthatarrivesandevictsastaleelement                      round (i←i+1), and go to step 3.
+s1. Untils1 arrivesagain, theeffectofthisevictionisnon-
+existent(asnootherelementisaffected). Whens1 arrives,
+itevictsanotherelementwhichwecalls2,andsoon. Con-                      IfthisishigherthanHk,thenthealgorithmswitchedtoran-
+sider the clean chain consisting ofc,s1,s2,....  For the               domevictionwhichbyLemma2resultsinatmostanother
+ﬁrstHk elements of this chain, the predicted times are in              Hk staleelementsinexpectation. Asaresult,theexpected
+weakly decreasing order since the reason why we evicted                numberofstaleelementsisnevermorethan2Hk andisless
+si insteadofsj withi<j was becausethepredicted time                    thanSℓ(ϵ)whenthisquantityislessthanHk;itistherefore
+of the former was no earlier than the one of the latter (as            upper bounded bymin(2·Sℓ(ϵ),2Hk).
+bothof themwere unmarked at thetime sincesj was also
+later evicted within the phase). However, the actual arriving          LetL be thenumber ofclean elements(and thereforealso
+times are in increasing order. Therefore, if the total loss on         chains). SincebothSℓ andtheminimum operatorarecon-
+theseelementsinthechainisatmostϵ,thenthenumberof                       cave functions, the way to maximize the number of stale
+staleelements(andthenumberofmisses)isatmostSℓ(ϵ).                      elements in each chain is to apportion the total error,η,
+[PDF_PAGE 7]
+                                         Competitive Caching with Machine Learned Advice
+
+equally across all of the chains.  Thus there areL chains               Theorem4. ThecompetitiveratioofAlgorithm1whenthe
+with errorη/L each. The total number ofstale elements is                oracle hasℓed errorηed is at mostmin(3+2ηedOPT,4Hk)
+then:L·min(2·Sℓ(η/L),2Hk). By Lemma1,       L/2≤ OPT,                   Proof.  Foranycleanchain,theﬁrstm≤Hk staleelements
+whichimpliestheresultsincealsotrivially OPT≤L.                          are in inverse order inAT andBT; else they would not be
+Wenowspecializetheresultstoabsoluteandsquaredlosses.                    evicted. Hencetheseelementsarecertainlymisplacedinthe
+Corollary    1.    The    competitive    ratio    of    Algo-           edit distance metric and contribute error ofm−1. The rest
+rithm1when  the  oracle  has     ℓ1  errorη1  is  at  most()            of the proof follows the same steps as in Theorem2.
+min   2+2√4·η1/OPT+1,4Hk             .
+Corollary  2.   The  competitive  ratio  of  Algorithm1                 Unifying Framework for Caching.  We remark that one
+when  the  oracle  has  squared  loss η2,   is  at  most()              can express the popular Least Recently Used (LRU) algo-
+min   2+2 3√14·η2/OPT,4Hk         .                                     rithm for caching in the framework above. Suppose for an
+                                                                        elementthatappearsattimeiwepredictitsnextappearance
+3.4. Discussion and Extensions                                          at time−i.  Then the element that is predicted to appear
+                                                                        furthest in the future is exactly the one that has appeared
+Wehaveshownhowtotiethelossofthemachinelearnedor-                        leastrecently. PredictiveMarkerwiththesepredictionsex-
+aclehtotheperformanceofthePredictiveMarker,andgave                      actly simulates LRU when the switching thrshold isk. The
+aboundontheinterplayofthetwo. Weexploreadditional                       reason is that just like Marker, such an implementation of
+extensionstothealgorithmbelow,givingageneraltrade-off                   LRUnever removes amarked element(thatappeared more
+between its robustness and competitiveness, as well as a                recently)whenanummarkedelement(thatappearedearlier)
+tighteranalysisonitsperformance. Finally,weshowhow                      ispresent. ThisimpliesthatwecanmakeLRUmorerobust
+toviewtheLRUalgorithmasavariantofPredictiveMarker                       bycombiningitwithrandomevictionincasetherearemany
+with a speciﬁc, easy to compute objective function.                     errors accumulated in some phase.
+Robustness vs.  Competitiveness.  One parameter in Al-                  Similarly,theClassicMarkeralgorithmcanbewritteninthe
+gorithm1is the length of the chain when the algorithm                   frameworkwithany predictorandswitchingthreshold of0
+switches from following the oracle to random unmarked                   (implyihgs that we immediately move to random eviction).
+evictions. If the switch occurs at lengthγHk, this provides
+a trade-off between competitiveness and robustness.                     4. Experiments
+Theorem 3.  Suppose that, for someγ> 0, the algorithm                   In this section we evaluate our approach on real world
+usesγHk as switching point, the oracle has total lossη                  datasets, empirically demonstrate its dependence on the
+under a loss functionℓ with spread bounded bySℓ. IfSℓ is                errors in the oracle, and compare it to standard baselines,
+concave, then the competitive ratio is at most                          like LRU and Marker.
+               (                 (η      )               )
+       2·min     1+ 1+γγ Sℓ        OPT     ,(1+γ)Hk        .            DatasetsandMetrics. Weexploretwodatasetsfromdiffer-
+                                                                        entdomainstoshowthewideapplicabilityofourapproach.
+Note that settingγ close to 0 makes the algorithm more                     • BK is data extracted from BrightKite, a now defunct
+conservative (switching to random evictions earlier), and                     social network. We consider sequences of checkins,
+thus reduces thecompetitive ratiowhen theoracleerror is                       and extract the top 100 users with the longest non-
+large. On the other hand, settingγ high has the algorithm                     trivialcheckinsequences—thosewheretheoptimum
+trustingtheoraclemore,andreducesthecompetitiveratio                           policy has at least50 misses. This dataset is publicly
+when the oracle error is small.                                               availableat (Choetal.,2011;Bri). Eachusersequence
+TighterAnalysis. Standardlossfunctionslikeabsoluteand                         represents an instance of the caching problem.
+squared loss are deﬁned on a per element basis.  On the                    • Citi isdata extracted fromCitiBike,a popularbike
+other hand, we can get a tighter bound on the performance                     sharing platform operating in New York City.   We
+ofPredictiveMarker,ifwecomparethesequencegenerated                            consider citi bike trip histories, and extract stations
+by the oracle with the ground truth.                                          correspondingtostartingpointsofeachtrip. Wecreate
+                                                                              12 sequences, one for each month of 2017 for this
+Let(e,i) be the pair that corresponds to thei-th arrival of                   dataset.  We consider only the ﬁrst 25,000 events in
+elemente. CreatethesequenceAT byputtingthesepairsin                           each ﬁle. The dataset is publicly available at (Cit).
+increasingorderoftheirtruearrivaltimeandBT byputting                    We give additional statistics about each datasets in Table1.
+theminincreasingorderoftheirpredictedarrivaltime. The
+edit distance,ℓed, between these two sequences precisely                Ourmain metricfor evaluationwill bethecompetitiveratio
+captures the performance of Predictive Marker.                          ofthealgorithm,deﬁnedasthenumberofmissesincurred
+[PDF_PAGE 8]
+                                          Competitive Caching with Machine Learned Advice
+
+Dataset  Num Sequences       Sequence Length     Unique Elements
+   BK           100                2,101               67– 800
+ Citi            24                25,000             593 – 719
+
+Table1.Number of sequences; sequence length; min and max
+number of elements for each dataset.
+
+
+divided by the optimum number of misses.
+Predictions. We run experiments with both synthetic pre-
+dictions to showcase the sensitivity of our methods to learn-            Figure1.Ratio of average number of evictions as compared to
+ingerrors,andwith preditionsusinganofftheshelfclassi-                    optimum for varying levels of oracle error.
+ﬁer, published previously (Anderson et al.,2014).
+   •  Synthetic Predictions.   For each element, we ﬁrst                                   Algorithm           BK      Citi
+     compute the true next arrival timey(t), setting it to                               Blind Oracle        2.049      2.023
+     n+1ifitdoesnotappearinthefuture. Tosimulatethe                                           LRU            1.280      1.859
+     performanceofanMLsystem,weseth(t) =y(t)+ϵ,                                              Marker          1.310      1.869
+     whereϵ is drawn i.i.d. from a lognormal distribution                             Predictive Marker      1.266      1.810
+     with meanparameter0 and standarddeviationσ. We
+     chose the lognormal distribution of errors to demon-                Table2.CompetitiveRatiosusingPLECOmodelonbothdatasets.
+     strate the sensitivity to rare but large failures of the
+     learningalgorithm. Finally,sinceweonlycomparethe
+     relativepredictedtimesforeach method,addingabias                    The results using the PLECO predictor are shown in Ta-
+     term to the predictor would not change the results.                 ble2, where we keep   k = 10 forBK and setk = 100 for
+   •  PLECO Predictions.  In their work,Anderson et al.                  Citi;the rankingofthemethods isnotsensitivetocache
+     (2014)developedasimpleframeworktomodelrepeat                        size. We can again see that the Predictive Marker algorithm
+     consumption, and published the parameters of their                  outperforms all othersn and is 2.5% better than the next
+     PLECO(PowerLawwithExponentialCutOff)model                           best method, LRU. While the gains appear modest, they
+     for the BrightKite dataset. While their work focused                are statistically signiﬁcant atp< 0.001.  Moreover, the
+     onpredictingtherelativeprobabilitiesofeachelement                   off-the-shelfPLECOmodelwasnottunedoroptimizedfor
+     (re)appearinginthesubsequenttimestep,wemodifyit                     predicting the next appearance of each element.
+     to predictthe nexttime an elementwill appear. Specif-
+     ically,weseth(t) =t+1/p(t),wherep(t)represents                      5. Conclusion
+     theprobabilitythatelementthatappearedattimetwill
+     re-appear at timet+1.                                               In this work, we introduce the study of online algorithms
+Algorithms. We use multiple algorithms for evaluation.                   with the aid of machine learned oracles.  This combines
+                                                                         the empirical success of machine learning with the rigorous
+   •  LRUistheLeastRecentlyUsed policythatiswildly                       guarantees of online algorithms. We model the setting for
+     successful in practice.                                             theclassicalcachingproblemandgiveanoracle-basedalgo-
+   •  Markeristheclassical algorithmofFiatet al.(1991).                  rithmwhosecompetitiveratioisdirectlytiedtotheaccuracy
+   •  PredictiveMarker is the algorithmwe developin this                 of the machine learned oracle.
+     work.  We set the switching cost tok, and therefore                 Our work opens up two avenues for future work. On the
+     never switch to random evictions.                                   theoreticalside,itwouldbeinterestingtoseesimilaroracle-
+   •  Blind Oracleis thealgorithm of Section3.1,evicting                 based algorithmsfor other onlinesettings. Onthe practical
+     the element predicted to appear furthest in the future.             side, our caching algorithm shows how we can use machine
+
+4.1. Results                                                             learning in a safe way, avoiding problems caused by rare
+                                                                         wildly inaccurate predictions.  At the same time, our ex-
+Wesetk = 10,and summarizethesyntheticresults onthe                       perimental results show that even with simple predictors,
+BKdatasetinFigure1. ObservethattheperformanceofPre-                      our algorithm providesimprovement comparedto LRU.In
+dictive Marker is consistently better than LRU and standard              essence,wehavereducedtheworstcaseperformanceofthe
+Marker, and degrades slowly as the average error increases,              cachingproblemtothatofﬁndingagood(onaverage)pre-
+ascapturedbythetheoreticalanalysis. Second,weempiri-                     dictor. Thisopensupthedoorforpracticalalgorithmsthat
+callyverifythatblindlytrustingtheoracleworkswellwhen                     yield provably good performance without being tailored to-
+the error isvery low, butquickly becomes incredibly costly.              wards theworst-case or speciﬁc distributional assumptions.
+[PDF_PAGE 9]
+                                      Competitive Caching with Machine Learned Advice
+Acknowledgements                                                     Data Mining,  KDD ’11,  pp. 1082–1090,  New York,
+The authors thank Andr´es Mu˜noz-Medina and ´Eva Tardos               NY, USA, 2011. ACM. ISBN 978-1-4503-0813-7. doi:
+for valuable discussions and an anonymous reviewer for               10.1145/2020408.2020579. URLhttp://doi.acm.
+pointing towards the direction of Theorem1.   The ﬁrst                org/10.1145/2020408.2020579.
+
+author was supported under NSF grant CCF-1563714. Part             Denning,P.J. Theworkingsetmodelforprogrambehavior.
+of the work was done while the author was interning at               Commun. ACM, 11(5):323–333, May 1968. ISSN 0001-
+Google.                                                               0782.  doi:  10.1145/363095.363141.  URL http://
+                                                                      doi.acm.org/10.1145/363095.363141.
+References                                                         Fiat, A., Karp, R. M., Luby, M., McGeoch, L. A., Sleator,
+Brightkite  data.      http://snap.stanford.edu/                      D.  D.,  and  Young,  N.  E.     Competitive  paging  al-
+  data/loc-brightkite.html.                                           gorithms.    J. Algorithms,  12(4):685–699,  December
+Citibike   system   data.        http://https://www.                 1991.  ISSN 0196-6774.  doi: 10.1016/0196-6774(91)
+  citibikenyc.com/system-data.                                        90041-V.  URL http://dx.doi.org/10.1016/
+                                                                      0196-6774(91)90041-V.
+Achlioptas,  D.,  Chrobak,  M.,  and Noga,  J.    Competi-         Kraska, T., Beutel, A., Chi, E. H., Dean, J., and Polyzotis,
+  tive analysis of randomized paging algorithms.  Theor.              N.  The case for learned index structures.  2017.  URL
+  Comput. Sci., 234(1-2):203–218, 2000.  doi: 10.1016/                https://arxiv.org/abs/1712.01208.
+  S0304-3975(98)00116-9. URLhttps://doi.org/
+  10.1016/S0304-3975(98)00116-9.                                   Mahdian, M., Nazerzadeh, H., and Saberi, A. Online op-
+Ailon, N., Chazelle, B., Clarkson, K. L., Liu, D., Mulzer,            timization with uncertain information. ACM Trans. Al-
+  W.,andSeshadhri,C. Self-improvingalgorithms. SIAMJ.                 gorithms, 8(1):2:1–2:29, 2012.  doi: 10.1145/2071379.
+  Comput.,40(2):350–375, 2011. doi: 10.1137/090766437.                2071381. URLhttp://doi.acm.org/10.1145/
+  URLhttps://doi.org/10.1137/090766437.                               2071379.2071381.
+
+Albers, S., Favrholdt, L. M., and Giel, O. On paging with          McGregor,A.Graphstreamalgorithms: Asurvey.SIGMOD
+  localityofreference. InProceedingsoftheThiry-fourth                Rec., 43(1):9–20, May 2014.   ISSN 0163-5808.   doi:
+  AnnualACMSymposiumonTheoryofComputing,STOC                         10.1145/2627692.2627694. URLhttp://doi.acm.
+  ’02, pp. 258–267, New York, NY, USA, 2002. ACM.                     org/10.1145/2627692.2627694.
+  ISBN 1-58113-495-9.   doi:  10.1145/509907.509949.               Medina,  A.  M.  and  Vassilvitskii,  S.     Revenue  opti-
+  URL http://doi.acm.org/10.1145/509907.                              mization  with  approximate  bid  predictions.    CoRR,
+  509949.                                                             abs/1706.04732, 2017.  URL http://arxiv.org/
+Anderson,A., Kumar, R.,Tomkins, A.,andVassilvitskii, S.               abs/1706.04732.
+  Thedynamicsofrepeatconsumption. InProceedingsof                  Mirrokni, V. S., Gharan, S. O., and Zadimoghaddam, M.
+  the 23rd International Conference on World Wide Web,                Simultaneousapproximationsforadversarialandstochas-
+  WWW ’14, pp. 419–430, New York, NY, USA, 2014.                      tic online budgeted allocation.  In Proceedings of the
+  ACM. ISBN978-1-4503-2744-2. doi: 10.1145/2566486.                  Twenty-ThirdAnnualACM-SIAMSymposiumonDiscrete
+  2568018. URLhttp://doi.acm.org/10.1145/                            Algorithms, SODA 2012, Kyoto, Japan, January 17-19,
+  2566486.2568018.                                                   2012, pp. 1690–1701, 2012.  URLhttp://portal.
+Borodin, A. and El-Yaniv, R.   Online Computation and                 acm.org/citation.cfm?id=2095250&CFID=
+  Competitive Analysis. Cambridge University Press, New               63838676&CFTOKEN=79617016.
+  York, NY, USA, 1998. ISBN 0-521-56392-5.                         Motwani, R. and Raghavan, P.  Randomized Algorithms.
+Bubeck, S. and Slivkins, A.   The best of both worlds:                CambridgeUniversityPress,NewYork,NY,USA,1995.
+  Stochastic and adversarial bandits.   In COLT 2012 -                ISBN 0-521-47465-5, 9780521474658.
+  The 25th Annual Conference on Learning Theory, June              Sculley, D., Holt, G., Golovin, D., Davydov, E., Phillips,
+  25-27,2012,Edinburgh,Scotland,pp.42.1–42.23,2012.                  T., Ebner, D., Chaudhary, V., Young, M., Crespo, J.-
+  URL    http://www.jmlr.org/proceedings/                             F., and Dennison, D. Hidden technical debt in machine
+  papers/v23/bubeck12b/bubeck12b.pdf.                                 learningsystems.InProceedingsofthe28thInternational
+Cho, E., Myers, S. A., and Leskovec, J.  Friendship and              Conference on Neural Information Processing Systems,
+  mobility: User movement in location-based social net-               NIPS’15, pp. 2503–2511, Cambridge, MA, USA, 2015.
+  works.  In Proceedings of the 17th ACM SIGKDD In-                   MITPress.URLhttp://dl.acm.org/citation.
+  ternational Conference on Knowledge Discovery and                   cfm?id=2969442.2969519.
+[PDF_PAGE 10]
+                                        Competitive Caching with Machine Learned Advice
+
+Sleator, D. D. and Tarjan, R. E.   Amortized efﬁciency                Szegedy, C., Zaremba, W., Sutskever, I., Bruna, J., Er-
+  of list update and paging rules.   Commun. ACM, 28                    han,  D.,  Goodfellow,  I.,  and Fergus,  R.    Intriguing
+  (2):202–208, February 1985.   ISSN 0001-0782.   doi:                  properties of neural networks. In International Confer-
+  10.1145/2786.2793.  URL http://doi.acm.org/                           ence on Learning Representations, 2014.  URL http:
+  10.1145/2786.2793.                                                    //arxiv.org/abs/1312.6199.

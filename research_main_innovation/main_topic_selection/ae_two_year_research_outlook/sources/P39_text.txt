@@ -1,0 +1,1488 @@
+
+[PDF PAGE 1]
+ProbGuard: Proactive Runtime Monitoring for LLM Agent Safety
+via Probabilistic Prediction
+Haoyu Wang
+Singapore Management University
+Singapore
+haoyu.wang.2024@phdcs.smu.edu.sg
+Christopher M. Poskitt
+Singapore Management University
+Singapore
+cposkitt@smu.edu.sg
+Jiali Wei
+Xi’an Jiaotong University
+Xi’an, China
+weijiali1119@stu.xjtu.edu.cn
+Jun Sun
+Singapore Management University
+Singapore
+junsun@smu.edu.sg
+Abstract
+Large Language Model (LLM) agents increasingly operate across
+domains such as robotics, virtual assistants, and web automation.
+However, their stochastic decision-making introduces safety risks
+that are difficult to anticipate during execution. Existing runtime
+monitoring frameworks, such as AgentSpec, primarily rely on reac-
+tive safety rules that detect violations only when unsafe behavior
+is imminent or has already occurred, limiting their ability to han-
+dle long-horizon dependencies. We presentProbGuard, a proac-
+tive runtime monitoring framework for LLM agents that antici-
+pates safety violations through probabilistic risk prediction.Prob-
+Guardabstracts agent executions into symbolic states and learns
+a Discrete-Time Markov Chain (DTMC) from execution traces to
+model behavioral dynamics. At runtime, the monitor estimates the
+probability that execution will remain safe from the current state,
+and triggers an intervention when this probability falls below a user-
+defined threshold. To improve robustness,ProbGuardincorporates
+semantic validity constraints in the abstraction and admits a PAC-
+style analysis that characterizes the sample complexity required to
+certify the learned model under standard assumptions. We evaluate
+ProbGuardin two safety-critical domains: autonomous driving
+and embodied household agents. Across evaluated scenarios,Prob-
+Guardconsistently predicts traffic law violations and collisions in
+advance, with warnings up to 15.84 seconds at a threshold yielding
+no false alarms, and up to 38.66 seconds at stricter thresholds. In em-
+bodied agent tasks,ProbGuard’s re-prompting intervention mode
+reduces unsafe behavior by 65.37% relative to the unmonitored base-
+line while retaining 80.4% of the baseline task completion; a stricter
+halting configuration reduces unsafe behavior by 93.60% at a larger
+cost in completion.ProbGuardis implemented as an extensible
+open-source runtime monitor integrated with the LangChain agent
+framework and introduces minimal runtime overhead.
+Permission to make digital or hard copies of all or part of this work for personal or
+classroom use is granted without fee provided that copies are not made or distributed
+for profit or commercial advantage and that copies bear this notice and the full citation
+on the first page. Copyrights for components of this work owned by others than the
+author(s) must be honored. Abstracting with credit is permitted. To copy otherwise, or
+republish, to post on servers or to redistribute to lists, requires prior specific permission
+and/or a fee. Request permissions from permissions@acm.org.
+ASE ’26, Munich, Germany
+©2026 Copyright held by the owner/author(s). Publication rights licensed to ACM.
+ACM ISBN 978-x-xxxx-xxxx-x/YYYY/MM
+https://doi.org/10.1145/nnnnnnn.nnnnnnn
+CCS Concepts
+•Software and its engineering;•Theory of computation →
+Logic and verification;
+Keywords
+LLM Agents, Runtime Monitoring, Runtime Verification, Probabilis-
+tic Model Checking, Discrete-Time Markov Chains, Agent Safety
+ACM Reference Format:
+Haoyu Wang, Christopher M. Poskitt, Jiali Wei, and Jun Sun. 2026.Prob-
+Guard: Proactive Runtime Monitoring for LLM Agent Safety via Probabilis-
+tic Prediction. InProceedings of the 41st IEEE/ACM International Conference
+on Automated Software Engineering (ASE ’26), October 12–16, 2026, Munich,
+Germany.ACM, New York, NY, USA, 13 pages. https://doi.org/10.1145/
+nnnnnnn.nnnnnnn
+1 Introduction
+Large Language Models (LLMs) are increasingly used as the foun-
+dation for building autonomous agents. These agents function as
+programmable entities operating across domains ranging from code
+generation and productivity tools to embodied household tasks and
+robotics [29, 37, 46]. Unlike traditional software systems, which
+are designed around explicit specifications and fixed control logic,
+LLM-powered agents interpret natural language goals, synthesize
+action plans, and adaptively respond to environmental feedback. In
+this paradigm, the agent itself effectively becomes the software [37].
+However, this autonomy introduces serious safety concerns [42].
+LLM agents may take harmful actions, misinterpret ambiguous in-
+structions, or behave inconsistently under minor context shifts [27,
+33, 35]. These issues resemble familiar software engineering chal-
+lenges such as bugs, specification gaps, and nondeterminism, but
+are amplified by the opacity and adaptivity of foundation models. In
+high-stakes domains such as cyber-physical systems, sensitive data
+management, or decision pipelines, such risks become particularly
+critical [26, 29]. Failures may manifest in subtle yet consequential
+ways, for example skipping confirmation steps in safety-critical
+workflows, misclassifying objects before manipulation, or granting
+elevated privileges due to ambiguous instructions. Consequently,
+ensuring the trustworthy deployment of LLM agents requires sys-
+tematic runtime monitoring mechanisms capable of detecting and
+mitigating unsafe behavior during execution [52, 53].
+To improve agent reliability, several frameworks introduce over-
+sight layers that monitor agent behavior during execution. For
+arXiv:2508.00500v4  [cs.AI]  3 Aug 2026
+
+[PDF PAGE 2]
+ASE ’26, October 12–16, 2026, Munich, Germany Haoyu Wang, Christopher M. Poskitt, Jiali Wei, and Jun Sun
+example, AgentSpec [ 42] and GuardAgent [ 48] implement rule-
+based monitors that track agent actions against interpretable safety
+constraints, such as preventing unauthorized access to sensitive
+records. To account for contextual uncertainty, ShieldAgent [12]
+incorporates Markov logic networks, allowing the monitor to eval-
+uate rule relevance probabilistically. However, these approaches
+are largelyreactive: violations are detected only when a specific
+state transition breaches a safety rule or when a violation becomes
+imminent. Such reactive monitoring lacks the temporal foresight
+needed to manage long-horizon risks. For instance, in autonomous
+driving, a rule stating that a vehicle must not collide with another
+vehicle provides little opportunity for intervention once the colli-
+sion becomes unavoidable. A more effective approach is to detect
+risk earlier, when the system can anticipate that the agent is fol-
+lowing an unsafe trajectory, such as accelerating toward a busy
+intersection without sufficient braking distance.
+To address this limitation, we proposeProbGuard, a framework
+that shifts agent oversight from reactive monitoring to proactive
+runtime monitoring through probabilistic risk prediction.Prob-
+Guardoperates through a multi-stage monitoring pipeline (Fig-
+ure 1). Offline, it collects execution traces, applies domain-specific
+predicate abstraction [17] to map trajectories into symbolic states,
+and learns a Discrete-Time Markov Chain (DTMC) over those states,
+enabling reasoning about future behavior over long horizons; Proba-
+bly Approximately Correct (PAC) analysis [7] characterizes how far
+the learned dynamics may deviate from the true ones under finite
+sampling. At runtime, the monitor estimates the probability that
+execution will remain safe from the current state and intervenes
+when this probability falls below a user-defined threshold, adapting
+agent behavior before unsafe states are reached.ProbGuardis de-
+signed as a policy-agnostic runtime monitor: the framework makes
+no assumption about how the monitored agent selects actions. The
+underlying policy may be LLM-driven, neural network-based, rule-
+based, or hybrid.ProbGuardassumes only the observation of the
+agent’s behavior in the form of a sequence of concrete states (that
+are subsequently processed through predicate-based abstraction).
+We evaluateProbGuardin two safety-critical domains char-
+acterized by stochastic environments: autonomous vehicles and
+embodied household agents. To ground the evaluation, we derive
+domain-specific safety properties from LawBreaker [ 39] (traffic
+rules for autonomous driving) and SafeAgentBench [ 51] (object-
+and state-level safety rules for embodied agents), from which we ex-
+tract predicates that define the abstract state space. In autonomous
+driving scenarios,ProbGuardintegrates a monitor automaton syn-
+chronized with the learned DTMC to predict potential violations in
+future driving trajectories. Across evaluated scenarios,ProbGuard
+consistently predicts traffic law violations and collision risks in
+advance, providing warnings up to 15.84 seconds before violations
+occur at a threshold that raises no false alarms, and up to 38.66
+seconds under stricter thresholds. In embodied agent tasks, the re-
+prompting intervention mode reduces unsafe behavior by 65.37%
+relative to the unmonitored baseline while preserving 80.4% of the
+baseline task completion; the strictest halting configuration reduces
+unsafe behavior by 93.60% at a larger cost in completion. More-
+over,ProbGuardintroduces minimal runtime overhead, staying
+below 50 ms for embodied agents and approximately 100 ms for
+autonomous driving scenarios.
+Execution
+traces
+Predicate
+abstraction
+Learned
+DTMC
+Safety
+property
+LLM agent
++ environment
+Symbolic
+state
+Risk prediction
+𝑃safe
+Risk alert /
+intervention
+observe
+<𝜃
+Offline model construction
+Online runtime monitoring
+Figure 1: High-level workflow ofProbGuard. Offline, the
+framework learns a probabilistic model from execution
+traces and domain-specific abstractions. Online, it abstracts
+the current agent state, estimates the probability that exe-
+cution will remain safe, and issues an alert or intervention
+when that probability falls below the threshold𝜃.
+The contributions of this work are summarized as follows:
+• Proactive probabilistic runtime monitoring for LLM
+agents.We presentProbGuard, a runtime monitoring frame-
+work that anticipates safety violations by estimating, under a
+learned DTMC model, the probability that execution remains
+safe, and triggers an intervention when this probability falls
+below a threshold.
+• Empirical evaluation in safety-critical domains.We
+evaluateProbGuardin autonomous driving and embod-
+ied agent settings, demonstrating that it can provide early
+warnings of safety violations while maintaining strong task
+completion with low runtime overhead.
+• Practical implementation for LLM agents.We imple-
+mentProbGuardon top of the LangChain agent framework
+and release it as open-source to support reproducibility [43].
+The framework is designed to be adaptable across domains
+via a unified abstraction interface.
+2 Background and Problem Definition
+2.1 LLM Agents
+LLMs are increasingly embedded in autonomous agents that inter-
+pret instructions, orchestrate external tools, and make high-level
+decisions through mechanisms such as planning, memory, and tool
+use [16, 19, 25, 45, 47, 50]. Rather than executing deterministic
+code paths, an agent’s behavior emerges from stochastic reasoning
+mediated by LLMs and environmental feedback, which exposes
+systems to new classes of risks: agents may misinterpret ambigu-
+ous instructions, misuse external tools, or take harmful actions
+in both physical and digital environments [ 9, 15, 21, 31, 32, 34].
+Accordingly, we argue that formally grounded safety constraints
+should become first-class elements of agent software design, much
+like type systems, contracts, and runtime monitors in conventional
+software.
+
+[PDF PAGE 3]
+ProbGuard: Proactive Runtime Monitoring for LLM Agent Safety via Probabilistic Prediction ASE ’26, October 12–16, 2026, Munich, Germany
+We model an LLM agent interacting with its environment as a
+stochastic transition system over states and actions. Let V denote
+the set of possible valuations of variables encoding theunderlying
+system state(including both the agent and its environment), and
+letAdenote the set of actions available to the agent.
+The execution of an action 𝑎𝑖 ∈ A in state 𝑣𝑖−1 ∈ V induces a
+state transition( 𝑣𝑖−1 , 𝑎𝑖) →𝑣 𝑖. An execution of the agent yields a
+trajectory:
+𝜏=⟨𝑣 0
+𝑎1
+− →𝑣1
+𝑎2
+− →. . .⟩,
+where actions are selected according to an implicit stochastic policy
+conditioned on the interaction history.
+2.2 Motivating Example
+Consider a household service agent operating in a smart home. A
+user instructs:
+“Prepare dinner while I answer the phone. ”
+The agent begins cooking and turns on the stove to boil water.
+While waiting for the water to heat, it receives another task, such
+as retrieving a package from the front porch or helping the user
+carry groceries inside. A purely goal-driven agent interprets these
+tasks independently and temporarily leaves the kitchen to complete
+the new request.
+Suppose the safety requirement is:
+“The agent must not leave the kitchen for more than 10
+minutes while the stove is on. ”
+Initially nothing unsafe occurs: the stove is on, the pot heats nor-
+mally, and the agent makes progress toward both objectives. But
+risk accumulates with time, the longer the stove is unattended, the
+more likely the pot boils dry, food burns, or a fire starts. Safe op-
+eration therefore requires continuously tracking the safety-critical
+state (stove status, agent location, elapsed time outside the kitchen)
+and interveningbeforethe constraint is violated, while prevention
+is still feasible: suspending the secondary task and returning to
+the kitchen, switching off the stove remotely, or requesting human
+assistance.
+The critical issue is thus not the eventual violation itself, but the
+trajectory leading toward it, precisely what purely reactive moni-
+toring cannot see. A proactive monitor reasons about the evolving
+execution state, anticipates when the safety margin becomes insuf-
+ficient, and intervenes early enough to keep the agent within safe
+operating conditions.
+2.3 Problem Definition
+The goal ofProbGuardis to provide proactive runtime safety as-
+surance for LLM agents by predicting the likelihood of future safety
+violations and enabling timely interventions before unsafe states
+are reached. Unlike reactive approaches, which detect violations
+only after they occur or become imminent, our objective is to antic-
+ipate risk sufficiently early to provide actionable warning of unsafe
+executions.
+Achieving this goal raises three key challenges:
+(1) Formal Specification.How to encode safety properties𝜓 in
+a form that captures safety-relevant behavior while remain-
+ing amenable to efficient runtime reasoning and probabilistic
+analysis.
+(2) Probabilistic Modeling.How to construct a probabilistic
+model 𝑀 that faithfully approximates the dynamics of the
+underlying system 𝑆, with statistical guarantees, so that pre-
+dictions about future behavior are both accurate and reliable.
+(3) Runtime Risk Prediction and Intervention.How to ef-
+ficiently estimate the conditional probability 𝑃[𝜓|𝜋 ]that
+a safety property will continue to hold given a partial exe-
+cution trace 𝜋, and determine when this probability is suffi-
+ciently low to warrant intervention before the system enters
+an unsafe state.
+3 Proactive Runtime Monitoring Framework
+In this section, we presentProbGuard, a general framework for
+proactive runtime safety monitoring of LLM-powered agents based
+on probabilistic modeling and prediction. The framework centers
+on a domain-specific formal safety specification that defines the
+unsafe states or behaviors of interest. Given such a specification,
+ProbGuardproceeds in three stages: a domain-specific abstraction
+mapping concrete agent states to a finite set of symbolic states;
+a DTMC over those states, learned from execution traces; and a
+runtime monitor that estimates the probability of remaining safe
+and raises an alert when it falls below a predefined threshold.
+3.1 Specifying Properties
+To specify safety requirements across heterogeneous domains, we
+use Computation Tree Logic (CTL) [ 4] as a qualitative specifica-
+tion language. CTL describes which executions are considered safe
+or unsafe, but does not itself assign probabilities to them. Quan-
+titative runtime reasoning is instead performed over the learned
+DTMC by computing the satisfaction probability associated with the
+CTL requirement, implemented through PCTL [18] model-checking
+queries. CTL reasons over the multiple possible future evolutions
+of stochastic agent behavior, giving a unified foundation for the
+domains we consider: autonomous driving (§5) and embodied house-
+hold agents (§6).
+Definition 3.1 (Computation Tree Logic (CTL)).Let Prop be a set
+of atomic propositions. The syntax of CTL is given by:
+𝜑::=⊤ |𝑝| ¬𝜑|𝜑 1 ∨𝜑 2 |EX𝜑|EG𝜑|E(𝜑 1 U𝜑 2)
+where𝑝∈Prop. We use the standard syntactic sugar:
+AX𝜑≜¬EX¬𝜑,AG𝜑≜¬EF¬𝜑,
+EF𝜑≜E(⊤U𝜑),AF𝜑≜¬EG¬𝜑
+We briefly recall the semantics of CTL. A CTL formula is inter-
+preted over a labeled transition system (Kripke structure) 𝑀 with
+state set S. The satisfaction relation( 𝑀, 𝑠) |=𝜑 denotes that the
+formula 𝜑 holds at state 𝑠 in 𝑀. The path quantifiersAandErange
+overall pathsandsome pathstarting from 𝑠, respectively, while the
+temporal operatorsX,F,G, andUdenotenext,eventually,globally,
+anduntil. We refer the reader to [4] for a complete formal definition.
+We assume that domain experts define what constitutes anunsafe
+state at an abstraction level of interest. Under this assumption, the
+core runtime safety invariant monitored byProbGuardtakes the
+simple form:
+𝜓=AG¬unsafe,
+
+[PDF PAGE 4]
+ASE ’26, October 12–16, 2026, Munich, Germany Haoyu Wang, Christopher M. Poskitt, Jiali Wei, and Jun Sun
+which expresses that along all execution paths (A), the property
+holds globally (G). That is, the system never reaches a state la-
+beled asunsafe. The domain expert thus specifies the conditions
+characterizing unsafe situations in the abstract state space, and the
+monitor ensures such states are never reached. AlthoughProb-
+Guardfocuses on the invariant form 𝜓 = AG¬unsafe , CTL is
+more expressive. For example, in the autonomous driving domain
+(§5) we translate a fragment of Signal Temporal Logic into CTL to
+capture temporally extended behaviors (e.g., bounded response).
+Our framework supports arbitrary CTL properties; however, we
+focus on the aforementioned invariant form for simplicity.
+ProbGuarduses CTL to express a qualitative safety requirement
+𝜓, and additionally reasons about thelikelihoodthat the agent’s
+future execution satisfies it. Since a CTL formula is astatefor-
+mula,( 𝑀, 𝑠) |=𝜓 is a Boolean judgement and 𝑃[𝜓]is not by itself
+well defined. We therefore attach the probability to thepathfor-
+mula underlying 𝜓: writing 𝜓 =A 𝜓 𝜋 with 𝜓 𝜋 =G ¬unsafe , the
+quantitative satisfaction probability at a state𝑠is defined as
+𝑃[𝜓|𝑠]≜Pr 𝑠
+𝑀 { 𝜌∈Paths(𝑠) | 𝜌|=𝜓 𝜋 },
+which is exactly the value returned by the PCTL query P=?[𝜓 𝜋 ]
+evaluated at 𝑠. This quantity is the basis for runtime intervention.
+This construction also applies to the bounded-response properties
+of §5, whose product encodingA G¬violis of the same form.
+3.2 Modeling an Agent’s Behavior
+We model an agent’s stochastic behavior as a Discrete-Time Markov
+Chain (DTMC) over symbolic states, obtained from a domain-specific
+abstraction of the concrete system states.
+3.2.1 Domain-specific Abstraction.As agents are deployed across
+diverse domains, it is necessary to design domain-specific abstrac-
+tions that capture safety-relevant aspects of the system while re-
+maining amenable to analysis. Because domains differ in their se-
+mantics and invariants, these abstractions must incorporate knowl-
+edge provided by domain experts.
+Let V denote the set of concrete system states and let Var be the
+set of variables whose valuations constitute those states. We write
+BExprV for the set of Boolean expressions over Var, i.e., proposi-
+tional formulas whose atomic propositions are drawn from Var.
+We define a finite set of Boolean predicates P = {𝜑1, 𝜑2, . . . , 𝜑𝑛 } ⊆
+BExprV. Each predicate induces an evaluation functionJ𝜑𝑖 K : V →
+{0,1}.
+Given a concrete state𝑣∈ V, its abstracted state is defined as
+𝑠 P(𝑣) = (J𝜑1K(𝑣),J𝜑 2K(𝑣), . . . ,J𝜑 𝑛K(𝑣)) ∈ {0,1} 𝑛.
+This abstraction maps each concrete state to a vector of truth values
+of the selected predicates, capturing safety-relevant properties.
+The abstract state space is defined as 𝑆⊆ { 0, 1}𝑛, where 𝑆 con-
+tains the set of admissible predicate valuations. In principle, 𝑆 may
+be taken as the set of all valuations reachable from some concrete
+state 𝑣∈ V ; in practice, we restrict 𝑆 to a subset of semantically
+valid or domain-specified states to exclude infeasible combinations.
+To ensure that the DTMC respects domain semantics, we in-
+troduce the predicate valid_tran(𝑠𝑖, 𝑠𝑗 ), which defines admissible
+transitions between abstract states, where valid_tran(𝑠𝑖, 𝑠𝑗 ) = true
+Figure 2: DTMC representing stove monitoring interactions,
+with the unsafe state highlighted in red. Each node repre-
+sents a symbolic state, and each edge is annotated with the
+transition probability between states.
+iff the transition from symbolic state 𝑠𝑖 to 𝑠 𝑗 is not ruled out by do-
+main invariants. Invalid transitions arise fromphysical irreversibil-
+ity, where certain states are terminal by domain semantics (e.g., in
+the AV domain, collision = true is absorbing and cannot transition
+toreached_destination=true).
+3.2.2 DTMC Model.Given an abstract state space, we model the
+agent’s stochastic behavior as a DTMC over symbolic states.
+Definition 3.2 (Discrete-Time Markov Chain (DTMC)).ADTMC
+is a pair 𝑀 = ( 𝑆𝑀, 𝑃𝑀), where 𝑆𝑀 is a finite set of states and 𝑃𝑀
+is a transition probability matrix such that 𝑃𝑀(𝑠 ′ |𝑠 )denotes the
+probability of transitioning from state𝑠 to state 𝑠 ′. The probabilities
+satisfy P
+𝑠′ ∈𝑆𝑀 𝑃𝑀(𝑠′ |𝑠) = 1for all𝑠∈𝑆 𝑀.
+To construct a DTMC 𝑀 = (𝑆𝑀, 𝑃𝑀)for an agent,ProbGuard
+employs the abstraction defined above to derive a finite set of
+symbolic states 𝑆𝑀 from behavioral predicates [17]. Inconsistent
+or semantically invalid states (e.g., simultaneously satisfying 𝑎> 0
+and 𝑎< 0) are pruned. The transition matrix 𝑃𝑀 is then estimated
+from empirical transition counts extracted from execution traces.
+Figure 2 illustrates a DTMC for an embodied agent task. For
+example, when the stove is off and the agent is in the kitchen (i.e.,
+the agent is at state 𝑠0), the probability of transitioning to the state
+where the stove is on (i.e., state𝑠 1) is31/184 = 16.85%.
+3.2.3 Learning the DTMC.In practice, transition data may be
+sparse or biased due to limited exploration or task priors, resulting
+in incomplete coverage that incorrectly implies unreachable states.
+To address this, we applyvalid-transition–aware Laplace smoothing,
+where a small constant 𝛼> 0is added only to semantically valid
+transitions. Let 𝑛Π
+𝑖 𝑗 be the number of transitions from state 𝑠𝑖 to
+state 𝑠 𝑗 subject to the set of traces inΠ, and 𝑛Π
+𝑖 = P
+𝑗 𝑛Π
+𝑖 𝑗. Let 𝑘𝑖
+denote the number of valid transitions (as defined by valid_tran)
+originating from state 𝑠𝑖. The corresponding normalized transition
+
+[PDF PAGE 5]
+ProbGuard: Proactive Runtime Monitoring for LLM Agent Safety via Probabilistic Prediction ASE ’26, October 12–16, 2026, Munich, Germany
+Algorithm 1Learning a DTMC to Model an Agent’s Behavior
+Require:CTL property𝜓, error𝜀, confidence𝛿
+Ensure:DTMC ˆ𝑀= (𝑆 ˆ𝑀, 𝑃 ˆ𝑀)with(𝜀, 𝛿)-PAC-correct guarantee
+1:Π← ∅;𝑆 ˆ𝑀 ← ∅;𝑛 Π
+𝑖 𝑗 ←0for all𝑖, 𝑗
+2:P 𝜓 ← {𝜑 1
+𝑠 , 𝜑2
+𝑠 , . . . , 𝜑𝑛
+𝑠 |𝜑 𝑖
+𝑠 occurs in𝜓}⊲Derive predicates
+3:repeat
+4:Sample a new agent trace𝑣 0 →𝑣 1 → · · · →𝑣𝑚
+5:𝜋←𝑠 P(𝑣0), 𝑠P(𝑣1),· · ·, 𝑠P(𝑣𝑚); add𝜋toΠ⊲Abstraction
+6:𝑆 ˆ𝑀 ← S
+𝜋∈Π states(𝜋) ⊲ States observed in collected traces
+7:foreach consecutive pair(𝑠 𝑖, 𝑠𝑗 )in𝜋do
+8:𝑛 Π
+𝑖 𝑗 ←𝑛 Π
+𝑖 𝑗 + 1⊲Pairwise transition counts
+9:end for
+10:𝑛 Π
+𝑖 ← P
+𝑗 𝑛Π
+𝑖 𝑗 for all𝑠 𝑖 ∈𝑆 ˆ𝑀
+11:𝑃 ˆ𝑀 ← ˆ𝑃 𝛼
+Π computed by Eq. (1)⊲Laplace smoothing
+12:untilPACBoundSatisfied(𝑆 ˆ𝑀,Π, 𝜀, 𝛿)
+13:return ˆ𝑀= (𝑆 ˆ𝑀, 𝑃 ˆ𝑀)
+probability is:
+ˆ𝑃 𝛼
+Π (𝑠𝑗 |𝑠 𝑖) =
+ 
+
+𝑛Π
+𝑖,𝑗 +𝛼
+𝑛Π
+𝑖 +𝑘 𝑖 ·𝛼 ,ifvalid_tran(𝑠 𝑖, 𝑠𝑗 ),
+0,otherwise.
+(1)
+This formulation ensures that only semantically valid transitions are
+assigned with non-zero probability mass, thereby maintaining the
+logical consistency of the DTMC while preserving smoothness and
+generalization across sparsely observed yet valid state transitions.
+Following the standard additive smoothing practice [ 30], we set
+𝛼 = 1. For the sake of notational brevity, we occasionally drop
+the 𝛼 superscript and let ˆ𝑃Π represent the resulting probability
+distribution.
+Intuitively, we want the learned DTMC to faithfully represent
+the ground-truth agent system. To measure this accuracy, we adopt
+the Probably Approximately Correct (PAC) framework.
+Definition 3.3 (Probably Approximately Correct (PAC-correct)).
+Let 𝑀 be the (unknown) ground-truth DTMC and ˆ𝑀 the learned
+DTMC. Let 𝜓 𝜋 be a measurable path property—in our setting, the
+path formula underlying a CTL safety requirement 𝜓 =A 𝜓 𝜋 , e.g.,
+𝜓 𝜋 =G ¬unsafe for 𝜓 = AG¬unsafe —and let P𝑀(𝜓 𝜋 )and P ˆ𝑀(𝜓 𝜋 )
+denote the measures of the sets of paths satisfying 𝜓 𝜋 in 𝑀 and ˆ𝑀,
+respectively. We say that ˆ𝑀is(𝜀, 𝛿)-PAC-correctif
+Pr P ˆ𝑀(𝜓𝜋 )−P 𝑀(𝜓𝜋 )
+ ≤𝜀  ≥1−𝛿 .(2)
+Here, Pr(·)denotes the probability with respect to the prior proba-
+bility distribution, which is also the random sampling process used
+to learn the DTMC ˆ𝑀. In other words, with probability at least
+1 −𝛿 over the sampling process used to learn ˆ𝑀, the estimated
+probability deviates from the true probability by no more than 𝜀.
+This ensures that any safety intervention decision made from ˆ𝑀 is
+reliable with high confidence.
+We would like to collect enough samples so that the learned
+transition probabilities 𝑃 ˆ𝑀(𝑠 𝑗 |𝑠 𝑖)is close to the true transition
+probabilities 𝑃𝑀(𝑠 𝑗 |𝑠 𝑖)for every pair of states. Theorem 6 in [ 7]
+shows that it suffices for each 𝑠𝑖 ∈𝑆 ˆ𝑀 to satisfy the following
+Algorithm 2DTMC-Driven Runtime Agent Monitoring
+Require:agent, DTMC ˆ𝑀, CTL property𝜓=A𝜓 𝜋 , threshold𝜃
+1:whileagent is runningdo
+2:𝑃 safe ←𝑃[𝜓|𝑠 𝑖]⊲Conditioned satisfaction prob.
+3:if𝑃 safe <𝜃then⊲Predicted safety prob. too low
+4:Halt or steer agent to mitigate risk
+5:end if
+6:end while
+sample bound:
+𝑛Π
+𝑖 ≥
+ 11
+10 𝐵( ˆ𝑃Π )
+2
+· 2
+𝜀2 log
+ 2
+𝛿 ′
+h 1
+4 −
+
+max
+𝑗
+ 1
+2 −
+𝑛Π
+𝑖 𝑗
+𝑛Π
+𝑖
+ − 2
+3 𝜀
+2i
+,
+where 𝛿 ′ = 𝛿
+|𝑆 ˆ𝑀 | . Here, 𝑛Π
+𝑖 is the number of samples visiting the
+source state 𝑠𝑖, and the maximum ranges over its successor states
+𝑠 𝑗 . Checking this per-state condition with 𝛿 ′ = 𝛿/|𝑆 ˆ𝑀 | yields the
+global( 𝜀, 𝛿)guarantee by a union bound over |𝑆 ˆ𝑀 | states. The right-
+hand side has two components: the factor ( 11
+10 𝐵( ˆ𝑃Π ))2 captures the
+amplification effectpropagating local transition errors to global
+reachability probabilities, while 2
+𝜀2 log( 2
+𝛿 ′ )[·]is a concentration
+bound for the empirical frequency estimator. We refer the reader
+to [7] for details, and write PACBoundSatisfied(𝑆 ˆ𝑀, Π , 𝜀, 𝛿)when
+this condition holds for every𝑠 𝑖 ∈𝑆 ˆ𝑀.
+We now describe how we learn the DTMC ˆ𝑀 = (𝑆 ˆ𝑀, 𝑃 ˆ𝑀)for a
+state space 𝑆 ˆ𝑀 constructed from 𝜓-derived predicates, as shown
+in Algorithm 1. Given a property 𝜓 in CTL, we first extract the
+set of atomic state predicates 𝜑𝑠 appearing in 𝜓, and derive the
+corresponding predicate abstraction P𝜓 . The abstract state space
+𝑆 ˆ𝑀 is then defined as the set of all Boolean valuations over P𝜓 . The
+main loop repeatedly samples inputs and collects execution traces
+from the agent. By default, traces are generated with a uniform input
+distribution, although the sampling can be adapted if the actual
+environment distribution is known. For each newly observed trace,
+we accumulate the pairwise transition counts 𝑛Π
+𝑖 𝑗 and recompute
+the smoothed transition matrix ˆ𝑃 𝛼
+Π according to Eq. (1). After each
+update, we evaluate PACBoundSatisfied(𝑆 ˆ𝑀, Π , 𝜀, 𝛿). If it holds,
+the learned DTMC is returned; otherwise, sampling continues.
+Theorem 3.4 (PAC-correctness under Laplace smoothing).
+For any safety property 𝜓 =A 𝜓 𝜋 whose path formula 𝜓 𝜋 is a
+reachability or invariant property of the form covered by [ 7], and
+for any error bound 𝜀 and confidence parameter 𝛿, Algorithm 1 is
+(𝜀, 𝛿)-PAC-correct.
+Intuitively, as more traces are collected the estimated transition
+probabilities converge to the true ones; once the sample count
+satisfies the global PAC bound of [7], the satisfaction probability
+computed on the learned DTMC deviates from the true one by at
+most 𝜀 with confidence at least1 −𝛿 . We provide a detailed proof
+in Appendix A.
+We remark that the stopping condition of Algorithm 1 depends
+on the conditioning number 𝐵( ˆ𝑃Π ), which is prohibitively large
+in domains with strong behavioral persistence (e.g., autonomous
+driving, where 𝐵( ˆ𝑃Π ) ≃ 107–108; see §7). There, we replace Laplace
+
+[PDF PAGE 6]
+ASE ’26, October 12–16, 2026, Munich, Germany Haoyu Wang, Christopher M. Poskitt, Jiali Wei, and Jun Sun
+smoothing with frequency estimation, forgoing the uniform guaran-
+tee for the(𝜀, 𝛿)-PAC guarantee on the runtime reachability property
+only [7] (Theorem 3) at substantially lower sample cost.
+3.3 Runtime Monitoring
+Our runtime monitoring mechanism operates in two stages: a
+DTMC-based probabilistic predictionphase followed by aninterven-
+tion strategy. Algorithm 2 summarizes the process. At each decision
+step 𝑖, the agent observes the concrete environment state 𝑣𝑖 and
+computes its abstract representation𝑠𝑖 = 𝑠 P(𝑣𝑖)using the predicates
+extracted from the specification. Given the CTL property𝜓 =A 𝜓 𝜋 ,
+the learned DTMC ˆ𝑀 is queried to estimate the probability 𝑃safe
+that 𝜓 will continue to hold when execution proceeds from the
+current abstract state. Formally, 𝑃safe = 𝑃[𝜓|𝑠 𝑖], where 𝑠𝑖 is the
+current state, obtained from the PCTL query P=?[𝜓 𝜋 ]evaluated
+at 𝑠𝑖; the complementary quantity1 −𝑃 safe is the likelihood that
+the system will violate 𝜓 in the future. Throughout the paper we
+use this single convention: 𝜃 is a lower bound on the probability of
+remaining safe, so a larger 𝜃 yields a stricter monitor. If 𝑃safe <𝜃 ,
+meaning that the predicted probability of eventually remaining
+safe is lower than the allowed threshold,ProbGuardtriggers a
+proactive intervention. The framework remains agnostic to the
+enforcement policy: by decoupling risk detection from mitigation,
+it lets each agent implementation choose the response appropriate
+to its context, such as halting execution to prevent irreversible dam-
+age, raising an alarm for human-in-the-loop validation, or invoking
+a planner to steer back toward the safe region of the state space.
+4 ImplementingProbGuard
+We integrateProbGuardinto the open-source agent framework
+LangChain [23]. LangChain agents determine each step of a multi-
+turn interaction from LLM output alone, with control flow handled
+by ad-hoc error handling or user-defined conditions. They there-
+fore operate without quantitative risk awareness or formal safety
+guarantees, which is problematic in safety-critical settings.
+To support probabilistic runtime monitoring,ProbGuardadopts
+a modular architecture centered on a domain-specific abstraction
+interface. Our implementation has been released in our reposi-
+tory [43]. During offline model construction, the agent collects
+execution traces, abstracts them using the domain specification
+interface, and learns a DTMC capturing the agent’s behavioral dy-
+namics. At runtime,ProbGuardinstruments the decision-making
+loop of LangChain agents via the abstraction interface. Probabilistic
+model checking is performed using the PRISM model checker [22].
+Given the qualitative CTL safety requirement 𝜓 =A 𝜓 𝜋 ,Prob-
+Guardconstructs the corresponding PCTL query P=?[𝜓 𝜋 ]to com-
+pute 𝑃 b𝑀[𝜓|𝑠 𝑖], the probability that an execution starting from the
+current state 𝑠𝑖 satisfies the path formula 𝜓 𝜋 . When this probabil-
+ity falls below a predefined threshold 𝜃,ProbGuardproactively
+triggers an intervention by appending risk-related context to the
+agent’s prompt, thereby guiding the agent toward safer behavior.
+Traces are collected differently in each domain. In the AV domain,
+ProbGuard instruments Apollo’s perception–planning bridge: at
+each control cycle the symbolic state is extracted from Apollo’s
+localization and perception modules (vehicle speed, relative velocity
+to the nearest NPC, traffic light color, headway distance), yielding
+one abstract state per cycle. In the embodied domain, each trace
+corresponds to one full task episode in SafeAgentBench [51], driven
+by the GPT-4o-mini ReAct [49] agent. At each agent step, we map
+the raw environment observation to a symbolic state vector. Traces
+are collected offline prior to deployment and are not updated during
+runtime monitoring.
+Figure 3 illustrates howProbGuardis integrated into the agent
+loop. If the current state indicates elevated risk with respect to
+the safety specification (e.g., the agent plans to leave the kitchen
+while the stove remains on), and model-checking the property on
+b𝑀 yields 𝑃safe = 0 .86, below the threshold 𝜃 = 0 .9(equivalently,
+a violation probability of0 .14against a permitted maximum of
+0.1),ProbGuardaugments the prompt with a fixed-schema risk
+alert carrying three fields: the violated safety rule, the current
+symbolic state, and the symbolic evidence supporting the prediction
+(the offending transition and its model-checked probability). This
+intervention is advisory and purely textual:ProbGuardnever
+overrides action selection or alters control flow directly, but appends
+the alert to the planning context so the agent revises its reasoning
+and generates safer actions, e.g., turning off the stove before leaving.
+ProbGuardis framework-agnostic. Beyond LangChain, it is in-
+tegrated with the autonomous driving system Apollo Autonomous
+Driving Platform [3]. By instrumenting the perception and plan-
+ning modules,ProbGuardcontinuously monitors both the vehicle
+state and environmental context. Upon detecting potential risks,
+ProbGuardintervenes to steer the planner toward safer actions.
+Furthermore,ProbGuardcan be extended to other agent frame-
+works, such as OpenAI Agents SDK and OpenClaw. Adapting
+ProbGuard to a new domain requires implementing: (1) a state ab-
+straction function that maps concrete system states to abstract ones
+through predicate abstraction, (2) avalid_tranpredicate encoding
+domain-specific transition constraints, and (3) a safety property
+expressed in CTL. In our implementation, the embodied-agent and
+AV abstractions required approximately 200 and 250 lines of Python,
+respectively.
+5 Application Domain: Autonomous Vehicles
+In this section, we demonstrate how we applyProbGuardfor
+autonomous vehicles. The autonomous driving domain introduces
+additional challenges. In particular, traffic laws are specified in
+Signal Temporal Logic (STL) [39] and must be encoded into CTL
+specifications for probabilistic reasoning. We first present how
+traffic laws are encoded into CTL, how to monitor such properties
+at runtime, and then we report on an empirical evaluation.
+5.1 Encoding Traffic Laws as CTL Safety
+Properties
+We first review how our prior work LawBreaker [39] formalizes
+traffic laws using a fragment of STL. We then show how formulas
+in this fragment can be systematically translated into CTL to enable
+probabilistic reasoning.
+Definition 5.1 (LawBreaker STL Fragment STLLB for autonomous
+vehicle properties).We define a bounded fragment of STL, denoted
+STLLB, whose formulas are given by
+𝜓::=G(𝜑 𝑠 =⇒F [0,𝐾] 𝜑𝑡 )𝜑::=⊤ |𝑝| ¬𝜑|𝜑∨𝜑 ′
+
+[PDF PAGE 7]
+ProbGuard: Proactive Runtime Monitoring for LLM Agent Safety via Probabilistic Prediction ASE ’26, October 12–16, 2026, Munich, Germany
+Figure 3: Implementation ofProbGuardon top of the agent framework LangChain [ 23], illustrating the prompt flow during
+the agentic decision-making process with the embodied example. The specification shown bounds the violation probability by
+0.1, which is the threshold𝜃= 0.9on the probability of remaining safe in the convention of Algorithm 2.
+We use standard Boolean syntactic sugar:𝜑→𝜑 ′ ≜¬𝜑∨𝜑 ′, 𝜑∧
+𝜑 ′ ≜¬(¬𝜑∨ ¬𝜑 ′).
+This fragment is designed specifically to encodebounded-response
+safety rules. Each property has the formG (𝜑𝑠 ⇒ F[0,𝐾] 𝜑𝑡 ), which
+expresses the requirement that whenever a triggering condition 𝜑𝑠
+becomes true, the desired response𝜑𝑡 must occur within a fixed time
+bound 𝐾. This captures the essence of many traffic-law constraints
+where correctness depends not only onwhatthe autonomous vehi-
+cle does, but also onhow quicklyit does so, e.g., initiating motion
+within a fixed time after a traffic light turns green.
+To encode the bounded-response STL properties as CTL proper-
+ties, we introduce an auxiliary deterministic automaton that explic-
+itly tracks pending response obligations [4]. Intuitively, whenever
+the trigger condition𝜑 𝑠 becomes true, the monitor starts a𝐾-step
+countdown during which the target condition 𝜑𝑡 must be satisfied.
+If 𝜑𝑡 occurs within the bound, the obligation is discharged and
+the monitor returns to an idle state; otherwise, if the countdown
+expires, a violation is raised. This construction reduces bounded
+liveness to reachability of an absorbing violation state.
+Definition 5.2 (Auxiliary Monitor for 𝐾-Bounded Response).For
+the ruleG(𝜑𝑠 ⇒ F[0,𝐾]𝜑𝑡 ), define the deterministic monitor(𝑄, 𝑞0, 𝛿)
+with:
+•𝑄 = {idle} ∪ {wait (𝑖) |𝑖 = 0 , . . . , 𝐾} ∪ {viol} , where idle
+indicates no pending obligation, wait(𝑖)tracks 𝑖 remaining
+steps to satisfy𝜑 𝑡 , andviolis absorbing.
+•𝑞 0 =idle.
+•For any labelℓ, the transition𝛿is:
+𝛿(𝑞, ℓ) =
+ 
+
+wait(𝐾), 𝑞=idle, ℓ|=𝜑 𝑠 ∧ℓ̸|=𝜑 𝑡,
+idle, 𝑞=wait(𝑖), ℓ|=𝜑 𝑡 ,
+wait(𝑖−1), 𝑞=wait(𝑖), 𝑖>0, ℓ̸|=𝜑 𝑡 ,
+viol, 𝑞=wait(0), ℓ̸|=𝜑 𝑡 ,
+𝑞,otherwise.
+Synchronous Product DTMC.To perform Markovian reasoning
+over bounded-response violations, we construct the synchronous
+product of the environment DTMC 𝑀 and the auxiliary monitor.
+In this product model 𝑀 ′, the 𝐾-bounded response rule reduces to
+the CTL safety property𝑀 ′ |=AG¬viol.
+Example 5.3 (Auxiliary monitor for A V traffic light law.).Define
+𝜑1:trafficLightAheadColor == 3 , 𝜑 2:PriorityNPCAhead ==
+0, 𝜑 3:PriorityPedsAhead == 0 , 𝜑 4:speed> 0.5. Consider
+the following traffic law defined in STL:G(( 𝜑1 ∧𝜑 2 ∧𝜑 3) =⇒
+F[0,100]𝜑4), which specifies that once the light turns green and there
+are no obstacles, the vehicle should start within 100 time units. We
+instantiate the 𝐾-bounded response monitor with 𝜑𝑠 = 𝜑1 ∧𝜑 2 ∧
+𝜑3, 𝜑 𝑡 = 𝜑4, 𝐾 = 100. Here, a time unit is one Apollo control cycle
+(100ms), so 𝐾 = 100corresponds to a10s deadline; the advance
+warning times reported in Table 1 are converted to seconds using
+the same factor.
+At runtime, the agent is conceptually evaluated on the product
+model 𝑀 ′. Given the current trajectory 𝑠0, 𝑠1, 𝑠2, . . . , 𝑠𝑖, the corre-
+sponding monitor states evolve synchronously according to 𝑞𝑖+1 =
+𝛿 (𝑞𝑖, 𝐿 (𝑠𝑖+1)), yielding the product-state trajectory( 𝑠0, 𝑞0), (𝑠1, 𝑞1),
+(𝑠2, 𝑞2), . . . (𝑠𝑖, 𝑞𝑖). The current product state( 𝑠𝑖, 𝑞𝑖)serves as the
+basis for risk assessment. Specifically, the runtime monitor queries
+the augmented DTMC 𝑀 ′ to compute the probability thatnovi-
+olation state is ever reached: Pr(𝑠𝑖 ,𝑞𝑖 )
+𝑀 ′ (G ¬viol ), or, when required,
+its finite-horizon variant; this is the quantity 𝑃safe of Algorithm 2
+instantiated for the product model. This probability is subsequently
+used to determine whether enforcement should be applied.
+5.2 Empirical Evaluation
+We evaluateProbGuardfor autonomous vehicles (and in §6, for
+embodied agents) with respect to three Research Questions (RQs):
+•RQ1:CanProbGuardeffectively predict risks?
+• RQ2:How doesProbGuardcompare with state-of-the-art
+enforcement approaches?
+• RQ3:Is the overhead of monitoring safety withProbGuard
+acceptable?
+
+[PDF PAGE 8]
+ASE ’26, October 12–16, 2026, Munich, Germany Haoyu Wang, Christopher M. Poskitt, Jiali Wei, and Jun Sun
+Experiment Setup.We conduct our experiments using the Apollo
+autonomous driving simulator [3]. Apollo is based on a mixture
+of neural networks (not LLMs) and human-written control logic.
+We include this evaluation for demonstratingProbGuard’s policy-
+agnostic design applied to a real-world domain: the monitoring
+framework operates over the symbolic state abstraction derived
+from Apollo’s perception outputs, with no dependency on how
+those states were reached. The same DTMC learning and CTL
+model checking pipeline used for LLM agents in §6 is applied here
+without modification. The law-violating scenarios are adopted from
+𝜇Drive [44], a user-controlled framework for generating diverse
+traffic violations. Traffic laws are derived from the formal specifica-
+tions defined in LawBreaker [39] and translated into CTL properties
+for probabilistic reasoning. We collected 30 traces per scenario to
+learn each DTMC. This is a deliberately small budget, well below
+the sample sizes required for formal PAC certification; our aim here
+is to test whether the monitor delivers useful advance warning
+under realistic data constraints rather than to certify the learned
+models. We discuss the sample complexity in full in §7.
+The four laws in Table 1 are derived from LawBreaker [39]; we
+present their definitions below. We characterize the predicates in
+natural language for simplicity, and full definitions can be referred
+to in [43].
+Law38_2 (Yellow light response).Define the following predicates:
+𝜑1 : yellow light ahead, 𝜑2 : stop line ahead, 𝜑3 : vehicle stopped.
+The STL specification encodes the obligation:
+𝜓Law38_2 =𝐺 ((𝜑1 ∧𝜑 2)⇒𝐹 [0,100]𝜑3)
+Law51_5 (Emergency stop on red).Define the following predi-
+cates:
+𝜑4 :red light ahead𝜑 5 :critical proximity
+The STL specification is:
+𝜓Law51_5 =𝐺 ((𝜑4 ∧𝜑 5)⇒𝐹 [0,2]𝜑3)
+Law53 (Traffic jam yield).Define the following predicates:
+𝜑6 :traffic jam𝜑 7 :lead NPC slow/stopped or junction imminent
+The STL specification is:
+𝜓Law53 =𝐺 ((𝜑6 ∧𝜑 7)⇒𝐹 [0,200]𝜑3)
+No Collision (Global safety invariant).Define:
+𝜑8 :collision== 0 (no collision has occurred)
+The CTL property is a pure invariant:
+𝜓NoCollision =𝐴𝐺 𝜑 8
+STL formula Law38_2, Law51_5, Law53 are translated to CTL using
+Definition 5.2 with𝐾= 100,2,200, respectively.
+Effectiveness (RQ1):We evaluate the effectiveness ofProb-
+Guardby measuring its Advance Warning Time (AWT), defined as
+the temporal lead by which the system predicts a safety property
+violation before it physically manifests in the environment. Table 1
+reports the average AWT (in seconds) achieved byProbGuard
+under varying probability thresholds 𝜃. For each experimental run,
+the AWT is computed as the simulation-clock time difference be-
+tween the initial time step 𝑡pred at which the predicted probability
+of remaining safe first drops below the threshold 𝜃, and the actual
+Table 1: Average advance warning time (seconds) provided by
+ProbGuardand REDriver prior to safety property (i.e., traffic
+law) violations.ProbGuard’s threshold 𝜃 is a lower bound
+on the probability of remaining safe, so a larger 𝜃 yields a
+stricter monitor; REDriver’s threshold𝜎 denotes a robustness
+margin derived from the quantitative STL semantics [14].
+ID Law ProbGuardREDriver
+𝜃= 0.3 0.5 0.7 𝜎=0.4 0.8 1.2
+1 Law38_2 15.84 15.84 15.84 0 0 15.84
+2 Law51_5 13.41 13.41 13.41 0 0 3.30
+3 No Col-
+lision 0.34 1.76 23.87 0.38 0.58 0.77
+4 Law51_5 0.01 0.01 15.15 0 0 3.53
+5 Law51_5 6.22 9.33 21.06 4.08 5.04 8.04
+6 No Col-
+lision 12.57 23.02 38.66 0.58 1.18 1.71
+7 Law53 0.77 0.77 0.77 0.21 0.77 0.77
+time of occurrence 𝑡fail of the safety property violation within the
+simulator:
+AWT=𝑡 fail −𝑡 pred (3)
+Overall,ProbGuardconsistently provides early warnings across
+diverse traffic scenarios and safety properties. As shown in Table 1,
+warnings are issued strictly before actual violations occur in all
+evaluated cases, yielding a 100% detection rate.
+For bounded response violations (e.g., Scenarios 1 and 2),Prob-
+Guardachieves stable advance predictions with warning times
+up to 15.84s and 13.41s. These results remain largely invariant to
+the threshold 𝜃, indicating robust predictability for violations with
+deterministic temporal structures. This invariance is not a property
+of the bounded-response class as such: Scenarios 4 and 5 instanti-
+ate the same law (Law51_5) in different traffic situations and are
+markedly threshold-sensitive, so stability depends on the dynamics
+of the specific scenario rather than on the property alone. In con-
+trast, for collision-related properties, the AWT is highly threshold-
+sensitive. In Scenarios 3 and 6 (No Collision), increasing 𝜃 signifi-
+cantly extends the warning horizon to 38.66s. This suggests that
+while collision events are inherently stochastic, higher confidence
+requirements allow the agent to identify risky trajectories much
+earlier, providing a broader window for proactive intervention.
+To calibrate the threshold 𝜃, we evaluate the false positive (FP)
+rate ofProbGuardon safe execution traces where no actual vi-
+olations occur. We collected safe traces across 6 distinct scenar-
+ios, encompassing pedestrian crossings, lane changes, motorcycle
+encounters, and stationary obstacle avoidance. At 𝜃 = 0.3,Prob-
+Guardachieves 0% FP across all four properties, making it a practi-
+cal threshold that balances detection sensitivity against false-alarm
+suppression. As 𝜃 increases the check becomes stricter and flags
+progressively more safe scenarios: the FP rate rises to 75% at𝜃 = 0.5
+and 100% at 𝜃 = 0.7. This trend is driven primarily by the conser-
+vativeness of a high assurance threshold, compounded by residual
+estimation error in the learned model b𝑀.
+
+[PDF PAGE 9]
+ProbGuard: Proactive Runtime Monitoring for LLM Agent Safety via Probabilistic Prediction ASE ’26, October 12–16, 2026, Munich, Germany
+Comparison with state of the art (RQ2):We further compare
+ProbGuardwith REDriver [ 40]. REDriver performs prediction us-
+ing quantitative semantics, which measures the robustness degree
+of property satisfaction or violation. REDriver has a different type
+of threshold toProbGuard.ProbGuard’s threshold 𝜃∈ [0, 1]
+is a normalized probability: it directly represents the estimated
+likelihood that the safety property will continue to hold from the
+current state. A threshold of 𝜃 = 0.7means the monitor intervenes
+when the predicted probability of remaining safe drops below70%.
+This scale is domain-independent and immediately interpretable.
+REDriver’s threshold operates on a robustness degree derived from
+quantitative STL semantics, which measures how far the current
+signal is from violating the property in terms of raw variable values,
+including multiple types like Boolean, speed and distance. Normal-
+izing the value of robustness derived from different variables (such
+as speed and distance to the car in front) is highly non-trivial. The
+thresholds {0.4, 0.8, 1.2} used for REDriver are those reported in
+the original work [40], adopted without modification to ensure a
+fair comparison against the published baseline.
+REDriver suffers from a fundamental issue: different variables
+inherently operate on incompatible scales (e.g., vehicle speed ranges
+from 0–120 km/h, while distance between vehicles is measured in
+0-100 meters). As a result, it is difficult to define meaningful and
+consistent thresholds across different variable types. For example,
+under a fixed threshold (e.g., 𝜎 = 0 .4), both Scenario 1 and 2 in
+Table 1 fail to produce advance predictions in REDriver.
+ProbGuardprovides explainability by explicitly estimating the
+probability of future violations, yielding interpretable risk scores
+that are naturally normalized in[0 , 1]. For instance, Scenario 3 is a
+left-turn stress test, where collision likelihood varies across abstract
+states. When no priority non-player character (NPC) or pedestrian
+is ahead, a slow-moving vehicle (< 0.5m/s) exhibits a 47.15% colli-
+sion risk as the task poses significant challenge. However, when a
+priority NPC is present, the risk rises sharply to 56.78%, accurately
+reflecting unsafe yielding behavior. These results demonstrate that
+ProbGuardnot only predicts violations earlier, but also provides
+well-calibrated and interpretable probabilistic explanations to sup-
+port proactive intervention.
+Overhead (RQ3):In the autonomous driving domain, the run-
+time monitoring overhead is 100.79±16.96 ms (mean±std). After
+synchronizing the learned DTMC with the monitor automaton,
+the overhead becomes slightly higher, due to the additional syn-
+chronous product and monitor state updates. This overhead is still
+acceptable for practical deployment because monitoring is per-
+formed at a lower frequency than the control loop. For instance,
+if the monitoring interval is set to once every 10 control cycles
+(or every 500–1000 ms depending on the driving scenario), the in-
+curred delay represents only a small fraction of the overall system
+runtime. Moreover, the absolute overhead (∼100 ms) is well within
+the reaction time window required for anticipating unsafe behav-
+iors, allowing the system to trigger proactive interventions without
+impacting real-time safety or control performance.
+6 Application Domain: Embodied Agents
+In this section, we present howProbGuardis applied to embodied
+agents, starting with an illustrative example and then providing an
+empirical evaluation.
+6.1 Illustrative Example
+In the following, we demonstrate howProbGuardcan be applied
+in embodied environments, where safety is often characterized
+by the absence of dangerous unattended-appliance situations that
+arise from the temporal accumulation of individually safe actions.
+Consider the requirement that an agent mustneverleave the kitchen
+for more than a threshold time 𝑇 while the stove is on—a common
+cause of household fires. This safety rule can be encoded in CTL as:
+𝜓=AG¬ (stove_on∧ ¬agent_in_kitchen∧elapsed≥𝑇 ),
+which asserts that the joint hazardous condition must never hold
+along any execution path.
+To evaluate this property, we extract the relevant predicate set:
+P𝜓 ={stove_on,agent_in_kitchen,elapsed≥𝑇}.
+Algorithm 1 then learns a DTMC ˆ𝑀 = (S ˆ𝑀, 𝑃 ˆ𝑀), as shown in Fig-
+ure 2, where each symbolic state in S ˆ𝑀 represents a feasible combi-
+nation of predicate truth values, and transitions encode empirically
+estimated behavior from trajectory data.
+At runtime, the agent observes the current state (e.g., 𝑠2) and
+estimates the conditional safety probability
+𝑃 ˆ𝑀[𝜓|𝑠 2],
+where 𝜓 =A 𝜓 𝜋 with 𝜓 𝜋 =G ¬𝑠 3, and 𝑠3 denotes the hazardous
+configuration. If this probability falls below a predefined thresh-
+old (e.g., 𝜃 = 0.7),ProbGuardinjects a corrective prompt to steer
+the agent away from trajectories that are predicted, based on the
+learned DTMC, to lead toward𝑠3. This demonstrates how our frame-
+work enables proactive, probability-driven safety enforcement for
+embodied agents.
+6.2 Empirical Evaluation
+Experiment Setup.We adopt the ReAct [ 49] framework in con-
+junction with a low-level controller defined in SafeAgentBench [51]
+to simulate realistic household manipulation tasks. The embod-
+ied agent is powered by gpt-4o-mini with temperature=0. The
+prompt follows the Langchain ReAct [49] template and SafeAgent-
+Bench [51]. We use PRISM [ 22] to calculate the probability that
+the learned DTMC satisfies the specified safety property. For each
+task, we sample 30 traces to learn the DTMC. We follow the RQs
+introduced in Section 5.
+Effectiveness (RQ1):We evaluate the performance ofProbGuard
+in monitoring and enforcing safety properties within complex
+embodied environments. Table 2 illustrates the inherent trade-
+off between safety violations (Unsafe%) and functional utility
+(Completion%) across various enforcement regimes.
+Without runtime monitoring, the agent exhibits a high viola-
+tion rate of 40.63%, while completing 59.38% of tasks.ProbGuard
+provides a configurable proactive defense through two primary in-
+tervention modes:stop(immediate termination upon risk detection)
+andreflect(risk-aware re-prompting). At the most conservative
+
+[PDF PAGE 10]
+ASE ’26, October 12–16, 2026, Munich, Germany Haoyu Wang, Christopher M. Poskitt, Jiali Wei, and Jun Sun
+Table 2: Average unsafe rate and task completion rate of run-
+time monitoring forProbGuardon the embodied agent. Su-
+perscripts are thresholds 𝜃 in the convention of Algorithm 2:
+the monitor intervenes when the predicted probability of
+remaining safe falls below𝜃, so a larger𝜃is stricter.
+Enforcement Unsafe% Completion%
+None 40.63% 59.38%
+ProbGuard0.9
+𝑠𝑡𝑜𝑝 2.60% 10.42%
+ProbGuard0.7
+𝑠𝑡𝑜𝑝 5.20% 20.31%
+ProbGuard0.5
+𝑠𝑡𝑜𝑝 21.35% 41.14%
+ProbGuard0.3
+𝑠𝑡𝑜𝑝 29.17% 48.96%
+ProbGuard0.9
+𝑟𝑒 𝑓 𝑙𝑒𝑐𝑡 14.07% 47.74%
+Figure 4: Average runtime overhead (milliseconds) with re-
+spect to the number of abstract states; bars indicate the vari-
+ation observed across runs.
+configuration (ProbGuard0.9
+𝑠𝑡𝑜𝑝 ), the system successfully reduces
+unsafe outcomes to a negligible 2.60%, a 93.60% relative reduction
+over the unmonitored baseline. However, this comes at a cost: task
+completion drops to 10.42% as the monitor prioritizes safety over
+progress. By scaling the threshold𝜃, we observe a Pareto frontier of
+agent behavior:ProbGuard 0.5
+𝑠𝑡𝑜𝑝 provides a balanced middle ground,
+roughly doubling the completion rate of the next-strictest setting
+(41.14% versus 20.31% forProbGuard 0.7
+𝑠𝑡𝑜𝑝 ) while maintaining vio-
+lations at nearly half the baseline rate.
+Compared to the halt-basedstopstrategy at the same threshold
+𝜃 = 0.9,reflectallows the agent to maintain a much higher comple-
+tion rate (47.74%, i.e., 80.4% of the unmonitored baseline, at a 65.37%
+relative reduction in unsafe behavior) by attempting to self-correct
+its reasoning trace when a potential violation is predicted, shifting
+the agent from high-risk execution toward a safer “self-correct”
+posture.
+Comparison with state of the art (RQ2):We compareProb-
+Guardwith the state-of-the-art agent runtime enforcement frame-
+work AgentSpec [42]. In addition to its effectiveness, the advantage
+ofProbGuardis twofold. (1)Runtime efficiency: Unlike the reac-
+tive step-by-step enforcement in AgentSpec, which checks safety
+only after each LLM action,ProbGuardperforms predictive prob-
+abilistic reasoning over future paths. By estimating the likelihood
+Table 3: PAC bound analysis (𝜀=0.1, 𝛿=0.05). For A V, frequency
+estimation is used as a practical trade-off; the 𝐵( ˆ𝑃Π )column
+reports the conditioning number measured under Laplace
+smoothing, which is what makes the uniform bound imprac-
+tical in that domain.
+Domain|𝑆|𝐵( ˆ𝑃Π )Traces required
+Embodied (with Laplace) 3–33 1.0–481 530–10 5
+AV (frequency estimation) 4–3410 7–108 185–1,016
+of a violation before the agent commits to an action,ProbGuard
+early-rejects unsafe trajectories and avoids redundant LLM queries
+in long-horizon tasks, achieving an average token reduction of
+12.05%. (2)Automated and trustworthy checks:ProbGuardauto-
+mates the construction of CTL safety specifications systematically
+from unsafe-state definitions (e.g., “stove on while agent away be-
+yond threshold time”), eliminating the need for manually crafted
+rules. In contrast, AgentSpec relies on manually engineered sym-
+bolic constraints that require substantial domain knowledge and
+per-task customization, incurring higher engineering overhead and
+limited scalability across new environments; its LLM-generated
+rules often lack interpretability and may be incomplete or incorrect.
+The CTL formulasProbGuardsynthesizes are instead grounded in
+a formally learned model of system behavior, and are transparent,
+verifiable, and admit probabilistic guarantees.
+Runtime overhead (RQ3):We evaluate the runtime overhead
+ofProbGuardby decomposing its enforcement process into ab-
+straction, I/O, and probabilistic inference. The inference step (i.e.,
+computing probability according to DTMC) is the dominant cost,
+averaging 430 ms per decision cycle, while abstraction and I/O con-
+tribute only 0.07 ms and 0.6 ms, respectively. To reduce repeated
+inference costs,ProbGuardemploys a caching mechanism based
+on the fixed DTMC structure, precomputing the probability of reach-
+ing unsafe states for each symbolic state. This enables constant-time
+lookup during runtime, reducing the per-decision overhead to 5–
+8 ms for small abstractions, 13 ms for 8-state abstractions, and 28 ms
+for 16-state abstractions, and remaining below 50 ms at 32 states,
+as illustrated in Figure 4. The additional computation introduces
+only millisecond-level overhead, which is negligible relative to the
+LLM’s decision time.
+7 Discussion
+PAC Bounds in Practice.We analyze sample complexity follow-
+ing Bazille et al. [ 7] with 𝜀=0.1and 𝛿=0.05. For the reachability
+propertyProbGuardchecks at runtime, Theorem 3 of [ 7] requires
+only185–1 , 016traces via frequency estimation. For the stronger
+uniform CTL guarantee (Theorem 6), we measure the conditioning
+number 𝐵( ˆ𝑃Π )on the learned DTMCs (Table 3). For the AV domain,
+although Laplace smoothing provides the stronger PAC guarantee
+by avoiding the assumption that unobserved transitions have zero
+probability, this requires an impractically large sample size.
+The two domains exhibit a structural difference. Embodied-agent
+DTMCs model forward-progressing task execution (e.g., pick →
+
+[PDF PAGE 11]
+ProbGuard: Proactive Runtime Monitoring for LLM Agent Safety via Probabilistic Prediction ASE ’26, October 12–16, 2026, Munich, Germany
+open → place → close), producing well-mixed chains with moder-
+ate𝐵( ˆ𝑃Π ). In contrast, autonomous-driving DTMCs exhibit strong
+behavioral persistence: the vehicle remains within a narrow region
+of the abstract state space, with self-loop probabilities exceeding
+99.9% and inter-state transition probabilities below10 −5. Under
+Laplace smoothing, this persistence yields 𝐵( ˆ𝑃Π ) ≈ 107–108, mak-
+ing the corresponding PAC bound impractical. By replacing Laplace
+smoothing with frequency estimation, the error factor introduced
+( 11
+10 𝐵( ˆ𝑃Π ))2 is removed from the bound, trading the stronger uni-
+form CTL guarantee for a substantially lower sample requirement
+suitable for runtime monitoring.
+Threats to Validity.A primary threat arises from the Markov
+assumption underlying our probabilistic model: the agent’s future
+behavior is assumed to depend only on the current abstract state
+rather than the full execution history. Although the predicate-based
+abstraction captures safety-relevant information, an incomplete or
+overly coarse abstraction may omit latent dependencies, such as
+delayed effects or history-dependent behavior. This can violate the
+Markov property, bias learned transition probabilities, and produce
+inaccurate risk estimates. Moreover, our PAC guarantees bound
+estimation error with respect to the learned model, but do not cover
+misspecification caused by an inadequate abstraction.
+A second threat stems from stochasticity in trajectory sampling
+and agent behavior. We mitigate this through repeated runs and
+report averages over those runs, although residual variance may
+still affect reproducibility and risk estimates, particularly in sparsely
+explored states.
+Our evaluation uses a fixed budget of 30 traces per scenario,
+below the bounds in Table 3. The PAC analysis characterizes the
+sample complexity required for formal certification, whereas our
+experiments show that the monitor is practically effective with a
+much smaller budget. Closing this gap would require more extensive
+sampling and computational resources.
+Limitations and Future Work.Future work includes active learn-
+ing and online updates for sample-efficient adaptation, improved
+predicate discovery and abstraction learning, support for richer
+PCTL properties, and natural language-to-specification pipelines.
+Scalability remains a key challenge as the predicate space grows;
+promising directions include abstraction refinement, compositional
+reasoning, symbolic model checking, and selective state-space ex-
+ploration.
+8 Related Work
+Agent Safety.This work contributes to the growing body of re-
+search on ensuring safe and reliable behavior in LLM-powered
+agents, a rapidly emerging field that combines runtime monitoring,
+and probabilistic reasoning to mitigate risks in open-ended decision-
+making. Recent benchmarks such as SafeAgentBench [51], Agen-
+tHarm [2], and AgentDOJO [13] provide comprehensive testbeds
+for assessing agent behavior across diverse environments, including
+embodied tasks, simulated tool use, and interactive web settings.
+To prevent agent risks, AgentSpec [ 42] introduces a domain-
+specific language (DSL) for specifying symbolic runtime enforce-
+ment rules, enabling modular safety enforcement through struc-
+tured prompt augmentations. Other recent efforts, such as ShieldA-
+gent [12] and GuardAgent [48], propose shielding architectures that
+wrap LLM agents with logical constraints or policy filters. Agent-
+DAM [54] focus on privacy preservation in browser-based agents,
+highlighting the breadth of safety challenges faced by LLM systems.
+While effective for enforcing local invariants, these methods typi-
+cally assume static constraints and ignore multi-step risk evolution.
+In contrast, our approach combines symbolic abstraction with prob-
+abilistic reachability for trajectory-aware enforcement, extending
+safe RL shielding [1] to data-driven, stochastic LLM agents through
+learned probabilistic runtime monitoring.
+Complementary research has also explored constraining LLM
+behavior through formal logic and decoding-time control. For ex-
+ample, LMQL [8] introduces a query language that enforces logi-
+cal constraints during decoding, ensuring syntactic and semantic
+compliance at generation time. However, LMQL’s guarantees are
+output-level and static, whereas our approach operates dynamically
+at runtime, reasoning over symbolic state transitions and enforcing
+safety through probabilistic reachability analysis. Similarly, frame-
+works such as Toolformer [36] and Voyager [41] have expanded the
+scope of LLM agents into tool-augmented and open-world environ-
+ments, amplifying the need for proactive safety enforcement that
+anticipates multi-step, high-risk behaviors before they manifest.
+Runtime VerificationOur work builds on the runtime verifica-
+tion (RV) literature while extending it to provide safety and relia-
+bility guarantees for LLM-powered agents operating in uncertain
+environments. Classical RV monitors system executions against
+formal specifications and triggers interventions upon detecting vio-
+lations [5, 24]. However, traditional RV typically assumes determin-
+istic and fully observable system dynamics, limiting its applicability
+to stochastic agent workflows. To address these limitations, several
+probabilistic extensions have been proposed. Runtime verification
+with state estimation (RVSE) [38] augments monitoring with proba-
+bilistic inference over hidden states, while adaptive RV [6] updates
+monitoring models online to accommodate evolving system behav-
+iors. Another related direction combines conformal prediction with
+runtime verification to forecast future states from observed execu-
+tions while providing distribution-free coverage guarantees [11, 28].
+Similarly, probabilistic monitoring frameworks such as PSTMoni-
+tor [10] and MDP-based monitors [20] incorporate stochastic rea-
+soning into runtime monitoring, but they assume either predefined
+probabilistic models or manually specified safety properties. Our
+framework differs by learning the probabilistic model directly from
+observed agent trajectories. Specifically, we construct a DTMC over
+predicate-based symbolic states that capture high-level safety con-
+ditions, enabling data-driven and domain-general runtime enforce-
+ment without requiring a handcrafted transition model. During
+execution, probabilistic reachability analysis estimates the likeli-
+hood of future safety violations, allowing proactive intervention
+before unsafe states are reached.
+
+[PDF PAGE 12]
+ASE ’26, October 12–16, 2026, Munich, Germany Haoyu Wang, Christopher M. Poskitt, Jiali Wei, and Jun Sun
+9 Conclusion
+We presentedProbGuard, a proactive runtime enforcement frame-
+work that enhances LLM-agent safety through probabilistic pre-
+diction. By modeling agent behavior as DTMCs over symbolic ab-
+stractions,ProbGuardanticipates risks and can intervene before
+violations occur. Experiments in embodied-agent and autonomous-
+driving domains show thatProbGuardcan improve safety while
+preserving task performance, offering a principled approach that is
+adaptable across dynamic agent environments.
+Acknowledgments
+This research is supported by the Lee Kuan Yew Fellowship awarded
+to SUN Jun by Singapore Management University. We sincerely
+thank the anonymous reviewers for their valuable feedback and
+suggestions.
+Data Availability Statement
+The artifacts generated and used in this study—including the bench-
+mark, safety rules, learned DTMCs, and source code—are avail-
+able in the repository at [ 43]. The repository also includes our
+LangChain-based implementation of the runtime monitoring and
+intervention mechanisms to support reproduction.
+References
+[1] Mohammed Alshiekh, Roderick Bloem, Rüdiger Ehlers, Bettina Könighofer, Scott
+Niekum, and Ufuk Topcu. 2018. Safe Reinforcement Learning via Shielding. In
+AAAI. AAAI Press, 2669–2678. doi:10.1609/aaai.v32i1.11797
+[2] Maksym Andriushchenko, Alexandra Souly, Mateusz Dziemian, Derek Due-
+nas, Maxwell Lin, Justin Wang, Dan Hendrycks, Andy Zou, J. Zico Kolter, Matt
+Fredrikson, Yarin Gal, and Xander Davies. 2025. AgentHarm: A Benchmark for
+Measuring Harmfulness of LLM Agents. InICLR. OpenReview.net.
+[3] Baidu. 2023. Apollo Open Source Platform 9.0. https://github.com/ApolloAuto/
+apollo/tree/v9.0.0 Released December 18, 2023; accessed 2025-06-12.
+[4] Christel Baier and Joost-Pieter Katoen. 2008.Principles of Model Checking. MIT
+press.
+[5] Ezio Bartocci, Yliès Falcone, Adrian Francalanza, and Giles Reger. 2018. Introduc-
+tion to Runtime Verification. InLectures on Runtime Verification. Springer, 1–33.
+doi:10.1007/978-3-319-75632-5_1
+[6] Ezio Bartocci, Radu Grosu, Atul Karmarkar, Scott A. Smolka, Scott D. Stoller, Erez
+Zadok, and Justin Seyster. 2012. Adaptive Runtime Verification. InRV (Lecture
+Notes in Computer Science). Springer, 168–182. doi:10.1007/978-3-642-35632-2_18
+[7] Hugo Bazille, Blaise Genest, Cyrille Jégourel, and Jun Sun. 2020. Global PAC
+Bounds for Learning Discrete Time Markov Chains. InCA V (2) (Lecture Notes in
+Computer Science). Springer, 304–326. doi:10.1007/978-3-030-53291-8_17
+[8] Luca Beurer-Kellner, Marc Fischer, and Martin T. Vechev. 2023. Prompting
+Is Programming: A Query Language for Large Language Models.Proc. ACM
+Program. Lang.7, PLDI (2023), 1946–1969. doi:10.1145/3591300
+[9] Harry Booth. 2025.When AI Thinks It Will Lose, It Sometimes Cheats, Study Finds.
+Time. https://time.com/7259395/ai-chess-cheating-palisade-research/
+[10] Christian Bartolo Burlò, Adrian Francalanza, Alceste Scalas, Catia Trubiani, and
+Emilio Tuosto. 2022. PSTMonitor: Monitor synthesis from probabilistic session
+types.Sci. Comput. Program.222 (2022), 102847. doi:10.1016/j.scico.2022.102847
+[11] Francesca Cairoli, Luca Bortolussi, and Nicola Paoletti. 2023. Learning-Based
+Approaches to Predictive Monitoring with Conformal Statistical Guarantees.
+InRuntime Verification (RV) (LNCS). Springer, 461–487. doi:10.1007/978-3-031-
+44267-4_26
+[12] Zhaorun Chen, Mintong Kang, and Bo Li. 2025. ShieldAgent: Shielding Agents
+via Verifiable Safety Policy Reasoning. InICML (Proceedings of Machine Learning
+Research). PMLR / OpenReview.net.
+[13] Edoardo Debenedetti, Jie Zhang, Mislav Balunovic, Luca Beurer-Kellner, Marc
+Fischer, and Florian Tramèr. 2024. AgentDojo: A Dynamic Environment to
+Evaluate Prompt Injection Attacks and Defenses for LLM Agents. InNeurIPS.
+doi:10.52202/079017-2636
+[14] Georgios E. Fainekos and George J. Pappas. 2009. Robustness of temporal logic
+specifications for continuous-time signals.Theoretical Computer Science410, 42
+(2009), 4262–4291. doi:10.1016/j.tcs.2009.06.021
+[15] Misha Glenny. 2025. Cyber crime is surging. Will AI make it worse? https:
+//www.ft.com/content/d3119d3f-97bd-4ff4-905d-b471a8828beb
+[16] Marc Glocker, Peter Hönig, Matthias Hirschmanner, and Markus Vincze. 2025.
+LLM-Empowered Embodied Agent for Memory-Augmented Task Planning in
+Household Robotics.CoRRabs/2504.21716 (2025). doi:10.48550/arXiv.2504.21716
+[17] Susanne Graf and Hassen Saïdi. 1997. Construction of Abstract State Graphs with
+PVS. InCA V (Lecture Notes in Computer Science). Springer, 72–83. doi:10.1007/3-
+540-63166-6_10
+[18] Hans Hansson and Bengt Jonsson. 1994. A Logic for Reasoning about Time and
+Reliability.Formal Aspects Comput.6, 5 (1994), 512–535. doi:10.1007/BF01211866
+[19] Xu Huang, Weiwen Liu, Xiaolong Chen, Xingmei Wang, Hao Wang, Defu Lian,
+Yasheng Wang, Ruiming Tang, and Enhong Chen. 2024. Understanding the
+planning of LLM agents: A survey.CoRRabs/2402.02716 (2024). doi:10.48550/
+arXiv.2402.02716
+[20] Sebastian Junges, Hazem Torfah, and Sanjit A. Seshia. 2021. Runtime Monitors
+for Markov Decision Processes. InCA V (2) (Lecture Notes in Computer Science).
+Springer, 553–576. doi:10.1007/978-3-030-81688-9_26
+[21] Ken D. Kumayama, Pramode Chiruvolu, and Daniel Weiss. 2025. AI Agents:
+Greater Capabilities and Enhanced Risks. https://www.reuters.com/legal/
+legalindustry/ai-agents-greater-capabilities-enhanced-risks-2025-04-22/
+[22] Marta Z. Kwiatkowska, Gethin Norman, and David Parker. 2011. PRISM 4.0:
+Verification of Probabilistic Real-Time Systems. InCA V (Lecture Notes in Computer
+Science). Springer, 585–591. doi:10.1007/978-3-642-22110-1_47
+[23] LangChain. 2025. LangChain. https://www.langchain.com/langchain Accessed:
+2025-01-14.
+[24] Martin Leucker and Christian Schallhart. 2009. A brief account of runtime
+verification.J. Log. Algebraic Methods Program.78, 5 (2009), 293–303. doi:10.
+1016/j.jlap.2008.08.004
+[25] Xinzhe Li. 2025. A Review of Prominent Paradigms for LLM-Based Agents: Tool
+Use, Planning (Including RAG), and Feedback Learning. InCOLING. Association
+for Computational Linguistics, 9760–9779.
+[26] Percy Liang, Rishi Bommasani, Tony Lee, Dimitris Tsipras, Dilara Soylu, Michi-
+hiro Yasunaga, Yian Zhang, Deepak Narayanan, Yuhuai Wu, Ananya Kumar,
+Benjamin Newman, Binhang Yuan, Bobby Yan, Ce Zhang, Christian Cosgrove,
+Christopher D. Manning, Christopher Ré, Diana Acosta-Navas, Drew A. Hudson,
+Eric Zelikman, Esin Durmus, Faisal Ladhak, Frieda Rong, Hongyu Ren, Huaxiu
+Yao, Jue Wang, Keshav Santhanam, Laurel J. Orr, Lucia Zheng, Mert Yüksekgönül,
+Mirac Suzgun, Nathan Kim, Neel Guha, Niladri S. Chatterji, Omar Khattab, Peter
+Henderson, Qian Huang, Ryan Chi, Sang Michael Xie, Shibani Santurkar, Surya
+Ganguli, Tatsunori Hashimoto, Thomas Icard, Tianyi Zhang, Vishrav Chaudhary,
+William Wang, Xuechen Li, Yifan Mai, Yuhui Zhang, and Yuta Koreeda. 2023.
+Holistic Evaluation of Language Models.Trans. Mach. Learn. Res.2023 (2023).
+[27] Stephanie Lin, Jacob Hilton, and Owain Evans. 2022. TruthfulQA: Measuring How
+Models Mimic Human Falsehoods. InACL (1). Association for Computational
+Linguistics, 3214–3252. doi:10.18653/v1/2022.acl-long.229
+[28] Lars Lindemann, Xin Qin, Jyotirmoy V. Deshmukh, and George J. Pappas. 2023.
+Conformal Prediction for STL Runtime Verification. InProc. ACM/IEEE 14th Int.
+Conf. on Cyber-Physical Systems (ICCPS). doi:10.1145/3576841.3585927
+[29] Xiao Liu, Hao Yu, Hanchen Zhang, Yifan Xu, Xuanyu Lei, Hanyu Lai, Yu Gu,
+Hangliang Ding, Kaiwen Men, Kejuan Yang, Shudan Zhang, Xiang Deng, Aohan
+Zeng, Zhengxiao Du, Chenhui Zhang, Sheng Shen, Tianjun Zhang, Yu Su, Huan
+Sun, Minlie Huang, Yuxiao Dong, and Jie Tang. 2024. AgentBench: Evaluating
+LLMs as Agents. InICLR. OpenReview.net.
+[30] Christopher D. Manning and Hinrich Schütze. 2001.Foundations of statistical
+natural language processing. MIT Press.
+[31] Jon Martindale. 2026. Meta Security Researcher’s AI Agent Accidentally Deleted
+Her Emails. PCMag Online. https://www.pcmag.com/news/meta-security-
+researchers-openclaw-ai-agent-accidentally-deleted-her-emails Accessed: 2026-
+03-11.
+[32] Catie McLeod. 2024. Real estate listing gaffe exposes widespread use of AI in Aus-
+tralian industry – and potential risks. https://www.theguardian.com/australia-
+news/2024/nov/12/real-estate-listing-gaffe-exposes-widespread-use-of-ai-in-
+australian-industry-and-potential-risks Accessed: 2026-03-24.
+[33] Long Ouyang, Jeffrey Wu, Xu Jiang, Diogo Almeida, Carroll L. Wainwright,
+Pamela Mishkin, Chong Zhang, Sandhini Agarwal, Katarina Slama, Alex Ray,
+John Schulman, Jacob Hilton, Fraser Kelton, Luke Miller, Maddie Simens, Amanda
+Askell, Peter Welinder, Paul F. Christiano, Jan Leike, and Ryan Lowe. 2022. Train-
+ing language models to follow instructions with human feedback. InNeurIPS.
+doi:10.52202/068431-2011
+[34] Sean Park. 2025. Unveiling AI Agent Vulnerabilities Part V: Securing LLM
+Services. https://www.trendmicro.com/vinfo/us/security/news/vulnerabilities-
+and-exploits/unveiling-ai-agent-vulnerabilities-part-v-securing-llm-services
+[35] Marco Túlio Ribeiro, Tongshuang Wu, Carlos Guestrin, and Sameer Singh. 2020.
+Beyond Accuracy: Behavioral Testing of NLP Models with CheckList. InACL.
+Association for Computational Linguistics, 4902–4912. doi:10.18653/v1/2020.acl-
+main.442
+[36] Timo Schick, Jane Dwivedi-Yu, Roberto Dessì, Roberta Raileanu, Maria Lomeli,
+Eric Hambro, Luke Zettlemoyer, Nicola Cancedda, and Thomas Scialom. 2023.
+Toolformer: Language Models Can Teach Themselves to Use Tools. InNeurIPS.
+doi:10.52202/075280-2997
+
+[PDF PAGE 13]
+ProbGuard: Proactive Runtime Monitoring for LLM Agent Safety via Probabilistic Prediction ASE ’26, October 12–16, 2026, Munich, Germany
+[37] Noah Shinn, Federico Cassano, Ashwin Gopinath, Karthik Narasimhan, and
+Shunyu Yao. 2023. Reflexion: language agents with verbal reinforcement learning.
+InNeurIPS. doi:10.52202/075280-0377
+[38] Scott D. Stoller, Ezio Bartocci, Justin Seyster, Radu Grosu, Klaus Havelund, Scott A.
+Smolka, and Erez Zadok. 2011. Runtime Verification with State Estimation. In
+RV (Lecture Notes in Computer Science). Springer, 193–207. doi:10.1007/978-3-
+642-29860-8_15
+[39] Yang Sun, Christopher M. Poskitt, Jun Sun, Yuqi Chen, and Zijiang Yang. 2022.
+LawBreaker: An Approach for Specifying Traffic Laws and Fuzzing Autonomous
+Vehicles. InASE. ACM, 62:1–62:12. doi:10.1145/3551349.3556897
+[40] Yang Sun, Christopher M. Poskitt, Xiaodong Zhang, and Jun Sun. 2024. REDriver:
+Runtime Enforcement for Autonomous Vehicles. InICSE. ACM, 176:1–176:12.
+doi:10.1145/3597503.3639151
+[41] Guanzhi Wang, Yuqi Xie, Yunfan Jiang, Ajay Mandlekar, Chaowei Xiao, Yuke Zhu,
+Linxi Fan, and Anima Anandkumar. 2024. Voyager: An Open-Ended Embodied
+Agent with Large Language Models.Trans. Mach. Learn. Res.2024 (2024).
+[42] Haoyu Wang, Christopher M. Poskitt, and Jun Sun. 2026. AgentSpec: Cus-
+tomizable Runtime Enforcement for Safe and Reliable LLM Agents. InProc.
+IEEE/ACM International Conference on Software Engineering (ICSE’26). IEEE.
+https://arxiv.org/abs/2503.18666.
+[43] Haoyu Wang, Christopher M. Poskitt, Jiali Wei, and Jun Sun. 2026.ProbGuard:
+Proactive Runtime Monitoring for LLM Agent Safety via Probabilistic Prediction
+(implementation). https://github.com/haoyuwang99/ProbGuard GitHub reposi-
+tory.
+[44] Kun Wang, Christopher M. Poskitt, Yang Sun, Jun Sun, Jingyi Wang, Peng Cheng,
+and Jiming Chen. 2024. 𝜇Drive: User-Controlled Autonomous Driving.CoRR
+abs/2407.13201 (2024). doi:10.48550/arXiv.2407.13201
+[45] Lei Wang, Chen Ma, Xueyang Feng, Zeyu Zhang, Hao Yang, Jingsen Zhang,
+Zhiyuan Chen, Jiakai Tang, Xu Chen, Yankai Lin, Wayne Xin Zhao, Zhewei Wei,
+and Jirong Wen. 2024. A survey on large language model based autonomous
+agents.Frontiers Comput. Sci.18, 6 (2024), 186345. doi:10.1007/s11704-024-40231-1
+[46] Xingyao Wang, Yangyi Chen, Lifan Yuan, Yizhe Zhang, Yunzhu Li, Hao Peng,
+and Heng Ji. 2024. Executable Code Actions Elicit Better LLM Agents. InICML
+(Proceedings of Machine Learning Research). PMLR / OpenReview.net, 50208–
+50232.
+[47] Lilian Weng. 2023. LLM-Powered Autonomous Agents. https://lilianweng.github.
+io/posts/2023-06-23-agent/. Lil’Log blog. Accessed: 2026-03-24.
+[48] Zhen Xiang, Linzhi Zheng, Yanjie Li, Junyuan Hong, Qinbin Li, Han Xie, Ji-
+awei Zhang, Zidi Xiong, Chulin Xie, Carl Yang, Dawn Song, and Bo Li. 2025.
+GuardAgent: Safeguard LLM Agents via Knowledge-Enabled Reasoning. InICML
+(Proceedings of Machine Learning Research). PMLR / OpenReview.net.
+[49] Shunyu Yao, Jeffrey Zhao, Dian Yu, Nan Du, Izhak Shafran, Karthik R. Narasimhan,
+and Yuan Cao. 2023. ReAct: Synergizing Reasoning and Acting in Language
+Models. InICLR. OpenReview.net.
+[50] Asaf Yehudai, Lilach Eden, Alan Li, Guy Uziel, Yilun Zhao, Roy Bar-Haim, Arman
+Cohan, and Michal Shmueli-Scheuer. 2026. A Survey on Evaluation of LLM-
+based Agents. InACL (Findings). Association for Computational Linguistics,
+26690–26714. doi:10.18653/v1/2026.findings-acl.1330
+[51] Sheng Yin, Xianghe Pang, Yuanzhuo Ding, Menglan Chen, Yutong Bi, Yichen
+Xiong, Wenhao Huang, Zhen Xiang, Jing Shao, and Siheng Chen. 2024. SafeAgent-
+Bench: A Benchmark for Safe Task Planning of Embodied LLM Agents.CoRR
+abs/2412.13178 (2024). doi:10.48550/arXiv.2412.13178
+[52] Yedi Zhang, Yufan Cai, Xinyue Zuo, Xiaokun Luan, Kailong Wang, Zhe Hou,
+Yifan Zhang, Zhiyuan Wei, Meng Sun, Jun Sun, Jing Sun, and Jin Song Dong. 2024.
+The Fusion of Large Language Models and Formal Methods for Trustworthy AI
+Agents: A Roadmap.CoRRabs/2412.06512 (2024). doi:10.48550/arXiv.2412.06512
+[53] Yedi Zhang, Haoyu Wang, Xianglin Yang, Jin Song Dong, and Jun Sun. 2026. LLM-
+enabled Applications Require System-Level Threat Monitoring.CoRR(2026).
+doi:10.48550/arXiv.2602.19844
+[54] Arman Zharmagambetov, Chuan Guo, Ivan Evtimov, Maya Pavlova, Ruslan
+Salakhutdinov, and Kamalika Chaudhuri. 2025. AgentDAM: Privacy Leakage
+Evaluation for Autonomous Web Agents. InNeurIPS.
+A Proof of Theorem 3.4
+We restate the theorem before giving the proof. Throughout, Theo-
+rems 5 and 6 refer to the results of Bazille et al. [7], not to results
+of this paper.
+Theorem 3.4.For any safety property 𝜓 =A 𝜓 𝜋 whose path formula
+𝜓 𝜋 is a reachability or invariant property of the form covered by [ 7],
+confidence𝛿, and error𝜀, Algorithm 1 is(𝜀, 𝛿)-PAC-correct.
+Proof. Let M = (𝑆, 𝑃)be the (unknown) DTMC governing the
+agent’s behavior, and let ˆM = (𝑆, ˆ𝑃 𝛼
+Π )be the DTMC returned by
+Algorithm 1. Fix a property𝜓 =A 𝜓 𝜋 as in the statement, accuracy𝜀,
+and confidence𝛿. Set
+𝛿 ′ = 𝛿
+|𝑆| , 𝜀 ′ = 𝜀
+𝐵( ˆ𝑃 𝛼
+Π )
+.
+Step 1: Transition-probability concentration.For each state 𝑠∈𝑆 ,
+the algorithm maintains the pairwise transition counts 𝑛Π
+𝑠𝑡 and the
+visitation count𝑛 Π
+𝑠 = P
+𝑡 𝑛Π
+𝑠𝑡 . Define the state-wise threshold
+𝐻 ∗(𝑛Π
+𝑠 , 𝜀′, 𝛿′) = max
+𝑡∈𝑆
+𝐻 (𝑛Π
+𝑠 , 𝑛Π
+𝑠𝑡 , 𝜀′, 𝛿′),
+where 𝐻(·)is the transition-wise concentration bound of Theorem 6
+of [7]. By the stopping rule of Algorithm 1, when the algorithm
+terminates,
+𝑛Π
+𝑠 ≥
+ 11
+10 𝐵( ˆ𝑃 𝛼
+Π )
+2
+𝐻 ∗(𝑛Π
+𝑠 , 𝜀′, 𝛿′),∀𝑠∈𝑆 .
+Thus, by Theorem 6 of [7], for each fixed 𝑠, with probability at least
+1−𝛿 ′,
+max
+𝑡∈𝑆
+|𝑃(𝑠, 𝑡)− ˆ𝑃 𝛼
+Π (𝑠, 𝑡)| ≤𝜀 ′.
+Applying a union bound over the |𝑆| source states, and using 𝛿 ′ =
+𝛿/|𝑆|, gives
+Pr
+
+max
+𝑠,𝑡∈𝑆
+|𝑃(𝑠, 𝑡)− ˆ𝑃 𝛼
+Π (𝑠, 𝑡)| ≤𝜀 ′
+
+≥1−𝛿 .(4)
+Step 2: Propagating local error to satisfaction probabilities.By
+Theorem 5 of [7] (reachability sensitivity), for any path property
+𝜓 𝜋 in the fragment covered by that result,
+|PM(𝜓𝜋 )−P ˆM(𝜓𝜋 )| ≤𝐵( ˆ𝑃 𝛼
+Π )·max
+𝑠,𝑡∈𝑆
+|𝑃(𝑠, 𝑡)− ˆ𝑃 𝛼
+Π (𝑠, 𝑡)|.
+The conditioning number is evaluated on the learned chain ˆ𝑃 𝛼
+Π
+rather than on 𝑃; this is what makes the bound checkable at run-
+time, and is admissible because Laplace smoothing keeps every
+semantically valid transition bounded away from zero, so 𝐵( ˆ𝑃 𝛼
+Π )is
+finite and computable from the data the algorithm already main-
+tains.
+Under the good event of Eq. (4),
+max
+𝑠,𝑡
+|𝑃(𝑠, 𝑡)− ˆ𝑃 𝛼
+Π (𝑠, 𝑡)| ≤𝜀 ′ = 𝜀
+𝐵( ˆ𝑃 𝛼
+Π )
+,
+implying
+|PM(𝜓𝜋 )−P ˆM(𝜓𝜋 )| ≤𝐵( ˆ𝑃 𝛼
+Π )𝜀 ′ =𝜀.
+Step 3: PAC guarantee.Combining the above yields
+Pr
+P ˆM(𝜓𝜋 )−P M(𝜓𝜋 )
+ ≤𝜀
+
+≥1−𝛿,
+which is precisely( 𝜀, 𝛿)-PAC correctness (Definition 3.3). Thus Al-
+gorithm 1 is PAC-correct.□

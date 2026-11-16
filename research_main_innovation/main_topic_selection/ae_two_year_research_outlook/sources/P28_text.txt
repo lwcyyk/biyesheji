@@ -1,0 +1,2677 @@
+
+[PDF PAGE 1]
+Protocols and Formal Models for Delegated Authorisation with
+Server-Side Secrecy
+Jean Snyman
+University of Surrey
+Guildford, United Kingdom
+Hewlett Packard Enterprise
+Bristol, United Kingdom
+research@snyman.ca
+Chris Culnane
+Castellate Consulting Ltd
+London, United Kingdom
+University of Melbourne
+Melbourne, Australia
+chris@culnane.org
+Ioana Boureanu
+University of Surrey
+Guildford, United Kingdom
+ib0020@surrey.ac.uk
+Gerault David
+Technology Innovation
+Institute (TII)
+Adu Dhabi, United Arab
+Emirates
+dagerault@gmail.com
+Abstract
+OAuth 2.0 is a well-known protocol suite whereby customers of
+a web service can grant third-party applications access to their
+information (or resources) on said web service, all without handing
+over their long-term credentials. But what if the resources are
+encrypted? Should third parties get rights to decrypt them?
+We propose APEX: an OAuth-grounded suite of protocols
+which systematically augment delegated authorisation to allow re-
+fined third-party access to encrypted resources, while maintaining
+OAuth’s behaviour for any unencrypted resources. We also provide
+an implementation of APEX, showing its seamless integration with
+OAuth.
+On the formal side, we propose a generalisation of APEX (and
+OAuth) into a paradigm which we call restricted authorisation del-
+egation (RAD). RAD is a model that lifts formal treatment from
+protocol to suites; and, it also stipulates the desirable requirements
+that delegated authorisation schemes should attain (including to
+enable access over encrypted resources). We also give a formal,
+cryptographic model that augments existing models in multi-party
+authorisation, authenticated key-exchange and access control.
+Finally, we use this model to prove that APEX formally attains
+all the properties of a restricted authorisation delegation (RAD)
+scheme, and discuss that OAuth 2.0 does not.
+ACM Reference Format:
+Jean Snyman, Chris Culnane, Ioana Boureanu, and Gerault David. 2025.
+Protocols and Formal Models for Delegated Authorisation with Server-Side
+Secrecy. In ACM Asia Conference on Computer and Communications Security
+(ASIA CCS ’25), August 25–29, 2025, Hanoi, Vietnam. ACM, New York, NY,
+USA, 22 pages. https://doi.org/10.1145/3708821.3736217
+1 Introduction
+OAuth 2.0 [25] is a ubiquitous suite of web-based protocols which
+allows one application to borrow the user’s authorisation in an-
+other to gain access to its resources. This happens with the user’s
+approval and at the user’s discretion: we say that the userdelegates
+their authorisation to the first application. Meanwhile, in this realm,
+Permission to make digital or hard copies of all or part of this work for personal or
+classroom use is granted without fee provided that copies are not made or distributed
+for profit or commercial advantage and that copies bear this notice and the full citation
+on the first page. Copyrights for components of this work owned by others than the
+author(s) must be honored. Abstracting with credit is permitted. To copy otherwise, or
+republish, to post on servers or to redistribute to lists, requires prior specific permission
+and/or a fee. Request permissions from permissions@acm.org.
+ASIA CCS ’25, Hanoi, Vietnam
+© 2025 Copyright held by the owner/author(s). Publication rights licensed to ACM.
+ACM ISBN 979-8-4007-1410-8/25/08
+https://doi.org/10.1145/3708821.3736217
+modern protocols are multi-app, multi-device and multi-platform
+(e.g., the Apple [10] and Google [ 36] implementations of FIDO2
+passkeys) and, as such, authorisation flows must also adapt to sup-
+port cross-device scenarios [11, 21] where an action started on one
+device (e.g., accessing a document in a desktop web browser) is
+authorised by software on another (e.g., a mobile app).
+Such user-friendly authorisation and wide interoperability has
+led to vast amounts of user data being entrusted to just a hand-
+ful of multinational corporations. And now, this data has become
+increasingly valuable with the advent of large language models
+(LLMs), such as GPT4 [45], as companies in the race for artificial
+general intelligence (AGI) have strong incentives to use it as part of
+the training of their models. With concerns that training data may
+be partially extracted from trained models [4, 23] and a history of
+provider abuses [6, 19, 34], users may seek to have more agency
+over how their data is used and shared.
+Consequently, we face the following research question (RQ):
+How can we design cloud services so only selected parties are
+given access to a user’s data — all while still preserving modern
+functionalities such as multi-app data access?
+Challenges in Our RQ: Cross-Device, Selective-Access Cloud Storage.
+Challenge 1: Data Portability. One solution is that data is en-
+crypted on the user’s device before being sent to the storage server,
+and the key never leaves the user’s device. Portability between a
+user’s multiple devices (e.g., creating a file from a laptop and reading
+it later from a smartphone) can be handled by allowing end-to-end
+encryption between these devices, as with services such as Proton
+Drive [50] and Tresorit [58]. However, this solution does not permit
+the user to access their data using third-party applications. The
+user would be unable to open a document from their cloud storage
+account in a word processor such as Microsoft Word.
+Challenge 2: Scope of Trust. To give a third-party application
+access to the encrypted data in their cloud storage, a user could
+share their encryption key with the third party. However, scope
+issues arise if the user only wishes to share a subset of the files, or
+share different (possibly overlapping) subsets of files with different
+parties, or when a certain party’s access needs to be revoked. While
+these may be addressed by using multiple keys, a protocol is clearly
+needed to handle the complexities of key management and rotation.
+Such an authorisation management system could be built from
+scratch, but it would be ideal if we could base our solution on an
+established, battle-tested protocol like OAuth 2.0. Unfortunately,
+1372
+
+[PDF PAGE 2]
+ASIA CCS ’25, August 25–29, 2025, Hanoi, Vietnam Jean Snyman, Chris Culnane, Ioana Boureanu, and Gerault David
+OAuth-like protocols are not designed to work on encrypted data
+and are built around the provider as a trusted party, so that extensive
+changes are needed, in particular when dealing with authorised
+key transfers where the provider could act as a man in the middle.
+Challenge 3: Compatibility. The preceding challenges seem to be
+naturally resolved through homomorphic encryption [24] which
+would allow the third party to work on the encrypted data directly.
+However, this would require significant engineering effort by de-
+velopers to make their applications compatible with homomorphic
+encryption, if possible at all. Many forms of data processing require
+access to the plaintext and for others, the performance penalty may
+be unacceptable. Furthermore, homomorphic primitives are not
+included in government standards like FIPS 140-3 [44], preventing
+their use by government entities or contractors.
+Our Contributions.
+(1) A construction, called APEX (§3), which extends OAuth in
+seamless way to allow delegated access to encrypted re-
+source, but remains usable by real-world web developers
+and end users in the modern web ecosystem.
+(2) An implementation of APEX (§4), built using off-the-shelf
+OAuth libraries, thus demonstrating how APEX can easily fit
+into existing OAuth deployments to add server-side secrecy
+while maintaining interoperability.
+(3) The introduction of restricted authorisation delegation (RAD)
+schemes (§5), protocol suites which perform generically the
+enhanced delegated authorisation found in APEX: that is,
+when the data stored on the server is a ciphertext, the dele-
+gated authorisation intentionally applies to the underlying
+plaintext as well.
+(4) A formal cryptographic model (§6), encoding a realistic
+threat model of delegated authorisation protocols, and a
+set of security definitions (§7) reflecting the guarantees we
+expect from RAD schemes, whilst also adhering to a modular
+build-up of security notions.
+(5) Formal proofs (§8) that APEX realises all RAD properties in
+our security model.
+2 The OAuth 2.0 Standard
+Our work is centric to OAuth 2.0 [25], which we summarise next.
+We first introduce some OAuth-related terminology.
+2.1 Authorisation Protocol Terminology
+In authorisation standards like OAuth, it is said that a resource
+owner (typically an end user) delegatesaccess to protected resources,
+hosted on a resource server (the API provider), to a client (the API
+consumer) which will make resource requests on behalf of the
+resource owner.
+By “access” it is meant that the client can perform any action on
+the specific resource, as allowed by the resource server, e.g., create,
+read, update or delete. Additionally, the “client” is often itself a web
+server, which can be confusing. Because of this, we generally prefer
+to use consumer in the rest of the paper.
+S O
+C
+REDIRECT URI
+Service request
+Authorisation code
+UAUA
+ASAS
+Owner credentials
+3
+Authorisation decision
+4
+1
+Consumer ID ; Scope ; Redirect URI
+Access token
+TLS comm.
+TLS context dependent
+Authorisation code
+6
+5
+2
+Part A Part B
+Figure 1: OAuth 2.0 Authorisation Grant Protocol
+RS
+Resource request
+Response
+2
+1
+(Access token)
+TLS comm.
+Figure 2: OAuth 2.0 Resource Access Protocol
+An authorisation server (typically a service provided by the API
+provider) is responsible for authenticating, and obtaining approval
+from, the resource owner and issues to the consumer limited short-
+term credentials that grant appropriate access (in OAuth, this comes
+in the form of an access token).
+In many real-world deployments, the duties of the two servers
+(resource server and authorisation server) are performed by the
+same party, which is allowable under the OAuth specification. And,
+even when distinct entities, both servers are considered trusted
+at the same level. As such, we will often refer to both together as
+simply the server.
+2.2 OAuth 2.0 Phases and Their Functions
+OAuth 2.0 operates in two distinct, and somewhat independent,
+phases which we refer to as: (1) the authorisation grant phase and
+(2) the resource access phase.
+In the authorisation grant phase, a consumer requests authori-
+sation and obtains a secret from the authorisation server. In the
+resource access phase, the consumer uses the secret to authorise
+requests to the resource server. Resource access can be performed
+over and over, without repeating the authorisation grant phase,
+unless the consumer changes the scope of its access, or the authori-
+sation server has revoked access.
+The two phases are performed by the protocols detailed in the
+following two subsections.
+2.3 OAuth 2.0 Authorisation Grant Protocol
+The authorisation grant protocol proceeds according to the follow-
+ing steps, shown in Part A of Figure 1:
+(1) An owner (O) with resources held at an OAuth resource
+server will request a service from an OAuth consumer (C)
+which requires access to resources held at the server.
+1373
+
+[PDF PAGE 3]
+Protocols and Formal Models for Delegated Authorisation with Server-Side Secrecy ASIA CCS ’25, August 25–29, 2025, Hanoi, Vietnam
+TLS usage: When the consumer is a remote server, it is as-
+sumed that this request is sent over TLS.
+(2) The consumer will direct the owner’s user agent (UA), i.e.,
+web browser, to an authorisation endpoint on an authori-
+sation server (AS) trusted by the resource server. With this
+message, the consumer also selects one of its preregistered
+redirect URIs, and includes the scope of the access requested
+(i.e., the actions it wishes to perform). Here the server also
+receives a consumer identifier, but is unable authenticate the
+consumer at this stage.
+(3) The owner authenticates to the server by means of creden-
+tials over TLS, e.g., a password, session cookie, etc. The server
+is authenticated by way of X.509 certificate.
+The protocol continues with Part B:
+(4) If the owner has not previously authorised the consumer for
+the scope of access requested in (2) above, the authorisation
+server presents information about the authorisation request
+to the owner, and the owner is given the opportunity to
+approve it, deny it or limit its scope.
+(5) The server returns a message to the owner’s user agent to
+redirect to the redirect URI received in (2) above but modi-
+fied to encode an authorisation code as a parameter, thereby
+passing this code along to the consumer.
+Interprocess messaging: When the consumer is running on
+the resource owner’s hardware (e.g., as a native application),
+the authorisation code is sent interprocess, typically without
+TLS. An extension to OAuth called PKCE must be used to
+protect the code [54].
+(6) The consumer sends the received authorisation code to the
+server over TLS. The server replies with an access token and
+the scope, if changed from (2).
+Consumer authentication: When running on a remote
+server, in this step, the consumer also authenticates to the
+server by providing pre-registered credentials.
+2.4 OAuth 2.0 Resource Access Protocol
+Execution of this phase proceeds as in Figure 2:
+(1) Over TLS, the consumer (C) makes a request to the resource
+server (RS) to access a resource, presenting the access token
+previously obtained (in step 6 above).
+(2) On valid requests, the server responds as follows: (a) for read
+access, with a message containing the resource; or (b) for
+create/update/delete access, it indicates whether the action
+has been performed (un)successfully.
+2.5 OAuth 2.0 Implementation Assumptions
+OAuth 2.0 is specified [ 25] as a flexible framework with many
+decisions left to the implementer. We assume the following:
+– The authorisation code grant is used over the less secure
+implicit grant, to be deprecated in [41] and removed in the
+draft 2.1 version of the framework [26].
+– The authorisation code is transmitted over TLS unless the
+consumer runs on resource owner hardware per [ 26, 41], in
+which case it may not be so long as PKCE [54] is used.
+– All other communication between the owner’s user agent
+and the consumer takes place over TLS.
+– All communication between the consumer and server takes
+place over TLS.
+– If the consumer does not run on resource owner hardware
+and instead runs on a remote server, the consumer is con-
+sidered to be of type “confidential” and therefore the server
+will authenticate the consumer when an authorisation code
+is exchanged for an access token (per §3.2.1 of [25]).
+– Whenever a redirect is performed, either HTTP code 303
+is used or the navigation is achieved by user agent script,
+thereby eliminating Fett et al. ’s [22] “307 redirect” attack.
+– For consumers which interact with more than one OAuth
+server, when the server redirects back to the consumer, the
+consumer verifies that this redirect originated from the ex-
+pected server tied to the current session (per [26, 41]), elimi-
+nating Fett et al. ’s [22] “naive RP session integrity” attack.
+– In general, all mitigations required by [41] are implemented.
+3 The APEX Framework
+We introduce the Authorisation Protocol Encryption Extension
+(APEX), a framework layering end-to-end encryption (E2EE) on top
+of existing authorisation delegation protocols.
+Note: APEX is suite of protocols that realise cryptographic aims
+(e.g., authorisation) as well as functional aims (e.g., seamless cross-
+device interoperability). To give this mixed domain, we choose not
+to present APEX subroutines in the common “Alice and Bob” nota-
+tion, employing free-form textual explanations and accompanying
+diagrams instead.
+3.1 Foundational Concepts
+APEX re-imagines certain authorisation concepts:
+Agents. In APEX, resources are handled at the owner’s end by
+software agents. These run solely on the resource owner’s hardware
+and perform cryptographic operations on the owner’s behalf. They
+are the only entities permitted to touch the plaintexts of encrypted
+resources.
+There are two kinds of agents: a provider agent and a consumer
+agent, where the former is distributed by the API provider and the
+later by the API consumer. The provider agent has the additional
+responsibility of managing a set of encryption and signing keys
+belonging to the owner.
+As the agents represent an extension of the owner and are trusted
+to handle sensitive data, in the next description of APEX, we treat
+them as part of the owner party.
+Consumers. In OAuth, consumers communicate with the API
+provider and themselves access resources. But in APEX, making
+API calls is a separate role from accessing resources, as decryption
+of resources is not performed by the consumer itself but by the
+consumer agent.
+1374
+
+[PDF PAGE 4]
+ASIA CCS ’25, August 25–29, 2025, Hanoi, Vietnam Jean Snyman, Chris Culnane, Ioana Boureanu, and Gerault David
+The most versatile configuration of APEX is one in which the
+consumer is implemented as server-side software and this is the
+configuration we assume throughout the paper, although others
+are possible, as we discuss in Appendix C.
+3.2 Further Design Considerations
+3.2.1 Functional requirements. From APEX’s operating context
+and envisioned use cases, a number of requirements arise:
+a) Mix of native and web apps: provider and consumer
+agents may be implemented as browser-based applications,
+native applications, or as a mix of both types.
+b) Cross-device flows: flows can start on one device and in-
+voke a provider agent on another.
+c) Multiple agents: a resource owner can have multiple
+provider agents and, for each consumer, multiple consumer
+agents. Decryption and signing keys are syncable across
+agents (the specific mechanism is left unspecified).
+d) Agents with limited connectivity: ideally agents should
+be reachable by the server and consumer at all times, how-
+ever they can also be invoked by other means.
+e) Key and data recovery:it is possible to implement solutions
+for key recovery if one, many or all provider agents and/or
+consumer agents are lost (the specific mechanism being left
+to the implementer).
+f) Data validation: the API provider is able to validate data
+stored by the server, including data the server never sees as
+a result of being encrypted, by moving validation logic into
+the provider agent.
+3.2.2 Non-functional, non-security requirements. Aspects related
+to developer experience were also considered:
+a) Ease of implementation: the framework is straightfor-
+ward for the average web developer to implement using the
+standard library of most languages.
+b) Practical to integrate: easy to add to existing codebases
+which already use an authorisation framework.
+c) Minimised burden on consumers: wherever possible, the
+burden associated with the implementation cost, required ex-
+pertise and the consequences of negligence has been placed
+with the API provider over the API consumer.
+d) Lightweight: the cryptography employed is commonplace
+for efficiency and ease of implementation
+3.3 Trust Assumptions and Threat Model
+3.3.1 Trust assumptions. APEX is mainly concerned with ensuring
+the secrecy of resources according to their owner’s will; to this end,
+resource owners consider:
+– servers: untrusted (assumed malicious)
+– consumers: semi-trusted (assumed honest-but-curious)
+– agents: trusted
+However, the trust afforded is not absolute: consumers and con-
+sumer agents are only trusted for the resources and actions on those
+resources for which they have been granted access by the owner
+for so long as that access is valid.
+3.3.2 Informal threat model. The outcome of these trust assump-
+tions is a service and an API which protect the secrecy of resources
+from unintentional errors and even intentional subversion on the
+part of the API provider in the administration of their server in-
+frastructure. Resource secrecy is also ensured against simple data
+leaks which affect the API consumer (e.g., SQL injection could cause
+exposure of a resource ciphertext persisted by the consumer but
+not the associated plaintext).
+Note: Our threat model is as strong as is possible cryptograph-
+ically without being at odds with our other requirements. Most
+notably, as the entire set of trusted consumer agents cannot be
+known by the API provider ahead of time, long-held keys are kept
+by the consumer which neccitates honest-but-curious corruption.
+3.4 Construction
+A developer implementing APEX may select the protocols (e.g.,
+OAuth vs. other delegated-authorisation protocols) and crypto-
+graphic algorithms of their choice, specifically:
+3.4.1 Delegated authorisation protocols. APEX works by enforc-
+ing access policies via the provider agents. However, most web
+services will also wish to enforce access policy on the server. As
+this is a solved problem, APEX can be composed with any dele-
+gated authorisation protocol suite which provides the following
+two protocols:1
+a) Server-mediated authorisation grant protocol:
+SMAG(𝐴𝑆, 𝐶, 𝑂, 𝑠𝑐𝑜𝑝𝑒 ) — a protocol for a consumer 𝐶 to
+request, from an authorisation server 𝐴𝑆, permission to per-
+form certain actions (indicated by 𝑠𝑐𝑜𝑝𝑒 ) on resources of a
+resource owner 𝑂, kept on a resource server 𝑅𝑆 that uses 𝐴𝑆
+as its authorisation server; 𝑅𝑆 may equal 𝐴𝑆.
+Precondition: 𝑂 and 𝐶 are registered with 𝐴𝑆.
+Postcondition: 𝐶 has authorisation to perform the actions
+approved by the 𝐴𝑆 and indicated by 𝑠𝑐𝑜𝑝𝑒 ∗ which may or
+may not equal 𝑠𝑐𝑜𝑝𝑒 .
+b) Resource access protocol:
+RA(𝑅𝑆, 𝐶, 𝑟𝑒𝑞𝑢𝑒𝑠𝑡 ) — a protocol for a consumer 𝐶 to request
+that a resource server 𝑅𝑆 perform an action on a resource as
+encoded in 𝑟𝑒𝑞𝑢𝑒𝑠𝑡 using authorisation granted prior by an
+authorisation server 𝐴𝑆.
+Preconditions: (i) 𝐴𝑆 is trusted by 𝑅𝑆; (ii) an execution of
+SMAG(𝐴𝑆, 𝐶, 𝑂, 𝑠𝑐𝑜𝑝𝑒 ) has succeeded with 𝐶 approved for
+a level of access indicated by𝑠𝑐𝑜𝑝𝑒 ∗; (iii) 𝐴𝑆 has not revoked
+the authorisation of 𝐶; and (iv) 𝐶 is authorised for the action
+indicated by 𝑟𝑒𝑞𝑢𝑒𝑠𝑡 on the resource as per 𝑠𝑐𝑜𝑝𝑒 ∗.
+Postcondition: 𝑟𝑒𝑞𝑢𝑒𝑠𝑡 is carried out by 𝑅𝑆.
+3.4.2 Cryptographic algorithms. APEX requires four different cryp-
+tographic schemes:
+a) a symmetric encryption scheme Sym, consisting of three
+PPT (probabilistic polynomial time) algorithms (SGen, SEnc,
+SDec);
+b) an asymmetric encryption scheme Asym, consisting of
+three PPT algorithms (AGen, AEnc, ADec);
+c) a digital signature scheme Sig, consisting of three PPT
+algorithms (SigGen, Sign, SigVrfy); and
+1For example, various instantiations of OAuth 2.0, GNAP [52], etc.
+1375
+
+[PDF PAGE 5]
+Protocols and Formal Models for Delegated Authorisation with Server-Side Secrecy ASIA CCS ’25, August 25–29, 2025, Hanoi, Vietnam
+S O
+ASAS
+PA
+C
+Service request
+One-time code (OTC)
+1
+Server-mediated authorisation grant protocol—part A2
+PA
+OTC
+Public key URI ; Common secret (Q) ; Scope ; Misc. info3
+4
+O.spk ; O.epk ; q = MacOTC(Q)
+MacOTC(O.spk || O.epk)
+5
+C.spk ; MacOTC(C.spk)
+C.spk ; SignO.ssk(C.spk)
+6
+7
+Server-mediated authorisation grant protocol—part B8
+PUB KEY URI
+TLS comm.
+Figure 3: APEX Dual-Mediated Authorisation Grant
+d) a message authentication code scheme MAC, consisting
+of three PPT algorithms (MacGen, Mac, MacVrfy).
+Note: Following intuition and convention, “ XGen” stands for
+generation of parameters for a scheme “X” , “XVrfy” stands for the
+verification part of a scheme “X”, etc., where for “X” we use standard
+cryptographic schemes Sig for signature, Mac for mac-ing, etc.
+3.5 APEX Authorisation Grant Protocol
+The OAuth 2.0 authorisation grant protocol (§2.3) allows a resource
+owner to authorise a consumer of their choice to access a subset of
+their resources. In APEX, that authorisation also needs to include
+encryption and decryption of those resources via a provider agent
+trusted by the owner. However, without a central trusted authority,
+the consumer cannot itself discover which provider agents belong
+to the owner.
+APEX instead uses the untrusted server to establish the initial
+contact with an agent. To enable the provider agent receiving the
+request and the consumer initiating the flow to authenticate one
+another, the identity of each gets bound to a one-time code (OTC)
+for the duration of the session.
+This is the basis of the APEX dual-mediated authorisation grant
+protocol, shown in Figure 3. The protocol proceeds according to the
+following steps in which all network communication is over TLS:
+(1) A resource owner (O) requests a service from a consumer (C)
+which requires access to the owner’s resources held by a
+server (S). The consumer selects a one-time code (OTC) cho-
+sen at random.
+A request ID (𝑞) is derived from the OTC by calculating a
+message authenticate code (MAC) of a common value (𝑄)
+pre-shared between the server and consumer. This is used to
+store the OTC and the future time at which it expires under
+a known identifier for later retrieval.
+The consumer displays the OTC to the owner.
+(2) The owner, consumer and server initiate a run of the server-
+mediated authorisation grant protocol ( SMAG) to request
+access to a certain scope, pausing on the achievement of
+owner–server authentication.
+(3) The server contacts one of the owner’s provider agents (PA)
+and sends the consumer’s public key URI , which the con-
+sumer has previously registered with the server.
+If the owner has not previously authorised the consumer
+for the scope of access requested in (2) above, the provider
+agent presents information about the authorisation request
+to the owner, including the domain name of the consumer
+extracted from the public key URI. The owner approves,
+denies or limits the scope of the authorisation request.
+(4) The agent prompts the owner for the OTC from (1).
+(5) The provider agent derives the request ID (q) from the OTC
+in the same way as in (1). It then calculates a MAC of the
+owners’s public signature verification and encryption keys
+(𝑂 .𝑠𝑝𝑘 and 𝑂 .𝑒𝑝𝑘), using the OTC.
+The agent sends all of this to the consumer’s public key URI
+together with the aforementioned public keys.
+(6) The consumer looks up the OTC from the request ID and
+uses this to verify the owner’s public keys against the MAC.
+If verification succeeds, the consumer returns its public sig-
+nature verification key (𝐶.𝑠𝑝𝑘 ) and a new MAC calculated
+over the key.
+(7) The provider agent verifies the received public key against
+the MAC and OTC. If successful, the agent signs the public
+key with the owner’s secret signing key (𝑂 .𝑠𝑠𝑘) and sends
+it to the server. The server persists the consumer’s public
+key and the signature so that other provider agents can later
+obtain it if needed.
+(8) The provider agent passes back control to the server and
+the run of the server-mediated authorisation grant protocol
+(SMAG) is resumed and continued until completion, ending
+with the owner redirected to the consumer.
+On successful conclusion of the protocol, the consumer is au-
+thorised to invoke the owner’s provider agents to perform certain
+tasks. The consumer and set of agents also now have an established
+relationship for future secure communication.
+3.5.1 On the Usability of One-Time Codes. In the above procedure,
+the resource owner is expected to ferry across the one-time code
+(OTC) from the consumer to the provider agent. If the page or win-
+dow in which the OTC is first displayed to the owner closes, the
+owner will need to write the code down or momentarily commit
+it to memory. So, it recommended that the consumer initiate the
+server-mediated authorisation grant protocol in step 2 in a separate
+window. This permits visibility of the OTC while the owner inter-
+acts with the provider agent, even when both consumer and agent
+are being accessed on a single device. For flows initiated from a
+non-windowed device such as a mobile phone, the consumer may
+deliver the OTC in a domain-bound SMS text message [ 2, 35], to
+allow system-autofill into the provider agent on user consent.
+3.5.2 Cross-Device Flows. On redirect to the server (step 2), the
+server may elect to transfer control to a provider agent on a second
+device. Once this happens, the server may redirect back to the con-
+sumer immediately, performing step 8 without waiting for approval
+1376
+
+[PDF PAGE 6]
+ASIA CCS ’25, August 25–29, 2025, Hanoi, Vietnam Jean Snyman, Chris Culnane, Ioana Boureanu, and Gerault David
+S OC
+rid
+wak = AEncO.epk(ak )
+wr = SEncak(r* )
+CACA
+RSRSRS
+Authorisation proof
+rid ; wak ; wr
+Save promise
+Resource access protocol
+Resource access protocol
+Promise fulfilment protocol5
+1
+2
+3
+4
+Save promise
+σreq = SignC.ssk(O || rid || wak || wr )
+TLS comm.
+Figure 4: APEX Resource Registration
+of the authorisation request (steps 3-7). Any tokens received (like
+the OAuth authorisation code) should be invalid until the server
+receives the consumer key in step 7. For a better experience during
+cross-device flows, a QR code embedding the OTP may be shown
+alongside the textual version. When the flow starts on a mobile
+device, the role of consumer and provider agent in generating the
+OTP may be reversed to utilise the initiating device’s camera.
+3.5.3 Safeguards Against Consumer Impersonation. The OTC en-
+sures that the owner and agent approve the expected consumer and
+not another substituted by the server in step 3. However, this does
+not prevent consumer impersonation attacks in which the owner
+is tricked into contacting the wrong consumer from the start (in
+step 1). As a partial mitigation, the domain name of the consumer
+is displayed to the owner in step 3 and the consumer public key is
+obtained strictly from that domain.
+3.6 APEX Resource Registration Protocol
+The APEX resource registration protocol allows a consumer to use
+the authorisation it has been granted to create new resources or
+update existing resources on behalf of a resource owner. It is initi-
+ated by a consumer agent, authenticated to the consumer by some
+application-specific means, which has a resource plaintext it wishes
+to store on the server. The protocol proceeds as follows according
+to Figure 4, wherein all communication is over TLS:
+(1) The consumer agent (CA) generates a random agent key (𝑎𝑘)
+and encrypts the resource using this key to obtain a wrapped
+resource (𝑤𝑟 ). The agent key itself is encrypted with the
+resource owner’s public key, the result of which is referred
+to as the wrapped agent key (𝑤𝑎𝑘 ). The two wrapped keys
+are sent to the consumer (C).
+If the consumer agent wishes to update an existing resource,
+it also sends the identifier of the resource (𝑟𝑖𝑑 ).
+(2) The consumer signs the received data with its secret key and
+submits the result (𝜎req) along with the wrapped resource
+and agent key to the server (S), providing the proof of autho-
+risation required by the resource access protocol RA (when
+OAuth 2.0 is used, an access token is provided as this proof).
+S OC
+CACA
+RSRS
+Authorisation proof ; rid
+σRK = SignO.ssk(rid ||RK )
+σR = SignO.ssk(rid ||R)
+rid ; RK ; R ; σRK ; σR
+wak  = AEncO.epk(ak )
+Authorisation proof
+rid ; RK ; wak ; σRK
+σreq = SignC.ssk(rid || RK || wak )
+CA
+RS
+Rewrapping promise
+Promise fulfilment protocol8
+Rewrapping promise
+Resource access protocol
+Resource access protocol
+Resource access protocol
+2
+3
+4
+1
+5
+6
+7
+RK = AEncO.epk(rk ) ; R = SEncrk(r )
+TLS comm.
+Figure 5: APEX Resource Retrieval
+(3) The server checks the proof of authorisation and responds
+with a unique ID representing a save promise, i.e., the server
+has not yet saved the resource, but will do so if certain re-
+quirements are met.
+(4) The consumer delivers the save promise ID to the CA.
+(5) The consumer agent fulfils the save promise with the help
+of the server and a provider agent. Refer to §3.8.
+In a typical web service without encrypted resources, you might
+expect the protocol to end at step 2 with a reply indicating that
+the resource was saved successfully. However, the APEX encrypted
+resource first needs to be decrypted, checked for validity and signed
+by a provider agent. This is achieved by performing the promise
+fulfilment process (§3.8).
+At the conclusion of promise fulfilment, the server will have
+stored ciphertexts 𝑅 and 𝑅𝐾 where the former is the encrypted
+resource and the later is its wrapped resource key. Alongside these,
+signatures 𝜎𝑅 and 𝜎𝑅𝐾 are also stored.
+3.7 APEX Resource Retrieval Protocol
+The APEX resource retrieval protocol allows a consumer to use the
+authorisation it has been granted to read resource plaintexts. It is
+initiated by a consumer that wishes to retrieve a resource from the
+server and, if encrypted, to employ a consumer agent and provider
+agent to decrypt it. The protocol proceeds as follows according to
+Figure 5, wherein all communication is over TLS:
+(1) The consumer (C) requests an encrypted resource identified
+by 𝑟𝑖𝑑 from the server (S) using the resource access protocol
+RA.
+(2) The server checks the proof of authorisation and replies with
+the encrypted resource (𝑅), its wrapped resource key (𝑅𝐾) and
+signature on both of these (𝜎𝑅 and 𝜎𝑅𝐾 ).
+1377
+
+[PDF PAGE 7]
+Protocols and Formal Models for Delegated Authorisation with Server-Side Secrecy ASIA CCS ’25, August 25–29, 2025, Hanoi, Vietnam
+(3) The consumer submits these to a consumer agent (CA), run-
+ning on resource owner hardware and authenticated to the
+consumer, to retrieve a new wrapped agent key.
+(4) The consumer agent generates a wrapped agent key (𝑤𝑎𝑘 )
+by choosing an agent key (𝑎𝑘) at random and encrypting it
+with the resource owner’s public key. The wrapped agent
+key is returned to the consumer.
+(5) To decrypt the resource, the consumer initiates the key
+rewrapping process. The consumer signs the wrapped re-
+source key together with the wrapped agent key and submits
+everything to the server’skey rewrapping endpoint providing
+the authorisation proof required by RA.
+(6) The server checks the proof of authorisation and responds
+with a unique ID representing arewrapping promise. The con-
+sumer agent can subsequently use this to have the resource
+key rewrapped with the agent key it chose previously.
+(7) The consumer delivers the rewrapping promise ID to the
+consumer agent.
+(8) The consumer agent fulfils the promise with the help of the
+server and a provider agent. Refer to §3.8.
+If regular OAuth were being used, the consumer would receive
+the plaintext resource immediately in step 2. In APEX, the server
+responds instead with an encrypted resource and key. As the key
+is itself encrypted with the owner’s private key, the consumer can
+submit that to be decrypted by a provider agent. The process by
+which this happens (promise fulfilment) supports sending the key
+in a URI query string which may be length constrained and could
+be delivered over an insecure channel. It is for this reason that the
+resource itself is not sent alongside the key and why an ephemeral
+key (𝑎𝑘) is chosen by the agent: it protects the newly-decrypted
+key on its way back from the provider agent.
+At the conclusion of promise fulfilment, the consumer agent
+receives a rewrapped resource key (𝑟𝑤𝑟𝑘 ) which it can decrypt using
+the 𝑎𝑘 chosen in step 4. The result is the resource key (𝑟𝑘 ) which
+can in turn be used to decrypt 𝑅 and obtain the plaintext resource.
+3.8 APEX Promise Fulfilment & Resource
+Deletion Protocols
+The APEX registration, retrieval and deletion protocols all result
+in, or can result in, the creation of a promise stored on the resource
+server. A promise represents a request that has been received by
+the server but can only be processed with the assistance of the
+provider agent and has yet to actually be processed, akin to promises
+in programming languages such as JavaScript [15]. Promises are
+uniquely identifiable with a cryptographically random string ID
+which can later be submitted to obtain the results of the processing.
+This is referred to as fulfilling the promise.
+Due to lesser significance, we present resource deletion in Ap-
+pendix A and promise fulfilment in Appendix B.
+4 Implementation
+To validate APEX as practical for use in the real world, we have
+developed a demo implementation. Our aims are:
+(1) show the protocols are implementable in the web context,
+with all its unique runtime and security characteristics;
+(2) demonstrate the framework’s flexibility for use within web
+and native apps and in single- and cross-device scenarios;
+(3) establish that the framework can be applied in a typical
+programming environment with off-the-shelf libraries;
+(4) prove that APEX can be layered overtop of an existing OAuth
+implementation; and
+(5) obtain empirical measurements of APEX’s performance char-
+acteristics relative to OAuth.
+The demo implementation and its source code is available at [1].
+4.1 Demonstrated Use Case. Our demonstration implements an
+integration between a cloud storage service (calledCloud Drive) and
+a web-based notes application (Cloud Notes). These communicate
+via REST API, with OAuth used for server-mediated authorisation.
+This enables notes to be saved in a user’s cloud storage account.
+Optionally, the user may elect to protect a note with end-to-end
+encryption (E2EE). In this case, APEX is used to add server-side
+secrecy and JavaScript-based consumer and provider agents handle
+the encryption/decryption in browser on behalf of the user.
+We also provide a mobile application (Cloud Drive Mobile) which
+can be used in place of the in-browser provider agent. This allows
+the user to keep their encryption keys on their Android device,
+protected by the hardware-backed Android Keystore [ 12]. After
+logging into their Cloud Drive account on the mobile app, it be-
+comes the default provider agent. Subsequent promises are sent to
+the app for handling via push notification.
+4.2 Technologies Used. The web service backends have been writ-
+ten in Python and use Flask [47] as the web framework. Front-end
+UI is built with JavaScript, HTML and CSS using the Materialize [59]
+and Bulma [57] CSS frameworks. The mobile app is rendered in a
+WebView [13] and makes calls to Android system APIs using the
+Capacitor cross-platform development framework [29].
+The Cloud Drive service acts as an OAuth 2.0 authorisa-
+tion/resource server by way of the Authlib [ 60] Python library,
+and the Requests-OAuthlib [51] library is used by the Cloud Notes
+app to interface with the server.
+4.3 Limitations. The user’s keys are stored in the browser’s local-
+Storage [14] but isolated to the provider agent by way of the same
+origin policy [16] (the agent is served from a separate origin than
+the rest of the Cloud Drive service). The mobile implementation of
+the provider agent has its own set of keys. This means that notes
+created with one agent cannot be accessed by another. In a true
+implementation, the API provider would need to provide a mecha-
+nism for syncing the keys between agents, or derive the keys from
+the user’s password using a key derivation function.
+Additionally, we did not utilise the APEX feature which allows
+the provider agent to implement custom logic to validate a resource
+before it is accepted for storage, as this is of limited benefit to a
+simple file store.
+4.4 Performance. To compare the performance of APEX against
+plain OAuth, we measured the duration to complete several register
+and retrieve operations2. For this, we repeatedly saved and opened
+2We give no figures for the initial authorisation as the authorisation grant phase
+depends on user interaction and is generally undertaken once per user.
+1378
+
+[PDF PAGE 8]
+ASIA CCS ’25, August 25–29, 2025, Hanoi, Vietnam Jean Snyman, Chris Culnane, Ioana Boureanu, and Gerault David
+an encrypted and unencrypted note. In the former case, we did this
+first using only the browser-based agents and then again using the
+mobile app.
+We performed this test twice: over a fibre-to-the-premises (FTTP)
+connection (900 mbps, symmetric) and over a 5G connection in an
+area with poor cellular connectivity. The Cloud Drive and Cloud
+Notes apps were hosted on the same sever in the London AWS
+region. Each operation was performed 10 times per connection.
+The results of these tests are given in Table 1, including com-
+bined averages across both connection types. We found a 9.03:1
+APEX:OAuth ratio across all registration operations and a 10.77:1
+ratio across all retrieval operations.
+The 10x penalty is attributable to several factors: (1) connection
+speed, (2) the use of the provider and server to proxy messages be-
+tween agents, (3) cryptographic overheads, and (4) rendering agent
+UI during each operation rather than using background processes.
+4.5 Technical Challenges. Within the web apps, we decided to serve
+the agents from their own origin. This limits options for communi-
+cation between the agents and the provider and consumer. We facil-
+itate this through the use of iframes and window.postMessage() [17].
+Embedding a script within the page would be more seamless with
+the trade-off of reduced isolation.
+Additionally, the Android OS restricts background communica-
+tion when the system is in a low-power sleep state. Apps can be
+awaken by high-priority push notification, but this requires user
+interaction to ensure consistent behaviour.
+5 Generalising APEX: The Restricted
+Authorisation Delegation (RAD) Scheme
+One could lift APEX to a higher level of abstraction and give a
+generic delegated authentication construction. We give that con-
+struction next and call it a restricted authorisation delegation (RAD) .
+Its purpose is to offer delegated authorisation whereby a resource
+owner can further restrict access to its resources (even to the server
+itself), while also allowing them to delegate limited authorisation
+to certain parties at their discretion.
+RAD vs. APEX. APEX and OAuth are specific web-based dele-
+gated authentication protocol suites (i.e., with specific web flows
+and cryptographic primitives). However, a RAD scheme is black-box
+or a functionality-like mechanism, with no specific implementation-
+level detail mandated. In other words, APEX and OAuth are in-
+stances of the RAD scheme, and there would be other such in-
+stances; some will fulfil all RAD requirements, realising it fully,
+some may be imperfect instantiations in that sense. We formalise
+a RAD scheme below.
+RAD scheme. A restricted authorisation delegation (RAD) scheme
+consists of four probabilistic polynomial time (PPT) algorithms
+(DMAG, RReg, RRet, RDel), each of which executes a protocol with
+a specific function. The algorithms in the RAD scheme are run by
+interactive Turing machines (ITM) [43], which we call parties: an
+authorisation server 𝐴𝑆, a resource server 𝑅𝑆 (where 𝐴𝑆 and 𝑅𝑆
+may be the same party), a resource owner 𝑂, and an API consumer
+OAuth 2.0 OAuth 2.0 + APEX
+Fully in browser Cross device
+Registration
+Fibre (a) 34.41ms [0.46] 235.23ms [9.24] 287.14ms [16.47]
+5G (a) 91.77ms [22.48]980.54ms [53.99] 775.20ms [73.21]
+Combined (b)63.09ms [32.79]607.89ms [374.66] 531.17ms [249.73]
+Retrieval
+Fibre (a) 33.86ms [1.67] 282.05ms [13.13] 359.05ms [32.49]
+5G (a) 84.78ms [22.47]1,012.82ms [102.89] 901.30ms [197.18]
+Combined (b)59.32ms [30.03]647.44ms [372.67] 630.18ms [305.74]
+Results shown are the mean across several operations (𝑛) with the
+standard deviation given in brackets. a. 𝑛 = 10 b. 𝑛 = 20
+Table 1: Performance of APEX vs. OAuth 2.0
+in Our Proof of Concept Implementation
+(which may be a server or an application running on an end-user
+device). The RAD algorithms3, run by these parties, are as follows:
+(1) Dual-mediated authorisation grant algorithm:
+DMAG(𝐴𝑆, 𝐶, 𝑂, 𝑠𝑐𝑜𝑝𝑒 ) — implements a request to a regis-
+tered resource owner𝑂 to delegate its authorisation to create,
+read, update and/or delete resources indicated by 𝑠𝑐𝑜𝑝𝑒 and
+stored at a server 𝑅𝑆 to consumer 𝐶; the resource owner 𝑂
+may approve/deny/limit the request.
+Postcondition: 𝐶 can authenticate and authorise requests
+to 𝑅𝑆 and 𝑂 which are allowable by the approved 𝑠𝑐𝑜𝑝𝑒 ∗
+which may or may not equal the requested 𝑠𝑐𝑜𝑝𝑒 .
+(2) Resource registration algorithm:
+RReg(𝑅𝑆, 𝐶, 𝑂, 𝑟, 𝑟𝑖𝑑 ) — implements a request to a server 𝑅𝑆
+to register a resource on behalf of a consumer 𝐶. It requires
+prior approval from the owner𝑂, or from the software acting
+on behalf of 𝑂, for the specific resource plaintext 𝑟. If a
+resource identifier 𝑟𝑖𝑑 is given, an update of the existing
+resource stored at 𝑆 under 𝑟𝑖𝑑 will be attempted. If not, 𝑅𝑆
+and 𝑂 will (try to) create a new resource.
+Precondition: An execution of DMAG(𝐴𝑆, 𝐶, 𝑂, 𝑠𝑐𝑜𝑝𝑒 ) has
+completed successfully with the authorisation server 𝐴𝑆
+used by 𝑅𝑆, resulting in𝐶 being approved for a𝑠𝑐𝑜𝑝𝑒 ∗ which
+includes the resource 𝑟 identified by 𝑟𝑖𝑑 .
+Postcondition: 𝑟, or a value derived from 𝑟 by way of a
+reversible operation, is registered at 𝑅𝑆 as belonging to 𝑂
+under 𝑟𝑖𝑑 ∗ which may or may not equal 𝑟𝑖𝑑 .
+(3) Resource retrieval algorithm:
+RRet(𝑅𝑆, 𝐶, 𝑂, 𝑟𝑖𝑑 ) — implements a request to a server 𝑅𝑆 to
+return a resource 𝑟 identified by 𝑟𝑖𝑑 to a consumer 𝐶. There
+may be intermediate processing by owner𝑂, or by a software
+acting on behalf of 𝑂, if required for the specific resource.
+Precondition: Same as above.
+Postcondition: 𝐶, or software deployed by 𝐶 on hardware
+under the control of 𝑂, has obtained 𝑟.
+(4) Resource deletion algorithm:
+3We describe these algorithms just in intuitive terminology, without formalising mat-
+ters irrelevant to our formal model, e.g., resources’ storage.
+1379
+
+[PDF PAGE 9]
+Protocols and Formal Models for Delegated Authorisation with Server-Side Secrecy ASIA CCS ’25, August 25–29, 2025, Hanoi, Vietnam
+RDel(𝑅𝑆, 𝐶, 𝑂, 𝑟𝑖𝑑 ) — implements a request to a server 𝑅𝑆
+on behalf of a consumer 𝐶 to delete a resource 𝑟 identified
+by 𝑟𝑖𝑑 . Approval from owner 𝑂 may be required.
+Precondition: Same as above.
+Postcondition: 𝑟 is no longer registered at 𝑅𝑆.
+6 A Formal Model for RAD
+Our formalism for RAD is given in the style of Bellare-Rogaway
+formalisms [5] (i.e., session-based, with notions of partnering and
+freshness). On top, we give game-based security definitions in line
+with the latest trend for OAuth [40].
+Note: As per usual, all our measures of probability and time
+complexity are asymptotic in a security parameter 𝑠.
+6.1 Parties. The set of RAD-suite parties 𝒫, or simply parties, is
+partitioned into three subsets: servers 𝒮, consumers 𝒞 and resource
+owners 𝒪. Variables 𝑛𝒫, 𝑛𝒮, 𝑛𝒞 and 𝑛𝒪 represent the number of
+parties, servers, consumers and owners.
+Each owner is linked to a server: i.e., each 𝑂 ∈ 𝒪 is in fact 𝑂𝑆
+where 𝑆 ∈ 𝒮. This follows real life: one user may have accounts
+with different storage providers (e.g., Google Drive and Dropbox)
+but would have different credentials for each, and so would appear
+to the providers as separate owners.
+Consumers do not operate in the same way: one consumer can
+potentially communicate with multiple servers and might share
+authentication credentials between them, or not.
+Attributes common to all parties. Each party 𝑃 ∈ 𝒫 is a
+stateful PPT algorithm, with the following attributes:
+– the party’s resource encryption secret and public keys ,
+𝑃 .esk and 𝑃 .epk; set to ⊥ if 𝑃 ∈ 𝒮;
+– a map of other parties’ public encryption keys, 𝑃 .epk′,
+which the party has knowledge of and which contains pairs
+(𝑄, 𝑒𝑝𝑘 𝑄 ) where 𝑄 ∈ 𝒫 and 𝑒𝑝𝑘 𝑄 is the public key for 𝑄
+obtained by 𝑃;
+– the party’s signing secret and public keys , 𝑃 .ssk and
+𝑃 .spk; set to ⊥ if 𝑃 ∈ 𝒮;
+– a list of credentials, 𝑃 .authz, containing tuples (𝐴, 𝐵, cred,
+from, until, scope, aux), as follows:
+(1) 𝐴 is the party at which actions are authorised; (2) 𝐵 is the
+party for which actions are authorised on behalf of, which
+may be set to ⊥; (3) cred is the credential used to prove
+authorisation and could be a shared secret, a secret signing
+key, or something else; (4) from is an immutable timestamp
+representing the moment the credential was first usable by
+𝑃; (5) until is a timestamp representing the moment the
+credential is no longer valid and can only be set to a future
+time, the current time to expire it right away or ⊥ to make
+it valid indefinitely; (6) scope is a value which encodes what
+actions the credential is valid for; and (7)aux is any auxiliary
+data about the credential.
+– a list of verifiers, 𝑃 .authz′, containing tuples (𝐴, 𝐵, vrfr,
+from, until, scope, aux), as follows:
+(1) 𝐴 is the party whose actions are authorised at 𝑃; (2) 𝐵,
+from, until, scope and aux are the same as for 𝑃 .authz above;
+and (3) vrfr is the verifier confirming a valid proof of au-
+thorisation was presented, i.e., a shared secret, a signature
+verification key, or something else.
+If 𝑃 .authz or 𝑃 .authz′ has an entry where 𝑠𝑐𝑜𝑝𝑒 = ⊥, that cre-
+dential/verifier does not authorise actions on resources. Instead, it
+is used for authentication only.
+Server attributes. Each server party 𝑆 ∈ 𝒮 also keeps:
+– a list of registered resources , 𝑆 .res, containing tuples
+(𝑂, 𝑟𝑖𝑑, 𝑅 ) where 𝑂 ∈ 𝒪, 𝑟𝑖𝑑 is a unique resource identi-
+fier, and 𝑅 is the raw resource data stored by 𝑆.
+For encrypted resources, 𝑅 is the ciphertext associated with a plain-
+text 𝑟 plus any auxiliary data required by the protocol suite. For
+unencrypted resources, 𝑅 is the resource plaintext.
+Owner attributes. Each owner party 𝑂 ∈ 𝒪 sets:
+– a list of cached resources, 𝑂 .cache, for which 𝑂 has knowl-
+edge of the plaintext, containing tuples (𝑅, 𝑟) where 𝑅 is the
+encrypted resource and 𝑟 is its plaintext; and
+– the server, 𝑂 .srv ∈ 𝒮, at which the owner is registered.
+6.2 Executing Parties Over Phases. The executions of the algorithms
+in a RAD scheme form the phases: authorisation grant, resource
+registration, resource retrieval and resource deletion. Each RAD
+party may be running one or several phases, at one given point. An
+execution of one phase by a party is referred to as a phase instance
+(or simply instance), dubbed 𝜋𝑖
+𝑃 : 𝑃 is the executing party and𝑖 refers
+to the 𝑖th execution over all phase instances of the party 𝑃. We use
+𝑃 .𝑛𝜋 for the total number of instances for𝑃 and, generally, we write
+𝑖 ∈ [ 1, 𝑃 .𝑛𝜋 ] for an instance 𝑖.
+Instance attributes are:
+– the phase type, 𝜋𝑖
+𝑃 .type, fixed to one of{“auth”, “reg”, “ret”,
+“del”} indicating the specific phase the instance has been
+executing;
+– the status, 𝜋𝑖
+𝑃 .status, set to “active” if the instance is still
+executing, “success” or “fail” after it terminated in a suc-
+cess/error state;
+– the start time, 𝜋𝑖
+𝑃 .start, at which 𝜋𝑖
+𝑃 ’s execution began;
+– the end time, 𝜋𝑖
+𝑃 .end, at which 𝜋𝑖
+𝑃 ’s execution stopped;
+– the credential index, 𝜋𝑖
+𝑃 .authzid, set to the index of the list
+item added to 𝑃 .authz by the phase instance, if any;
+– the verifier index, 𝜋𝑖
+𝑃 .authzid′, set to the index of the list
+item added to 𝑃 .authz′ by the phase instance, if any;
+– a list of authorisation proofs, 𝜋𝑖
+𝑃 .proof↔, sent or received
+in the phase instance to either authorise a request or allow
+verification of a request’s authorisation, where each proof
+could be a shared secret, a signature, etc.
+– the list of resources, 𝜋𝑖
+𝑃 .R↔, either encrypted or unen-
+crypted and sent or received in the phase instance when
+𝜋𝑖
+𝑃 .type ∈ { “reg”, “ret”, “del”}; and
+– the list of resource identifiers, 𝜋𝑖
+𝑃 .rid↔, sent or received
+in the instance when 𝜋𝑖
+𝑃 .type ∈ { “reg”, “ret”, “del”}.
+1380
+
+[PDF PAGE 10]
+ASIA CCS ’25, August 25–29, 2025, Hanoi, Vietnam Jean Snyman, Chris Culnane, Ioana Boureanu, and Gerault David
+When 𝜋𝑖
+𝑃 .type = “reg” and a resource is being created rather
+than updated, the first resource identifier sent/received in the phase
+instance is empty such that 𝜋𝑖
+𝑃 .rid↔
+1 = ⊥.
+6.3 Channels. In a RAD scheme, we usechannels to model instances
+sending and receiving messages to one another: 𝜋𝑖
+𝑃 .Π 𝑗 denotes
+the 𝑗-th channel for instance 𝜋𝑖
+𝑃 with 𝑗 ∈ [ 1, 𝜋𝑖
+𝑃 .𝑛Π], where 𝜋𝑖
+𝑃 .𝑛Π
+is the total channel count for 𝜋𝑖
+𝑃 .
+We consider cryptographically insecure channels, as well as
+channels secured with an authenticated and confidential channel
+establishment (ACCE) [32] protocol (such as TLS). In RAD schemes,
+ACCE channels can use either unilateral or mutual authentication.
+This is detailed in Appendix D.1.
+6.4 Utility Functions. To describe the model, we use a set of helper
+or utility functions associated to instances, and their attributes.
+These are generally self-explained, e.g., : ProtectRes(𝑒𝑝𝑘, 𝑠𝑠𝑘, 𝑟 )
+will encrypt a resource 𝑟 with public key 𝑒𝑝𝑘 and sign it using
+secret key 𝑠𝑠𝑘 . Inversely, ExtractRes(𝑒𝑠𝑘, 𝑠𝑝𝑘, 𝑅 ) decrypts resource
+𝑅 with secret key𝑒𝑠𝑘 and verifies it using public key𝑠𝑝𝑘 . A complete
+and descriptive list of utility functions is given in Appendix D.2.
+6.5 Adversarial Model. As per the usual, the execution of (instances
+of) parties are simulated by the interactions between an unbounded
+algorithm called challenger and probabilistic polynomial time (PPT)
+algorithm called adversary. The adversary can corrupt up to a poly-
+nomial number of parties, act as a legitimate party in the communi-
+cation flows, and interfere in all communications; as per the normal,
+these abilities is modelled via oracles.
+The oracles4 most pertinent to the notions and security defini-
+tions discussed subsequently are given below:
+– CommCorrupt(𝑃):
+Returns 𝑃 .csk used to secure ACCE communications.
+– ResCorrupt(𝑃):
+Returns (𝑃 .esk, 𝑃 .ssk) used to secure resources.
+– DataReveal(𝑃):
+Returns the values of the party’s attributes, including data for
+all phase instances of the party, and decrypts any encrypted
+data using any and all keys in the party’s possession.
+Excludes any secrets (including secret keys), all credentials
+in 𝑃 .authz, any verifiers in𝑃 .authz′ which are shared secrets
+with another party, and proofs which are also a credential
+or verifier for the party such that 𝜋𝑖
+𝑃 .proof↔
+𝑗 = 𝑃 .authz𝑚 or
+𝜋𝑖
+𝑃 .proof↔
+𝑗 = 𝑃 .authz′𝑛 for any 𝑖, 𝑗, 𝑚, 𝑛 ∈ N.
+– GetData(𝑃):
+Returns all data for the party like DataReveal(𝑃) but does
+not perform any decryption of data.
+If 𝑃 ∈ 𝒪 then this query excludes 𝑂 .cache.
+Additional oracles can be found in Appendix D.3.
+6.6 Message Authentication. For an authenticator 𝑡 to authenticate
+a message 𝑚 to a party 𝑃 as being authored by another party 𝑄,
+party 𝑃 must have knowledge of a public/secret key used to verify
+4In the oracles given here, for ease, the bookkeeping by the challenger in the attributes
+of the various parties, instances and channels is implicit.
+𝑡 against 𝑚 (e.g., if a signing/MAC-ing key is present in 𝑃 .authz′).
+This is formally defined in Appendix D.4.
+6.7 Authorisation Origination. Since a party receives authorisation
+to perform actions at another, we keep record of the credential
+and verifier which facilitate that authorisation get as a result of
+two different phase instances (of different parties). We say that a
+credential/verifier originates in the phase instance that causes it to
+be added to the authz or authz′ lists. This is formally defined in
+Appendix D.5.
+6.8 Authorisation Credential and Verifier Matching. If a credential
+can be used to produce a proof which is verifiable by a particular
+verifier, we say that the credential matches the verifier. This is
+formally defined in Appendix D.6.
+6.9 Instance Partnering. Different phase instances from distinct
+parties execute in concert with one another to form a complete
+phase execution across parties. These instances are considered
+partnered with one another. As the instance-partnering conditions
+differ based on phases, this makes the formal definition somewhat
+convoluted and is deferred to Appendix D.7.
+The intuition behind instance partnering is:
+– During the authorisation grant phase, two instances are
+partnered when there is a credential originating in one which
+has a matching verifier that originates in the other.
+– During the resource registration, retrieval and deletion
+phases, instances are partnered when they act on the same
+resource.
+6.10 Freshness. In line with our trust assumptions in §3.3, we
+exclude attacks which require the corruption of an owner or a
+consumer but still permit attacks in which a consumer leaks all its
+data to the attacker. To put this formally, we definefresh instances.
+Definition 1. For some 𝑃 ∈ 𝒫 and 𝑖 ∈ [ 1, 𝑃 .𝑛𝜋 ], an instance 𝜋𝑖
+𝑃 is
+considered fresh iff:
+(1) the instance has terminated successfully, i.e., 𝜋𝑖
+𝑃 .status =
+“success”;
+(2) there exists at least one 𝜋 𝑗
+𝑄 for some 𝑄 ∈ 𝒫, 𝑗 ∈ [ 1, 𝑄 .𝑛𝜋 ]
+such that 𝜋𝑖
+𝑃 and 𝜋 𝑗
+𝑄 are partnered;
+(3) no ResCorrupt(𝑋 ) or CommCorrupt(𝑋 ) query has been
+made for any party 𝑋 ∈ 𝒞 ∪ 𝒪, where 𝑋 = 𝑃 or where
+𝑋 has an instance 𝜋𝑚
+𝑋 partnered with 𝜋𝑖
+𝑃 , for some 𝑚 ∈
+[1, 𝑋 .𝑛𝜋 ]; and
+(4) no DataReveal(𝑂) query has been made for any 𝑂 ∈ 𝒪,
+where 𝑂 = 𝑃 or where 𝑂 has an instance 𝜋𝑛
+𝑂 partnered with
+𝜋𝑖
+𝑃 , for some 𝑛 ∈ [ 1, 𝑂 .𝑛𝜋 ].
+The implication of this definition is that, for any 𝑎 ∈ [ 1, 𝑆 .𝑛𝜋 ],
+𝑏 ∈ [ 1, 𝐶.𝑛𝜋 ], 𝑐 ∈ [ 1, 𝑂 .𝑛𝜋 ], instances 𝜋𝑎
+𝑆 , 𝜋𝑏
+𝐶 or 𝜋𝑐
+𝑂 can only be
+considered fresh if the adversary 𝒜 limits itself to queries on 𝑆, 𝐶
+and 𝑂 as given in Table 2.
+7 Security in the RAD Model
+7.1 RAD Game Setup
+All our security definitions rely on the challenger 𝐶ℎ first setting
+up the environment by running Algorithm 1.
+1381
+
+[PDF PAGE 11]
+Protocols and Formal Models for Delegated Authorisation with Server-Side Secrecy ASIA CCS ’25, August 25–29, 2025, Hanoi, Vietnam
+Algorithm 1 Setup𝒜,𝛾 for RAD games
+1: Create parties 𝒫 ⊲ creates a polynomial number 𝑛𝒮 , 𝑛𝒞, 𝑛𝒪 of
+server, consumer and owner parties
+2: for each 𝑃 ∈ 𝒫 do
+3: Initialise attributes on 𝑃
+⊲ generates keys 𝑃 .𝑠𝑠𝑘, 𝑃 .𝑠𝑝𝑘, 𝑃 .𝑒𝑠𝑘, 𝑃 .𝑒𝑝𝑘, 𝑃 .𝑐𝑠𝑘 and 𝑃 .𝑐𝑝𝑘
+4: if 𝛾 is a resource access protocol then
+5: if 𝑃 ∈ 𝒞 then Set values for 𝑃 .authz
+6: if 𝑃 ∈ 𝒮 ∪ 𝒪 then Set values for 𝑃 .authz′
+⊲ lines 5-6 cause consumers to be pre-authorised to access the resources
+of a subset of owners on a subset of servers
+7: if 𝛾 is a retrieval or deletion protocol and 𝑆 ∈ 𝒮 then
+8: Create a no. of resources and add them to 𝑆 .res
+⊲ such that some owners 𝑂 ∈ 𝒪 have encrypted resources pre-registered
+on some servers
+9: Set constant 𝜖 to contain a list of all resources
+⊲ 𝜖 contains triples (𝑆, 𝑂, 𝑟𝑖𝑑, 𝑅 ) where 𝑅 is a resource for a particular owner 𝑂
+stored at the given server 𝑆 and identified by 𝑟𝑖𝑑
+10: Give 𝒜 a handle to 𝜖 and access to all oracles
+7.2 Authorisation Grant (AG) Security
+In protocol suites like OAuth, the server is trusted to authenticate
+the consumers and enforce the correct authorisation policy. In
+RAD schemes, this trust is removed, and the owners enforce the
+authorisation policy, so they need to perform mutual authentication
+directly with the consumers. Crucially, if a malicious server were
+to subvert this mutual authentication, it could impersonate the
+consumer and access plaintexts, violating the secrecy requirements
+of RAD schemes. We introduce authorisation grant (AG) security to
+formalise these.
+Our AG security notion, to follow, means to say this: an adver-
+sary should not be able, after manipulating runs of a dual-mediated
+authorisation grant protocol, to cause an owner to accept authenti-
+cation presented by the adversary as if it were a legitimate consumer,
+or vice versa. This is formalised, based on the AG game between
+the adversary 𝒜 and the challenger 𝐶ℎ given in Algorithm 2, via
+the following definitions:
+Definition 2 (AG game’s winning condition). The adversary 𝒜
+wins the AG game GAG
+𝒜,𝛾 when:
+(1) there exist two partnered phase instances𝜋𝑖
+𝐶 and 𝜋 𝑗
+𝑂 of some
+consumer 𝐶 ∈ 𝒞 and owner 𝑂 ∈ 𝒪 such that 𝑖 ∈ [ 1, 𝐶.𝑛𝜋 ]
+and 𝑗 ∈ [ 1, 𝑂 .𝑛𝜋 ];
+(2) the authenticator 𝑡 ∗ authenticates the message𝑚∗ to party 𝑃
+as originating with party 𝑄, where 𝑃 = 𝐶, 𝑄 = 𝑂 or 𝑃 = 𝑂,
+𝑄 = 𝐶; and
+(3) 𝜋𝑖
+𝐶 and 𝜋 𝑗
+𝑂 are fresh.
+𝑆 𝐶 𝑂
+CommCorrupt ✓ ✗ ✗
+ResCorrupt ✓ ✗ ✗
+DataReveal ✓ ✓ ✗
+GetData ✓ ✓ ✓
+Table 2: The Impact of Oracles on Instance Freshness
+Algorithm 2 Authorisation Grant (AG) Game GAG
+𝒜,𝛾
+for a RAD Dual-Mediated Authorisation Grant Protocol 𝛾
+1: The challenger 𝐶ℎ runs Setup𝒜,𝛾
+2: 𝒜 makes a polynomial number of oracle queries
+3: 𝒜 outputs a tuple (𝑚∗, 𝑡∗) containing a message and an authen-
+ticator
+Definition 3 (AG security). A RAD dual-mediated authorisation
+grant protocol 𝛾 is secure w.r.t. authorisation grant security (AG
+secure) iff, for all PPT adversaries 𝒜:
+Pr
+h
+𝒜 wins GAG
+𝒜,𝛾
+i
+≤ negl(𝑠)
+where negl is a negligible function in our security parameter 𝑠
+(i.e., the inverse of an exponential in 𝑛𝒮, 𝑛𝒞, 𝑛𝒪 and the number of
+queries by the adversary) and the probability is considered over all
+random coins in the game GAG
+𝒜,𝛾.
+7.3 Encrypted Resource Authorisation (ERA)
+Security
+An adversary should not be able to exceed its authorisation to
+read/modify a resource plaintext. This is formalised by the ERA
+game given in Algorithm 3 and the definitions below:
+Definition 4 (ERA game’s winning condition ). The adver-
+sary 𝒜 wins the ERA game GERA
+𝒜,𝛾 when:
+(1) there exists an entry (𝑂, 𝑟𝑖𝑑, 𝑅 ) in 𝑆 .res for some 𝑆 ∈ 𝒮 and
+𝑂 ∈ 𝒪 such that 𝑟 ∗ = ExtractRes(𝑂 .esk, ⊥, 𝑅 );
+(2) at least one instance of 𝑆 has sent/received 𝑅 such that a
+set Φ can be constructed as follows:
+Φ = { 𝜋𝑥
+𝑆 | 𝑥 ∈ [ 1, 𝑆 .𝑛𝜋 ]
+∧ 𝜋𝑥
+𝑆 .res↔𝑦 = 𝑅 for all 𝑦 ∈ N }; and
+(3) all 𝜋 ∈ Φ are fresh.
+Definition 5 (ERA security). A RAD protocol or suite 𝛾 is secure
+w.r.t. encrypted resource authorisation (ERA secure) iff, for all PPT
+adversaries 𝒜:
+Pr
+h
+𝒜 wins GERA
+𝒜,𝛾
+i
+≤ negl(𝑠)
+where negl is a negligible function in 𝑠 and the probability is con-
+sidered over all random coins in the game GERA
+𝒜,𝛾 .
+We note that ERA also (non-obviously) covers attacks in which
+a legitimate party is able to exceed their authorisation. If a server
+or consumer can obtain a resource plaintext, the adversary can
+access it without violating the freshness definition. If an owner
+instance were to obtain a resource plaintext, the instance would
+not be considered partnered with the instances of the server where
+it is stored (because the soundness principle would be violated) and
+again the adversary would be able to use an oracle to access it and
+win the game.
+Finally, unauthorised deletion per se is not a violation of ERA
+security: simply put, corruption of a resource by the adversary is
+considered a form of deletion.
+1382
+
+[PDF PAGE 12]
+ASIA CCS ’25, August 25–29, 2025, Hanoi, Vietnam Jean Snyman, Chris Culnane, Ioana Boureanu, and Gerault David
+Algorithm 3 Enc. Resource Authorisation (ERA) Game GERA
+𝒜,𝛾
+for a RAD resource registration, retrieval or deletion protocol 𝛾,
+or an entire RAD scheme 𝛾
+1: The challenger 𝐶ℎ runs Setup𝒜,𝛾
+2: 𝒜 makes a polynomial number of oracle queries
+3: 𝒜 outputs a resource 𝑟 ∗
+8 Formal Security Analysis of APEX
+Instantiating RAD as APEX. Consider the APEX protocol suite 𝛼:
+𝛼 = (SMAG, RA, Sym, Asym, Sig, MAC, OTCGen)
+where SMAG is the server-mediated authorisation grant protocol,
+RA is the resource access protocol, and Sym, Asym, Sig and MAC
+are the encryption, signature and MAC schemes. OTCGen is the
+algorithm used to generate one-time codes uniformly at random.
+APEX allows SMAG and RA to be fulfilled by any authorisation
+protocol suite but, for our proofs, we will fix them to be the OAuth
+2.0 protocols from §2. No specific cryptographic schemes are as-
+sumed. So, the APEX protocol suite𝛼 is an instance of RAD scheme
+RAD𝛼 :
+𝑅𝐴𝐷𝛼 = (DMAG𝛼, RReg𝛼, RRet𝛼, RDel𝛼 )
+where DMAG𝛼 , RReg𝛼 , RRet𝛼 and RDel𝛼 are the protocols de-
+scribed in §3 and instantiated with configuration 𝛼.
+RAD Security of APEX. The security of APEX is established by
+proving the security of each RAD phase and composing the result,
+as below:
+Theorem 1. An APEX protocol suite 𝑅𝐴𝐷𝛼 is ERA secure if it is
+constructed from 𝛼 consisting in part of:
+a) an IND-EAV secure symmetric encryption scheme;
+b) an IND-CPA secure asymmetric encryption scheme;
+c) EUF-CMA secure MAC and signature schemes; and
+d) one-time codes (OTCs) in an exponential space in the secu-
+rity parameter.
+The above theorem is proven via the following lemmas:
+Lemma 1 (Authorisation grant security). The dual-mediated
+authorisation grant protocol DMAG𝛼 in an APEX suite 𝑅𝐴𝐷𝛼 is
+AG secure if 𝛼 consists in part of:
+a) an EUF-CMA secure MAC scheme; and
+b) one-time codes (OTCs) in an exponential space in the secu-
+rity parameter.
+Lemma 2 (Resource access security). The resource registration
+protocol RReg𝛼 , resource retrieval protocol RRet𝛼 and resource
+deletion protocol RDel𝛼 in an APEX suite 𝑅𝐴𝐷𝛼 are each indepen-
+dently ERA secure if 𝛼 consists in part of:
+a) an IND-EAV secure symmetric encryption scheme;
+b) an IND-CPA secure asymmetric encryption scheme; and
+c) an EUF-CMA secure signature scheme.
+All proofs can be found in Appendix G.
+APEX Security Compared to OAuth. OAuth 2.0 has previously been
+analysed in a computational model by authors Li et al. [40]. RAD
+authorisation grant (AG) security is roughly comparable to their
+notion of “3P-ASD” security. Similarly, ERA security and their “au-
+thorisation” security are analogous.
+Our models are different enough that these properties do not
+lend themselves to easy translation from one to the other. However,
+our RAD properties are defined in the presence of a considerably
+stronger adversary. This is summarised in Table 3. We also show,
+in Appendix E, how OAuth falls short of meeting the RAD security
+properties.
+Complexity of the RAD Formal Model & Implications of the Security
+Results. Due to space constraints, only in Appendix F, we discuss
+in laymen terms the intricacies of our model and the meaning of
+our formal security results.
+9 Related Work
+Server-Side Secrecy in OAuth-like Systems. Two systems cur-
+rently limit the sharing of end-to-end encrypted data: AAuth [56],
+an authorisation protocol drawing inspiration from OAuth, and
+Droplet [55], an authorisation scheme for IoT devices. Relying on
+attribute-based encryption and a blockchain respectively, neither of
+these proposals meet our requirements of ease of implementation
+and simple integration into existing codebases, which we provably
+realise. Other attempts to improve the security of cloud-stored data
+include: Sporc [20], CryptDB [49], SUNDR [39] and CloudProof [48].
+None of these handle sharing of data to entities unconnected to the
+service provider, as we do.
+Formal Treatments of Authorisation Protocols. Li et al. [40]
+presented a cryptographic, security model for OAuth 2.0. We give
+a substantially more complex model, catering for multi-phase suite
+that generalises OAuth in several ways, intricate session inter-
+leaving, including cross-phase notions and attacks. Our security
+properties are also more involved that in [40]. In more detail, Li et
+al. only consider authorisation pertaining to consumers; the server
+and owner are deemed to have full authorisation to all resources.
+Meanwhile, APEX/RAD needs to capture the following: (1) servers
+are no longer afforded this access, (2) consumers are given only
+limited access, and (3) consumers can have different authorisation
+levels and exceeding this level constitutes a valid attack. Because Li
+et al. [40] ignore these, they coarsely substitute authorisation with
+authentication, whereas we model authorisation directly. So, Li et
+al.’s models are not easily adaptable to RAD proofs.
+Simulation-based models for OAuth, based on UC [7], also exist:
+[8] for OAuth Core 1.0 and [ 9] for OAuth 2.0. Similarly, Dolev-
+Yao [18] verification for OAuth Core, OAuth 1.0 & 2.0 exists [3, 22,
+28, 30, 31, 33, 37, 38, 46], but these models are not of direct interest.
+Security Property OAuth + APEX
+Liet al.’s “3P-ASD” security ✓
+Liet al.’s “authorisation” security ✓
+RAD authorisation grant (AG) security ✓✓
+RAD encrypted resource access (ERA) security ✓✓
+Table 3: Security Properties of OAuth vs. APEX
+1383
+
+[PDF PAGE 13]
+Protocols and Formal Models for Delegated Authorisation with Server-Side Secrecy ASIA CCS ’25, August 25–29, 2025, Hanoi, Vietnam
+The Grant Negotiation and Authorisation Protocol (GNAP) [52]
+is a new authorisation framework, consolidating various OAuth
+standards [42, 53, 54] and analysed formally in [27].
+10 Conclusions
+We extended the concept of delegated authorisation from OAuth
+and related protocols, to include resistance to malicious servers,
+resulting in a formalism called restricted authorisation delegation
+(RAD) and instantiated in a protocol suite called APEX. APEX builds
+on the principles of OAuth 2.0 to allow a resource owner (user) to
+keep resources (files or other data) encrypted on an untrusted server
+(e.g., a cloud storage service), whereby only the owner and the API
+consumers they authorise (e.g., a word processor) can decrypt and
+act on them. Our implementation of APEX leverages the same web-
+based environments, infrastructures and libraries as OAuth and
+exhibits APEX’s new features, whilst maintaining interoperability
+with existing systems and having performance comparable to that
+of plain OAuth. We also have proven APEX secure in the RAD
+model. All this is in line with our engagements with the broader
+community working to improve the security of RAD-like schemes,
+e.g., OAuth, OpenID Connect, GNAP, etc.
+References
+[1] Jean Snyman, Chris Culnane, Ioana Boureanu, and David Gerault. 2025. APEX
+Project Landing Page. https://uos-sccs.github.io/apex.
+[2] Apple Developer. [n. d.]. Enabling AutoFill for domain-bound SMS
+codes. https://developer.apple.com/documentation/security/one-time_codes/
+enabling_autofill_for_domain-bound_sms_codes (https://archive.today/ZbcGZ).
+[3] Chetan Bansal, Karthikeyan Bhargavan, Antoine Delignat-Lavaud, and Sergio
+Maffeis. 2014. Discovering Concrete Attacks on Website Authorization by Formal
+Analysis1. Journal of Computer Security 22, 4 (April 2014), 601–657. https://
+doi.org/10.3233/JCS-140503 https://www.medra.org/servlet/aliasResolver?alias=
+iospress&doi=10.3233/JCS-140503.
+[4] Lejla Batina, Shivam Bhasin, Jakub Breier, Xiaolu Hou, and Dirmanto Jap. 2022.
+On Implementation-Level Security of Edge-Based Machine Learning Models.
+In Security and Artificial Intelligence: A Crossdisciplinary Approach . Springer,
+335–359. https://doi.org/10.1007/978-3-030-98795-4_14
+[5] Mihir Bellare and Phillip Rogaway. 1994. Entity Authentication and Key Distribu-
+tion. In Advances in Cryptology — CRYPTO’ 93 , Douglas R. Stinson (Ed.). Vol. 773.
+Springer Berlin Heidelberg, Berlin, Heidelberg, 232–249. https://doi.org/10.1007/
+3-540-48329-2_21 http://link.springer.com/10.1007/3-540-48329-2_21.
+[6] Rich Brown. 2012. SkyDrive Content Restrictions among the Toughest in the
+Cloud. CNET (Aug. 2012). https://www.cnet.com/tech/services-and-software/
+skydrive-content-restrictions-among-the-toughest-in-the-cloud/.
+[7] R. Canetti. 2001. Universally Composable Security: A New Paradigm for Cryp-
+tographic Protocols. In Proceedings 42nd IEEE Symposium on Foundations of
+Computer Science. IEEE, Newport Beach, CA, USA, 136–145. https://doi.org/10.
+1109/SFCS.2001.959888 https://ieeexplore.ieee.org/document/959888/.
+[8] Suresh Chari and Charanjit Jutla. 2009. Universally Composable Web Security
+Protocols for Delegation . Research Report RC24856. IBM. https://dominoweb.
+draco.res.ibm.com/b0d33665257dd3a0852576410043bcdd.html.
+[9] Suresh Chari, Charanjit Jutla, and Arnab Roy. 2011. Universally Composable
+Security Analysis of OAuth v2.0. https://eprint.iacr.org/2011/526.
+[10] Garrett Davidson. 2022. Meet Passkeys. https://developer.apple.com/videos/play/
+wwdc2022/10092/.
+[11] William Denniss, John Bradley, Michael B. Jones, and Hannes Tschofenig. 2019.
+OAuth 2.0 Device Authorization Grant. RFC 8628. IETF. https://www.rfc-editor.
+org/info/rfc8628.
+[12] Android Developers. 2025. Android Keystore system. Google. https://developer.
+android.com/privacy-and-security/keystore
+[13] Android Developers. 2025. Build web apps in WebView. Google. https://developer.
+android.com/develop/ui/views/layout/webapps/webview
+[14] MDN Web Docs. 2024. Window: localStorage property. https://developer.mozilla.
+org/en-US/docs/Web/API/Window/localStorage
+[15] MDN Web Docs. 2025. Promise - JavaScript. https://developer.mozilla.org/en-
+US/docs/Web/JavaScript/Reference/Global_Objects/Promise
+[16] MDN Web Docs. 2025. Same-Origin Policy. https://developer.mozilla.org/en-
+US/docs/Web/Security/Same-origin_policy
+[17] MDN Web Docs. 2025. Window: postMessage() method. https://developer.mozilla.
+org/en-US/docs/Web/API/Window/postMessage
+[18] D. Dolev and A. Yao. 1983. On the Security of Public Key Protocols. IEEE
+Transactions on Information Theory 29, 2 (March 1983), 198–208. https://doi.org/
+10.1109/TIT.1983.1056650 http://ieeexplore.ieee.org/document/1056650/.
+[19] Emily Dreyfuss. 2018. Was It Ethical for Dropbox to Share Customer Data with
+Scientists? Wired (July 2018). https://www.wired.com/story/dropbox-sharing-
+data-study-ethics/.
+[20] Ariel J Feldman, William P Zeller, Michael J Freedman, and Edward W Felten. 2010.
+SPORC: Group Collaboration Using Untrusted Cloud Resources. In Proceedings
+of the 9th USENIX Symposium on Operating Systems Design and Implementation
+(OSDI ’10). USENIX, Vancouver, BC, Canada. https://www.usenix.org/conference/
+osdi10/sporc-group-collaboration-using-untrusted-cloud-resources.
+[21] G. Fernandez, F. Walter, A. Nennker, D. Tonge, and B. Campbell. 2021.OpenID
+Connect Client-Initiated Backchannel Authentication Flow - Core 1.0 . Technical
+Report. OpenID Foundation. https://openid.net/specs/openid-client-initiated-
+backchannel-authentication-core-1_0.html.
+[22] Daniel Fett, Ralf Küsters, and Guido Schmitz. 2016. A Comprehensive Formal
+Security Analysis of OAuth 2.0. InProceedings of the 2016 ACM SIGSAC Conference
+on Computer and Communications Security . ACM, Vienna Austria, 1204–1215.
+https://doi.org/10.1145/2976749.2978385 https://dl.acm.org/doi/10.1145/2976749.
+2978385.
+[23] Niv Haim, Gal Vardi, Gilad Yehudai, Ohad Shamir, and Michal Irani. 2022. Recon-
+structing training data from trained neural networks. In Proceedings of the 36th
+International Conference on Neural Information Processing Systems (New Orleans,
+LA, USA) (NIPS ’22). Article 1665. https://doi.org/10.5555/3600270.3601935
+[24] Shai Halevi. 2017. Homomorphic Encryption. Springer International Publishing,
+Cham, 219–276. https://doi.org/10.1007/978-3-319-57048-8_5
+[25] Dick Hardt. 2012. The OAuth 2.0 Authorization Framework . RFC 6749. IETF.
+https://datatracker.ietf.org/doc/html/rfc6749.
+[26] Dick Hardt, Aaron Parecki, and Torsten Lodderstedt. 2022. The OAuth 2.1 Au-
+thorization Framework. Internet-Draft draft-ietf-oauth-v2-1-06. IETF. https:
+//datatracker.ietf.org/doc/html/draft-ietf-oauth-v2-1-12.
+[27] Florian Helmschmidt. 2022. Security Analysis of the Grant Negotiation and Au-
+thorization Protocol. Ph. D. Dissertation. University of Stuttgart, Stuttgart, Ger-
+many. https://elib.uni-stuttgart.de/bitstream/11682/12220/1/Security_Analysis_
+GNAP.pdf.
+[28] Yating Hsu and David Lee. 2010. Authentication and Authorization Protocol
+Security Property Analysis with Trace Inclusion Transformation and Online
+Minimization. In The 18th IEEE International Conference on Network Protocols .
+IEEE, Kyoto, Japan, 164–173. https://doi.org/10.1109/ICNP.2010.5762765 http:
+//ieeexplore.ieee.org/document/5762765/.
+[29] Ionic. 2017. Capacitor: Cross-platform apps with web technology . https:
+//capacitorjs.com/
+[30] Daniel Jackson. 2002. Alloy: A Lightweight Object Modelling Notation. ACM
+Transactions on Software Engineering and Methodology 11, 2 (April 2002), 256–290.
+https://doi.org/10.1145/505145.505149 https://dl.acm.org/doi/10.1145/505145.
+505149.
+[31] Daniel Jackson, Ian Schechter, and Ilya Shlyakhter. 2000. Alcoa: The Alloy
+Constraint Analyzer. In Proceedings of the International Conference on Software
+Engineering. Limerick, Ireland.
+[32] Tibor Jager, Florian Kohlar, Sven Schäge, and Jörg Schwenk. 2017. Authenticated
+Confidential Channel Establishment and the Security of TLS-DHE. Journal of
+Cryptology 30, 4 (Oct. 2017), 1276–1324. https://doi.org/10.1007/s00145-016-
+9248-2 http://link.springer.com/10.1007/s00145-016-9248-2.
+[33] K. S. Jayasri, K. P. Jevitha, and B. Jayaraman. 2018. Verification of OAuth 2.0 Using
+UPPAAL. In Social Transformation – Digital Way , Jyotsna Kumar Mandal and
+Devadatta Sinha (Eds.). Vol. 836. Springer, 58–67. https://doi.org/10.1007/978-
+981-13-1343-1_7 http://link.springer.com/10.1007/978-981-13-1343-1_7.
+[34] Joel Khalili. 2022. Google Drive Is Locking Some People’s Files for No Rea-
+son. TechRadar (Jan. 2022). https://www.techradar.com/news/google-drive-is-
+locking-some-peoples-files-for-no-reason.
+[35] Eiji Kitamura. 2019. Verify phone numbers on the web with the WebOTP API .
+Chrome for Developers. https://developer.chrome.com/docs/identity/web-apis/
+web-otp (https://archive.today/mN9Wo).
+[36] Eiji Kitamura. 2022. A Path to a World without Passwords. https://io.google/
+2022/program/e3bb37a4-2723-4d72-a5b3-1a23abb94ac0/.
+[37] Apurva Kumar. 2011. Model Driven Security Analysis of IDaaS Protocols. In
+Service-Oriented Computing , Paul P. Maglio, Mathias Weske, Jian Yang, and
+Marcelo Fantinato (Eds.), Vol. 6470. Springer Berlin Heidelberg, Berlin, Hei-
+delberg, 312–327. https://doi.org/10.1007/978-3-642-25535-9_21 http://link.
+springer.com/10.1007/978-3-642-25535-9_21.
+[38] Apurva Kumar. 2012. Using Automated Model Analysis for Reasoning about
+Security of Web Protocols. In Proceedings of the 28th Annual Computer Security
+Applications Conference on - ACSAC ’12. ACM Press, Orlando, Florida, 289. https:
+//doi.org/10.1145/2420950.2420993 http://dl.acm.org/citation.cfm?doid=2420950.
+2420993.
+1384
+
+[PDF PAGE 14]
+ASIA CCS ’25, August 25–29, 2025, Hanoi, Vietnam Jean Snyman, Chris Culnane, Ioana Boureanu, and Gerault David
+[39] Jinyuan Li, Maxwell Krohn, David Mazieres, and Dennis Shasha. 2003. Secure
+Untrusted Data Repository (SUNDR):. In Proceedings of the 6th Symposium on
+Operating Systems Design & Implementation (OSDI ’04). USENIX, San Francisco,
+CA, 121–135. https://doi.org/10.21236/ADA445862 https://www.usenix.org/
+conference/osdi-04/secure-untrusted-data-repository-sundr.
+[40] Xinyu Li, Jing Xu, Zhenfeng Zhang, Xiao Lan, and Yuchen Wang. 2020. Modular
+Security Analysis of OAuth 2.0 in the Three-Party Setting. In 2020 IEEE European
+Symposium on Security and Privacy (EuroS&P). IEEE, Genoa, Italy, 276–293. https:
+//doi.org/10.1109/EuroSP48549.2020.00025 https://ieeexplore.ieee.org/document/
+9230361/.
+[41] Torsten Lodderstedt, John Bradley, Aney Labunets, and Daniel Fett. 2022. OAuth
+2.0 Security Best Current Practice . Internet Draft draft-ietf-oauth-security-topics-
+21. Internet Engineering Task Force. https://datatracker.ietf.org/doc/draft-ietf-
+oauth-security-topics-21.
+[42] Torsten Lodderstedt, Brian Campbell, Nat Sakimura, Dave Tonge, and Filip
+Skokan. 2021. OAuth 2.0 Pushed Authorization Requests. Request for Comments
+RFC 9126. Internet Engineering Task Force. https://doi.org/10.17487/RFC9126
+https://datatracker.ietf.org/doc/rfc9126.
+[43] Goldreich Oded. 2009. Foundations of Cryptography: Volume 2, Basic Applications
+(1st ed.). Cambridge University Press, USA.
+[44] National Institute of Standards and Technology (NIST). 2019. Security Require-
+ments for Cryptographic Modules . FIPS 140-3. U.S. Department of Commerce.
+https://doi.org/10.6028/NIST.FIPS.140-3
+[45] OpenAI. 2023. GPT-4 Technical Report. ArXiv abs/2303.08774 (2023). https:
+//api.semanticscholar.org/CorpusID:257532815
+[46] Suhas Pai, Yash Sharma, Sunil Kumar, Radhika M. Pai, and Sanjay Singh. 2011.
+Formal Verification of OAuth 2.0 Using Alloy Framework. In2011 International
+Conference on Communication Systems and Network Technologies . IEEE, Katra,
+Jammu, India, 655–659. https://doi.org/10.1109/CSNT.2011.141 http://ieeexplore.
+ieee.org/document/5966531/.
+[47] Pallets. 2010. Flask. https://github.com/pallets/flask
+[48] Raluca Ada Popa, Jacob R Lorch, David Molnar, Helen J Wang, and Li Zhuang.
+2011. Enabling Security in Cloud Storage SLAs with CloudProof. In Pro-
+ceedings of the 2011 USENIX Annual Technical Conference . USENIX, Portland,
+OR. https://www.usenix.org/conference/usenixatc11/enabling-security-cloud-
+storage-slas-cloudproof.
+[49] Raluca Ada Popa, Catherine M. S. Redfield, Nickolai Zeldovich, and Hari Bal-
+akrishnan. 2011. CryptDB: Protecting Confidentiality with Encrypted Query
+Processing. In Proceedings of the Twenty-Third ACM Symposium on Operating
+Systems Principles - SOSP ’11. ACM Press, Cascais, Portugal, 85. https://doi.org/
+10.1145/2043556.2043566 http://dl.acm.org/citation.cfm?doid=2043556.2043566.
+[50] Proton. [n. d.]. Proton Drive: Free Encrypted Cloud File Storage & Sharing . https:
+//proton.me/drive
+[51] Kenneth Reitz. 2014. Requests-OAuthlib. https://github.com/requests/requests-
+oauthlib
+[52] Justin Richer and Fabien Imbault. 2022. Grant Negotiation and Authorization
+Protocol. RFC 9635. IETF. https://datatracker.ietf.org/doc/html/rfc9635.
+[53] Justin Richer, Michael Jones, John Bradley, Maciej Machulak, and Phil Hunt.
+2015. OAuth 2.0 Dynamic Client Registration Protocol . RFC 7591. IETF. https:
+//datatracker.ietf.org/doc/html/rfc7591/.
+[54] Nat Sakimura, John Bradley, and Naveen Agarwal. 2015. Proof Key for Code
+Exchange by OAuth Public Clients . RFC 7636. IETF. https://datatracker.ietf.org/
+doc/html/rfc7636.
+[55] Hossein Shafagh, Lukas Burkhalter, Sylvia Ratnasamy, and Anwar Hithnawi. 2020.
+Droplet: Decentralized Authorization and Access Control for Encrypted Data
+Streams. In Proceedings of the 29th USENIX Security Symposium (USENIX Security
+’20). USENIX, 2469–2486. https://www.usenix.org/conference/usenixsecurity20/
+presentation/shafagh.
+[56] Anuchart Tassanaviboon and Guang Gong. 2011. OAuth and ABE Based Autho-
+rization in Semi-Trusted Cloud Computing: Aauth. In Proceedings of the Second
+International Workshop on Data Intensive Computing in the Clouds - DataCloud-SC
+’11. ACM Press, Seattle, Washington, USA, 41. https://doi.org/10.1145/2087522.
+2087531 http://dl.acm.org/citation.cfm?doid=2087522.2087531.
+[57] Jeremy Thomas. 2023. Bulma. https://bulma.io/.
+[58] Tresorit. [n. d.]. Secure Cloud Storage. https://tresorit.com/individuals
+[59] Alvin Wang. 2014. Materialize. https://github.com/Dogfalo/materialize
+[60] Hsiaoming Yang. 2017. Authlib. https://github.com/lepture/authlib
+A APEX Resource Deletion Protocol
+The APEX resource deletion protocol performs the function of the
+RRet protocol required by RAD (§5) and begins with a consumer
+that wishes to delete a resource from the server. The protocol pro-
+ceeds as follows with all communication taking place over TLS:
+(1) A consumer uses the resource access protocol RA to request
+that a resource identified by an 𝑟𝑖𝑑 is deleted.
+The consumer also provides a list of supported promise ful-
+filment methods and a signature on the 𝑟𝑖𝑑 .
+(2) The server can: (a) delete the resource and return a success
+status; or (b) respond with an ID representing a deletion
+promise and a chosen promise fulfilment method.
+The server might select the second option if the API provider
+only wishes to allow deletion of a resource under certain
+circumstances, based on the contents of the resource.
+In the case of the first option, the run of the deletion protocol
+ends here. Otherwise, the subsequent steps are performed.
+(3) The consumer communicates with a consumer agent and
+provides the deletion promise.
+(4) The consumer agent fulfils the deletion promise with the
+help of the server and a provider agent, using the promise
+fulfilment method negotiated in the preceding steps. Promise
+fulfilment is described in §3.8 and §3.8.
+B APEX Promise Fulfilment Protocol
+Asynchronous vs synchronous fulfilment. If one or more provider
+agents are reachable by the server (e.g., the agent has a persistent
+connection to the server or is registered to receive push notifica-
+tions) at the time it receives the request to register, retrieve or delete
+a resource, it may notify one or more of these agents on the spot,
+starting the promise fulfilment process straight away. In this case,
+the consumer agent receives the promise asynchronously (while
+the provider agent processes the promise) and must periodically
+query the server to obtain the status of the processing.
+Alternatively, upon receiving a promise, the consumer agent
+may submit it to a provider agent directly. This causes the provider
+agent to begin processing of the promise and return to the consumer
+agent upon completion. It can be said that the promise is fulfilled
+synchronously. This only works if both the consumer and provider
+agent are running on the same device and are able to be invoked
+by navigating to a URI (e.g., the agent is implemented as browser
+script or has registered a custom URI scheme).
+Even if fulfilment of a promise begins in an asynchronous fashion,
+the consumer agent may still proceed with synchronous fulfilment.
+This is particularly useful, e.g., when a push notification is sent to a
+provider agent but that agent is on a device which is momentarily
+inaccessible to the resource owner (perhaps the device stays at
+home during the workday).
+The promise fulfilment procedure. Fulfilment begins when a
+promise is received by a provider agent and proceeds according to
+the following steps (illustrated in Figure 6):
+(1) The provider agent (PA) receives the promise from the server
+(S) in the case of asynchronous fulfilment.
+♦ In the synchronous case, the promise is instead received
+from the consumer agent (CA) along with a redirect URI.
+The provider agent will later use this redirect URI to return
+execution to the consumer agent.
+(2) The provider agent requests the data associated with the
+promise by submitting it to the server.
+1385
+
+[PDF PAGE 15]
+Protocols and Formal Models for Delegated Authorisation with Server-Side Secrecy ASIA CCS ’25, August 25–29, 2025, Hanoi, Vietnam
+♦ For most protocol runs, execution continues to the next step.
+However, if the promise has already been fulfilled by another
+run, execution proceeds from (6).
+(3) The server responds with any information that has been
+associated with the promise, which differs depending on the
+type of promise:
+• 𝑟𝑖𝑑 : the identifier at which the resource is currently
+saved which may be null (all promises)
+• 𝑟𝑖𝑑 ∗: the resource identifier, chosen by the server, under
+which to save the resource, which may or may not differ
+from 𝑟𝑖𝑑 (save promise)
+• 𝑤𝑟 : the resource data to save, wrapped (encrypted)
+using the agent key (save promise)
+• 𝑤𝑎𝑘 : the agent key wrapped using the owner’s public
+key (save or rewrapping promise)
+• 𝜎req: a signature on the request data submitted by the
+consumer (save or rewrapping promise)
+• 𝑅, 𝜎𝑅: the encrypted resource currently stored by the
+server, with signature (save or deletion promise)
+• 𝑅𝐾, 𝜎𝑅𝐾 : the wrapped resource key currently stored by
+the server or provided by the consumer for rewrapping,
+together with signature (all promises)
+(4) The provider agent verifies the signatures received and,
+if successful, unwraps (decrypts) all keys and resources
+received. Resource data to be saved is validated against
+application-specific rules and rewrapped (encrypted) with
+a newly-generated resource key 𝑟𝑘 ∗. Resource keys to be
+rewrapped are re-encrypted with the agent key from the
+consumer agent.
+(5) The provider agent returns certain data to the server, de-
+pending on the promise type:
+• 𝑅∗, 𝑅𝐾∗, 𝜎𝑅∗, 𝜎𝑅𝐾 ∗: the resource data to save (re-
+encrypted with the new resource key), the newly
+wrapped resource key, and signatures (save promise)
+• 𝑟𝑤𝑟𝑘 : the supplied resource key rewrapped with
+the supplied agent key, which is also known as the
+rewrapped resource key (rewrapping promise)
+• 𝜎res: a signature over the request data received by the
+provider agent and the response data returned (save
+or rewrapping promise)
+• whether the data received by the provider agent was
+well formed and treated as valid (all promises)
+• whether the provider agent made any changes to the
+resource beyond those requested (all promises)
+Provided the promise has not been fulfilled by a different
+protocol run, if the information provided is valid, the server
+commits the changes to the stored resources.
+(6) The server replies with a message indicating whether it has
+committed changes for this promise. This happens even if
+the promise happened to be fulfilled by a different protocol
+run while the current run was in progress.
+S
+PromiseA
+PromiseA
+S
+S S D
+A A
+S DR S
+A R S
+Redirect URIA
+Navigate to Redirect URI
+Rewrapping promise
+TLS comm. / internal processing
+TLS context dependent
+Save promise
+Deletion promise
+All promises
+From S or CA
+O
+1
+2
+PromiseA
+StatusA
+PromiseA
+5
+7
+3
+PromiseA
+Insecure channel Conditional 
+8
+9
+4 Unwrap and rewrap data
+Unwrap data
+A
+A
+S R
+S
+S
+S
+S
+R
+S
+S
+A 
+A
+R R
+10
+R
+S
+D
+A
+PA
+RSRS
+PACA
+6
+Figure 6: APEX Promise Fulfilment
+(7) If in (1) the provider agent received a redirect URI (because
+synchronous fulfilment is being performed), the provider
+agent navigates to that URI and includes the promise as a
+URI parameter.
+♦ In asynchronous fulfilment, this step is skipped.
+(8) The consumer agent submits the promise to the server in or-
+der to retrieve the results. This may happen directly after (7)
+or, if asynchronous fulfilment is being performed, whenever
+the consumer agent wishes to try.
+(9) The server returns info about the promise’s status (i.e., has
+processing completed and was it successful?) and various
+resource attributes, depending on the promise type:
+• 𝑟𝑤𝑟𝑘 : rewrapped resource key (rewrapping promise)
+• 𝑟𝑖𝑑 ∗: the new resource identifier (save promise)
+• 𝜎res: a signature over the request and response data to
+be checked against the consumer agent’s view of the
+execution (save or rewrapping promise)
+(10) The consumer agent performs any processing as necessary.
+For a rewrapping promise, it verifies the signature, unwraps
+the resource key and decrypts the resource.
+♦ If the server indicated in (9) that processing of the promise
+has not yet been completed, the consumer agent instead
+waits a period and then retries from (8).
+1386
+
+[PDF PAGE 16]
+ASIA CCS ’25, August 25–29, 2025, Hanoi, Vietnam Jean Snyman, Chris Culnane, Ioana Boureanu, and Gerault David
+C Alternative Modes for APEX
+C.1 Default Mode: Consumer Agents
+Independent of Consumer
+Throughout this paper, we have assumed (§3.3) that the APEX
+parties are so configured:
+– the APEX consumer which talks to the APEX server is itself
+running on a remote server; and
+– consumer agents are running on devices belonging to the
+resource owner.
+This has a couple of benefits:
+(1) When the API provider provides access to encrypted and
+unencrypted resources side by side, processing of any unen-
+crypted resources can be performed by the consumer server-
+side without involvement from the resource owner or its
+devices (after an initial authorisation grant phase has been
+completed) just as is the case with OAuth.
+(2) When APEX is composed with OAuth 2.0, the exchange of
+authorisation code for access token is performed by a entity
+capable of authenticating to the APEX server with an API
+secret which has been kept confidential (as it does not need
+to be distributed to end user devices). This means there is no
+need to employ PKCE [54] to prevent authorisation codes
+from being intercepted and exchanged by an unauthenticated
+malicious party.
+However, there are other possible modes of operations which
+may be more appropriate for certain use cases.
+C.2 Other Modes: Combining Consumer and
+Agent
+Instead of keeping the consumer and consumer agent as separate
+entities, it is possible that both these roles are fulfilled by the same
+party. This changes our trust assumptions such that the same level
+of trust extended to the consumer agent must also be extended
+to the consumer. So the combined consumer+agent is treated as
+trusted, rather than semi-trusted.
+When considering this variant of APEX in the context of the
+RAD model, one must treat the consumer+agent party as both
+owner and consumer such that a consumer+agent 𝑥 is simultane-
+ously an element of the set of owners 𝒪 and an element of the set
+of consumers 𝒞. Any query restrictions placed on owners at the
+invocation of the freshness definition (§6.9) also therefore apply to
+consumer+agents.
+Consumer on resource owner device. When the combined con-
+sumer+agent is implemented as an software running on the re-
+source owner’s device, much of the characteristics related to the
+secrecy of data are retained. However, there some difference in this
+and other areas:
+(1) The resource owner no longer has to place trust in a remote
+server (the software of which can more easily be changed
+without the owner’s knowledge) to faithful execute the pro-
+tocol according to specification.
+(2) Without a server to hold or securely sync𝐶.𝑠𝑠𝑘 , each instance
+of the consumer+agent will need to obtain authorisation
+independently.
+(3) If APEX is used with OAuth, PKCE must be employed to
+protect access tokens.
+Consumer agent on server. Another possibility is that the con-
+sumer+agent runs on a remote server, thereby moving the responsi-
+bility of performing encryption/decryption operations server-side.
+This has the obvious drawback that the entity controlling the API
+consumer is now able to read the owner’s resources. However, it
+opens up some new possibilities, e.g., consumers which function as a
+traditional web application based on the stateless request–response
+model and which may not have any programs/scripts running on
+the resource owner’s device. The costs and benefits should be care-
+fully considered and made known to the resource owner.
+D Further Formalisations in the RAD Model
+D.1 Channels
+In addition to those given in §6.1, each party𝑃 ∈ 𝒫 is also assigned
+attributes for:
+– the party’s channel secret and public keys , 𝑃 .csk and
+𝑃 .cpk, used for secure channel establishment, where 𝑃 .cpk
+is known by all other parties.
+Each channel 𝜋𝑖
+𝑃 .Π 𝑗 (see §6.3), where 𝜋𝑖
+𝑃 is an instance of 𝑃, has
+the following attributes set, whether ACCE is used or not:
+– the secure flag, 𝜋𝑖
+𝑃 .Π 𝑗 .secure, set to 1 if the channel is an
+ACCE channel or 0 otherwise;
+– the role, 𝜋𝑖
+𝑃 .Π 𝑗 .𝜌, set to “init” if 𝑃 sends the first message
+on channel 𝑗 or “resp” otherwise; and
+– the transcript, 𝜋𝑖
+𝑃 .Π 𝑗 .𝜏, a list of messages communicated
+on the channel (in an encrypted form, if ACCE is used).
+The channels that are ACCE secure additionally employ the next
+attributes (which are set to ⊥ when a channel is insecure):
+– the session identifier, 𝜋𝑖
+𝑃 .Π 𝑗 .sid, set to ⊥ until this has
+been negotiated;
+– the communication peer, 𝜋𝑖
+𝑃 .Π 𝑗 .peer, set to some party
+𝑄 ∈ 𝒫 to indicate the intended communication partner of
+the party in this channel or ⊥ if unilateral authentication is
+used and the peer is an ACCE consumer;
+– the channel acceptance flag, 𝜋𝑖
+𝑃 .Π 𝑗 .𝛼, which is set to ⊥
+while the session is being established, 1 if the authentication
+of the communication peer has been accepted, or 0 if the
+authentication has been rejected; and
+– the channel key, 𝜋𝑖
+𝑃 .Π 𝑗 .ck, used to authenticate and en-
+crypt messages, once it has been negotiated between the
+two party instances (before then, set to ⊥).
+D.2 Utility Functions
+The following utility functions (see §6.4) can be called by any in-
+stance during phase execution:
+– InScope(𝑠𝑐𝑜𝑝𝑒, 𝑎𝑐𝑡𝑖𝑜𝑛, 𝑟𝑖𝑑, 𝑟 ):
+Returns 1 when 𝑎𝑐𝑡𝑖𝑜𝑛 is allowed to be performed on a re-
+source according to the given authorisation 𝑠𝑐𝑜𝑝𝑒 and 0
+1387
+
+[PDF PAGE 17]
+Protocols and Formal Models for Delegated Authorisation with Server-Side Secrecy ASIA CCS ’25, August 25–29, 2025, Hanoi, Vietnam
+otherwise. 𝑟𝑖𝑑 is any valid resource identifier and 𝑟 is any
+resource plaintext.
+When 𝑎𝑐𝑡𝑖𝑜𝑛 = “reg”, 𝑟 must be set to a non-⊥ value whereas
+𝑟𝑖𝑑 is only set to indicate a resource update.
+When 𝑎𝑐𝑡𝑖𝑜𝑛 ∈ { “ret”, “del”}, 𝑟𝑖𝑑 must be set to a
+non-⊥ value. The value of 𝑟 is ignored.
+– ProduceProof(𝑐𝑟𝑒𝑑, 𝑚, 𝑎𝑢𝑥 ):
+Generates a proof from the credential 𝑐𝑟𝑒𝑑 and message 𝑚,
+e.g., a signature on 𝑚 using 𝑐𝑟𝑒𝑑 as the signing key. 𝑎𝑢𝑥
+models extra information about𝑐𝑟𝑒𝑑 and may affect the type
+of proof produced. When 𝑐𝑟𝑒𝑑 is a shared secret, 𝑚 must be
+set to ⊥ and 𝑐𝑟𝑒𝑑 returned as the proof.
+– VerifyProof(vrfr, 𝑚, 𝑝, 𝑎𝑢𝑥 ):
+Returns 1 if proof 𝑝 matches message 𝑚 and verifies using
+verifier vrfr with metadata 𝑎𝑢𝑥 or 0 otherwise. When vrfr is
+a shared secret, 𝑚 must be set to ⊥.
+– ProtectRes(𝑒𝑝𝑘, 𝑠𝑠𝑘, 𝑟 ):
+Converts a plaintext resource 𝑟 to a form that can only be
+read given knowledge of the secret key corresponding to
+public encryption key𝑒𝑝𝑘 . A signing key𝑠𝑠𝑘 can be provided
+to sign the resource.
+– ExtractRes(𝑒𝑠𝑘, 𝑠𝑝𝑘, 𝑅 ):
+Decodes and decrypts a raw resource 𝑅 using secret decryp-
+tion key 𝑒𝑠𝑘 to return plaintext resource 𝑟. Verification of
+𝑅 against public verification key 𝑠𝑝𝑘 will be attempted, if
+provided, and ⊥ returned if unsuccessful.
+D.3 Additional Oracles
+In addition to the oracles given in §6.5 for corrupting parties to
+various degrees, the adversary 𝒜 is also given access to following
+oracles to instantiate new phase executions and facilitate commu-
+nication between them:
+– NewInstance(𝑃, 𝑡𝑦𝑝𝑒 ):
+Creates a new phase instance 𝜋𝑖
+𝑃 of party 𝑃 and 𝑡𝑦𝑝𝑒 ∈
+{“auth”, “reg”, “ret”, “del”}, setting the instance’s status to
+“active” and recording the start time. 𝐶ℎ returns to 𝒜 the
+instance identifier 𝑖 ∈ 𝑃 .𝑛𝜋 .
+– NewChannel(𝜋𝑖
+𝑃 , 𝜌, peer):
+Creates a new channel for the instance 𝜋𝑖
+𝑃 with role 𝜌 ∈
+{“init”, “resp”} and its intended communication partner peer
+if 𝑝𝑒𝑒𝑟 ought to authenticate to 𝑃 via some ACCE protocol.
+– Send(𝜋𝑖
+𝑃 .Π 𝑗 , 𝑚 ):
+Sends a message 𝑚 to the instance 𝜋𝑖
+𝑃 over channel 𝜋𝑖
+𝑃 .Π 𝑗 .
+A reply is generated according to the protocol specification
+and returned to 𝒜.
+– BeginPhase(𝜋𝑖
+𝑃 , 𝑄, 𝑟𝑖𝑑 ):
+Causes 𝜋𝑖
+𝑃 to generate the first message required to start the
+phase, assuming that 𝑄 ∈ 𝒫 is the recipient. Returns the
+generated message unless, according to the protocol, either
+𝑃 or 𝑄 is a party of a type not permitted to initiate the phase,
+or the current state of 𝜋𝑖
+𝑃 or 𝑃 is not such that beginning the
+phase is a valid action.
+If 𝜋𝑖
+𝑃 .type ∈ { “reg”, “ret”, “del”}, then 𝑟𝑖𝑑 can optionally be
+given to perform an action on a specific resource, otherwise
+the affected resource is chosen at random.
+𝒜 also receives oracle access to the utility functions defined
+previously in Appendix D.2.
+D.4 Message Authentication
+An authenticator 𝑡 is said to authenticate a message 𝑚 to a party
+𝑃 ∈ 𝒫 as originating at a party 𝑄 ∈ 𝒫 iff any of the following
+statements are true:
+(1) 𝑃 .authz′
+𝑖 = (𝑄, B𝑖, vrfr𝑖, from𝑖, until𝑖, scope𝑖, aux𝑖 ) for
+some 𝑖 ∈ N such that VerifyProof(vrfr𝑖, 𝑚, 𝑡, aux𝑖 ) = 1
+and until𝑖 is some future time or ⊥;
+(2) VerifyProof(𝑄 .cpk, 𝑚, 𝑡, “cpk”) = 1; or
+(3) there exists an instance 𝜋 𝑗
+𝑃 for some 𝑗 ∈ 𝑃 .𝑛𝜋 such that
+𝜋 𝑗
+𝑃 .peer = 𝑄 and VerifyProof(𝜋 𝑗
+𝑃 .ck, 𝑚, 𝑡, “ck”) = 1.
+Refer back to §6.6 for the intuition behind this definition.
+D.5 Authorisation Origination
+An authorisation credential or verifier 𝑥 is said to have originated
+within a phase instance 𝜋𝑖
+𝑃 for some 𝑃 ∈ 𝒫 and 𝑖 ∈ [ 1, 𝑃 .𝑛𝜋 ] iff:
+(1) the instance recorded a new credential/verifier such that
+𝜋𝑖
+𝑃 .authzid = 𝑗 or 𝜋𝑖
+𝑃 .authzid′ = 𝑘 for any 𝑗, 𝑘 ∈ N; and
+(2) the credential/verifier 𝑥 is present at index 𝑗 or 𝑘 such that
+𝑃 .authz𝑗 or 𝑃 .authz′
+𝑘 is equal to (𝐴, 𝐵, 𝑋 , from, until, scope,
+aux) where 𝑋 = 𝑥.
+Refer back to §6.7 for the intuition behind this definition.
+D.6 Authorisation Credential and Verifier
+Matching
+A credential 𝑥 and verifier 𝑦 are said to match iff:
+(1) 𝑥 originates within a phase instance 𝜋𝑎
+𝑃 where 𝜋𝑎
+𝑃 .authzid =
+𝑗 for some 𝑃 ∈ 𝒫, 𝑎 ∈ [ 1, 𝑃 .𝑛𝜋 ] and 𝑗 ∈ N;
+(2) 𝑦 originates within a phase instance𝜋𝑏
+𝑄 where 𝜋𝑎
+𝑃 .authzid′ =
+𝑘 for some 𝑄 ∈ 𝒫, 𝑏 ∈ [ 1, 𝑄 .𝑛𝜋 ] and 𝑘 ∈ N;
+(3) 𝑃 .authz𝑗 = (𝑄, 𝐵 𝑗 , 𝑥, from𝑗 , until 𝑗 , scope 𝑗 , aux 𝑗 );
+(4) 𝑄 .authz′
+𝑘 = (𝑃, 𝐵 𝑘, 𝑦, from𝑘, until𝑘, scope𝑘, aux𝑘 );
+(5) 𝑃 ≠ 𝑄; and
+(6) from 𝑥 it is possible to produce a proof of authorisation which
+can verified as valid using 𝑦, i.e., if 𝑝 = ProduceProof(𝑥, 𝑚,
+𝑎𝑢𝑥 𝑗 ) for a randomly chosen 𝑚, then VerifyProof(𝑦, 𝑚, 𝑝,
+𝑎𝑢𝑥𝑘 ) = 1.
+Refer back to §6.8 for the intuition behind this definition.
+D.7 Instance Partnering
+In RAD protocols, there are different ways in which instances can
+be partnered (see §6.9), depending on the protocol phase and the
+parties involved. This is formalised below:
+D.7.1 Partnering in the authorisation grant phase. For any 𝑆 ∈ 𝒮,
+𝐶 ∈ 𝒞, 𝑂 ∈ 𝒪 and 𝑎 ∈ [ 1, 𝑆 .𝑛𝜋 ], 𝑏 ∈ [ 1, 𝐶.𝑛𝜋 ], 𝑐 ∈ [ 1, 𝑂 .𝑛𝜋 ], a
+server, consumer and owner instance,𝜋𝑎
+𝑆 , 𝜋𝑏
+𝐶 and 𝜋𝑐
+𝑂, are considered
+partnered iff:
+1388
+
+[PDF PAGE 18]
+ASIA CCS ’25, August 25–29, 2025, Hanoi, Vietnam Jean Snyman, Chris Culnane, Ioana Boureanu, and Gerault David
+(1) all three have successfully completed the authorisation grant
+phase such that:
+𝜋𝑎
+𝑆 .type = 𝜋𝑏
+𝐶 .type = 𝜋𝑐
+𝑂 .type = “auth” and
+𝜋𝑎
+𝑆 .status = 𝜋𝑏
+𝐶 .status = 𝜋𝑐
+𝑂 .status = “success”;
+(2) an authorisation credential which has originated within
+the consumer instance 𝜋𝑏
+𝐶 matches an authorisation veri-
+fier which has originated within the server instance 𝜋𝑎
+𝑆 such
+that 𝐶 is authorised to perform actions on𝑆 at the conclusion
+of the phase execution;
+(3) an authorisation credential which has originated within the
+consumer instance 𝜋𝑏
+𝐶 matches an authorisation verifier
+which has originated within the owner instance 𝜋𝑐
+𝑂 such
+that 𝐶 is authorised to perform actions on 𝑂 at the conclu-
+sion of the phase execution;
+(4) the authorisation credential from condition 2 above is only
+valid for actions performed on behalf of 𝑂; and
+(5) the credentials and verifiers from conditions 2 and 3 above
+all share the same scope.
+D.7.2 Partnering in resource access phases. For any 𝑆 ∈ 𝒮, 𝐶 ∈ 𝒞
+and 𝑎 ∈ [ 1, 𝑆 .𝑛𝜋 ], 𝑏 ∈ [ 1, 𝐶.𝑛𝜋 ], a server instance 𝜋𝑎
+𝑆 and consumer
+instance 𝜋𝑏
+𝐶 are considered partnered iff:
+(1) both have successfully completed the same resource access
+phase 𝑝ℎ such that:
+𝑝ℎ = 𝜋𝑎
+𝑆 .type = 𝜋𝑏
+𝐶 .type ∈ { “reg”, “ret”, “del”} and
+𝜋𝑎
+𝑆 .status = 𝜋𝑏
+𝐶 .status = “success”;
+(2) both are acting on the same resource 𝑅 with identifier 𝑟𝑖𝑑
+for the full duration of phase execution, i.e.,:
+𝑅 = 𝜋𝑎
+𝑆 .R↔
+𝑑 = 𝜋𝑏
+𝐶 .R↔𝑒 for all 𝑑, 𝑒 ∈ N and
+𝑟𝑖𝑑 = 𝜋𝑎
+𝑆 .rid↔
+𝑓 = 𝜋𝑏
+𝐶 .rid↔𝑔 for all 𝑓 , 𝑔 ∈ N
+where 𝜋𝑎
+𝑆 .rid↔
+𝑓 ≠ ⊥ and 𝜋𝑏
+𝐶 .rid↔𝑔 ≠ ⊥;
+(3) the resource 𝑅 is registered with 𝑆 under identifier 𝑟𝑖𝑑 for
+an owner 𝑂 ∈ 𝒪, i.e.,:
+𝑆 .𝑟𝑒𝑠ℎ = (𝑂, 𝑟𝑖𝑑, 𝑅 ) for some ℎ ∈ N;
+(4) the instances have exchanged the same authorisation proof
+𝑝1, i.e., 𝑝1 = 𝜋𝑎
+𝑆 .proof↔
+𝑖 = 𝜋𝑏
+𝐶 .proof↔
+𝑗 for some 𝑖, 𝑗 ∈ N;
+(5) the proof 𝑝1 verifies using a verifier 𝑣1 stored by 𝑆 which is
+valid at the start of 𝜋𝑎
+𝑆 ’s execution; and
+(6) the resource is within the scope 𝑠𝑐 of the authorisation veri-
+fier 𝑣1, i.e., :
+InScope(𝑠𝑐, 𝑝ℎ, 𝜋 𝑏
+𝐶 .rid↔
+1 , 𝑟 ) = 1
+where 𝑟 = ExtractRes(𝑂 .𝑒𝑠𝑘, 𝑂 .𝑠𝑝𝑘, 𝑅 ).
+An instance 𝜋𝑐
+𝑂 of owner 𝑂 is additionally partnered with 𝜋𝑎
+𝑆
+and 𝜋𝑏
+𝐶 for some 𝑐 ∈ [ 1, 𝑂 .𝑛𝜋 ] iff:
+(1) 𝜋𝑐
+𝑂 has successfully completed the same resource access
+phase as the other two instances, i.e., 𝑝ℎ = 𝜋𝑐
+𝑂 .type and
+𝜋𝑐
+𝑂 .status = “success”;
+(2) 𝜋𝑐
+𝑂 is acting on the same resource 𝑅 with the same identifier
+𝑟𝑖𝑑 as the other two instances, i.e.,:
+𝑅 = 𝜋𝑐
+𝑂 .R↔𝑚 for all 𝑚 ∈ N and
+𝑟𝑖𝑑 = 𝜋𝑐
+𝑂 .rid↔𝑛 for all 𝑛 ∈ N where 𝜋𝑐
+𝑂 .rid↔𝑛 ≠ ⊥;
+(3) 𝑂 has a sound understanding of the contents of 𝑅, i.e.,
+there is no 𝑂 .cache𝑞 = (𝑅𝑞, 𝑟 𝑞) for any 𝑞 ∈ N where
+𝑟𝑞 ≠ ExtractRes(𝑂 .𝑒𝑠𝑘, 𝑂 .𝑠𝑝𝑘, 𝑅 𝑞) and 𝑅𝑞 = 𝑅;
+(4) 𝜋𝑐
+𝑂 has received an authorisation proof 𝑝2 from 𝜋𝑏
+𝐶, i.e., 𝑝2 =
+𝜋𝑐
+𝑂 .proof↔𝑠 = 𝜋𝑏
+𝐶 .proof↔
+𝑡 for some 𝑠, 𝑡 ∈ N;
+(5) the proof 𝑝2 verifies using a verifier 𝑣2 stored by 𝑂 which is
+valid at the start of 𝜋𝑐
+𝑂’s execution; and
+(6) the scope of verifier 𝑣2 is equal to 𝑠𝑐.
+E Evaluation of OAuth 2.0 as a RAD Scheme
+As a point of comparison with APEX, consider OAuth 2.0 (as de-
+scribed in §2) instantiated as a RAD scheme (§5):
+suite = (DMAG, RReg, RRet, RDel)
+OAuth = (SMAG, RA, RA, RA)
+Here, the dual-mediated authorisation grant protocol required
+for a RAD scheme (DMAG) is fulfilled by OAuth’s server-mediated
+protocol (SMAG). Similarly, the expected phase-specific resource
+protocols (RReg, RRet and RDel) are all fulfilled by OAuth’s generic
+resource access protocol (RA).
+Note that since OAuth does not perform encryption of resources,
+ProtectRes(𝑒𝑝𝑘, 𝑠𝑠𝑘, 𝑟 ) = 𝑟 and ExtractRes(𝑒𝑝𝑘, 𝑠𝑠𝑘, 𝑅 ) = 𝑅.
+Let 𝒜 be a PPT algorithm which plays the ERA security game
+against OAuth. It can perform a polynomial number of runs of the
+SMAG and RA protocols by issuing queries to the challenger.
+As the server in a RAD scheme is considered adversarial, 𝒜 had
+direct access to all data stored on the server and can even act as the
+server, unlike in the standard OAuth model. It also has access to
+data stored by the consumer since the consumer is considered only
+semi-trusted. These capabilities are modelled through the GetData
+and CommCorrupt oracles which can be used as in the following
+examples to win the game GERA
+𝒜,OAuth :
+– 𝒜 issues the GetData(𝑆) query to get the contents of 𝑆 .res
+for any server 𝑆 with one or more registered resources;
+– 𝒜 issues the GetData(𝐶) query to get the contents of𝜋𝑖
+𝐶 .R↔
+for any instance of any consumer 𝐶 where 𝜋𝑖
+𝐶 .status =
+“success” and 𝜋𝑖
+𝐶 .type ∈ { “reg”, “ret”, “del”};
+– 𝒜 uses the CommCorrupt(𝑆) query to interleave resources
+requested by two different consumers 𝐶1, 𝐶2 such that a
+consumer receives a resource it was not authorised to receive;
+or
+– 𝒜 uses the CommCorrupt(𝑆) query and forges a message
+from some server 𝑆 in reply to a resource retrieval request
+from some consumer 𝐶 who later updates the resource with
+minimal modifications, in effect allowing 𝒜 to register re-
+source data of its choice.
+If 𝒜 were to simply perform one run of RA to register a sin-
+gle resource before attempting the first attack above, its success
+probability would be 1. As such:
+AdvERA
+𝒜,OAuth > negl(𝑠)
+where negl is any negligible function in the security parameter 𝑠.
+Therefore, OAuth is not secure w.r.t. ERA, our security property
+for RAD schemes.
+1389
+
+[PDF PAGE 19]
+Protocols and Formal Models for Delegated Authorisation with Server-Side Secrecy ASIA CCS ’25, August 25–29, 2025, Hanoi, Vietnam
+F Evaluation of Our Model & Security Results
+F.1 Complexity of the Model. The RAD model is a Bellare-Rogaway
+formalism [5], enhanced to cater for the analysis of RAD protocol
+suites, including APEX.
+The intricacies come from the fact that RAD schemes have phases
+(i.e., DMAG, RReg, RRet, RDel), with sub-protocols inside each, and
+they can be executed asynchronously, with state being kept at
+some points but not at all, and with the ability to restart/resume
+at various points but not all. This asynchronicity and particular
+statefulness means that the model has to carefully bookkeep many
+details. Together with our strong attacker model (whereby our
+attacker can corrupt even server parties), this makes for difficult
+definitions of partnering and freshness in the Bellare-Rogaway
+sense. It is laborious to formally express these:
+– Partnering: we need to be able to link together which in-
+stance of which owner, client, or server is speaking to which
+other instance of an owner, client, or server, in which session.
+– Freshness and security definitions: if the attacker has
+corrupted one party, we need to be able to correctly exclude
+— over the partnering definition — the appropriate instances
+which violate the security definitions, without producing
+trivial attacks.
+F.2 Implications of the Security Results. As an ERA-secure protocol
+suite, APEX ensures that no party can read or modify a resource
+without authorisation from the owner of the resource. This includes
+malicious servers, honest-but-curious consumers and even trusted
+owner parties to which the resource does not belong. Clearly, these
+guarantees are significantly stronger than those provided by OAuth
+(see Appendix E on this point). Notably, these guarantees do not
+arise from the security of the underlying delegated authorisation
+protocol suite. Indeed, no result from the previous section is given
+in terms of the security of SMAG or RA. Therefore, it should be
+simple to prove the security of APEX when instantiated with a
+different protocol suite, e.g., GNAP [52].
+The ERA security of APEX is made possible in no small part due
+to the binding of the identity of a consumer to that of a particular
+owner during the authorisation grant phase (Leema 1). Really, it
+is the provider agent who needs to be introduced to the consumer
+and vice versa. Achieving this is not easy, as the consumer cannot
+connect to the provider agent directly. Instead, the user is passed
+off from consumer to agent through a browser redirect facilitated
+by the server (in an OAuth-like fashion). The simple-to-implement
+one-time code (OTC) mechanism takes advantage of the user to
+authenticate the exchange of identities. This is why the OTC is
+required to be over a sufficiently large space for ERA security.
+G Security Proofs
+G.1 Proof of Theorem 1: Relationship Between
+the Security of APEX and Its Sub-Protocols
+As a reminder, Theorem 1 states:
+An APEX protocol suite𝑅𝐴𝐷𝛼 is ERA secure if it is constructed
+from 𝛼 consisting in part of:
+a) an IND-EAV secure symmetric encryption scheme;
+b) an IND-CPA secure asymmetric encryption scheme;
+c) EUF-CMA secure MAC and signature schemes; and
+d) one-time codes (OTCs) in an exponential space in the
+security parameter.
+The proof follows below, but first:
+Let APEX represent any instantiation of APEX consist-
+ing of instantiations of the APEX component protocols
+(DMAG, RReg, RRet, RDel) configured to use cryptographic
+primitives (Sym, Asym, Sig, MAC).
+Let A represent the set of all possible PPT algorithms.
+Notice that any 𝒜 ∈ A which wins in the ERA game against an
+arbitrary RAD suite or sub-protocol, does so by obtaining either:
+(1) the plaintext of a legitimately registered resource 𝑟 ′, or
+(2) sufficient information to allow it to impersonate and use the
+authorisation of a legitimate party.
+To break ERA security of the suite/protocol it must be able to do so
+with a non-negligible probability.
+Assume: ∄ 𝒜′
+1 ∈ A s.t. AdvAG
+𝒜′
+1,DMAG > negl(𝑠)
+∄ 𝒜′
+2 ∈ A s.t. AdvERA
+𝒜′
+2,RReg > negl(𝑠)
+∄ 𝒜′
+3 ∈ A s.t. AdvERA
+𝒜′
+3,RRet > negl(𝑠)
+∄ 𝒜′
+4 ∈ A s.t. AdvERA
+𝒜′
+4,RDel > negl(𝑠)
+for any negligible function negl(𝑠).
+Suppose: ∃ 𝒜 ∈ A s.t. AdvERA
+𝒜,APEX > negl(𝑠)
+∴ 𝒜 ∉ {𝒜′
+1, 𝒜′
+2, 𝒜′
+3, 𝒜′
+4}
+∴ 𝒜 cannot, by limiting its interactions to one of the four phases:
+(1) obtain a resource plaintext 𝑟 ′ with a non-negligible prob-
+ability; or
+(2) obtain an authorising credential 𝑐𝑟𝑒𝑑 ′ for a consumer
+which has a matching verifier 𝑣𝑟 𝑓 𝑟 ′ at an owner, or vice
+versa, with a non-negligible probability.
+∴ 𝒜 must break the ERA security of APEX by either:
+(1) obtaining partial information about 𝑟 ′ in two or more
+of the phases to allow it to deduce the full 𝑟 ′ with a
+non-negligible probability; or
+(2) obtaining partial information about 𝑐𝑟𝑒𝑑 ′ in two or more
+of the phases to allow it to deduce the full 𝑐𝑟𝑒𝑑 ′ with a
+non-negligible probability.
+The proof proceeds by contradiction, showing that it is not pos-
+sible to obtain even one bit of 𝑟 ′ or 𝑐𝑟𝑒𝑑 ′ with a non-negligible
+probability in any of the phases.
+1390
+
+[PDF PAGE 20]
+ASIA CCS ’25, August 25–29, 2025, Hanoi, Vietnam Jean Snyman, Chris Culnane, Ioana Boureanu, and Gerault David
+For all instances of the ERA game in which 𝒜 is playing against
+APEX:
+Let Γ be the set of resource ciphertexts that correspond to 𝑟 ′
+s.t. ∃ an entry (𝑂, 𝑟𝑖𝑑, 𝑅 ) in 𝑆 .𝑟𝑒𝑠 for some 𝑆 ∈ 𝒮 and 𝑂 ∈ 𝒪
+where 𝑟 ′ = ExtractRes(𝑂 .𝑒𝑠𝑘, ⊥, 𝑅).
+Let Φ be the set of all server instances which have sent/received
+an 𝑅 ∈ Γ.
+Let S be the set of servers which have an instance in Φ.
+Let C be the set of consumers which have an instance in Φ.
+Let O be the set of owners which have an instance in Φ.
+Because 𝒜 satisfies the winning condition of the ERA game, all
+𝑆 ∈ S are fresh.
+∴ No CommCorrupt(𝐶) or ResCorrupt(𝐶) has been called on
+any 𝐶 ∈ C.
+No CommCorrupt(𝑂) or ResCorrupt(𝑂) has been called on
+any 𝑂 ∈ O.
+No DataReveal(𝑂) has been called on any 𝑂 ∈ O.
+All other queries are permitted.
+Note: It is not possible for 𝒜 to corrupt a phase instance of a party
+𝑃 ∈ 𝒫 without also corrupting all other instances of 𝑃 whether
+executing the same type of phase or not.
+Let V𝑖
+𝑃 be a set representing the view of instance 𝜋𝑖
+𝑃 for some party
+𝑃 ∈ 𝒫 and 𝑖 ∈ [ 1, 𝑃 .𝑛𝜋 ] w.r.t. data which has a relation to the
+plaintext of any resource acted on in 𝜋𝑖
+𝑃 .
+For all 𝑂 ∈ 𝒪, 𝐶 ∈ 𝒞 and 𝑆 ∈ 𝒮:
+V𝑎
+𝑂 = { 𝑤𝑎𝑘 𝑎 = AEnc𝑂𝑎 .𝑒𝑝𝑘 (𝑎𝑘𝑎), 𝑤𝑟 𝑎 = SEnc𝑎𝑘𝑎 (𝑟 ∗
+𝑎),
+𝑅𝐾𝑎 = AEnc𝑂𝑎 .𝑒𝑝𝑘 (𝑟𝑘𝑎), 𝑅 𝑎 = SEnc𝑟𝑘 𝑎 (𝑟𝑎),
+𝑅𝐾 ∗
+𝑎 = AEnc𝑂𝑎 .𝑒𝑝𝑘 (𝑟𝑘 ∗
+𝑎), 𝑅 ∗
+𝑎 = SEnc𝑟𝑘 ∗𝑎 (𝑟 ∗
+𝑎) }
+for all 𝑎 ∈ [ 1, 𝑂 .𝑛𝜋 ] s.t. 𝜋𝑎
+𝑂 .type = “𝑟𝑒𝑔 ”
+V𝑏
+𝐶 = { 𝑤𝑎𝑘 𝑏 = AEnc𝑂𝑏 .𝑒𝑝𝑘 (𝑎𝑘𝑏 ), 𝑤𝑟 𝑏 = SEnc𝑎𝑘𝑏 (𝑟 ∗
+𝑏 ) }
+for all 𝑏 ∈ [ 1, 𝐶.𝑛𝜋 ] s.t. 𝜋𝑏
+𝐶 .type = “𝑟𝑒𝑔 ”
+V𝑐
+𝑆 = { 𝑤𝑎𝑘 𝑐 = AEnc𝑂𝑐 .𝑒𝑝𝑘 (𝑎𝑘𝑐 ), 𝑤𝑟 𝑐 = SEnc𝑎𝑘𝑐 (𝑟 ∗
+𝑐 ),
+𝑅𝐾𝑐 = AEnc𝑂𝑐 .𝑒𝑝𝑘 (𝑟𝑘𝑐 ), 𝑅 𝑐 = SEnc𝑟𝑘 𝑐 (𝑟𝑐 ),
+𝑅𝐾 ∗
+𝑐 = AEnc𝑂𝑐 .𝑒𝑝𝑘 (𝑟𝑘 ∗
+𝑐 ), 𝑅 ∗
+𝑐 = SEnc𝑟𝑘 ∗𝑐 (𝑟 ∗
+𝑐 ) }
+for all 𝑐 ∈ [ 1, 𝑆 .𝑛𝜋 ] s.t. 𝜋𝑐
+𝑆 .type = “𝑟𝑒𝑔 ”
+For all 𝑎 ∈ [ 1, 𝑂 .𝑛𝜋 ], 𝑏 ∈ [ 1, 𝐶.𝑛𝜋 ], and 𝑐 ∈ [ 1, 𝑆 .𝑛𝜋 ] such that
+𝑟 ∗𝑎 = 𝑟 ′, 𝑟 ∗
+𝑏 = 𝑟 ′, 𝑟 ∗𝑐 = 𝑟 ′ or 𝑟𝑐 = 𝑟 ′:
+• 𝑂𝑎.𝑒𝑝𝑘 , 𝑂𝑏 .𝑒𝑝𝑘 and 𝑂𝑐 .𝑒𝑝𝑘 are not known to the𝒜 by virtue
+of freshness but can be guessed with probability= 3·|𝒦Sig|−1
+• 𝑤𝑎𝑘 𝑎, 𝑤𝑎𝑘 𝑏 and 𝑤𝑎𝑘 𝑐 reveal nothing about 𝑎𝑘𝑎, 𝑎𝑘𝑏 and
+𝑎𝑘𝑐 respectively unless 𝒜 is able to win in the IND-CPA
+game against Asym. As such, the probability of 𝑤𝑎𝑘 𝑎, 𝑤𝑎𝑘 𝑏
+and 𝑤𝑎𝑘 𝑐 leaking any information about 𝑎𝑘𝑎, 𝑎𝑘𝑏 and 𝑎𝑘𝑐
+is = 3 ·AdvIND-CPA
+𝒜,Asym
+• Similarly, 𝑤𝑟 𝑎, 𝑤𝑟 𝑏, 𝑤𝑟 𝑐 reveal nothing about 𝑟 ∗𝑎 = 𝑟 ∗
+𝑏 = 𝑟 ∗𝑐 =
+𝑟 ′ except with probability = 3 ·AdvIND-EAV
+𝒜,Sym
+• 𝑅𝐾𝑎, 𝑅𝐾𝑐 reveal nothing about 𝑟𝑘 ∗𝑎, 𝑟𝑘 ∗𝑐 except with proba-
+bility = 2 ·AdvIND-CPA
+𝒜,Asym
+• 𝑅𝑎, 𝑅𝑐 reveal nothing about 𝑟𝑎 = 𝑟𝑐 = 𝑟 ′ except with proba-
+bility = 2 ·AdvIND-EAV
+𝒜,Sym
+• 𝑅𝐾 ∗𝑎, 𝑅𝐾 ∗𝑐 reveal nothing about 𝑟𝑘 ∗𝑎, 𝑟𝑘 ∗𝑐 except with proba-
+bility = 2 ·AdvIND-CPA
+𝒜,Asym
+• 𝑅∗𝑎, 𝑅∗𝑐 reveal nothing about 𝑟 ∗𝑎 = 𝑟 ∗𝑐 = 𝑟 ′ except with proba-
+bility = 2 ·AdvIND-EAV
+𝒜,Sym
+∴ Pr[𝒜 learns a bit of 𝑟 ′ in RReg] ≤ negl(𝑠)
+For all 𝑂 ∈ 𝒪, 𝐶 ∈ 𝒞 and 𝑆 ∈ 𝒮:
+V𝑑
+𝑂 = { 𝑤𝑎𝑘 𝑑 = AEnc𝑂𝑑 .𝑒𝑝𝑘 (𝑎𝑘𝑑 ),
+𝑟𝑤𝑟𝑘 𝑑 = SEnc𝑎𝑘𝑑 (𝑟𝑘𝑑 ),
+𝑅𝐾𝑑 = AEnc𝑂𝑑 .𝑒𝑝𝑘 (𝑟𝑘𝑑 ), 𝑅 𝑑 = SEnc𝑟𝑘𝑑 (𝑟𝑑 ) }
+for all 𝑑 s.t. 𝜋𝑑
+𝑂 .type = “𝑟𝑒𝑡 ”
+V𝑒
+𝐶 = { 𝑤𝑎𝑘 𝑒 = AEnc𝑂𝑒 .𝑒𝑝𝑘 (𝑎𝑘𝑒 ),
+𝑅𝐾𝑒 = AEnc𝑂𝑒 .𝑒𝑝𝑘 (𝑟𝑘𝑒 ), 𝑅 𝑒 = SEnc𝑟𝑘 𝑒 (𝑟𝑒 ) }
+for all 𝑒 s.t. 𝜋𝑒
+𝐶 .type = “𝑟𝑒𝑡 ”
+V𝑓
+𝑆 = { 𝑤𝑎𝑘 𝑓 = AEnc𝑂 𝑓 .𝑒𝑝𝑘 (𝑎𝑘𝑓 ),
+𝑟𝑤𝑟𝑘 𝑓 = SEnc𝑎𝑘𝑓 (𝑟𝑘 𝑓 ),
+𝑅𝐾𝑓 = AEnc𝑂 𝑓 .𝑒𝑝𝑘 (𝑟𝑘 𝑓 ), 𝑅 𝑓 = SEnc𝑟𝑘 𝑓 (𝑟 𝑓 ) }
+for all 𝑓 s.t. 𝜋 𝑓
+𝑆 .type = “𝑟𝑒𝑡 ”
+For all 𝑑 ∈ [ 1, 𝑂 .𝑛𝜋 ], 𝑒 ∈ [ 1, 𝐶.𝑛𝜋 ], and 𝑓 ∈ [ 1, 𝑆 .𝑛𝜋 ] such that
+𝑟𝑑 = 𝑟 ′, 𝑟𝑒 = 𝑟 ′, 𝑟 𝑓 = 𝑟 ′ or 𝑟𝑐 = 𝑟 ′:
+• 𝑂𝑑 .𝑒𝑝𝑘 , 𝑂𝑒 .𝑒𝑝𝑘 and 𝑂 𝑓 .𝑒𝑝𝑘 can only be obtained with prob-
+ability = 3 · |𝒦Sig|−1
+• 𝑤𝑎𝑘 𝑑, 𝑤𝑎𝑘 𝑒 and 𝑤𝑎𝑘 𝑓 reveal nothing about 𝑎𝑘𝑑, 𝑎𝑘𝑒 and
+𝑎𝑘𝑓 respectively except for probability = 3 ·AdvIND-CPA
+𝒜,Asym
+• 𝑟𝑤𝑟𝑘 𝑎, 𝑟𝑤𝑟𝑘 𝑐 reveal nothing about 𝑟𝑘𝑑, 𝑟𝑘 𝑓 except with
+probability = 2 ·AdvIND-EAV
+𝒜,Sym
+• 𝑅𝐾𝑑, 𝑅𝐾𝑒, 𝑅𝐾𝑓 reveal nothing about 𝑟𝑘𝑑, 𝑟𝑘𝑒, 𝑟𝑘 𝑓 except
+with probability = 3 ·AdvIND-CPA
+𝒜,Asym
+• 𝑅𝑑, 𝑅𝑒, 𝑅𝑓 reveal nothing about 𝑟𝑑 = 𝑟𝑒 = 𝑟 𝑓 = 𝑟 ′ except
+with probability = 3 ·AdvIND-EAV
+𝒜,Sym
+∴ Pr[𝒜 learns a bit of 𝑟 ′ in RRet] ≤ negl(𝑠)
+For all 𝑂 ∈ 𝒪, 𝐶 ∈ 𝒞 and 𝑆 ∈ 𝒮:
+V𝑔
+𝑂 = { } for all 𝑔 s.t. 𝜋𝑔
+𝑂 .type = “𝑑𝑒𝑙 ”
+Vℎ
+𝐶 = { } for all ℎ s.t. 𝜋ℎ
+𝐶 .type = “𝑑𝑒𝑙 ”
+V𝑖
+𝑆 = { 𝑅𝐾𝑖 = AEnc𝑂𝑖 .𝑒𝑝𝑘 (𝑟𝑘𝑖 ), 𝑅 𝑖 = SEnc𝑟𝑘 𝑖 (𝑟𝑖 ) }
+for all 𝑖 s.t. 𝜋𝑖
+𝑆 .type = “𝑑𝑒𝑙 ”
+1391
+
+[PDF PAGE 21]
+Protocols and Formal Models for Delegated Authorisation with Server-Side Secrecy ASIA CCS ’25, August 25–29, 2025, Hanoi, Vietnam
+For all 𝑖 ∈ [ 1, 𝑆 .𝑛𝜋 ] such that 𝑟𝑖 = 𝑟 ′:
+• 𝑂𝑖 .𝑒𝑝𝑘 can only be obtained with probability = |𝒦Sig|−1
+• 𝑅𝐾𝑖 reveals nothing about 𝑟𝑘𝑖 except with probability =
+AdvIND-CPA
+𝒜,Asym
+• 𝑅𝑖 reveal nothing about 𝑟𝑖 = 𝑟 ′ except with probability
+= AdvIND-EAV
+𝒜,Sym
+∴ Pr[𝒜 learns a bit of 𝑟 ′ in RDel] ≤ negl(𝑠)
+For all 𝑂 ∈ 𝒪, 𝐶 ∈ 𝒞 and 𝑆 ∈ 𝒮:
+V𝑗
+𝑂 = { } for all 𝑔 s.t. 𝜋 𝑗
+𝑂 .type = “𝑎𝑢𝑡ℎ”
+V𝑘
+𝐶 = { } for all ℎ s.t. 𝜋𝑘
+𝐶 .type = “𝑎𝑢𝑡ℎ”
+V𝑙
+𝑆 = { } for all 𝑖 s.t. 𝜋𝑙
+𝑆 .type = “𝑎𝑢𝑡ℎ”
+∴ Pr[𝒜 learns a bit of 𝑟 ′ in DMAG] ≤ negl(𝑠)
+In the resource access phases, APEX authenticates consumers and
+owners to one another by signing the messages which appear in
+V𝑎
+𝑂, V𝑏
+𝐶, V𝑐
+𝑆, V𝑑
+𝑂, V𝑒
+𝐶, V𝑓
+𝑆 ,V𝑔
+𝑂, Vℎ
+𝐶 and V𝑖
+𝑆.
+In the authorisation grant phase, APEX authenticates consumer
+and owners by calculating a MAC on a one-time code (OTC).
+The keys 𝑂 .𝑠𝑠𝑘 and 𝐶.𝑠𝑠𝑘 are unknown to 𝒜 by virtue of the fresh-
+ness definition.
+As such, so long as the signature scheme Sig and MAC scheme
+MAC are EUF-CMA secure and the search space for the OTC is
+exponential in the security parameter:
+Pr[𝒜 learns a bit of 𝑐𝑟𝑒𝑑 ′ in AG] ≤ negl(𝑠)
+Pr[𝒜 learns a bit of 𝑐𝑟𝑒𝑑 ′ in RReg] ≤ negl(𝑠)
+Pr[𝒜 learns a bit of 𝑐𝑟𝑒𝑑 ′ in RRet] ≤ negl(𝑠)
+Pr[𝒜 learns a bit of 𝑐𝑟𝑒𝑑 ′ in RDel] ≤ negl(𝑠)
+∴ ∄ 𝒜 ∈ A s.t. AdvERA
+𝒜,APEX > negl(𝑠)
+G.2 Proof of Lemma 1: Security of the APEX
+Authorisation Grant Protocol
+As a refresher, Lemma 1 states:
+The dual-mediated authorisation grant protocol DMAG𝛼 in an
+APEX suite 𝑅𝐴𝐷𝛼 is AG secure if 𝛼 consists in part of:
+a) an EUF-CMA secure MAC scheme; and
+b) one-time codes (OTCs) in an exponential space in the
+security parameter.
+The proof proceeds as a series of reductions, but first:
+• Let 𝛾 = DMAG𝛼 .
+• Let 𝑆0, . . . , 𝑆6 denote the events that 𝒜 has won in games
+G0, . . . ,G6 that follow.
+Game 0. This game is the authorisation grant (AG) security game
+as stated in §7.2 with no modifications. As per the definitions, 𝒜
+makes queries to the challenger as it chooses including, at most:
+(1) fully corrupting all servers, consumers and owners but leav-
+ing at least one consumer and owner uncorrupted;
+(2) with the exception of at least one owner, obtaining the data
+(except keys) stored by all parties and decrypted by each
+parties’ keys; and
+(3) decrypting all ACCE channels, all such that the freshness re-
+quirement (§6.9) is satisfiable in at least one run of DMAG𝛼 .
+As these actions alone afford the adversary no quantifiable advan-
+tage, the most that can be concluded so far is thatAdvG0
+𝒜,𝛾 = AdvAG
+𝒜,𝛾.
+Game 1. This game handles the event in which a key used to
+authenticate data repeats for two different consumers or owners. If
+this condition were to occur, the adversary could, e.g., forge a MAC
+from one consumer by corrupting another. This could constitute a
+valid attack in the previous game as the freshness of one consumer
+will not always impact the freshness of another or the instances
+with which the second is partnered (according to the definition of
+instance partnering in §6.9).
+The game therefore proceeds as in the preceding one except that
+𝐶ℎ aborts the game if:
+(1) any owner 𝑂1 generates a 𝑂1.𝑠𝑠𝑘 which is the same as that
+of another owner 𝑂2 at any point (let 𝐸1 denote this event);
+(2) any consumer 𝐶1 generates a 𝐶1.𝑠𝑠𝑘 which is the same as
+that of another consumer 𝐶2 at any point (let 𝐸2 denote this
+event); or
+(3) any consumer 𝐶3 generates a one-time code (OTC) which
+is the same as that of another 𝐶4 at any point (let 𝐸3 denote
+this event).
+The probability of𝐸1 occurring can be bound using the likelihood
+of a cross-owner collision:
+Pr[𝐸1] ≤ ( 𝑛𝒪 − 1) ·
+ 1
+|𝒦Sig|
+
+Recall from §6.1 that 𝑛𝒪 represents the number of owners. One
+(1) is subtracted because a cross-owner collision can only occur if
+there is a minimum of two owners. 𝒦Sig represents the key space
+for the secret keys generated by signature scheme Sig.
+The probabilities of 𝐸2 and 𝐸3 can be bound using the likelihood
+of a cross-consumer collision:
+Pr[𝐸2 ∨ 𝐸3] ≤ ( 𝑛𝒞 − 1) ·
+ 1
+|𝒦Sig| + 1
+|𝒦OTC|
+
+In a similar fashion to be previous bound,𝑛𝒞 represents the number
+of consumers and 𝒦Sig represents the key space for the secret keys
+generated by Sig. 𝒦OTC represents the key space from which OTCs
+are chosen.
+It is worth noting that the size of 𝒦Sig and 𝒦OTC are assumed
+exponential in the security parameter 𝑠.
+From this, it follows that:
+Pr[𝑆0] − Pr[𝑆1] ≤ Pr[𝐸1 ∨ 𝐸2 ∨ 𝐸3]
+AdvG0
+𝒜,𝛾 − AdvG1
+𝒜,𝛾 ≤ Pr[𝐸1 ∨ 𝐸2 ∨ 𝐸3]
+1392
+
+[PDF PAGE 22]
+ASIA CCS ’25, August 25–29, 2025, Hanoi, Vietnam Jean Snyman, Chris Culnane, Ioana Boureanu, and Gerault David
+AdvG0
+𝒜,𝛾 ≤ AdvG1
+𝒜,𝛾 + (𝑛𝒪 − 1) ·
+ 1
+|𝒦Sig|
+
++ (𝑛𝒞 − 1) ·
+ 1
+|𝒦Sig| + 1
+|𝒦OTC|
+
+Game 2. This game captures the chance of guessing a one-time
+code (OTC). If the adversary is able to do so, it can impersonate a
+consumer to an owner or vice versa.
+The game therefore proceeds as in the preceding one except that
+𝐶ℎ additionally aborts if 𝒜 correctly guesses an OTC generated by
+any 𝐶 ∈ 𝒞. Let 𝐸4 denote this event.
+The probability of 𝐸4 can be bound as follows:
+Pr[𝐸4] ≤ 𝑔 ·𝑛𝑜𝑡𝑐 · 1
+|𝒦OTC|
+Here 𝑔 is used to represent the polynomial maximum number of
+guesses that 𝒜 will perform and 𝑛𝑜𝑡𝑐 is the number of OTCs gener-
+ated across all runs of 𝛾.
+From this, it follows:
+Pr[𝑆1] − Pr[𝑆2] ≤ Pr[𝐸4]
+AdvG1
+𝒜,𝛾 − AdvG2
+𝒜,𝛾 ≤ Pr[𝐸4]
+AdvG1
+𝒜,𝛾 ≤ AdvG2
+𝒜,𝛾 + 𝑔 ·𝑛𝑜𝑡𝑐 · 1
+|𝒦OTC|
+Game 3. This game captures the chance of forging a MAC calcu-
+lated by an owner without the OTC (as the chance to obtain it has
+been eliminated in previous games). If an adversary were to succeed
+at this, it could impersonate a legitimate owner to a consumer.
+The game therefore proceeds as in the preceding one except that
+𝐶ℎ additionally aborts if𝒜 is able to break the EUF-CMA security of
+Mac𝑜𝑡𝑐 (𝑂 .𝑠𝑝𝑘) in message 5 of Figure 3 to produce a valid MAC not
+present in the transcript of any fresh owner instance but verifiable
+using one-time code 𝑜𝑡𝑐 . This is once again only possible if 𝒜 can
+win in the EUF-CMA game against MAC, yielding:
+AdvG2
+𝒜,𝛾 ≤ AdvG3
+𝒜,𝛾 + 𝑛𝑜𝑡𝑐 ·AdvEUF-CMA
+𝒜,MAC
+Game 4. This game, like the previous one, captures the chance of
+forging a MAC without the OTC, but this time a MAC calculated by
+a consumer rather than the owner. If an adversary were to succeed
+at this, it could impersonate a legitimate consumer to an owner.
+The game therefore proceeds as in the preceding one except that
+𝐶ℎ additionally aborts if 𝒜 is able to break the EUF-CMA security
+of Mac𝑜𝑡𝑐 (𝐶.𝑝𝑝𝑘 ) in message 6 of Figure 3 to produce a valid MAC
+not present in the transcript of any fresh consumer instance but
+verifiable using one-time code 𝑜𝑡𝑐 . This is only possible if 𝒜 can
+win in the EUF-CMA game against the MAC scheme, yielding:
+AdvG3
+𝒜,𝛾 ≤ AdvG4
+𝒜,𝛾 + 𝑛𝑜𝑡𝑐 ·AdvEUF-CMA
+𝒜,MAC
+Game 5. This game captures the chance of guessing an owner’s
+secret signing key directly. Succeeding at this would allow the
+adversary to trivially win in the previous game by signing a message
+of its choice with the guessed key.
+The game therefore proceeds as in the preceding one except that
+𝐶ℎ additionally aborts if 𝒜 correctly guesses 𝑂 .𝑠𝑠𝑘 for any 𝑂 ∈ 𝒪
+which has participated in a run of 𝛾. The probability of this can be
+bound as:
+AdvG4
+𝒜,𝛾 ≤ AdvG5
+𝒜,𝛾 + 𝑔 ·𝑛𝒪 · 1
+|𝒦Sig|
+Game 6. This game captures the chance of guessing a consumer’s
+secret signing key directly. Succeeding at this would once again
+allow the attacker to win trivially.
+The game therefore proceeds as in the preceding one except that
+𝐶ℎ additionally aborts if 𝒜 correctly guesses 𝐶.𝑠𝑠𝑘 for any 𝐶 ∈ 𝒞
+which has participated in a run of 𝛾. The probability of this can be
+bound as:
+AdvG5
+𝒜,𝛾 ≤ AdvG6
+𝒜,𝛾 + 𝑔 ·𝑛𝒞 · 1
+|𝒦Sig|
+Conclusion for Lemma 1. To successfully impersonate a consumer
+or owner at the conclusion of the authorisation grant phase,𝒜 must
+either obtain that party’s private signing key or cause a consumer or
+owner to accept a fraudulent public key as belonging to a legitimate
+party.
+The former cannot be achieved without guessing a signing key
+or exploiting a signing key which repeats. And the latter cannot be
+achieved without forging a MAC, guessing the OTC or exploiting a
+repeating OTC. Note that 𝒜 cannot obtain the OTC by breaking
+channel security because it is never sent over the wire. And it
+cannot obtain it by corrupting the consumer or owner because that
+would violate the freshness requirement.
+As such, in game 6, we have removed all appreciable options
+available to 𝒜 for winning in the original AG game. As such, we
+can say that:
+AdvG5
+𝒜,𝛾 ≤ negl(𝑠)
+where negl is any negligible function and𝑠 is the security parameter.
+From this, we are able to combine the above inequalities to yield
+the bound:
+AdvAG
+𝒜,𝛾 ≤ 2𝑛𝑜𝑡𝑐 ·AdvEUF−CMA
+𝒜,Mac + ( 𝑛𝒪 − 1) ·
+
+|𝒦Sig|−1
+
++ ( 𝑛𝒞 − 1) ·
+
+|𝒦Sig|−1 + | 𝒦OTC|−1
+
++ 𝑔 ·
+ 𝑛𝑜𝑡𝑐
+|𝒦OTC| + 𝑛𝒪 + 𝑛𝒞
+|𝒦Sig|
+
++ negl(𝑠)
+Since 𝑔, 𝑛𝑜𝑡𝑐 , 𝑛𝒪 and 𝑛𝒞 are all polynomials in the security pa-
+rameter, as long as Sig and MAC each have the properties required
+in Lemma 1 and the search space of the OTC is exponential, the
+probability that 𝒜 wins in the AG game is negligible and therefore
+𝛾 is AG secure (§7.2). □
+G.3 Proof of Lemma 2: Security of the APEX
+Resource Access Protocols
+At this point, we are reaching the page limit for ASIACCS, so we
+politely send the reader to the below link for the remaining proofs,
+which follow the same style as the above:
+▶ https://uos-sccs.github.io/apex
+1393

@@ -1,0 +1,2240 @@
+
+[PDF PAGE 1]
+Demystifying the (In)Security of OAuth-based Account Linking
+in Connector Ecosystems
+Kaixuan Luo †, Xianbo Wang †, Pui Ho Adonis Fung ‡, Wing Cheong Lau †
+†The Chinese University of Hong Kong ‡Samsung Research America
+Abstract—Modern productivity apps, automation platforms,
+and AI agents orchestrate across external tools through cloud-
+based “connectors”. To obtain authorized access to connector
+accounts, these applications rely extensively on the OAuth 2.0
+protocol. However, tracking authorization context across web
+origins and user-agents, while maintaining the binding to the
+applications’ own user identities (i.e.,a secureAccount Link-
+ingprocess), pushes OAuth beyond its original client–server
+model assumptions. The rise of the OAuth-as-a-Service (OaaS)
+paradigm further complicates trust boundaries in OAuth.
+In this paper, we present the first comprehensive study
+of OAuth-based account (mis)linking in connector ecosystems.
+By systematizing real-world account linking architectural pat-
+terns, we show how “OAuth connections”, commonly intro-
+duced to manage account linking, can inadvertently break ses-
+sion integrity and security boundaries in OAuth. This enables
+multiple forms of connector account takeovers.
+We developOASIS(OAuth Session Integrity Scanner), an
+analysis framework that identifies account linking implemen-
+tations and detects novelCross-user OAuth session fixation
+(COSF)vulnerabilities in mobile apps. Our empirical anal-
+ysis discovers 40 vendors susceptible to COSF and identifies
+additional Cross-tenant confused deputy threats in 8 OaaS
+providers. We propose practical countermeasures that have
+since been adopted by major vendors such as Amazon Bedrock
+AgentCore. We lead ongoing discussions and standardization
+efforts to update OAuth security best practices in the IETF.
+1. Introduction
+Connector Ecosystem.Modern software systems are
+transforming how applications (apps) interact with external
+tools on behalf of users. Productivity apps such as Evernote
+integrate with SaaS services like Outlook Calendar to sync
+user data across clouds. Integration platforms [1] such as
+Microsoft Power Automate, IFTTT, Amazon Alexa, and
+Google Home enable broader automation with a portfolio
+of services. OAuth 2.0 [2] has been the predominant proto-
+col for delegated authorization, allowing end-users to grant
+applications access to the services without password sharing.
+The emergence of Agentic AI has accelerated this
+trend. Developers can now build autonomous agents through
+infrastructures such as Microsoft Copilot Studio, Ama-
+zon Bedrock AgentCore, and Composio. These agentic
+AI infrastructures introduce the OAuth-as-a-Service (OaaS)
+MicrosoftCopilot Studio
+Connectors(a.k.a.Tools,Services,Integrations)
+AgenticAIInfrastructures
+……
+Custom AIAgentsBuild
+Amazon Bedrock AgentCore
+Notion
+Connector-equippedAppsMicrosoftPowerAutomate
+IntegrationPlatforms
+Figure 1. Connector Ecosystems. With OAuth 2.0, users can delegate access
+to connectors to various types of applications, such asconnector-equipped
+apps,integration platforms, andAI agents. These applications can then
+invoke the connectors to perform tasks on behalf of users.
+paradigm, where a centralized “Token Vault” [3], [4] handles
+OAuth token retrieval and storage for multiple AI agents.
+In the aforementioned ecosystems, each external service
+integration, with its OAuth configurations, API endpoints
+(a.k.a.Resource Servers), and wrapper functions for API
+calls, is encapsulated as a “connector”. Collectively, these
+OAuth-enabled settings define what we term theconnector
+ecosystems(Fig. 1). However, applying OAuth securely in
+this context is non-trivial: OAuth architectures have evolved
+from simple client–server models into complex patterns
+executing flows across disparate web origins and user-agents
+(UAs), and even into multi-tenant architectures as AI agents
+offload OAuth responsibilities to OaaS providers.
+The Missing Piece of OAuth Authorization.Prior
+OAuth research [5], [6], [7], [8] has primarily focused on tra-
+ditional applications with simple client–server architectures.
+As illustrated in Fig. 2, OAuth at the protocol level concerns
+how anapplication (OAuth client)obtains an end-user’s
+access token from anauthorization server (AS), treating
+the application as a single logical entity. However, OAuth
+remains agnostic to the “authorization context”, regarding
+how, in amulti-user application, the obtained access token
+from an AS should be associated with the app’s own user
+identity (i.e.,“Account Linking”).
+Once this dimension is taken into account, critical
+ambiguities emerge. While existing OAuth standards [2],
+[9] adequately handle same-origin and same-UA scenarios,
+challenges arise when the application’suser sessionis main-
+tained in a different environment from theOAuth client, such
+as on a distinct origin (in web apps), a separate UA (in native
+apps), or under a different entity (as in OaaS architectures).
+1
+
+[PDF PAGE 2]
+Web/Native App OAuth Client
+proprietary
+"OAuth Connection"
+Focus ➊:Multi-user Application
+access token
+intended for an app user
+Authorization
+Server (AS)
+(Connector)
+access token
+intended for the appWeb/Native App
+as OAuth Client
+Authorization
+Server (AS)
+Focus ➋:Decoupled Relationship
+ ormanaged byan external entityself-managedby the app
+This Paper:
+    OAuth-based Account Linking
+    in Connector Ecosystems
+Textbook OAuth:
+RFC6749 - OAuth Framework
+RFC8252 - OAuth for Native Apps
+Figure 2. Textbook OAuthvs.Account Linking. Textbook OAuth standard-
+izes token negotiation for an application (OAuth client) but is agnostic to
+its user session management. Account Linking further specifies how an app
+associates a token with the app’s user identity. Notably, the app’s core busi-
+ness logic (where user session resides) is often decoupled from its OAuth
+client component. Account Linking is prevalent in connector ecosystems.
+Notably, existing mechanisms likestateparameter binding
+[2, §10.12] are underspecified regarding end-to-end session
+integrity in such cases.
+Our Study.In this paper, we conduct a systematic
+examination of OAuth architectural patterns in connector
+ecosystems and their security implications. We reveal how
+implementation details left underspecified by the OAuth
+protocol play a critical role in accurately and securely
+modeling account linking flows. At its core, we observe that
+OAuth clients often introduce an abstractOAuth connection
+to manage a token throughout its lifecycle:
+1) It governs token retrieval as an authorization session in
+OAuth flows (i.e., an OAuth session). When user sessions
+in the UA are inaccessible, applications often resort to
+OAuth sessions, passed via URLs, to identify end-users.
+2) It serves as a persistent handle for internal reference to
+the token, such as for API calls and token refresh.
+Conceptually, an OAuth connection can be characterized
+by three key elements that form its authorization context:
+<user,tenant,connector>, representing the app’s user iden-
+tity, the tenant (in OaaS), and the connector involved.
+Attacks.The gap between the authorization context
+tracked by OAuth connections and those enforced in OAuth
+flows exposes critical vulnerabilities absent under standard
+OAuth assumptions. Table 1 summarizes our threat analysis.
+Cross-user Attacks.Cross-user OAuth Session Fixation
+(COSF) arises when an OAuth session is used to com-
+plete an OAuth flow without verifying its binding to the
+initiating user’s identity. An attacker can pre-establish (fix-
+ate) a controlled OAuth session and trick a victim into
+completing authorization; the resulting token, carrying the
+victim’s connector access, is then linked to the attacker’s app
+account. Unlike traditional web session fixation [10], [11],
+[12], which hijacks user sessions through unauthenticated
+session IDs, COSF exploits OAuth sessions derived from
+existing user sessions to hijack subsequent authorizations.
+Cross-tenant Attacks.The threat landscape expands fur-
+ther under OaaS. As a single “Token Vault” serves multiple,
+potentially untrusted applications (agents) across diverse ori-
+gins and UAs, the OaaS architecture is inherently susceptible
+to COSF. It further enables cross-tenant attacks, in which a
+malicious agent can compromise authorizations of agents in
+other tenants. These include two confused deputy-style [13]
+attacks,Cross-tenant Client ID ConfusionandCross-tenant
+COAT(C ross-connector O Auth A ccount T akeover), which
+exploit the blurred trust boundaries between tenants, and
+between both tenants and connectors, respectively.
+Security Impact.In many cases, a single hyperlink click
+is the only interaction needed to compromise a user. These
+attacks enable account takeovers, granting attackers unau-
+thorized access to the connected services. The same exploit
+can targetany connectorin a vulnerable application, or that
+withinany tenantof a vulnerable OaaS provider.
+Vulnerability Detection.To facilitate our analysis, we
+developOASIS(OA uth S ession I ntegrity S canner), a static
+analysis framework that identifies account linking imple-
+mentations and detects COSF vulnerabilities in Android
+apps using an exclusion-based approach.OASISidentified 12
+apps supporting account linking and, in an extended dataset,
+detected 20 vulnerable apps with high accuracy.
+Measurement Study.Beyond mobile apps, our broader
+investigation, combiningOASIS-backed scans with a cu-
+rated set of leading vendors, reveals industry-wide threats:
+1) COSF vulnerabilities in 19 connector-equipped apps and
+15 integration platforms, including top vendors such as
+Slack, Alexa, n8n [14], IFTTT, Perplexity, and Manus. 2) 19
+instances of cross-user or cross-tenant vulnerabilities across
+8 agentic AI infrastructures, including Amazon Bedrock
+AgentCore [3], Microsoft Copilot Studio, and Composio.
+Responsible Disclosure.To date, we have received ac-
+knowledgments from 20 vendors, with over 15 confirmed
+fixes and a total of $35,850 in bug bounties. Drawing on this
+experience, we distill a set of countermeasures, ranging from
+short-term mitigations to long-term architectural defenses,
+and lead ongoing standardization efforts to update OAuth
+security best practices in the IETF, ensuring the safe deploy-
+ment of OAuth in rapidly evolving connector ecosystems.
+Contributions.Our main contributions are as follows 1:
+•We demystify OAuth architectural patterns and security
+challenges not captured by textbook OAuth (§2) or related
+work (§8), but fundamental to connector ecosystems (§3).
+•We present Cross-user OAuth Session Fixation (COSF), a
+new class of OAuth attack prevalent in Account Linking,
+and propose comprehensive defenses (§4). We further ex-
+tend the analysis to Cross-tenant confused deputy threats
+in OAuth-as-a-Service environments (§5).
+•We developOASIS, a framework for identifying account
+linking support and detecting COSF vulnerabilities in
+mobile apps (§6).
+•We uncovered vulnerabilities across 42 vendors through
+our measurement study (§7).
+•We actively engaged in responsible disclosure and are
+working on updates to OAuth security best practices in
+the IETF [16].
+1. We publicly release the artifacts, including the experimental dataset,
+source code ofOASIS, and attack demo videos, on our project website [15]:
+https://mobitec.ie.cuhk.edu.hk/connector-oauth-security.
+2
+
+[PDF PAGE 3]
+Table 1. COMPREHENSIVEOAUTHTHREATENUMERATION IN“CONNECTORECOSYSTEMS”. THESE ECOSYSTEMS INTRODUCE AN ABSTRACT
+“OAUTHCONNECTION”TO MANAGEACCOUNTLINKING,WHICH TRACKS THE AUTHORIZATION CONTEXT AS A TUPLE OF<user,tenant,connector>.
+Category[§3.1] OAuth Client
+OAuth Connection’s
+Authorization Context:
+<user,tenant,connector>
+Potential Account Mislinking Threats
+Cross-userCross-tenantCross-connector
+OAuth Session Fixation[§4.1]Client ID Confusion[§5.1]OAuth Account Takeover(COAT)
+Defense: User Session Bindinga Defense: Tenant Scopingb Defense: Connector Distinctionc
+Connector-equipped AppsSelf-managed<many,1,handful> (Cross-Origin/UA) (No untrusted connector)
+Integration Platforms Self-managed <many,1,many> (Cross-Origin/UA) (Single-tenant) COAT [1]
+Agentic AI InfrastructuresManaged<many,many,many> (Separate Responsibilities) Cross-tenant COAT [§5.2]
+Notation: indicates the threat is applicable;indicates the threat is not applicable.
+a User Session Binding:User that Starts OAuth == User that Completes OAuth, enforced via session integrity checks at the original origin or UA.
+b Tenant Scoping:Tenant that User Consents == Tenant that Receives Access, enforced via per-tenant OAuth client registration.
+c Connector Distinction:Connector that Starts OAuth == Connector that Completes OAuth, enforced via globally unique per-connectorredirect_uri.
+Authorize➌  /callback?state=state&code=code
+➎  access token
+➍  /token with code Code
+Exchange
+➋  /authorize?client_id=client-AS&state=state
+OAuth Client User-agent (UA) Authorization Server (AS)
+user session
+Cookies: user session
+linked to an app user
+Application ConnectorBrowser
+&redirect_uri=/callback
+➊ Start OAuth
+Figure 3. OAuth 2.0 Authorization Code Grant Flow
+2. Background: Textbook OAuth
+OAuth Authorization Code Grant.The textbook OAuth
+flow (Fig. 3) follows a “three-legged” design, as it involves
+three entities: anOAuth clienthosted by the application in
+need of tokens; auser-agent (UA)for end-user interactions,
+typically a web browser; and anauthorization server (AS),
+from which the application obtains access tokens. As a
+running example, a web app (e.g.,an online PDF editor)
+may request access to a user’s private files in a cloud storage
+service (e.g.,Dropbox), where the service runs an AS.
+An OAuth flow consists of two phases:authorizationand
+code exchange. The authorization phase would issue a short-
+lived authorization code (authcode): 1 The user initiates
+OAuth via the UA, which sends a request to the web app’s
+backend (hereafter, theOAuth initiation request). 2 The
+user is then redirected to the AS in an authorization request,
+prompted to log in at the storage service’s website and grant
+authorization consent. Note that explicit consent may be
+skipped if prior consent exists, making the authorization an
+automatic process. 3 An auth code is issued by the AS in an
+authorization response, passed through the UA, and handed
+to the web app’s backend. It reaches the callback (a.k.a.
+redirection) endpoint, as specified by theredirect_uri
+parameter (redirection URI) in the earlier request.
+In the code exchange phase, the OAuth client at web
+app’s backend exchanges the auth code for an access token
+via a server-to-server request to the AS (token request 4
+and response 5 ). Eventually, the access token is associated
+with the web app, which can then call the service’s APIs to
+retrieve protected resources such as the user’s private files.
+OAuth Client Registration and Client Types.At steps
+1 and 4 , the AS can uniquely identify the client using
+aclient_id. At step 4 , the AS can further authenti-
+cate the client using a credential, typically a shared se-
+cret (i.e.,client_secret). The process of negotiating such
+identifiers and credentials prior to OAuth flows is called
+client registration. A web app running on a backend server
+can securely store secrets and is therefore referred to as
+aconfidential client. In contrast, native apps that store
+credentials on-device cannot maintain their confidentiality
+and are treated aspublic clients.
+OAuth Session Integrity.In this work, we define OAuth
+session integrity based on [5], as the property thata user
+who initiates an OAuth flow must be the same user
+who completes OAuth.To date, Cross-site Request Forgery
+(CSRF) is the most widely-discussed session integrity threat
+in OAuth. According to RFC requirements [2, §10.12]
+and [17, §5.3.5], the OAuthstateparameter, an opaque
+value sent in the authorization request and returned un-
+changed in the authorization response should be bound to
+the UA session. Without proper validation, an attacker can
+inject an auth code into a victim’s unsolicited OAuth flow
+in step 3 , thereby breaking session integrity and allowing
+the victim to access attacker’s resources (i.e.,Login CSRF).
+3. Understanding Account Linking
+This section demystifies account linking in connector
+ecosystems, examining the architectural patterns that enable
+it and the implementation challenges that make it non-trivial.
+For ease of understanding, Table 2 provides a mapping
+between standard OAuth roles and common industry jargon.
+For example, we use the umbrella termconnectorto denote
+the entity that plays the AS role in OAuth.
+3.1. Connector Ecosystems
+In ecosystems such asapplication integration[18], [19]
+andagentic AI[20], each external service integration is
+encapsulated as aconnector. Applications perform OAuth-
+based account linking and maintain a persistent “OAuth
+connection” to that service. This allows applications to
+perform tasks on behalf of users with authorized access. We
+scope our study to three representative product categories:
+Integration Platforms.Cloud-based integration platforms
+orchestrate interactions across multiple connectors from an
+open marketplace, often in a low-code or no-code fashion.
+Following prior work [1], we examine 3 major types of
+3
+
+[PDF PAGE 4]
+Table 2. TERMINOLOGYMAPPINGTABLE
+OAuth Roles [RFC6749] Industry Jargon
+Authorization Server (AS)& Resource Server (RS)Connector(e.g.,Dropbox)
+Application (App)subsumed underOAuth Client
+-Connector-equipped App(e.g.,Evernote);-Integration Platform(e.g.,Amazon Alexa);-Agentsdeployed with Agentic AI Infrastructure (e.g.,withAmazon Bedrock AgentCore): the OAuth-as-a-Service paradigm.Concrete form as a web or native application.
+OAuth Client - ABackend Componentof Connector-equipped App/Integration Platform;
+-“Token Vault”in Agentic AI Infrastructure.
+Resource Owner Connector Accountof the end-user (e.g.,Dropbox account)
+Not Modeled App Accountof the end-user (e.g.,Amazon Alexa account)
+Not Modeled Tenant.Definition: A tenant is an organization signing upat OaaS to develop custom agent(s) paired with connectors,deploying the agent(s) in its own trust domains for its own end-users.
+platforms, includingworkflow automation platforms,virtual
+assistants, andsmart homes.
+Connector-equipped Apps.Applications such as Evernote
+do not fit neatly into common integration platform types, yet
+they have specific integration needs. For instance, Evernote
+supports calendar synchronization through Google and Out-
+look Calendar integrations. We refer to such apps with a few
+purpose-specific connectors asconnector-equipped apps.
+Agentic AI Infrastructures.Emerging platforms such as
+Amazon Bedrock AgentCore provide infrastructures for
+building AI agents that integrate with connectors. Histori-
+cally, niche infrastructure-level solutions have existed in the
+form ofIntegration Platform as a Service(iPaaS) and mod-
+ernAPI Management Service/API gateway. By contrast,
+such infrastructures have become pivotal in agentic AI:
+AI agents often need to accommodate customized enter-
+prise and organizational requirements, and therefore vendors
+position themselves asAgent BuildersorAI Gatewaysto
+support the development of custom AI agents. End-users
+interact with agents across disparate trust domains rather
+than through a centralized integration platform. A typical
+offering includes a software development kit (SDK) and de-
+veloper console for building agents and equipping them with
+pre-built or custom connectors. Agent developers rely on
+the OAuth client (so-called “Token Vault”) provided by the
+infrastructure for token retrieval and lifecycle management.
+From an OAuth perspective, this has led to a new busi-
+ness model,OAuth-as-a-Service(OaaS), where OAuth client
+responsibilities are effectively outsourced to a centralized
+entity. This also shifts OAuth from the traditional single-
+tenant model, where each OAuth client serves a single
+application, to amulti-tenant architecturein which a ten-
+ant corresponds to one or more agents built by the same
+organization’s developers.
+3.2. Account Linking: Second-order OAuth
+Following the definition in [1] (with aligned terminol-
+ogy), we defineAccount Linkingas the process ofcon-
+necting a user’s connector account to their app account.
+Access to the connector account is represented by the OAuth
+access token (and/or refresh token [2, §6]), while the app
+account reflects the user’s identity within a multi-user appli-
+cation, typically represented by an authenticated user session
+at runtime. In certain cases (e.g.,agents as customer service
+chatbots), the concept of an app account may extend to
+cover an anonymous session, which we subsume under “user
+session”. Depending on the use case, OAuth tokens may be
+either linked to the app account for long-term access, or
+valid for the lifetime of the current user session.
+Textbook OAuth: Track by Session.Revisiting the text-
+book OAuth flow, the OAuth client may rely on the applica-
+tion’s user session stored in the browser for account linking.
+Yet, the dotted steps in Fig. 3 are outside the scope of the
+OAuth protocol, namely, how OAuth is initiated and how the
+application identifies which user should receive the tokens.
+Reflecting on Fig. 2, this gap exists because
+RFC6749 [2] only specifies “first-order OAuth”, regarding
+how anapplicationobtains OAuth tokens from an end-
+user (i.e.,the resource owner). Account linking, however,
+represents “second-order OAuth”: anapplication’s own user
+needs tokens from the same user. Textbook OAuth overlooks
+this distinction because it typically assumes a same-origin,
+same-UA deployment, where the application and its
+OAuth client are deployed in a single origin and UA, and
+therefore the UA (web browser) naturally preserves the
+user session at the callback endpoint. In more complex
+architectures where the application and its OAuth client are
+decoupled components, this assumption no longer holds.
+To better reflect this decoupling, we hereafter use the term
+OAuth clientto refer specifically to the component that
+handles OAuth responsibilities of the application, and the
+termapplicationto refer to its general business logic (e.g.,
+user session management).
+3.3. Decoupled OAuth Architectural Patterns
+Modern OAuth deployments often violate textbook
+OAuth assumptions to support account linking across web
+origins, UAs, and security boundaries. Such decoupled
+OAuth architectural patterns create three key challenges:
+Challenge 1: Cross-Origin Session Tracking.When
+account linking spans multiple origins in a web applica-
+tion (see Fig. 4), for instance, account linking initiated at
+origin A but with the OAuth callback handled by origin B,
+origin B cannot determine which user the received autho-
+rization should be associated with. This occurs because the
+user session at origin A is not accessible to origin B due
+to same-origin policy [21] (or more precisely, due to site
+isolation at the registrable domain level,i.e.,eTLD+1 [22]).
+This situation is common in modern deployments where
+server-side components are decoupled, such as a shift from
+monolithic to microservices architecture.
+Challenge 2: Cross-UA Session Tracking.As depicted
+in Fig. 5, when a native app (e.g.,an Android mobile app)
+supports account linking and follows RFC8252 [9] to use an
+external UA (web browser) to handle OAuth, it launches the
+browser to request authorization for the connector. However,
+due to process isolation, the native app cannot share the user
+session with the browser, thereby breaking session tracking
+between the two UAs and creating a session gap at the
+OAuth callback. To date, OAuth specifications lack guidance
+4
+
+[PDF PAGE 5]
+App Backend
+(OAuth Client)
+Authorize<state, code>
+Start OAuth
+/authorize?state=state&redirect_uri=originB
+New origin,No user session
+App origin A
+App origin B
+user session
+Connector
+(AS)
+Figure 4. Challenge in Cross-Origin OAuth: Server-side decoupling sep-
+arates application components. However, the browser cannot track user
+session across origins due to Same-origin policy (SOP) and site isolation.
+User-agent A
+Native App
+Start OAuth
+/authorize?state=state&redirect_uri=app_backend
+user session
+New user-agent,
+No user session
+User-agent B
+Web
+Browser
+Authorize<state, code>
+App Backend
+(OAuth Client)
+Connector
+(AS)
+Figure 5. Challenge in Cross-UA OAuth: Native apps follow RFC8252 to
+perform OAuth in an external UA (browser). However, the browser cannot
+track the native app’s user session due to process isolation.
+for native apps acting as confidential clients. RFC8252 [9]
+only covers native apps as public clients. Yet, during account
+linking, a native app behaves more like a UA, with its OAuth
+client implemented in the backend as a confidential client.
+Challenge 3: Outsourced OAuth Responsibilities in
+OaaS.Custom AI agents (applications) outsource OAuth
+responsibilities to the OaaS, where its “Token Vault” acts
+as an OAuth confidential client to negotiate OAuth tokens
+with the connector’s AS, and securely stores them for the
+agents. Agents typically authenticate to the Token Vault us-
+ing per-tenant API keys [23] or per-agent workload identity
+tokens [24], [25] to retrieve the tokens or make API calls,
+thereby avoiding the complexity of implementing OAuth
+client logic and token management themselves.
+As illustrated in Fig. 6, agents that rely on OaaS inher-
+ently cross origins and/or UAs, since their main business
+logic (including user sessions) remains in the tenants’ own
+web origins or native apps, whereas the OAuth callback is
+operated by the Token Vault. This situation is further com-
+plicated by the heterogeneous agent publishingchannels:
+To interact directly with end-users, agents may be deployed
+across various environments, ranging from web/native apps
+to bots within instant messaging (IM) software such as
+WhatsApp and Telegram (see Fig. 7). While web and native
+apps are fully controlled by the agent developer, IM channels
+depend on external application contexts, compounding the
+session tracking challenge. Consequently, a session gap
+exists not only between theToken Vaultand theagent, but
+may also independently exist between the agent’sbackend
+and itschannel(the UA running its frontend).
+Expectations.Despite these challenges, decoupled OAuth
+deployments should uphold the following expectations:
+Tenants(Agents)ConnectorsTokenVault
+OAuthConnection=<user,tenant,connector>
+BackendComponents(Servers)FrontendComponents(UAs)
+user_id
+usersessionUsers
+Channels
+OAuthClientAuthorizationServer(AS)Applications
+Figure 6. OAuth-as-a-Service in Agentic AI Infrastructures: Agents can be
+deployed in any channels, crossing origins and UAs by design.
+Figure 7. Channels for Publishing an Agent in Microsoft Copilot Studio
+•From theapplication’s perspective, upon receiving a
+user’s request to initiate OAuth, it queries the OAuth client
+to generate an authorization URL, returns it to the user,
+and waits for the OAuth client to obtain the token. After
+OAuth completes, the app may access protected APIs in
+one of two methods: (1) typically by calling the OAuth
+client, which acts as an API gateway that routes requests
+to the appropriate connector’s APIs with the correct token
+attached, or (2) less commonly by retrieving the raw
+access token from the OAuth client, allowing the app to
+invoke the APIs directly, as seen in some OaaS providers.
+•From theOAuth client’s perspective, it needs to fulfill
+the application’s request to complete OAuth flows, while
+keeping track of thecontextin which the application
+requests authorization.
+•From theend-user’s perspective, the user experience
+should be consistent with textbook OAuth. The pro-
+prietary details between the application and decoupled
+OAuth client should be opaque to users.
+3.4. OAuth Connection
+To coordinate between the application and the OAuth
+client, vendors commonly introduce the abstract notion of
+anOAuth connection, which uniquely identifies each OAuth
+token together with its authorization context in account
+linking. While a token represents access to a protected
+resource, the OAuth connection manages an application’s
+access to that token throughout its lifecycle. To identify the
+authorization context, each OAuth connection is associated
+with certain metadata. Formally, we define the authorization
+context of an OAuth connection as a tuple:
+OAuth connection = <user, tenant, connector>.
+5
+
+[PDF PAGE 6]
+Authorize<state, code>
+Start OAuth
+302 redirect
+/pre_authorize?sessionID=<id>
+OAuth session
+/authorize?state=state&redirect_uri=originB
+user session
+App origin A
+App origin B
+Set-Cookie: sessionID
+user session -> OAuth session
+...
+Figure 8. OAuth Session as a standalone parameter in URL
+At a minimum, the OAuth client should track the recip-
+ient user of the token, and may also track the current con-
+nector or tenant if it supports multiple connectors or tenants.
+An end-user may also configure multiple OAuth connections
+for the same connector at a tenant (e.g.,to manage multiple
+Gmail accounts), in which case additional distinguishing
+metadata may be included, keyed by a unique connection ID.
+OAuth connection is used both during OAuth flows and
+for token management afterward. (1) During an OAuth flow,
+the OAuth connection is instantiated as an authorization
+session (hereafter,OAuth session), which allows the appli-
+cation to track the connection in the user’s browser. OAuth
+session is derived from and maintained independently of
+the application’s user session. (2) After OAuth completion,
+the OAuth connection serves as the handle to reference the
+obtained token, such as in token refresh and API calls.
+3.5. Common (but Flawed) Designs
+In practice, we observe two common implementation
+patterns for tracking OAuth connections in OAuth flows:
+embedding an OAuth session identifier (OAuth sessionID)
+in the URL, either as a standalone, client-defined parameter,
+or within the OAuthstateparameter.
+OAuth Session in standalone URL parameter.A com-
+mon pattern inserts an additional request between the OAuth
+initiation request and the authorization request. This addi-
+tionalpre-authorization requestcarries the OAuth sessionID
+as a URL parameter to transfer session information from
+origin A to origin B, or from a native app to a web browser.
+As an example, in a cross-origin scenario, when the server at
+origin B receives the pre-authorization request, it redirects
+the user to the authorization endpoint and either sets the
+OAuth session in the browser (e.g.,via Set-Cookie [26], as
+illustrated in Fig. 8), or continues carrying the session value
+in the URL (i.e.,via thestateparameter).
+OAuth Session instateparameter.An alternative de-
+sign embeds the OAuth session identifier directly into the
+stateparameter. As an example, Fig. 9 shows such a design
+under cross-UA setting. This approach is appealing because,
+per OAuth specification [2, §4.1.1], thestateparameter is
+intended to maintain state during the authorization phase.
+Unfortunately, the above common designs are also inher-
+ently insecure. They allow the OAuth session to be fixated
+within any UA, exposed to any origin, and propagated into
+the OAuth callback, which introduces serious security risks.
+Start OAuth
+/authorize?state=state&redirect_uri=app_backend
+user session -> OAuth session
+<state, code>
+Retrieve OAuth session from state
+user session
+Authorize
+...
+Figure 9. OAuth Session in thestateparameter
+3.6. Threat Model
+Our study considers two threat models that build upon
+theweb attackermodel [27], [28]. They capture two realistic
+ways in which an untrusted component can infiltrate connec-
+tor ecosystems: either as an application’send-user, or as a
+developer(via an OaaS tenant). This enables five new types
+of attacks spanning two classes (cross-user and cross-tenant
+attacks) within connector ecosystems. In both models, the
+victim is an honest user of a benign application. These at-
+tacks do not require an active user session of theapplication
+in the victim’s browser; however, an existing user session
+on theconnectorside can enhance attack stealthiness.
+Basic Model: Untrusted User (Three Cross-user Attacks
+in §4).
+•Attacker Capabilities.The attacker is a regular user of a
+benign application with no special privileges.
+•Attack Scenario and Goal.The attack occurs in a cross-
+user scenario and typically involves the victim clicking a
+crafted link provided by the attacker (§4.1, §4.2.1). By
+doing so, the attacker can hijack access to the victim’s
+connector by linking it to attacker’s app account. Some
+variants (§4.2.2) require no user interaction: the attacker
+can forcibly bind their connector account to the victim’s
+app account, causing victim to use attacker’s resources.
+Extended Model: Untrusted Tenant (Two Cross-tenant
+Attacks in §5).Under OaaS, tenants that are otherwise
+well-isolated may lack isolation at the OAuth protocol level.
+Tenants reflect a realistic organizational security boundary:
+•Attacker Capabilities.An attacker can freely sign up for
+the OaaS to set up a malicious tenant.
+•Attack Scenario and Goal.A malicious tenant can trick
+the victim into interacting with a connector associated
+with the attacker’s application. This poses cross-tenant
+threats, where the victim’s connector access in a benign
+tenant can be compromised by the malicious tenant.
+4. Cross-user Attacks
+The victimcompletesan OAuth flow, but may not be the
+one whoinitiatedit. Crucially, under the common design
+patterns in §3.5, the initiator of the OAuth flow is the user
+to whom the authorization is linked. Consequently, if a
+malicious user initiates an OAuth flow that a victim later
+completes, the victim’s connector account would be linked
+to the attacker’s app account. We refer to such account mis-
+linking issues in cross-user settings asCross-user Attacks.
+6
+
+[PDF PAGE 7]
+victim's
+Browser
+attacker'sBrowser  / Native App
+attacker'sApp Account
+Start OAuth
+/pre_authorize /authorize
+/callback with codevictim
+/token with codevictim
+tokenvictim
+/pre_authorize or /authorize
+Authorize
+Code
+Exchange
+/
+Key Step:
+      Share URL of
+Generate
+OAuth session
+Retrieve
+OAuth session
+<attacker>
+==
+<attacker>
+➊ ➋
+➌ ➌
+➍
+➎
+➏
+ victim'sConnector Account
+Figure 10. Attack Flow of Cross-user OAuth Session Fixation (COSF)
+4.1. Cross-user OAuth Session Fixation (COSF)
+4.1.1. Attack Flow.In a COSF attack, the attacker fixates
+an OAuth session in the victim’s browser to hijack the
+connector access. Assume the victim has previously linked
+the targeted connector account to their app account and that
+a valid session for the connector account exists in victim’s
+browser. The attack steps are illustrated in Fig. 10, and
+outlined as follows:
+1 The attacker initiates account linking with the tar-
+geted connector via the application.
+Variant 1: The attacker records thepre-authorization
+request URL(e.g.,https://client.com/pre_authorize
+?sessionID=7dpf1jhpq4q3s5fnj0hts1oou8), where the
+sessionIDvalue is the OAuth session identifier derived
+from the attacker’s app identity.
+Variant 2: The attacker records theauthorization request
+URL(e.g.,https://connector.com/authorize?client_
+id=<targeted_connector>&redirect_uri=https://cli
+ent.com/callback&state=7dpf1jhpq4q3s5fnj0hts1oou
+8), where thestateencodes the OAuth session.
+2 The attacker shares the pre-authorization request URL
+(Variant 1) or the authorization request URL (Variant 2 )
+with the victim as a hyperlink.
+3 When the victim clicks the link, their browser would
+be redirected to the app’s authorization endpoint (Variant 1)
+or would directly visit it (Variant 2 ).
+4 If prior consent exists, the access is granted automat-
+ically, withcodeandstatesent back to the app’s OAuth
+callback. While some cookies may be attached, the app
+backend only consumes the cookies used to maintain the
+OAuth session and/or to validatestate; the app’s session
+cookies are not available or not used to verify user identity.
+5 The app’s OAuth client exchanges victim’s auth code
+for an access token and associates this token with attacker’s
+app account, as indicated by the fixated OAuth session.
+6 As a result, thevictim’s connector account is linked to
+theattacker’s app account. The attacker gains unauthorized
+access and can control the connector on the victim’s behalf.
+4.1.2. Security Impact.
+Account Takeover.The direct impact isunauthorized ac-
+cess. Notably, as connector authorizations commonly grant
+broad scopes for access delegation that resemble user im-
+personation, these attacks essentially amount toaccount
+takeovers. For example, the attacker compromises the vic-
+tim’s Dropbox connector, then the attacker is able to access
+the victim’s Dropbox files directly from the attacker’s app
+account. Moreover, since the weakness lies in theOAuth
+client, which serves all connectors as a single, shared entity:
+•Inconnector-equipped apps, although only a handful
+of connectors are supported, all of them are at risk.
+•Inintegration platforms, all connectors in the plat-
+form’s marketplace are equally affected.
+•Inagentic AI infrastructures, vulnerabilities extend to
+all tenants and every connector used by their agents.
+Consequently, as long as the victim is an end-user at any
+of the affected vendors, they risk having their Dropbox
+connector access taken over, facilitating targeted attacks.
+One-click Attacks.Connectors such as GitHub, Dropbox,
+Outlook Calendar, and OneDrive support silent/automatic
+authorization. This means that when prior consent is in
+place (i.e.,if the victim user has previously connected
+these connectors with the application under a pre-configured
+client_id), no explicit consent would be required for an-
+other linkage, enabling stealthy, one-click attacks.
+Practical Consent Phishing.For connectors that always
+require explicit consent or for first-time authorizations, the
+threat remains and still constitutes a valid attack. This is be-
+cause the victim has no way of knowing that their connector
+account would be linked to the attacker’s app account rather
+than their own. The OAuth consent screen presents the token
+recipient as atrusted entity(which is the app itself,e.g.,
+Amazon Alexa), making these attacks more convincing than
+conventional consent phishing campaigns in OAuth [29].
+Attack Comparison.In classical web session fixa-
+tion [10], [11], [12], an attacker fixates a session identifier
+in the victim’s browser to hijack their user session. In
+Cross-user OAuth Session Fixation, the attacker fixates
+an OAuth session identifier derived from the established
+user session to hijack the victim’s connector access.
+4.2. COSF-related Implementation Flaws
+This section discusses two implementation issues in
+account linking that rely on COSF, where OAuth sessions
+either jeopardize the app’s user sessions or are guessable.
+4.2.1. Login CSRF of App Account.When the OAuth
+session is initially embedded in a standalone URL parameter
+(§3.5), we noted that a dedicated session cookie is typically
+set to track the OAuth session at the callback. In some apps,
+however, this cookie instead tracks the fulluser session
+of the account linking initiator. As a result, if the pre-
+authorization request URL is shared with a victim, an at-
+tacker can leverage the fixated session to break the integrity
+of the application’s user session, resulting in Login CSRF
+of the app account. Meanwhile, the OAuth flow proceeds
+uninterrupted, facilitating connector account takeovers via
+COSF, effectively “killing two birds with one stone”.
+4.2.2. 0-Click Forced Linking of Connector Accounts.
+The attacks described so far require user interaction. How-
+7
+
+[PDF PAGE 8]
+ever, if the OAuth session (ID) is guessable and its integrity
+is not protected (e.g.,merely consisting of an 8-digit user
+ID, or containing such an ID in a non-signed JSON), forced
+linking of connector accounts can occur without any victim
+interaction. An attacker can forge an OAuth session (ID)
+and then submit their own auth code at the OAuth callback.
+This forces the victim associated with the targeted user ID
+to access the attacker’s connector account at the application.
+4.3. Robust Defenses
+Root Cause.To summarize, cross-user attacks arise be-
+cause the OAuth client relies on a derivedOAuth session,
+instead of the app’s existinguser session, to identify the
+intended “app account” for account linking. However, it fails
+to verify the binding between the two sessions, likely due
+to the OAuth callback being visited in anunauthenticated
+space, a distinct origin or UA separated from the originalau-
+thenticated spaceholding the app’s user session. Malicious
+users can exploit this lack of binding to transfer OAuth ses-
+sions to a victim’s device, enabling session fixation attacks.
+To maintain session integrity during account linking, the
+guiding principle is to ensure thatan OAuth flowinitiated
+by one app user is alsocompletedby the same user.
+Practically, this means having the OAuth flow complete at
+an authenticated space, namely, the app’s primary web origin
+or its native app. Robust defenses therefore either directly
+return to the original origin or UA (D1 and D2), or apply a
+post-redirect pattern that securely bridges the gap between
+origins and UAs (D3). These approaches eliminate insecure
+session passing, ensuring that any passed session is routed
+back and validated in the authenticated space. 2
+D1. Web App: Cross-Origin Defense.The application
+shall register its OAuth callback endpoint under the same
+origin where its user session resides. Upon OAuth callback,
+the app’s backendmustverify the OAuth session against
+the user session to ensure that the entire OAuth flow is
+both initiated and completed by the same app user, before
+performing the code exchange. Note that if the “real” OAuth
+callback processing logic remains on a cross-origin location,
+the app should forward the auth code to the location from
+itsbackend, rather than exposing a cross-origin callback to
+thefrontend(UA) as in the vulnerable design.
+D2. Native App: Cross-UA Defense.Native apps should
+register their callback endpoint as a native public client [9,
+§7] at the connector’s AS. Upon receiving the authorization
+response, the native app should submit the auth code to the
+OAuth confidential client in the app’s backend. Implementa-
+tionsmustverify the OAuth session against the user session
+before proceeding with code exchange.
+D3. Post-redirect Pattern.There are cases where chang-
+ing the preregistered callback endpoint on the connector
+side is impractical: for example, when securing an existing
+2. Note that the defenses D1–D3 still assume the existence of an
+OAuth session. Under the same principle of returning to the authenticated
+space, if vendors instead abandon OAuth sessions and rely solely on the
+app’suser sessionfor user identification at the OAuth client, the session
+integrity problem reduces to standard OAuth Login CSRF in §2.
+Unauthenticated space
+Start OAuth
+/authorize?state=state&redirect_uri=app_backend
+user session
+(deep-link)
+(3) Forward to
+app backend
+user session
+(2) Return to the 
+original user-agent
+<state, code>(1) Convert to deeplink
+https://xxx ->
+app://xxx
+<state, code>
+302 redirect
+Authenticated space
+(5) Proceed with
+Code Exchange
+(4) Match state
+to user session
+Figure 11. Robust Defense: Return to and validate at the authenticated space
+(app’s original origin/UA with user session) maintains session integrity.
+implementation that requires a quick fix, or for a cross-
+platform app where a singleclient_idserves both its web
+and native versions. In such cases, apost-redirect pattern
+can be employed: the OAuth callback acts as a proxy that
+forwards the authcodeandstateback to the app’s original
+origin or UA where account linking is initiated.
+As an example, the defense in native apps is illustrated
+in Fig. 11. The callback endpoint converts the request URL it
+receives into a deep link and redirects to it, returning control
+to the native app. The app then sends the auth code to its
+backend and verifies that the logged-in user indeed initiated
+the OAuth session before continuing the code exchange.
+Defense Comparison.Traditional session fixation in
+web security has a well-established defense by rotating
+session IDs [10], which is now standard practice in web
+applications. In contrast, defending against COSF requires
+verifying the binding between the OAuth session and the
+existing user session, which is often overlooked.
+4.4. Other Valid Countermeasures
+In addition to the recommended defenses (D1–D3), we
+further outline several additional viable defenses (D4–D6)
+with their respective limitations.
+D4. Manually Bridging the Session Gap.Given the
+heterogeneous publishing channels for agents, their ability to
+handle OAuth callbacks varies. While web and native apps
+can host callbacks directly, agents deployed in constrained
+environments, such as bots running on IM platforms, face
+greater challenges. Although callbacks to the IM platform
+itself are feasible (e.g.,via HTTPS URLs or deep links), bots
+typically have limited capability to receive such callbacks.
+This limitation calls for alternative approaches to the post-
+redirect pattern. One option is for the OAuth client to display
+a PIN code that the user manually enters, similar to mech-
+anisms used to mitigate phishing attacks in cross-device
+OAuth flows [30, §3.1.3]. The PIN can then be relayed
+through the channel to app (agent) backend and ultimately
+returned to the OAuth client for validation. Alternatively,
+connector’s AS may directly employ cross-device flows
+instead of authorization code grant, as we move toward even
+more heterogeneous agent interfaces like headless agents.
+D5. Extra Consent Screen at OAuth Client.An al-
+ternative defense is to require explicit user consent at the
+8
+
+[PDF PAGE 9]
+pre-authorization request or OAuth callback. This additional
+consent screen, enforced by the OAuth client, shall display
+whichapp userwould receive the OAuth token. It comple-
+ments the original OAuth consent screen at the AS, which
+shows whichapplicationwould receive the OAuth token.
+D6. Re-authentication in the Browser.For native apps, a
+straightforward defense is to require users to re-authenticate
+the application in the browser, either at the pre-authorization
+request or OAuth callback. This would turn the cross-UA
+scenario into a same-UA scenario. However, this approach
+degrades user experience and may cause confusion.
+Limitations.
+•Defenses that depend on end-user awareness and manual
+decision-making remain vulnerable tophishing attacks.
+These include the manual session-transfer method (D4)
+and the extra consent mechanism (D5).
+•The defenses D5 and D6 are limited in that the OAuth
+client cannot present meaningful user information on the
+consent screen, or enforce re-authentication, when the
+application’s user session is not tied to a logged-in user
+account but rather an anonymous session.
+Other Defenses.Beyond the basic defenses, Ap-
+pendix A.1 describes tailored post-redirect pattern (D3)
+protections for OaaS. Appendix A.2 summarizes common
+pitfalls and ineffective defenses, such as PKCE’s [31] in-
+ability to mitigate the issue and additional open redirect [32]
+risks introduced by improper fixes.
+5. Cross-tenant Attacks in OAuth-as-a-Service
+So far, our analysis focused on scenarios where the
+application and its OAuth client are maintained by the same
+party. In OaaS, however, the centralized OAuth client (Token
+Vault) maintains athird-partyrelationship with potentially
+untrusted applications (agents) from different tenants. This
+multi-tenant architecture expands the attack surface and
+enables new cross-tenant confused deputy attacks.
+In such a setting, while the OAuth connection suffices
+for thefunctional requirementof tracking the tenant and
+connector, thesecurity requirementfurther relies on mech-
+anisms native to the OAuth protocol, namely the client ID
+and redirection URI, to distinguish them. These identifiers
+cannot be scoped only at the coarser per-OAuth-client level.
+5.1. Cross-tenant Client ID Confusion
+Problem Definition.OaaS providers aim to reduce the
+OAuth integration burden for agent developers. Beyond
+token lifecycle management, many providers offer pre-built
+connectors for popular services (e.g.,Dropbox, Outlook
+Calendar, GitHub) with preconfigured APIs. To support
+these tools out of the box, some OaaS providers also
+handle OAuth client registration for these connectors, with
+client_idandclient_secretbaked in. Traditionally,
+each developer must register their application at the AS to
+obtain a unique client ID, which identifies the application
+during OAuth flows. In OaaS, however, multiple tenants may
+share the same built-in client ID assigned to the Token Vault.
+OAuthClient
+ExplicitlyAuthorize/authorize?client_id=client&…
+ /authorize?client_id=client &…
+OAuth Client Registration<client_id=client,client_secret=***>
+OAuth Flow
+AuthorizationServer(AS)
+OAuthFlow
+ConnectorTokenVault
+Auto-Authorizew/ prior consent
+……
+Benign tenantMalicioustenant
+Figure 12. Cross-tenant Client ID Confusion. A user previously consented
+at a benign tenant under a sharedclient_idof a pre-built connector.
+Connector access granted without consent to an attacker-controlled tenant.
+USENIX Security '25 · COAT [1](Cross-connector OAuth Account Takeover)NEW·Cross-tenantCOATinOAuth-as-a-Service
+•Attacker: inﬁltrates via malicious tenant         , can register malicious connectors        by design•Target: any connector in any tenant
+•Attacker: inﬁltrates via malicious connector •Assumption: integration platform w/ open marketplace•Target: a benign connector in the same platform
+authcodeauth code
+ authcodeauthcodeSecurityboundary
+TenantConnectorIntegration Platform ConnectorToken Vault
+e.g.,MicrosoftPower Automate
+Figure 13. Comparison of (Single-tenant) COAT and Cross-tenant COAT
+Attack.This design introduces the risk ofClient ID Con-
+fusion. As shown in Fig. 12, consider a user who previously
+authorized a benign connector for a trusted agent belonging
+to a benign tenant. Although the resulting access token
+is scoped to that tenant, the user’s consent is technically
+granted to the Token Vault’s shared client ID. Consequently,
+when the same user later interacts with a malicious agent
+that also relies on the Token Vault, the benign connector
+treats the new authorization request as pertaining to the
+already-consented client ID. As a result, access is silently
+granted to the malicious agent, contrary to the user’s inten-
+tion to withhold or explicitly consent to the authorization.
+Countermeasure: Per-tenant OAuth Client Registration.
+The root cause of Client ID Confusion is that as mul-
+tiple tenants share the same client ID at a connector, a
+malicious tenant can inherit user consent previously granted
+to a benign tenant. To prevent this issue, OaaS providers
+must notsupply shared client IDs for tenants in production
+environments. Each tenant should instead register its own
+dedicated client ID with the connector’s AS and bring it
+to the OaaS (“Bring Your Ownclient_id”, BYOC). This
+ensures that authorization consent is always tied to the
+intended tenant and avoids cross-tenant unauthorized access.
+5.2. Cross-tenant COAT Attack
+Problem Setting.Prior work [1] introduces the Cross-
+connector OAuth Account Takeover (COAT) attack3, where
+an integration platform, acting as a confused deputy, can
+3. Originally referred to as “Cross-appOAuth Account Takeover” in [1],
+where the term “app” denotes SaaS applications integrated within a plat-
+form, and thus corresponds to the “connector” concept in this paper.
+9
+
+[PDF PAGE 10]
+leak a victim’s auth code from a benign connector to a
+malicious one. In the original setting, the attacker relies on
+a single tenant—an integration platform serving anopen
+marketplace—to distribute the malicious connector. With
+multi-tenant OaaS, this prerequisite is relaxed.
+Attack.As illustrated in Fig. 13, in OaaS, any developer
+can create custom agents paired with custom connectors
+within their own tenant. Consequently, the presence of a ma-
+licious connector no longer depends on an open marketplace,
+but remains applicable even if the targeted benign tenant(s)
+areclosed ecosystems: an attacker can simply deploy a
+malicious agent that carries a malicious connector in their
+own tenant, and target users of a benign connector carried
+by a benign tenant, launchingCross-tenant COATattacks.
+In an attack flow, the victim establishes account linking
+with the malicious connector (as a dummy user of the mali-
+cious agent), and is then redirected to authorize the benign
+connector (as a user of the benign agent). However, the
+resulting auth code is forwarded to the malicious connector
+in the token request because the OAuth client, based on
+the OAuth session, tracks the malicious connector in the
+authorization context. The attacker can then redeem the
+stolen auth code at the benign connector (as a user of the
+benign agent) for connector account takeover.
+Countermeasure: Globally-uniqueredirect_uri.In
+the original (single-tenant) COAT vulnerability [1], the
+OAuth client fails to verify that the connector completing
+OAuth matches the one that initiated it. In Cross-tenant
+COAT, the OAuth client (Token Vault) further fails to ensure
+that both connectors belong to the same tenant. To address
+this root cause, the OAuth client shall assign aglobally
+uniqueredirect_urifor each connector during client reg-
+istration and OAuth flows. This design enables the OAuth
+client to enforceredirect_urivalidation not only between
+connectors within the same tenant, but also across tenants.
+The exact implementation of theredirect_urimay vary;
+for example, using a globally unique connector ID (e.g.,h
+ttps://oaas.com/callback/<globally-unique-ID>), or
+combining a tenant ID 4 with a tenant-scoped connector ID
+(e.g.,https://<tenant>.oaas.com/callback/<intra-te
+nant-unique-ID>).
+Comparison: Cross-user vs. Cross-tenant Attacks.Re-
+call from §3.4 that an OAuth connection tracks the autho-
+rization context of <user,tenant,connector>. The afore-
+mentioned attacks exploit different gaps in this context:
+Cross-user attacks break theuserbinding; Cross-tenant
+Client ID Confusion breaks thetenantscoping; and Cross-
+tenant COAT breaks theconnectordistinction.
+6. COSF Vulnerability Detection
+In this section, we proposeOASIS(OAuth Session In-
+tegrity Scanner), a static analyzer that evaluates the preva-
+lence of COSF vulnerabilities across connector ecosystems.
+This section presents its design and implementation.
+4. Note that enforcing per-tenantredirect_urialone mitigates Cross-
+tenant COAT, reducing the attack surface to Single-tenant COAT [1].
+6.1. System Overview ofOASIS
+Evaluating COSF vulnerabilities across the industry is
+non-trivial in two aspects:1) Identifying in-scope applica-
+tions.While commonintegration platformsandagentic AI
+infrastructurescan be readily identified due to their inher-
+ent reliance on account linking,connector-equipped apps
+are more difficult to discover, as account linking appears
+as a secondary feature within broader productivity apps.
+2) Assessing vendor susceptibilityfurther requires exten-
+sive manual testing, since no reliable automated detection
+methods exist. These gaps motivate the development of a
+tool to uncover COSF vulnerabilities.
+A major challenge is that COSF vulnerabilities manifest
+in OAuth confidential clients deployed in the cloud, whose
+source code is not publicly available, which precludes direct
+static analysis. Our key insight is to shift focus to local code-
+bases instead. Rather than analyzingvulnerability patternsin
+cloud-side implementations, we adopt anexclusion-based
+approachthat identifiesthe absence of certain patterns
+in locally-accessible Android app code, which indirectly
+signals potential flaws in the corresponding OAuth clients.
+To this end, we developOASIS, a static analyzer capable
+of detecting COSF vulnerabilities in native apps. To our
+knowledge, existing OAuth testing tools [7], [8], [33], [34],
+[35], [36], [37] neither cover the use case of account linking
+in connector ecosystems nor detect session fixation flaws.
+OASISfollows a two-phase approach, with the workflow
+overview shown in Fig. 14. Phase I filters Android appli-
+cations that implement account linking, while Phase II de-
+tects COSF vulnerabilities without executing actual OAuth
+flows or attacks. Another major technical challenge lies in
+accommodating diverse Android app types, such as regular
+native apps written in Java or Kotlin, hybrid apps developed
+with Ionic or Capacitor, and cross-platform apps built with
+React Native.OASIStherefore adopts a lightweight design
+to ensure broad compatibility across such variants.
+6.2. Phase I: Account Linking Identification
+The first phase extracts Android apps that likely support
+OAuth-based account linking from a large corpus. We utilize
+AndroZoo [38], a large-scale research dataset of Android
+packages (APKs), and apply a multi-stage filtering pipeline:
+Data Preprocessing.We begin with apps in thePro-
+ductivitycategory, which, based on our preliminary study,
+exhibit the highest prevalence of account linking. To ensure
+relevance, we include only actively maintained apps (up-
+dated within the last 6 months) with at least 50K downloads.
+Each APK is decompiled usingJadx[39] to inspect source
+code and resource files. JavaScript bundles are unpacked into
+modules, and Hermes bytecode from React Native apps is
+decompiled usinghbc-decompiler[40].
+Heuristic-based Filtering.We then apply a set of static
+heuristics to exclude irrelevant apps and isolate OAuth con-
+fidential client implementations from the majority use case
+of public clients:
+10
+
+[PDF PAGE 11]
+Public Client [RFC8252]
+URL Parsing
+myapp://oauth/callback
+?code=xxx&state=xxx&id_token=xxx Vulnerable to COSF
+does not existConﬁdential Client
+Phase I: Identify Account Linking Apps Phase II: Detect COSF Vulnerabilities
+✅ ✅ ❌
+Dropbox
+Outlook
+OneDrive
+Popular Integration Platforms & Connector-equipped AppsHand-picked
+Automated
+Connector icon–name
+co-location
+OAuth Callback
+Handling Logic
+Workﬂow
+Automation
+Virtual
+Assistant
+Smart
+Home
+OAuth Code Exchange
+& API Call Logic
+does not exist
+Secure from COSF
+existsnot found
+Irrelevant Apps
+Relevant Apps
+found dropboxapi.com
+graph.microsoft.com
+...
+e.g.,
+Note-taking App
+exists
+Figure 14. Overview ofOASIS(OAuth Session Integrity Scanner). It follows a two-phase static approach to (I) identify native apps with account linking
+support, and (II) detect COSF vulnerabilities.
+•Connector Icon–Name Co-location.We detect user
+interfaces (UIs) indicative of account linking by search-
+ing resource files for hard-coded connector brand
+names (e.g., “Dropbox”, “OneDrive”) and correspond-
+ing logos (based on icon filenames and RGB values of
+vector graphics). The co-location of references to the
+connector’s name and logo within the same class or
+module constitutes a typical account linking interface.
+•Rule Out OAuth Public Clients.In Android, most
+OAuth use cases involve accessing resources directly
+from the device as public clients (first-order OAuth). In
+contrast, native apps in connector ecosystems operate
+as confidential clients (second-order OAuth), where
+resources are accessed by the app’s cloud. We therefore
+exclude apps that directly invoke connectors’ OAuth
+token endpoints or APIs on-device; the presence of
+such hard-coded endpoints indicates a public client
+implementation. Endpoints for major connectors are
+listed in Table 6 of Appendix B.
+•Exclude Local App Interactions.As a supplementary
+filtering step, we remove apps that use intents [41] to
+launch locally installed native apps of the connectors
+(e.g., Dropbox’s file chooser [42]), since such interac-
+tions do not involve OAuth flows.
+Scope of Connectors.We focus on 3 representative con-
+nectors: Dropbox, OneDrive, and Outlook Calendar. These
+connectors are well-suited forOASIS’ workflow, because
+(1) they avoid the potential interference from OAuth-based
+Single Sign-On (SSO) mechanisms (Dropbox is not an SSO
+provider, and Microsoft SSO is rarely used [43]); and (2)
+they support silent authorization, enabling stealthy one-click
+attacks (see §4.1.2). Due to these considerations, Google
+products (e.g.,Google Drive and Calendar) 5 are not in scope.
+Automated and Manual Collection.We augment au-
+tomated filtering with a manually curated application list
+to capture cases missed by static heuristics. Key sources
+include integration platforms reported in prior research [1],
+along with popular connector-equipped apps such as note-
+taking apps. Applications without Android versions are re-
+tained separately for evaluation in §7. This process yields a
+refined set of apps with verified account linking functional-
+ity, which are subsequently analyzed in Phase II.
+5. Google’s AS does not issue refresh tokens without explicit user con-
+sent (according to [44, §11]), which incidentally mitigates one-click COSF
+attacks on many OAuth clients that require refresh tokens to be returned.
+6.3. Phase II: COSF Vulnerability Detection
+In Phase II, we analyze how each app handles the OAuth
+callback. Our key insight is that native apps that robustly
+defend against COSF by returning to the original UA (§4.3)
+would process the OAuth callback within their local code-
+base, making them identifiable through static analysis.
+This phase extends the exclusion-based approach by
+inferring potential vulnerabilities from theabsenceof OAuth
+callback-handling patterns. Specifically:
+•If an app contains a class or module that parses both the
+codeandstateparameters from the OAuth callback
+URI, but not theid_token, we classify it asSecure.
+•Otherwise, the app is marked asVulnerable.
+This heuristic rests on two observations: (1) Mandating the
+joint presence ofcodeandstatehelps exclude OAuth-
+unrelated logic that happens to use either parameter name.
+(2) Excluding theid_tokenparameter avoids interference
+from OpenID Connect [44], an OAuth-based SSO protocol
+orthogonal to account linking in connector ecosystems.
+Implementation.Regardless of the app development
+framework, handling OAuth callbacks on Android ultimately
+relies on native processing of deep links or app links [45]
+via intents in Java (or Kotlin). In most cases, the intent URI
+is also parsed in Java (or Kotlin), as illustrated in Listing 1,
+before being passed to other frameworks or languages for
+further processing.
+1@Override
+2protected voidonCreate(Bundle savedInstanceState) {
+3super.onCreate(savedInstanceState);
+4// Handle OAuth callback
+5Uri uri = getIntent().getData();
+6if(uri !=null) {
+7// Parse callback URI,
+8// e.g., myapp://oauth/callback?code=12345&state=xyz
+9String code = uri.getQueryParameter("code");
+10String state = uri.getQueryParameter("state");
+11// Further Processing
+12...
+13}
+14}
+Listing 1. Example of OAuth callback handling logic in Android
+Therefore, for each app selected in Phase I, we locate
+the callback-parsing logic in the decompiled source code. To
+improve precision, we also account for corner cases where
+URL parsing is implemented in JavaScript, which can occur
+in hybrid or cross-platform apps. Specifically, we employ a
+regular expression-based approach to identify method names
+11
+
+[PDF PAGE 12]
+(e.g.,getQueryParameter()) and arguments (e.g.,"code")
+commonly used in OAuth callback parsing. This simple but
+effective method maximizes multi-language compatibility.
+Implementation details are summarized in Table 7.
+6.4. Discussions
+Testing Scope.WhileOASISis implemented to detect
+COSF vulnerabilities in Android apps, the methodology
+generalizes to iOS and desktop apps. Moreover, a vendor
+likely exhibits the same vulnerability across all native app
+offerings, as COSF is an OAuth client-specific backend flaw.
+Threats to Validity.We acknowledge several limitations
+of our approach: (1) In Phase I, native apps that fetch
+the account linking page dynamically from the backend
+elude the static heuristics. Typical examples include integra-
+tion platforms that host hundreds of connectors, where the
+connector names and icons are unlikely to be hard-coded
+in the app’s code. This limitation is partly mitigated by
+the manual collection, where such platforms are explicitly
+selected. (2) In Phase II, native apps that ensure session
+integrity by re-authenticating end-users in the external UA
+(defense D6) do not exhibit detectable callback patterns, po-
+tentially causing false positives. (3) Native apps that handle
+OAuth callbacks locally (thus appearing secure) can still be
+vulnerable if their backends omit session integrity checks.
+Such cases cannot be captured by the Phase II analysis,
+resulting in false negatives. (4) Native app obfuscation: As
+OASISidentifies resource files, method invocations, and web
+API calls—rather than control or data flows—using OAuth
+domain knowledge, it is relatively robust to obfuscation.
+We argue that these are inherent limitations of a static
+analysis approach. Dynamic analysis, however, is impracti-
+cal at scale because it requires substantial manual effort to
+locate account linking interfaces and trigger OAuth flows
+for Phase I, which vary widely across app UIs and are often
+gated behind subscription paywalls. For Phase II, a dynamic
+approach may also suffer from degraded accuracy due to
+heterogeneous implementations, while offering limited prac-
+tical benefits over manual attack reproduction.
+We acknowledge that Phase I approach is non-exhaustive
+and represents a lower bound on real-world account linking
+support. Nevertheless, since account linking is far less preva-
+lent than general OAuth or SSO adoption, our analysis at
+this scale still provides a reasonable characterization of the
+current landscape (see §7). For Phase II, the limited con-
+nector choices do not bias vulnerability detection accuracy,
+as identified OAuth callback logic is connector-agnostic.
+7. Evaluation
+This section presents our measurement and case studies.
+7.1. Experimental Setup
+Initial Triage.The cut-off date for our data collec-
+tion from AndroZoo [38], [46] was August 2025. Fol-
+lowingOASISPhase I (§6.2), we collected38 connector-
+equipped apps and integration platforms, including 12
+obtained through automated filtering and 26 hand-picked.
+We followed §3.3 to analyze their architectural patterns.
+For vendors offering Android mobile apps (27 in total),
+we followedOASISPhase II (§6.3) to automatically detect
+COSF vulnerabilities. We further surveyed agentic AI in-
+frastructures across the industry using keywords such as
+“Agent Auth”, “Agent Builder”, and “Agentic Platform”,
+identifying8 OaaS providers. Cross-tenant threats were
+triaged via manual inspection of each vendor’s developer
+documentation and runtime authorization URLs. Note that
+although theCOVScantool proposed in [1] can be adapted to
+detect Cross-tenant COAT, it was unnecessary, as all tested
+vendors (see Table 5) use a sharedredirect_uri, causing
+early exit inCOVScan’s detection flow [1, §7.1].
+Manual Verification.For all46vendors, we then manu-
+ally conducted proof-of-concept (PoC) exploits to verify the
+triaged vulnerabilities, following the attack descriptions in
+§4 and §5. In the testbed setup, we isolated the attacker and
+victim using two browser profiles (for web apps) or two
+devices (for native apps). We used separate accounts for
+test users (of apps and connectors) as well as test tenants,
+ensuring no shared state or information exchange between
+the attacker and victim except for the attack URL.
+Human Effort.In the evaluation, initial testing took
+around 15 minutes per vendor. Producing detailed PoCs and
+vulnerability reports for responsible disclosure took about
+2 hours per regular vendor and 1–2 days per OaaS vendor.
+7.2. Measurement Study
+Among the 46 vendors surveyed, 42 were found suscep-
+tible to account mislinking.
+7.2.1. Cross-user Attacks.
+Evaluation Results.Table 3 shows a breakdown of cross-
+user vulnerabilities: 40 vendors are affected by COSF, of
+which 3 and 4 are also vulnerable to App Account Login
+CSRF and Connector Account Forced Linking, respectively.
+For COSF alone, 16 vendors are vulnerable to the case
+where a standalone OAuth session ID is introduced, while
+the remaining 24 transfer the OAuth session via thestate
+parameter. Four apps require advanced techniques for prac-
+tical exploitation (labeled asAdvin Table 3), such as by-
+passing short-lived pre-authorization request URL timeouts,
+or sending attacker-controlled OAuth completion requests
+after the callback (see Appendix A.2–Ineffective Defenses).
+RFC Compliance ofstateMatching.Among the 16
+vendors introducing a separate OAuth session ID, only 3 fail
+to bind thestateparameter to the OAuth session in cookies
+(which is a form of UA session). This suggests that most
+developers strive to meet RFC requirements [28, §4.7.1] of
+state–UA sessionbinding despite cross-origin or cross-UA
+challenges. However, vulnerabilities remain if the OAuth
+session itself is not securely bound to the user session.
+Cross-Origin and Cross-UA Deployments.We identi-
+fied 27 cross-origin and 38 cross-UA vendors. To character-
+ize vendors’ architectural patterns, we first considerorigin
+12
+
+[PDF PAGE 13]
+Table 3. EVALUATION OFCROSS-USERATTACKS INCONNECTORECOSYSTEMS: 40VENDORS BREAKOAUTH SESSION INTEGRITY.
+Category Vendor Type Vendor Name Collection #DLs Architectural Pattern §3.3OAuth Session Fixation (COSF) §4.1App AccountLogin CSRF§4.2.1
+Connector AccountForced Linking§4.2.2Cross-Origin/Cross-SiteCross-UA StandalonesessionID Session instate Detection
+Connector-Equipped Apps
+Profile ConnectionsA Top Social Platform M 500M+ /exclamati⌢n-triangleTP
+Calendar Sync
+A Top Note-Taking App M 100M+ /exclamati⌢n-triangleTP
+Akiflow/gl⌢be♂¶obile-altM 50K+/exclamati⌢n-triangleTP
+149 Live Calendar/gl⌢be♂¶obile-altA 500K+ /exclamati⌢n-triangleTP
+Cupla/gl⌢be♂¶obile-altM 100K+/exclamati⌢n-triangleAdv TP
+FlowSavvy/gl⌢be♂¶obile-altA 50K+ Secure TN
+Habitify♂¶obile-altA 500K+/exclamati⌢n-triangleTP
+Smart Noter/gl⌢be♂¶obile-altA 1M+ /exclamati⌢n-triangleTP
+Upmeet/gl⌢be♂¶obile-altA 100K+/exclamati⌢n-triangleTP
+Setmore/gl⌢be♂¶obile-altA 500K+ /exclamati⌢n-triangleTP
+Harvest/gl⌢beM 100K+ /exclamati⌢n-triangleN/A /exclamati⌢n-triangle
+An Event Management PlatformM N/A /exclamati⌢n-triangleN/A
+Todoist/gl⌢be♂¶obile-altA 10M+SecureTN
+File Sync /Data Source Import
+OneDrive/gl⌢be♂¶obile-altA 5B+ /exclamati⌢n-triangleFN
+Speechify♂¶obile-altA 10M+/exclamati⌢n-triangleTP
+JotterPad/gl⌢be♂¶obile-altM 5M+ /exclamati⌢n-triangleTP
+Tanka/gl⌢be♂¶obile-altM 10K+/exclamati⌢n-triangleTP
+Mylio Photos♂¶obile-altA 100K+ /exclamati⌢n-triangleAdv TP
+Nozbe Classic/gl⌢be♂¶obile-altA 100K+/exclamati⌢n-triangleTP
+Cloze/gl⌢be♂¶obile-altA 100K+ /exclamati⌢n-triangleTP /exclamati⌢n-triangleA Top Note-Taking App M 10M+ /exclamati⌢n-triangleTP
+IntegrationPlatforms
+Workflow AutomationPlatforms
+IFTTT/gl⌢be♂¶obile-altM 10M+ /exclamati⌢n-triangleTP /exclamati⌢n-triangleSlack (Workflows)/gl⌢be/desk◎opM 10M+ /exclamati⌢n-triangleAdv N/AA Top Productivity PlatformM 1M+ /exclamati⌢n-triangleN/A
+n8n/gl⌢be/githubM N/A /exclamati⌢n-triangleN/A
+A Top AI Orchestration PlatformM N/A /exclamati⌢n-triangleAdv N/A
+Integrately/gl⌢beM N/A /exclamati⌢n-triangleN/A /exclamati⌢n-trianglePipedream/gl⌢be/githubM N/A /exclamati⌢n-triangleN/A
+Virtual Assistants
+Amazon Alexa/gl⌢be♂¶obile-altM 100M+/exclamati⌢n-triangleTP
+Baidu Xiaodu♂¶obile-altM 5M+ /exclamati⌢n-triangleTP /exclamati⌢n-triangleAlibaba AliGenie♂¶obile-altM 5M+/exclamati⌢n-triangleFN /exclamati⌢n-triangleLe Chat by Mistral AI/gl⌢be♂¶obile-altM 1M+ /exclamati⌢n-triangleTP
+Perplexity AI/gl⌢beM 10M+ /exclamati⌢n-triangleN/A
+Manus/gl⌢be M 1M+ /exclamati⌢n-triangleN/A /exclamati⌢n-triangleChatGPT/gl⌢be♂¶obile-altM 1B+SecureTN
+Claude/gl⌢be♂¶obile-altM 10M+ Secure TN
+Smart Homes Samsung SmartThings♂¶obile-altM 1B+/exclamati⌢n-triangleFN
+Xiaomi Home♂¶obile-altM 50M+ /exclamati⌢n-triangleTP
+Agentic AIInfrastructures
+Token Vault /Agent Auth Solution /AI Agent Builder /AI Gateway(OAuth-as-a-Service)
+Amazon AgentCoreὑ7/githubM N/A∀ ∀ /exclamati⌢n-triangleN/A
+Azure API Managementὑ7M N/A ∀ ∀ Secure N/A
+Microsoft Copilot Studioὑ7M N/A ∀ ∀ Secure N/A
+Composioὑ7/githubM N/A ∀ ∀ /exclamati⌢n-triangleN/A
+Arcadeὑ7/githubM N/A ∀ ∀ /exclamati⌢n-triangleN/A
+ByteDance Cozeὑ7 M N/A ∀ ∀ /exclamati⌢n-triangleN/A
+Nangoὑ7/githubM N/A ∀ ∀ /exclamati⌢n-triangleN/A
+ACI.devὑ7/githubM N/A ∀ ∀ /exclamati⌢n-triangleN/A
+Total 46 — — 27/46 38/46 16/46 + 24/46— 3/46 4/46
+/gl⌢be/♂¶obile-alt: Web/Native appavailable, and withAccount Linking support(Desktop app/desk◎opas fallback if Mobile app♂¶obile-altis unavailable or unsupported).: Same-Origin (and Same-Site);: Cross-Origin but Same-Site;: Cross-Site.: Same-UA;: Cross-UA./exclamati⌢n-triangle: Vulnerable.Adv: Advanced Attack Techniques Required.Vendor Collection: A = (semi-)Automated, M = Manual. Vendor collected followingOASISPhase I (§6.2).#DLs: Number of Downloads, statistics from Google Play (or Tencent Yingyongbao for Chinese-only apps).∀: Support Heterogeneous Publish Channels (within any origin and/or UA, including deployed as bots in Instant Messaging software), beyond the vendor’s official Web app or Native app.
+as the primary security boundary, enforced by the same-
+origin policy. A cross-origin deployment typically implies
+that an app’s main functionalities and its OAuth client are
+viewed, if not deployed, as separate components internally.
+Cross-Site Deployments.We further use thesame-site
+vs.cross-sitedistinction to capture whether the callback end-
+point can access the app’s session cookies. It is interesting to
+investigate why some vendors host callback endpoints cross-
+site, whichpreventsthem from utilizing the user session.
+For instance, Habitify hosts its callback endpoint on Google
+Cloud Functions while keeping other functionalities under
+its own domain. A leading event management platform, al-
+though not an OaaS provider, hosts OAuth functionalities on
+a centralized server for templated event websites deployed
+on custom domains. Microsoft acquired Mover.io in 2019
+to enhance OneDrive’s file migration feature, yet its OAuth
+callback endpoint remained on a non-Microsoft domain.
+Same-Origin and Same-UA Deployments.We observed
+5 vendors that fall into neither cross-origin nor cross-UA
+categories. In these cases, secure OAuth practices should,
+in principle, be straightforward, reducing the problem to
+implementation flaws within the textbook OAuth model that
+involves a single origin and UA. Despite this, we speculate
+that developers may assume that once authorization context
+is encoded in the OAuth session, the callback endpoint no
+longer needs to consume the user session, resulting in a
+false sense of security. This underscores the importance of
+awareness of COSF even in textbook OAuth deployments.
+Another possibility is that the OAuth client, despite same-
+origin, is implemented as a standalone component separate
+from those handling user sessions; in such cases, the cross-
+origin countermeasure described in D1 and D3 still apply.
+Vulnerability Detection withOASIS.
+Phase I.The size of initial dataset is 3.6 million non-game
+apps from AndroZoo, landing 61,087 apps after filtering by
+update date and number of downloads. Upon preprocessing,
+3,143 APKs of productivity apps were analyzed. As shown
+in Table 4, 26 Android apps were collected in Phase I. We
+13
+
+[PDF PAGE 14]
+Table 4. EVALUATION OFOASISFORCOSF VULNERABILITY
+DETECTION INMOBILEAPPS
+Phase I: Collection (§6.2) Phase II: † Detection (§6.3)
+Method # Selected # Excluded # TP # FN # TN # FP
+(semi-)Automated 12 14 20 3 4 0Manual 15 N/A
+† Positive (P): vulnerable; Negative (N): secure.
+then manually verified the presence of account linking and
+excluded 14 apps: 6 referenced dead code, 3 required paid
+subscriptions without free trials, 3 were proprietary apps,
+and 2 offered account linking only in web versions.
+Phase II.The remaining 12 Android apps were confirmed
+to support account linking and analyzed along with 15 man-
+ually selected Android apps in Phase II. Of the 27 vendors,
+20 were correctly identified as vulnerable (true positives),
+4 were correctly identified as secure (true negatives), with
+3 false negatives and no false positives. False negatives in-
+clude Samsung SmartThings (absence of server-side session
+integrity check despite native callback handling, see §6.4),
+OneDrive, and Alibaba AliGenie (interference from other
+secure OAuth features). To further validate the effectiveness
+of our approach, we scanned older versions of the 4 true
+negative apps that predate their account linking support.
+Three were correctly classified as lacking OAuth callbacks,
+while Claude was misclassified due to non-standard SSO
+flow that did not use theid_tokenparameter.
+7.2.2. OAuth-as-a-Service Providers.We evaluated cross-
+user and cross-tenant attack vectors in OaaS providers, with
+results summarized in Table 5.
+COSF.Six of the eight providers were vulnerable to
+COSF. Their respective fixes at the time of writing are listed
+in the table. Notably, one vendor exposed open redirect
+issues due to improper COSF defenses (see Appendix A.2).
+Cross-tenant Client ID Confusion.We examined how
+vendors support and promote shared client IDs across ten-
+ants. The four vulnerable vendors treat shared client IDs as
+part of their business model, making BYOC optional rather
+than a security requirement. For example, Arcade previously
+stated that “itcanbe useful” for tenants to configure their
+own client IDs, but now states: “if you are building a multi-
+user production app, youmustobtain your own OAuth app
+credentials and add them to Arcade.” [48] after our report.
+Cross-tenant COAT.We identified 7 susceptible OaaS
+providers, all of which use a sharedredirect_uriacross
+tenants and connectors. As a result, any connector in any
+tenant’s agent relying on these OaaS Token Vaults is vul-
+nerable to Cross-tenant COAT.
+As a concrete example, theredirect_uriin Amazon
+Bedrock AgentCorehttps://bedrock-agentcore.<AW
+S_REGION> .amazonaws.com/identities/oauth2/ca
+llbackwas shared between the malicious tenant’s con-
+nector and benign tenant’s connector (e.g.,Dropbox). An
+attacker can exploit this by tricking a victim into inter-
+acting with an attacker-controlled agent. During account
+linking, the malicious connector’s authorization endpoint
+https://attacker.com/authorizeissues a crafted redi-
+rect tohttps://www.dropbox.com/oauth2/authorize.
+This Dropbox authorization URL embeds query parameters
+collected from attacker’s interaction with the benign agent’s
+Dropbox connector (i.e.,with Dropbox’sclient_id, the
+sharedredirect_uri, and a fresh PKCEcode_challenge),
+while reusing thestatevalue of the victim’s ongoing
+interaction. Eventually, the attacker can redeem the stolen
+auth code by continuing their own OAuth flow with Dropbox
+(i.e.,the one associated with thecode_challenge), thereby
+completing the account takeover (PoC in [15]). Notably, the
+attack does not violate CSRF or PKCE protections. Amazon
+resolved this vulnerability by assigning globally unique, per-
+connectorredirect_uris (by appending a UUID suffix to
+the original URI) and enforcing matching in OAuth flows.
+7.3. Case Studies
+Slack (Workflow Builder).Slack enforced a 10-second
+timeout on pre-authorization request URLs, but this does
+not mitigate COSF. An attacker can bypass the limit by
+replaying the full OAuth initiation request that generates
+the pre-authorization request URL on their own serverafter
+the victim visits the attacker’s website. The attacker then
+immediately redirects the victim to the fresh request URL,
+ensuring its validity in an attack.
+Harvest.Harvest’s COSF vulnerability affects only its
+web app, not its mobile app. On mobile, the app acts as a
+public client to obtain tokens and forwards them to the app
+backend for storage and API calls. While this avoids COSF,
+public clients are inherently less secure than confidential
+clients as they lack client authentication. Furthermore, ac-
+cess tokens intended for backend use are exposed on-device,
+which could have been avoided with a confidential client.
+This illustrates the lack of guidance for implementing secure
+OAuth confidential clients in native apps.
+Microsoft Copilot Studio.A severe Cross-tenant COAT
+vulnerability was identified in Microsoft Copilot Studio.
+Each custom agent (called aCopilot) uses the “Bot Frame-
+work Token Service” as its Token Vault. Microsoft designed
+this Token Vault to support broader use cases, where agent
+developers can not only request tool access (e.g.,Dropbox)
+but also authenticate users across different identity providers
+(IdPs,e.g.,Microsoft Entra ID), thereby enabling fine-
+grained access control over who can access each agent.
+Consequently, a Cross-tenant COAT attacker can configure
+a custom agent with a malicious IdP to access arbitrary
+well-authenticated agents on the Internet under the victim’s
+identity, gaining access to all their gated resources.
+Model Context Protocol (MCP).MCP [49] is an emerg-
+ing standard for AI agent tool-use, in which MCP clients
+(OAuth clients) of an MCP host (e.g.,Claude Desktop) send
+access tokens to MCP servers (APIs) to access protected re-
+sources. While MCP OAuth [50] is usually consideredfirst-
+order OAuth, where the MCP client acts as an OAuth public
+client, COSF attacks can manifest in two MCP scenarios:
+1) MCP clients of remote MCP hosts.In this case, the
+MCP client is an OAuth confidential client. Users maintain
+14
+
+[PDF PAGE 15]
+Table 5. OAUTHACCOUNTMISLINKINGVULNERABILITIES ACROSSOAUTH-AS-A-SERVICEPROVIDERS
+Vendor Name
+Cross-user Attacks [§4] Cross-tenant Attacks [§5]
+OAuth Session Fixation (COSF) [§4.1] Countermeasures [§4.3, Appendix A] Client ID Confusion [§5.1] COAT [§5.2]
+Amazon Bedrock AgentCore/exclamati⌢n-triangleFixed Post-redirect Pattern (D3) [3] Secure /exclamati⌢n-triangleFixed
+Azure API Management Secure, except for
+/exclamati⌢n-triangleMicrosoft Copilot¶ (Fixed)
+Post-redirect Pattern (D3) or Extra Consent (D5) [47]
+/exclamati⌢n-triangleOpen Redirect×3 (Fixed) [Appendix A.2] Secure /exclamati⌢n-triangleFixed
+Microsoft Copilot Studio Secure Post-redirect Pattern (D3) or Manual PIN (D4) Secure /exclamati⌢n-triangleFixed
+Composio /exclamati⌢n-triangleInsufficient Fix Shorter Timeout /exclamati⌢n-triangle“recommend”§ /exclamati⌢n-triangle†
+Arcade /exclamati⌢n-triangleFixed Post-redirect Pattern (D3) [48] /exclamati⌢n-triangleFixed (“can”→“must”)/exclamati⌢n-triangleFixed
+ByteDance Coze /exclamati⌢n-triangleFixed Extra Consent (D5) /exclamati⌢n-triangleFixing /exclamati⌢n-triangleFixed
+Nango /exclamati⌢n-triangle Secure /exclamati⌢n-triangle†
+ACI.dev /exclamati⌢n-triangle /exclamati⌢n-triangle“can” N/A‡
+¶ A Microsoft first-party tenant of Azure API Management.§ Requirement level of BYOC (Bring Your Ownclient_id), the same below.
+† Cross-tenant COAT feasible via pre-built connectors with customizable AS endpoints from attacker’s tenant.‡ No custom(izable) connector support for any tenant.
+sessions between their UA and the remote MCP host, and
+tokens from MCP servers are linked to the MCP host’s user
+identity, making this a form of second-order OAuth (i.e.,
+account linking). We found 2 MCP clients (Manus AI and
+Mistral AI’s Le Chat; see Table 3) susceptible to this issue.
+2) MCP servers with downstream API authorization.If
+an MCP server relies on downstream APIs whose credentials
+are also fetched via OAuth and associated with the MCP ses-
+sion (between MCP client and server), then the downstream
+token retrieval process effectively becomes account linking.
+This pattern is standardized in the MCPURL elicitation
+proposal [51] by Arcade, a vulnerable agentic AI vendor
+(see Table 5). In addition to reporting vulnerabilities in Ar-
+cade’s OaaS product line [48], we discovered its MCP pro-
+posal was also vulnerable and informed Arcade accordingly.
+Arcade subsequently updated its MCP proposal to include
+a discussion of the session fixation attack vector [52].
+8. Related Work
+This section discusses related work from both academia
+and industry, and highlights how they differ from this work.
+8.1. Related Academic Research
+Connector vs. SSO Account Linking.In this work,
+the account linking concept generally aligns with [1]. It
+contrasts with SSO account linking [34], [37], [53], where
+a user’s IdP account connects to an application’s existing
+account system for SSO. In SSO account linking, account
+takeovers arise from typical OAuth CSRF vulnerabilities [2,
+§10.12], rather than from session fixation issues.
+OAuth in Integration Platforms.While (Single-tenant)
+COAT attacks in integration platforms [1] are not the focus
+of this work, they constitute an entry in our attack frame-
+work for connector ecosystems (Table 1), and our Cross-
+tenant COAT attack in OaaS builds upon them. Regarding
+session integrity, session fixation was not distinguished from
+CSRF issues in [1]: the authors attributed the potential for
+“one-click” COAT attacks to missing CSRF protection [1,
+§4.3], but only analyzed the case of OAuth-initiation CSRF.
+They did not investigate other causes of CSRF-like behav-
+iors, where the OAuth callback depends on the OAuth ses-
+sion rather than the pre-existing platform session to identify
+the user, thereby overlooking the threat modeling of session
+fixation. We address this gap by examining the motivations
+and implications of such designs from the perspective of
+OAuth architectural patterns, highlighting session fixation
+as a standalone attack vector across connector ecosystems.
+Cross-Origin OAuth.DISTINCT[34] identified security
+issues in dual-window SSO flows, including those that cross
+origins. However, the study focuses exclusively on SSO
+and does not cover OAuth authorization scenarios. A key
+distinction also lies in the flow assumptions: SSO may rely
+on cross-origin in-browser communication (InBC) mecha-
+nisms to return authentication credentials to the application’s
+primary origin, whereas our COSF attack arises precisely
+because such a return is absent. Consequently, cross-origin
+InBC mechanisms such aspostmessagecould serve as an
+alternative to HTTP redirects when enforcing the COSF
+defense of post-redirect pattern (D3) to return to the original
+authenticated origin.
+Brokered OAuth.Like SSO Brokers [54], OaaS with
+Token Vaults also extend three-legged OAuth into a four-
+actor architecture. However, the two ecosystems exhibit
+distinct security issues. The fundamental difference is that
+brokered SSO designs chain two SSO flows side by side
+(App↔Broker and Broker↔AS), whereas only a single
+OAuth flow is involved in OAuth-connection-based OaaS
+designs. In the latter, the Token Vault acts as the sole OAuth
+client; applications retrieve access tokens by 1)authenti-
+cating tothe Token Vault (§3.3), and 2) presentingOAuth
+connection IDs(§3.4), which are non-secret identifiers. Con-
+sequently, each application is exempt from the burden of
+implementing OAuth client logic or managing tokens.
+8.2. Related Discussions in Industry
+Despite active discussions on OAuth in the industry,
+particularly within standardization bodies such as the IETF
+OAuth Working Group and OpenID Foundation, the specific
+issues uncovered in this work were previously unaddressed.
+OAuth Session Integrity.Session integrity issues are a
+classic threat in web security. Prior research has extensively
+analyzed cookie integrity, leading to multiple updates to the
+cookie standard [55], [56]. While attack techniques such as
+cookie tossingare also feasible in OAuth [57], [58], such
+issues depend on ad-hoc OAuth implementations and fall
+outside the scope of this work.
+15
+
+[PDF PAGE 16]
+Existing OAuth research on session integrity primarily
+focuses on (Login) CSRF [2], [59], [60], [54]. Regarding
+session fixation, one such attack was previously identified
+in OAuth 1.0 [61], where the “request token” functioned
+as an OAuth session and could be fixated on a victim’s
+device. In OAuth 2.0, the concept of an OAuth session is
+not explicitly defined in the protocol specification, leaving
+only thestateparameter which may carry authorization
+state information. However, as our study reveals, connec-
+tor ecosystems may inevitably introduce standalone OAuth
+sessions throughstateparameters or standalone session
+IDs, and, more importantly, expose ananti-patternin which
+clients solely rely on the fixated OAuth session to identify
+the current authorization context, thereby associating the
+access token with an unintended user at the client.
+The OAuth community has also discussed remote phish-
+ing in cross-device OAuth flows [62, §5.4], [63], as well
+as session fixation in OpenID for Verifiable Presentations
+(OpenID4VP) [64, §14.2]. However, such ecosystems as-
+sume significantly modified versions of the OAuth protocol,
+handling authorization between a consumption device and
+an authorization device, or presentations between a verifier
+and a wallet, with attacks and defenses applicable only
+within those contexts. In contrast, we are the first to analyze
+session fixation patterns in the standard authorization code
+grant in same-device OAuth flows, which remains suscepti-
+ble to practical real-world attacks.
+Furthermore, our COSF attack isstealthier: previous
+cases required significant social engineering, as victimsmust
+perform user interaction (such as entering a user code) in
+cross-device flows [62, §3.3], andshouldprovide explicit
+consent in OpenID4VP [64, §15.1]. In contrast, COSF
+attacks can be triggered simply by tricking victims into
+clicking a hyperlink, and attackers can leverage silent autho-
+rization configured by mainstream ASes to bypass explicit
+user consent, resulting in one-click attacks. Finally, to our
+knowledge, no prior work has conducted measurement stud-
+ies or proposed vulnerability detection methods for session
+fixation attacks in OAuth(-derived) protocols.
+Decoupled OAuth Architectural Patterns.The “OAuth
+for Browser-Based Applications” specification [65] de-
+scribes the Backend-for-Frontend (BFF) and Token-
+Mediating Backend (TMB) OAuth architectural patterns.
+Although account linking in native apps resembles BFF, and
+OaaS providers that return raw access tokens to the apps are
+comparable to TMB, there are two key differences:
+(1) According to [65], the retrieved tokens are tied to the
+BFF or TMB’s own session, which are generated by BFF
+or TMBafter token retrieval. BFF or TMB-managed tokens
+are not linked to the user’s identity at the browser-based app.
+By contrast, the account linking scenario associates tokens
+with the app’s user identity, as indicated by the app’spre-
+existing user session. (2) The specification’s security consid-
+erations are scoped to a strong threat model ofcompromised
+applications (exploited by malicious JavaScript) inbrowser-
+based apps, whereas the COSF attack in this work assumes
+malicious (yet unprivileged) users of abenignapplication
+inweb and native apps.
+9. Conclusion
+This work presents the first systematic study of archi-
+tectural patterns underlying OAuth-based account linking in
+connector ecosystems. We develop a unified security frame-
+work foraccount mislinkingthreats, including Cross-user
+OAuth Session Fixation (COSF), the first session fixation
+attack against implementations of the standard OAuth 2.0
+authorization code grant flow. Our semi-automated measure-
+ment uncovers 40 real-world apps, platforms, or infrastruc-
+tures vulnerable to COSF, and further reveals Cross-tenant
+confused deputy flaws in 8 OAuth-as-a-Service providers.
+Our analysis exposes fundamental gaps that warrant
+immediate attention from both the research and standards
+communities: (1) Existing OAuth specifications lack nor-
+mative guidance on maintaining session integrity in cross-
+origin, cross-user-agent, and separate-responsibility scenar-
+ios. (2) Emerging OAuth-as-a-Service architectures reshape
+traditional trust boundaries. While they offer convenience
+for agentic AI development, their multitenancy may inadver-
+tently expose end-users to unauthorized access. This work
+represents an initial step toward addressing these gaps; while
+the proposed defenses are intuitive and empirically moti-
+vated, formal security proofs remain important future work.
+We are working with affected vendors and the IETF to
+harden implementations and advance security best practices.
+Ethics Considerations
+Considerations for Human Subjects Research.All
+experiments were conducted on self-registered test accounts,
+without putting humans at risk.
+Considerations for Vulnerability Disclosure.In accor-
+dance with responsible disclosure practices, we reported our
+findings to all affected vendors. For each contacted vendor,
+we provided a bug report with detailed reproduction steps
+and mitigation strategies, along with a PoC video. As of
+this writing, we have received acknowledgments from 20
+vendors (over 15 of which have fixed their issues) and
+$35,850 in bug bounties from 11 vendors. We also par-
+ticipated in meetings with engineering teams at Microsoft,
+Arcade, and ByteDance. Arcade published a blog detailing
+their fix and system re-architecture as a community call-to-
+action, describing our disclosure as “the first major identity
+vulnerability in agentic AI” [66]. ByteDance issued a formal
+letter of appreciation. Amazon [3] and Arcade [48] reused
+our root-cause analysis in their updated documentation.
+We re-tested the vulnerabilities following our disclosure.
+Among vendors whose systems were either fixed or not
+vulnerable, 18 vendors adopted COSF defenses D1–D3,
+1 adopted D4, 3 adopted D5, and 2 adopted D6. Some
+vendors find deploying mitigations challenging, as robust
+fixes may require cooperation fromend-users(to upgrade
+from deprecated vulnerable native app versions) orOaaS
+tenant developers(to update their agents and/or connectors).
+We engaged with the IETF OAuth Working Group,
+authoring an Internet-Draft [16] to propose updates to the
+published OAuth Security Best Current Practice document
+16
+
+[PDF PAGE 17]
+(RFC9700 [28]), and subsequently presented and discussed
+the issues during Interim and IETF meetings [67] with the
+Working Group members. The draft highlights (1) the ap-
+plication scenario of OAuth Connections/Account Linking,
+and, for both COSF and COAT, (2) the attack descrip-
+tions and (3) proposed countermeasures, especially cross-
+origin/UA considerations for COSF and cross-tenant con-
+siderations of globally-unique identifiers for COAT. Our
+Internet-Draft has been adopted as an OAuth Working-
+Group Draft, reflecting recognition of its practical relevance
+and impact.
+LLM Usage Considerations
+LLMs were used for editorial purposes in this
+manuscript, and all outputs were inspected by the authors
+to ensure accuracy and originality.
+Acknowledgments
+We thank the anonymous reviewers for their help-
+ful feedback and our shepherd for the constructive com-
+ments and guidance. This work is supported in part by
+the CUHK MobiTeC Fund (Project No. 6901539) and the
+CUHK Strategic Impact Enhancement Fund (Project Nos.
+399857576 and 456489500).
+References
+[1] K. Luo, X. Wang, P. H. A. Fung, W. C. Lau, and J. Lecomte,
+“Universal cross-app attacks: Exploiting and securing OAuth 2.0 in
+integration platforms,” in34th USENIX Security Symposium (USENIX
+Security 25), 2025, pp. 3221–3238.
+[2] D. Hardt, “The OAuth 2.0 Authorization Framework,” RFC 6749,
+Oct. 2012.
+[3] AWS Documentation, “OAuth 2.0 authorization URL session binding
+- Amazon Bedrock AgentCore,” https://docs.aws.amazon.com/bedr
+ock-agentcore/latest/devguide/oauth2-authorization-url-session-bindi
+ng.html.
+[4] Microsoft Learn, “About Credential Manager in Azure API Manage-
+ment,” https://learn.microsoft.com/en-us/azure/api-management/cred
+entials-overview.
+[5] D. Fett, R. Küsters, and G. Schmitz, “A comprehensive formal secu-
+rity analysis of OAuth 2.0,” inProceedings of the 2016 ACM SIGSAC
+Conference on Computer and Communications Security, 2016, pp.
+1204–1215.
+[6] D. Fett, R. Küsters, and G. Schmitz, “The web SSO standard OpenID
+Connect: In-depth formal security analysis and security guidelines,” in
+2017 IEEE 30th Computer Security Foundations Symposium (CSF),
+2017, pp. 189–202.
+[7] T. A. Rahat, Y . Feng, and Y . Tian, “OAUTHLINT: An empirical study
+on OAuth bugs in Android applications,” in2019 34th IEEE/ACM
+International Conference on Automated Software Engineering (ASE),
+2019, pp. 293–304.
+[8] ——, “Cerberus: Query-driven scalable vulnerability detection in
+OAuth service provider implementations,” inProceedings of the
+2022 ACM SIGSAC Conference on Computer and Communications
+Security, 2022, p. 2459–2473.
+[9] W. Denniss and J. Bradley, “OAuth 2.0 for Native Apps,” RFC 8252,
+Oct. 2017.
+[10] CWE - Common Weakness Enumeration, “CWE-384: Session fixa-
+tion,” https://cwe.mitre.org/data/definitions/384.html.
+[11] M. Kolsek, “Session fixation vulnerability in web-based applications,”
+ACROS Security, 2002, http://www.acrossecurity.com/papers/session
+fixation.pdf.
+[12] M. Johns, B. Braun, M. Schrank, and J. Posegga, “Reliable protection
+against session fixation attacks,” inProceedings of the 2011 ACM
+Symposium on Applied Computing, 2011, pp. 1531–1537.
+[13] CWE - Common Weakness Enumeration, “CWE-441: Unintended
+proxy or intermediary (’confused deputy’),” https://cwe.mitre.org/da
+ta/definitions/441.html.
+[14] n8n-io/n8n, “fix(core): Improve the security on oauth callback end-
+points,” https://github.com/n8n-io/n8n/pull/11593.
+[15] “Artifacts,” https://mobitec.ie.cuhk.edu.hk/connector-oauth-security.
+[16] T. Würtele, P. Hosseyni, K. Luo, and A. Fung, “Updates to OAuth
+2.0 Security Best Current Practice,” Internet Engineering Task Force,
+Internet-Draft draft-ietf-oauth-security-topics-update-01, Mar. 2026,
+work in Progress. https://datatracker.ietf.org/doc/draft-ietf-oauth
+-security-topics-update/01/.
+[17] T. Lodderstedt, M. McGloin, and P. Hunt, “OAuth 2.0 Threat Model
+and Security Considerations,” RFC 6819, Jan. 2013.
+[18] IBM, “What is application integration?” https://www.ibm.com/think/
+topics/application-integration.
+[19] AWS, “What is application integration? - app integration explained,”
+https://aws.amazon.com/what-is/application-integration/.
+[20] ——, “What is agentic ai? - agentic ai explained,” https://aws.amaz
+on.com/what-is/agentic-ai/.
+[21] MDN Web Docs, “Same-origin policy - security,” https://developer.
+mozilla.org/en-US/docs/Web/Security/Same-origin_policy.
+[22] ——, “eTLD - glossary,” https://developer.mozilla.org/en-US/docs/G
+lossary/eTLD.
+[23] Arcade Docs, “Getting your API key,” https://docs.arcade.dev/en/h
+ome/api-keys.
+[24] AWS Documentation, “Get workload access token - Amazon Bedrock
+AgentCore,” https://docs.aws.amazon.com/bedrock-agentcore/latest/
+devguide/get-workload-access-token.html.
+[25] T. South, S. Nagabhushanaradhya, A. Dissanayaka, S. Cecchetti,
+G. Fletcher, V . Lu, A. Pietropaolo, D. H. Saxe, J. Lombardo, A. M.
+Shivalingaiahet al., “Identity management for agentic AI: The new
+frontier of authorization, authentication, and security for an AI agent
+world,”arXiv preprint arXiv:2510.25819, 2025.
+[26] MDN Web Docs, “Set-Cookie header - HTTP,” https://developer.mo
+zilla.org/en-US/docs/Web/HTTP/Reference/Headers/Set-Cookie.
+[27] D. Akhawe, A. Barth, P. E. Lam, J. Mitchell, and D. Song, “Towards
+a formal foundation of web security,” in2010 23rd IEEE Computer
+Security Foundations Symposium. IEEE, 2010, pp. 290–304.
+[28] T. Lodderstedt, J. Bradley, A. Labunets, and D. Fett, “Best Current
+Practice for OAuth 2.0 Security,” RFC 9700, Jan. 2025.
+[29] Microsoft Learn, “Protect against consent phishing - Microsoft Entra
+ID,” https://learn.microsoft.com/en-us/entra/identity/enterprise-apps/
+protect-against-consent-phishing.
+[30] P. Kasselman, D. Fett, and F. Skokan, “Cross-Device Flows: Security
+Best Current Practice,” Internet Engineering Task Force, Internet-
+Draft draft-ietf-oauth-cross-device-security-12, Sep. 2025, work in
+Progress.
+[31] N. Sakimura, J. Bradley, and N. Agarwal, “Proof Key for Code
+Exchange by OAuth Public Clients,” RFC 7636, Sep. 2015.
+[32] CWE - Common Weakness Enumeration, “CWE-601: URL redirec-
+tion to untrusted site (’open redirect’),” https://cwe.mitre.org/data/d
+efinitions/601.html.
+[33] T. Innocenti, M. Golinelli, K. Onarlioglu, A. Mirheidari, B. Crispo,
+and E. Kirda, “OAuth 2.0 Redirect URI validation falls short, liter-
+ally,” inProceedings of the 39th Annual Computer Security Applica-
+tions Conference, 2023, pp. 256–267.
+[34] L. Jannett, V . Mladenov, C. Mainka, and J. Schwenk, “DISTINCT:
+Identity theft using in-browser communications in dual-window Sin-
+gle Sign-On,” inProceedings of the 2022 ACM SIGSAC Conference
+on Computer and Communications Security, 2022, p. 1553–1567.
+[35] S. Shi, X. Wang, and W. C. Lau, “MoSSOT: An automated blackbox
+tester for Single Sign-On vulnerabilities in mobile applications,” in
+Proceedings of the 2019 ACM Asia Conference on Computer and
+Communications Security, 2019, p. 269–282.
+[36] P. Philippaerts, D. Preuveneers, and W. Joosen, “OAuch: Exploring
+security compliance in the OAuth 2.0 ecosystem,” inProceedings of
+the 25th International Symposium on Research in Attacks, Intrusions
+and Defenses, 2022, pp. 460–481.
+17
+
+[PDF PAGE 18]
+[37] A. Bisegna, M. Bitussi, R. Carbone, L. Compagna, S. Ranise, and
+A. Sudhodanan, “CSRFing the SSO waves: Security testing of SSO-
+based account linking process,” in2024 IEEE 9th European Sympo-
+sium on Security and Privacy (EuroS&P). IEEE, 2024, pp. 139–154.
+[38] K. Allix, T. F. Bissyandé, J. Klein, and Y . L. Traon, “AndroZoo:
+Collecting millions of Android apps for the research community,”
+in2016 IEEE/ACM 13th Working Conference on Mining Software
+Repositories (MSR), 2016, pp. 468–471.
+[39] skylot/jadx, “Dex to Java decompiler,” https://github.com/skylot/jadx.
+[40] P1sec/hermes-dec, “A reverse engineering tool for decompiling and
+disassembling the React Native Hermes bytecode,” https://github.c
+om/P1sec/hermes-dec.
+[41] Android Developers, “Intent,” https://developer.android.com/referenc
+e/android/content/Intent.
+[42] Dropbox Developers Documentation, “Chooser - developers - Drop-
+box,” https://www.dropbox.com/developers/chooser#android.
+[43] L. Jannett, M. Westers, T. Wich, C. Mainka, A. Mayer, and V . Mlade-
+nov, “SoK: SSO-MONITOR - the current state and future research
+directions in Single Sign-on security measurements,” in2024 IEEE
+9th European Symposium on Security and Privacy (EuroS&P), 2024,
+pp. 173–192.
+[44] N. Sakimura, J. Bradley, M. Jones, B. De Medeiros, and C. Mor-
+timore, “OpenID Connect Core 1.0 incorporating errata set 2,”The
+OpenID Foundation, Specification, 2023, https://openid.net/specs/ope
+nid-connect-core-1_0.html.
+[45] Android Developers, “About deep links | App architecture,” https:
+//developer.android.com/training/app-links.
+[46] M. Alecci, P. J. R. Jiménez, K. Allix, T. F. Bissyandé, and J. Klein,
+“AndroZoo: A retrospective with a glimpse into the future,” inPro-
+ceedings of the 21st International Conference on Mining Software
+Repositories, 2024, pp. 389–393.
+[47] Azure/azure-tokens, “Phishing attack vulnerability,” https://github.c
+om/Azure/azure-tokens/blob/master/docs/phishing-attack-vulnerabili
+ty.md.
+[48] Arcade Docs, “Secure auth in production,” https://docs.arcade.dev/en
+/home/auth/secure-auth-production.
+[49] Anthropic, “Specification - Model Context Protocol,” https://modelc
+ontextprotocol.io/specification/2025-11-25.
+[50] ——, “Authorization - Model Context Protocol,” https://modelconte
+xtprotocol.io/specification/2025-11-25/basic/authorization.
+[51] N. Barbettini and W. Dawson, “SEP-1036: URL mode elicitation for
+secure out-of-band interactions,” https://github.com/modelcontextpro
+tocol/modelcontextprotocol/pull/887.
+[52] Anthropic, “Elicitation - Model Context Protocol,” https://modelcon
+textprotocol.io/specification/2025-11-25/client/elicitation#phishing.
+[53] Web Security Academy, “Lab: Forced OAuth profile linking,” https:
+//portswigger.net/web-security/oauth/lab-oauth-forced-oauth-profil
+e-linking.
+[54] T. Innocenti, L. Jannett, C. Mainka, V . Mladenov, and E. Kirda, ““only
+as strong as the weakest link”: On the security of brokered Single
+Sign-On on the web,” in2025 IEEE Symposium on Security and
+Privacy (SP), 2025, pp. 1009–1027.
+[55] M. Squarcina, P. Adão, L. Veronese, and M. Maffei, “Cookie crum-
+bles: breaking and fixing web session integrity,” in32nd USENIX
+Security Symposium (USENIX Security 23), 2023, pp. 5539–5556.
+[56] A. Bortz, A. Barth, and A. Czeskis, “Origin cookies: Session integrity
+for web applications,”Web 2.0 Security and Privacy (W2SP), 2011.
+[57] Snyk Labs, “Hijacking OAUTH flows via cookie tossing,” https://la
+bs.snyk.io/resources/hijacking-oauth-flows-via-cookie-tossing/.
+[58] Harel Security Research, “Zoom session takeover - cookie tossing
+payloads, OAuth dirty dancing, browser permissions hijacking, and
+W AF abuse,” https://nokline.github.io/bugbounty/2024/06/07/Zoo
+m-ATO.html.
+[59] T. Lodderstedt, J. Bradley, A. Labunets, and D. Fett, “Best Current
+Practice for OAuth 2.0 Security,” RFC 9700, Jan. 2025.
+[60] R. Yang, G. Li, W. C. Lau, K. Zhang, and P. Hu, “Model-based
+security testing: An empirical study on OAuth 2.0 implementations,”
+inProceedings of the 11th ACM on Asia Conference on Computer
+and Communications Security, 2016, p. 651–662.
+[61] OAuth Community Site, “OAuth security advisory: 2009.1,” https:
+//oauth.net/advisories/2009-1/.
+[62] W. Denniss, J. Bradley, M. B. Jones, and H. Tschofenig, “OAuth 2.0
+Device Authorization Grant,” RFC 8628, Aug. 2019.
+[63] D. Fett, “Cross-device session fixation and how the DC API solves
+it,” https://danielfett.de/2025/03/10/cross-device-session-fixation/.
+[64] O. Terbu, T. Lodderstedt, K. Yasuda, D. Fett, and J. Heenan, “OpenID
+for Verifiable Presentations 1.0,”The OpenID Foundation, Specifica-
+tion, 2025, https://openid.net/specs/openid-4-verifiable-presentations
+-1_0.html.
+[65] A. Parecki, P. D. Ryck, and D. Waite, “OAuth 2.0 for Browser-Based
+Applications,” Internet Engineering Task Force, Internet-Draft draft-
+ietf-oauth-browser-based-apps-25, Jul. 2025, work in Progress.
+[66] N. Barbettini, “How Arcade proactively addressed the first major
+identity vulnerability in agentic AI,” https://www.arcade.dev/blo
+g/arcade-proactively-addressed-coat-vulnerability-in-agentic-ai/.
+[67] IETF 125, “Updates to OAuth 2.0 Security Best Current Practice,”
+Mar. 2026, https://datatracker.ietf.org/meeting/125/materials/slides-1
+25-oauth-updates-to-oauth-20-security-best-current-practice-00.
+Appendix A.
+Additional Details on COSF Defenses
+A.1. Post-redirect Defense in OAuth-as-a-Service
+OaaS not only increases the risk of COSF attacks but
+also introduces new challenges for their defense. In OaaS,
+the agent (application)’s user session and its OAuth client
+are operated by separate entities, thus the callback endpoint
+is unable to interpret the agent’s user session. It is therefore
+essential to clearly delineate responsibilities between the
+agent and the OAuth client.
+As illustrated in Fig. 15, thepost-redirect patternde-
+fense in OaaS further requires the agent to extract the user
+identifier and forward it, along with the received autho-
+rization data, to the OAuth client for consistency check. A
+common implementation is as follows:
+1) The agent (application) sets up a post-callback end-
+point;
+2) The Token Vault (OAuth client) redirects the browser to
+this endpoint after the initial OAuth callback, attaching
+an OAuth session-boundnonce(explained below);
+3) The agent extracts theuser IDfrom theuser session,
+submitting it along with thenonce;
+4) Token Vault uses thenonceto validateOAuth session–
+user IDbinding, then proceeds with code exchange.
+Note that during post-redirection, unlike the mechanism
+described in defense D3 (§4.3), which transparently for-
+Application
+Authorize
+ Start OAuthBrowserConnectorusersessionAgent(Backend)
+/callback?code=code&state=state
+usersessionnonce
+Cannot verify user session
+userID
+Authoriza.onServer (AS)OAuthClientTokenVaultGenerateOAuthsession(e.g.,embeddedinstate),boundtouserID
+Verifynonce–userIDbinding
+Generatenonce,bound toOAuth session
+/authorize?state=state302Redirect302 Redirect302Redirect
+ProceedwithCodeExchange
+/post_callback?nonce=nonceuserID
+Figure 15. COSF Defense in OAuth-as-a-Service
+18
+
+[PDF PAGE 19]
+wards the original authorization data (codeandstate) as
+a proxy, the OAuth callback may alternatively consume the
+authorization data and emit a freshnoncefor subsequent ses-
+sion integrity validation. Such design is common in OaaS,
+as it prevents applications from directly handling raw OAuth
+credentials, consistent with the decoupled business model.
+Two vendors that adopted this defense in their vulnerability
+fixes are documented in [3], [48].
+Takeaway.Even in OAuth-as-a-Service architectures that
+aim to fully decouple OAuth client logic from the ap-
+plication, the application itselfmuststill assume certain
+OAuth responsibilities for security purposes.
+A.2. Common Pitfalls and Ineffective Defenses
+The following discusses several general caveats: bad
+practices that should be avoided and invalid mechanisms
+that offer little value as a defense.
+Common Pitfalls.
+1) Do not set the app’s full user session during the account
+linking process. Doing so enables Login CSRF attacks
+of app accounts (see §4.2.1).
+2) Always generate OAuth session IDs dynamically with
+sufficient entropy. Predictable identifiers invite brute-
+force attacks (see §4.2.2).
+3) Avoid treating the native app entirely as a public client
+per RFC8252 [9],i.e.,obtaining an access token on-
+device and then sending it to the app backend for
+account linking. This approach is susceptible to access
+token exposure (see the Harvest case study in §7.3).
+Ineffective Defenses.
+1) Proof Key for Code Exchange (PKCE) [31] does not
+resolve the problem. PKCE only preserves the binding
+between the authorization request and token request,
+but not between the initiation of OAuth (generating the
+authorization request) and the authorization request. In
+fact, in a COSF attack, both the authorization request
+and token request are completed in a single OAuth flow.
+2)Short-lived(pre-)authorization request URL is ineffec-
+tive as a sole defense (see the Slack case study in §7.3).
+3) Additional “completion” steps after the OAuth callback
+are ineffective if they rely on attacker-controlled data.
+For example, sending anOAuth completion request
+with simply a success message (e.g.,https://app.
+com/oauth/complete?success=true) or reusing the
+OAuth session ID (e.g.,https://app.com/oauth/co
+mplete?sessionID=foobar) are insufficient. As such
+information is known to the attacker, the completion
+request can be forged and therefore cannot defend
+against COSF.
+Caveat: Open Redirect.The post-redirect pattern (D3)
+is a robust defense against COSF. However, if an attacker
+can control the target location of the post-redirect, this
+would inadvertently create an auth code exfiltration channel,
+resulting in open redirect [32] flaws.
+In our study, we discovered three real-world vulnerabil-
+ity instances in Azure API Management, an OaaS provider
+from Microsoft (see Table 5). While mitigating COSF via
+the post-redirect pattern defense, its Token Vault (“Creden-
+tial Manager” [4]) exposed open redirect issues in Microsoft
+first-party applications that rely on it. InMicrosoft Copilot,
+the Token Vault did not validate post-redirect URLs, allow-
+ing an attacker to tamper with them to leak authorization
+credentials to any attacker-controlled domain. InMicrosoft
+Power AppsandAzure Logic Apps, the Token Vault validated
+post-redirect URLs only up to the root domain, leaving
+subdomains and path components as wildcards. As a result,
+an attacker could specify the post-redirect URL to locations
+capable of exfiltrating authorization credentials, for exam-
+ple, pages with Cross-site Scripting (XSS) orpostMessage
+vulnerabilities [33], [34] on Microsoft-owned domains.
+To prevent this, the post-redirect URL should be pre-
+configured at the OAuth client and validated using exact
+string matching in OAuth flows, without any wildcards. Ide-
+ally, the post-redirect URL should not accept any frontend-
+supplied values at all.
+Insight.A common source of open redirects in textbook
+OAuth is the redirection from AS to the OAuth client [28,
+§4.11]: the auth code can be leaked if the OAuth callback
+location is controlled by an attacker. Here, the additional
+post-redirect from the OAuth client to the application can
+unintentionally reintroduce open redirect vulnerabilities if
+the COSF defense is not implemented securely.
+Appendix B.
+Implementation Details ofOASIS
+The details ofOASISfor identifying OAuth public client
+(in Phase I) and OAuth callback handling logic (in Phase II)
+are shown in Table 6 and Table 7, respectively.
+Table 6. TOKEN ANDAPI ENDPOINTS OFPOPULARCONNECTORS,
+REFERENCED BYOASISPHASEITO EXCLUDEOAUTH PUBLIC CLIENTS.
+Connector OAuth Token Endpoints API Endpoints (Prefix)
+Dropbox api.{dropbox,dropboxapi}.com
+/oauth2/token {api,content}.dropboxapi.com
+OneDrive login.microsoftonline.com
+/common/oauth2/v2.0/token
+graph.microsoft.com/v1.0
+/{me/drive,drives/*}
+graph.microsoft.com/v1.0
+/{groups,sites,users}/*/drive
+Outlook
+Calendar
+login.microsoftonline.com
+/common/oauth2/v2.0/token
+graph.microsoft.com/v1.0
+/me/{calendar*,events,findMeetingTimes}
+Table 7. SCREENING LOGIC USED BYOASISPHASEII. ANANDROID
+APP IS CONSIDERED TO HANDLEOAUTH CALLBACKS IF IT SATISFIES
+ANY OF THE FOLLOWING RULES. EACH RULE SPECIFIES PATTERNS
+THAT MUST AND MUST NOT BE PRESENT,EVALUATED WITHIN THE
+SAME CLASS OR MODULE.
+Category Detection Rule
+Java(regular Native apps)
+UriAND.getQueryParameter("code")AND.getQueryParameter("state")AND NOT.getQueryParameter("id_token")
+JSONObjectAND.getString("code")AND.getString("state")AND NOT.getString("id_token")
+JavaScript / TypeScript(Hybrid apps orCross-platform apps)
+(URL.searchParamsORURLSearchParams)AND.codeAND.stateAND NOT.id_token
+(URL.searchParamsORURLSearchParams)AND.get("code")AND.get("state")AND NOT.get("id_token")
+19
+
+[PDF PAGE 20]
+Appendix C.
+Meta-Review
+The following meta-review was prepared by the program
+committee for the 2026 IEEE Symposium on Security and
+Privacy (S&P) as part of the review process as detailed in
+the call for papers.
+C.1. Summary
+The paper examines the security of OAuth-based account
+linking in connector ecosystems and OAuth-as-a-Service
+(OaaS) infrastructures. It identifies new attack vectors in-
+cluding Cross-user OAuth Session Fixation (COSF) and
+cross-tenant confused deputy attacks, presents OASIS (a
+static analysis framework for detecting these vulnerabilities
+in Android apps), and evaluates the prevalence of the attacks
+across popular vendors, with responsible disclosure leading
+to vendor acknowledgments and fixes.
+C.2. Scientific Contributions
+•Creates a New Tool to Enable Future Science.
+•Identifies an Impactful Vulnerability.
+•Provides a Valuable Step Forward in an Established
+Field.
+C.3. Reasons for Acceptance
+1)Identifies an Impactful Vulnerability.The paper iden-
+tifies a new attack surface for OAuth 2.0 in account
+linking scenarios that have not been previously studied.
+The findings involve major vendors including Slack
+and Amazon Bedrock AgentCore, with 40 vendors
+confirmed susceptible to COSF attacks and 8 OaaS
+providers susceptible to cross-tenant attacks. Most ven-
+dors acknowledged and partially deployed mitigations
+following responsible disclosure.
+2)Creates a New Tool to Enable Future Science.The
+paper presents OASIS, a static analysis framework
+that enables the detection of account linking flaws
+and COSF vulnerabilities in mobile apps. This tool
+represents a first step toward automated analysis of
+OAuth-based account linking flows.
+3)Provides a Valuable Step Forward in an Established
+Field.The paper advances understanding of OAuth
+security by analyzing the connector ecosystem/OaaS
+attack surface, combining empirical analysis, case stud-
+ies, and recommended mitigations.
+C.4. Noteworthy Concerns
+1)Limitations of the OASIS tool.The analysis relies
+on static heuristics, works only on Android apps, and
+detects only COSF vulnerabilities. The effectiveness
+of the first phase of OASIS is questionable. The tool
+requires substantial manual effort to confirm findings.
+2)Mitigations.The defenses presented are intuitive but
+not formally analyzed or proven to be robust. No
+systematic evaluation of mitigation effectiveness is pro-
+vided, and it is unclear whether some attack vectors
+may remain even after proposed fixes are applied.
+20

@@ -1,0 +1,1759 @@
+
+[PDF PAGE 1]
+This paper is included in the Proceedings of the 
+33rd USENIX Security Symposium.
+August 14–16, 2024 • Philadelphia, PA, USA
+978-1-939133- 4 4 -1
+Open access to the Proceedings of the 
+33rd USENIX Security Symposium 
+is sponsored by USENIX.
+Lightweight Authentication of Web Data 
+via Garble-Then-Prove
+Xiang Xie, PADO Labs; Kang Yang, State Key Laboratory of Cryptology;  
+Xiao Wang, Northwestern University; Yu Yu, Shanghai Jiao Tong University 
+and Shanghai Qi Zhi Institute
+https://www.usenix.org/conference/usenixsecurity24/presentation/xie-xiang
+
+[PDF PAGE 2]
+Lightweight Authentication of Web Data via Garble-Then-Prove
+Xiang Xie ∗ Kang Yang † Xiao Wang ‡ Yu Yu§
+Abstract
+Transport Layer Security (TLS) establishes an authenticated
+and confidential channel to deliver data for almost all Internet
+applications. A recent work (Zhang et al., CCS’20) proposed
+a protocol to prove the TLS payload to a third party, without
+any modification of TLS servers, while ensuring the privacy
+and originality of the data in the presence of malicious ad-
+versaries. However, it required maliciously secure Two-Party
+Computation (2PC) for generic circuits, leading to significant
+computational and communication overhead.
+This paper proposes the garble-then-prove technique to
+achieve the same security requirement without using any
+heavy mechanism like generic malicious 2PC. Our end-to-end
+implementation shows 14× improvement in communication
+and an order of magnitude improvement in computation over
+the state-of-the-art protocol. We also show worldwide per-
+formance when using our protocol to authenticate payload
+data from Coinbase and Twitter APIs. Finally, we propose an
+efficient gadget to privately convert the above authenticated
+TLS payload to additively homomorphic commitments so that
+the properties of the payload can be proven efficiently using
+zkSNARKs.
+1 Introduction
+Transport Layer Security (TLS) [26, 55] is the most widely
+deployed cryptographic protocol for secure communication
+on the Internet. It provides end-to-end security against ac-
+tive attackers between a client, namely C and a TLS server,
+namely S. However, if the client wants to use the TLS payload
+data in a different application, TLS does not guarantee the
+originality of the data. In particular, a malicious client could
+come up with a valid TLS transcript for any payload of its
+choice. The issue stems from the fact that the TLS protocol
+∗PADO Labs, xiexiangiscas@gmail.com
+†State Key Laboratory of Cryptology, yangk@sklc.org
+‡Northwestern University, wangxiao@northwestern.edu
+§Shanghai Jiao Tong University & Shanghai Qi Zhi Institute,yuyu@cs.
+sjtu.edu.cn
+assumes that both client C and server S are honest, but in this
+new setting, the client can be malicious. For most websites,
+this is solved by having a user authenticate one website in
+connection with the other website that needs the data. Doing
+so under the client’s authorization allows the two websites to
+share data directly and thus ensures no malicious client can
+break integrity. However, such a solution is not perfect. First,
+users are often forced to share more information than needed,
+e.g., to prove that their credit score is higher than a threshold,
+they need to share the score entirely. Second, this solution
+requires adding new web infrastructures, which could hinder
+the deployment, especially when connecting Web2 data to
+Web3 applications.
+A recent work, DECO [71], proposed a solution that does
+not require any change on the TLS server side. From a high-
+level view, they ask a prover P (i.e., a user that intends to
+prove the originality of the data) and a verifier V (i.e., a third
+party) to jointly emulate the computation of the TLS client
+C who interacts with S. Since neither P nor V ever holds
+TLS session keys, their capability is the same as man-in-the-
+middle attackers and thus cannot forge a valid TLS transcript
+for unauthorized data. In DECO, most of C’s computation
+is emulated using a maliciously secure Two-Party Computa-
+tion (2PC) protocol, which ensures that no derivation from
+the protocol can help the malicious party break the privacy
+or integrity requirement when interacting with S. To prove
+statements on the TLS payload, P proves to V the correct
+decryption of the ciphertext (to obtain a plaintext) and desired
+statements on the plaintext using zkSNARKs [8, 10, 30, 33].
+Generic 2PC protocols in the malicious setting have been
+studied extensively in the past decade (e.g., [15,50,51,53,59]).
+DECO used an implementation of the authenticated gar-
+bling [36,43,62,67], the state-of-the-art malicious 2PC frame-
+work that significantly reduces the overhead compared to
+the semi-honest counterparts. However, even based on the
+latest advances [23, 27], the computation and communica-
+tion cost of maliciously secure 2PC is still much higher than
+its semi-honest counterparts. Moreover, these protocols with
+malicious security often require storing preprocessed authen-
+USENIX Association 33rd USENIX Security Symposium    1957
+
+[PDF PAGE 3]
+ticated triples, thus incurring a huge memory overhead. The
+complexity of the maliciously secure protocol also makes it
+difficult to implement and deploy such a protocol. As a result,
+the DECO protocol still requires 475 MB of communication
+to authenticate a 2KB-sized payload via TLS and more than
+50 seconds to finish under a W AN network.
+1.1 Our Contribution
+In this paper, we design a new protocol for web-data authenti-
+cation to third parties with improved efficiency. We propose
+the garble-then-prove technique that can realize a special class
+of two-party computation functionalities against malicious
+adversaries, with almost no overhead compared to their semi-
+honest counterparts. We elaborate on our key concepts and
+contributions below and refer to Section 3 for an overview of
+our core techniques.
+Eliminating malicious 2PC via garble-then-prove. We
+avoid the use of maliciously secure 2PC, as a result of deeply
+understanding the features of authenticating web data in TLS.
+We observe that since V is the verifier, the security require-
+ments for V and the prover P differ in many ways. During
+the secure TLS emulation, a corrupted V shall not learn the
+session keys as it immediately reveals P ’s private input; how-
+ever, we can tolerate a corruptedP learning some information
+about the session keys: since V does not have long-term se-
+crets, the damage is remediable. We only requireP ’s cheating
+behavior to be identifiable by V later. After the completion
+of the joint TLS emulation, all of V ’s shares of the TLS se-
+crets can be opened to P since P can no longer alter the TLS
+protocol. Simply put, our security requirement is as below:
+P and V start with inputs xP and xV respectively and shall
+get outputs yP ,yV such that (yP ,yV ) = f (xP ,xV ) for some
+two-output function f . If P cheats, it can replace the function
+to one of its own choice but V cannot cheat in any way. Dur-
+ing the checking phase, P will be given xV and V should be
+notified if P cheated during the evaluation phase.
+To accomplish this task, P first sends V a garbled circuit
+for f ; they also use an OT with malicious security to letV get
+garbled labels on its input. Two parties then can obtain their
+outputs but there is no way to ensure correctness. For that, we
+ask P to commit to V its input xP and output yP . Now, V has
+shares xV ,yV and commitments of xP ,yP . After P gets xV ,
+thus also yV , P can use a Zero-Knowledge (ZK) protocol to
+prove that (yP ,yV ) = f (xP ,xV ) w.r.t. the committed values.
+P could launch a selective failure attack on xV (leaking one-
+bit of information), but it is meaningless since xV is always
+given to P in the proving phase. For obvious reasons, we refer
+to this technique as garble-then-prove. This technique can be
+also applied in, e.g., QUIC [24, 39], OAuth [35] and OpenID
+Connect [58], to authenticate web data.
+TLS-specific protocol optimization. Building on the above
+idea, we further optimize other TLS building blocks in various
+ways. For example, we show how to carefully select values
+to reveal, without providing any party an extra capacity, dur-
+ing the derivation of TLS session keys, leading to a more
+than 2-fold reduction in handshake circuit size. We also pull
+the computation of the Galois Message Authentication Code
+(GMAC) tags out of circuits and instead use Oblivious Linear
+Evaluation with errors (OLEe) 1 to compute additive sharings
+of the powers of a random element needed for GMAC, reduc-
+ing the cost of GMAC computation by more than two orders
+of magnitude. Doing so would allow the adversary to gain
+one bit of information of the TLS session key, but that would
+not reduce the overall concrete security, for a reason similar
+to prior works, e.g., [44, 67].
+Efficient commitment conversion. To prove statements on
+the TLS data using zkSNARKs, DECO embeds the TLS
+ciphertext into the statements and then proves in ZK the
+correctness of decryption. For our protocol, we use the re-
+cent vector OLE (VOLE) based interactive zero-knowledge
+proofs [7, 28, 63, 66] during the garble-then-prove execution.
+This means that at the end of the protocol, two parties hold
+information-theoretic MACs (IT-MACs) on each bit of the
+query and response involved in the TLS. One could prove
+statements using VOLE-based ZK proofs or, alternatively,
+convert them to commitments friendly to zkSNARKs. First,
+we convert IT-MACs over F2 to IT-MACs over Fq, ensur-
+ing the values are consistent. This protocol can be viewed
+as a special version of zero-knowledge via garbled-circuit
+protocol [41] over garbling of Boolean-to-arithmetic identity
+gates [6]. This makes the cost conversion in the malicious
+case almost the same as the semi-honest setting. Then we
+convert arithmetic IT-MACs to zkSNARK-friendly commit-
+ments, which can be achieved with high efficiency, since both
+representations are additive-homomorphic. In this way, with-
+out using zkSNARKs, we can convert the plaintext query and
+response to additively homomorphic commitments, which can
+then be connected to various zkSNARKs, e.g., [17, 18, 20].
+Full-fledged implementation. We implemented our protocol
+and report detailed performance in Section 5. Our protocol
+outperforms DECO by more than an order of magnitude: 14×
+improvement in communication and 7.5× to 15× improve-
+ments in running time. We also push through the last mile to
+connect our implementation with real-world APIs connected
+via TLS. In Section 5.3, we include two examples of using
+our protocol to authenticate API results from Coinbase and
+Twitter. We report the performance when the prover is located
+in 18 cities worldwide with various network conditions. We
+also show a summary of the performance in Table 1, where we
+can see that the whole protocol only takes around 7 seconds
+(4 seconds of online time) when a user in Tokyo proving to a
+verifier in California about its Coinbase/Twitter API payload.
+1OLEe provides a weaker security in which the malicious party can intro-
+duce an error into the OLE output, but it can be generated more efficiently.
+1958    33rd USENIX Security Symposium USENIX Association
+
+[PDF PAGE 4]
+Region of prover P Oregon Virginia Milan Singapore Tokyo
+Coinbase 1.66 (2.43) 2.85 (4.98) 6.47 (11.9) 6.05 (11.7) 3.94 (7.35)
+Twitter 0.94 (1.71) 2.08 (4.10) 5.21 (10.8) 5.78 (11.7) 3.56 (7.12)
+Table 1: Performance summary of our protocol. All numbers are reported in seconds, based on the Coinbase API to query
+account balance (426-byte query and 5701-byte response) and the Twitter API to query the number of followers (587-byte query
+and 894-byte response). Both online time and total time (in parentheses) are reported. Verifier V is always located at California.
+2 Preliminaries
+We describe the TLS building blocks and model the security
+of authenticating web data. The cryptographic preliminaries
+to comprehend our protocol are described in Section A.
+Notation. We use λ to denote the computational security pa-
+rameter. We use x ← S to denote that sampling x uniformly
+at random from a finite set S. For an algorithm A, we use
+y ← A(x) to denote the operation of running A on input x and
+setting y as the output. We will use bold lower-case letters
+like xxx for column vectors, and denote by xi the i-th com-
+ponent of xxx with x1 the first entry. For a,b ∈ N, we write
+[a,b] = {a, . . . ,b}. We write F2λ ∼= F2[X]/ f (X) for some
+monic, irreducible polynomial f (X) of degree λ. Depending
+on the context, we use{0,1}λ, (F2)λ and F2λ interchangeably,
+and thus addition in (F2)λ and F2λ corresponds to XOR in
+{0,1}λ and a string a ∈ {0,1}λ is also a vector in (F2)λ. For
+a bit-string x, we use lsb(x) to denote the least significant bit
+of x. For a prime p, we denote by Zp a finite field.
+We use [x]p = (xP ,xV ) to denote an additive secret sharing
+of x over Zp between P and V holding xP and xV respectively.
+When the field is F2128, we denote by [x]2128. For details of ad-
+ditive secret sharings, we refer to the reader for Section A. Let
+[ [x] ] = (x, M[x], K[x]) be an Information-Theoretic Message
+Authentication Code (IT-MAC) such that M[x] = K[x] +x · ∆,
+where the message x and MAC tag M[x] are held by a party
+P , and keys K[x], ∆ are obtained by another party V . We give
+more details of IT-MACs in the full version [65, Section A].
+2.1 TLS Building Blocks
+Transport Layer Security (TLS) is a family of protocols that
+guarantee privacy and integrity of data between a client C
+and a server S. It consists of two protocols: (a) the handshake
+protocol in which handshake secrets are established and the
+secrets are in turn used to generate application keys; (b) the
+record protocol where data is transmitted with confidentiality
+and integrity via encrypting and authenticating the data with
+the application keys. Our protocol focuses on authenticating
+web data for TLS 1.2 [26], and is able to be extended to TLS
+1.3 [55] that is shown in Section 4.3, where both of TLS 1.2
+and TLS 1.3 adopt HMAC to derive secrets and keys.2 While
+2For now, about 77%∼79% websites use TLS 1.2, while about 9%∼20%
+websites adopt TLS 1.3 [1].
+TLS provides different modes, we focus on the following
+most popular modes:
+ECDHE_RSA_AES128_GCM_SHA256
+ECDHE_ECDSA_AES128_GCM_SHA256,
+where the hash function H is instantiated by SHA256, and
+a stateful Authenticated Encryption with Associated Data
+(AEAD) scheme is instantiated byAES128 in the GCM mode.
+ECDHE adopts the elliptic-curve Diffie-Hellman (DH) key
+exchange protocol to establish ephemeral secrets.
+Our protocol is easy to be extended to support that AEAD
+scheme is instantiated by AES256_GCM and H is replaced
+with SHA384, and also allows one to use other digital sig-
+nature (e.g., DSA). Besides, our protocol can be straightfor-
+wardly extended to support ECDH in which the server uses
+a static DH value (rather than an ephemeral DH value). We
+did not optimize our protocol to realize the CBC mode in
+TLS 1.2, since this mode has been demonstrated to be vul-
+nerable to the timing attack against several TLS implemen-
+tations [5], and the GCM mode is preferred over CBC [2]. In
+addition, TLS 1.3 did not support the CBC mode any more.
+Our garble-then-prove approach can be also generalized to
+other modes such as CHACHA20_POLY1305_SHA256 and
+AES128_CCM_SHA256. In the full version [65], we describe
+the TLS 1.2 protocol in detail. Below, we describe several key
+building blocks used in the TLS protocol.
+HMAC. Given a key k and a message m as input, the well-
+known pseudo-random function HMAC is defined as follows:
+HMAC(k,m) = H(k ⊕ opad, H(k ⊕ ipad,m)),
+where opad and ipad are two public strings with length of 512
+bits (i.e., the repeated bytes of 0x36 and 0x5C respectively).
+Here we always assume that k has at most 512 bits, which is
+the case for TLS. When the bit-length of k is less than 512,
+it will be padded with 0 to achieve 512 bits. As described
+above, we focus on considering that H is instantiated by
+SHA256. In particular, SHA256 adopts the Merkle-Damgård
+structure with block size of 512 bits, and uses fH as the one-
+way compression function with output length of 256 bits.
+For example, H(m1,m2) is computed as fH( fH(IV0,m1),m2)
+where m1,m2 ∈ {0,1}512 and IV0 is a fixed initial vector.
+Key derivation. Here we focus on the Pseudo-Random Func-
+tion (PRF) in TLS 1.2 [26], where the PRF is used to derive
+USENIX Association 33rd USENIX Security Symposium    1959
+
+[PDF PAGE 5]
+handshake secrets and application keys and adopts HMAC as
+its core. TLS 1.3 [55] adopts the HKDF function [46, 47] as
+its key derivation function, where this function is also based
+on HMAC. We refer the reader to Section 4.3 for the details
+of HKDF. Specifically, the PRF function with output length
+ℓ in TLS 1.2 is defined below:
+PRFℓ(k,label,msg) = HMAC(k,M1∥label∥msg)∥ . . .∥HMAC
+(k,Mn−1∥label∥msg) ∥ Truncm(HMAC(k,Mn∥label∥msg)),
+where n = ⌈ℓ/256⌉, m = ℓ − 256 · (n − 1), M1 = HMAC
+(k,label∥msg) and Mi+1 = HMAC(k,Mi) for i ∈ [1,n − 1].
+For a bit-string x, Truncm(x) denotes truncating x to the left-
+est m bits.
+Stateful AEAD scheme. The TLS protocol adopts a stateful
+AEAD scheme (stE.Enc, stE.Dec) to encrypt/decrypt mes-
+sages in the handshake and record layers. The encryption
+algorithm stE.Enc(key, ℓC, H,M, ste) takes as input a secret
+key key, a target ciphertext lengthℓC, a header H, a messageM
+and a state ste, and outputs a ciphertext CT. The decryption al-
+gorithm stE.Dec(key, H, CT, std) takes as input key, a header
+H, a ciphertext CT and a state std, and outputs a plaintext M
+or a special symbol ⊥ indicating that the ciphertext is invalid.
+When the AEAD scheme is instantiated by AES128_GCM,
+stE.Enc(key, ℓC, H,M, ste) has the following steps:
+1. Compute Z0 := AES(key, ste) and update ste := ste + 1.
+2. Suppose M is padded as (M1, . . . ,Mn) with Mi ∈ {0,1}128.
+From i = 1 to n, compute Zi := AES(key, ste) and Ci :=
+Zi ⊕ Mi and update ste := ste + 1. Set C := (C1, . . . ,Cn).
+3. Suppose that the header H has been padded as an element
+in F2128. Let ℓH be the bit length of H. Given a vector X ∈
+(F2128)m, the GHASH polynomialΦX : F2128 → F2128 is de-
+fined as ΦX(h) = ∑m
+i=1 Xi · hm−i+1 ∈ F2128. Compute h :=
+AES(key,0) and a GMAC tag σ := Z0 ⊕ Φ(H,C,ℓH,ℓC)(h).
+4. Output CT = (C, σ).
+Algorithm stE.Dec(key, H, CT, std) has the same steps as
+stE.Enc, except for the following differences:
+• Parse CT as (C, σ) and C as (C1, . . . ,Cn). Compute Mi :=
+Zi ⊕ Ci for i ∈ [1,n] and set M = (M1, . . . ,Mn).
+• Compute a tag σ′ as described above and check σ = σ′.
+• If the check passes, output M. Otherwise, output ⊥.
+2.2 Security Model and Functionalities
+We use the standard ideal/real security model (shown as be-
+low) to prove security of our protocol. We describe the defini-
+tions of ideal functionalities for Oblivious Transfer (OT) and
+OLEe in Section A. The functionalities for additively homo-
+morphic commitments, standard commitments and Interactive
+Functionality FAuthData
+This functionality interacts with a prover P , a verifier V ,
+a server S and an adversary.
+• Upon receiving (sid, Query, α,S ) from P and (sid,
+Query) from V , where sid is a session identifier,Query
+is a query template and α is a private input for Query,
+1. Compute a query Q := Query(α), and then send a
+pair (sid,Q) to S.
+2. Receive a response (sid,R) from S and then store a
+tuple (sid,Q,R).
+3. Send (sid, |Q|, |R|,S ) to the adversary.
+• Upon receiving (commit, sid, cid) from P , where cid
+is a fresh commitment identifier, if a tuple (sid,Q,R)
+was previously stored, update it as (sid, cid,Q,R), and
+send (committed, sid, cid) to V and the adversary.
+• Output (sid, cid,Q,R) to P and (sid, cid,S ) to V .
+Figure 1: Functionality for authenticating web data.
+Zero-Knowledge (IZK) proofs along with their instantiations
+can be found in the full version [65, Section A].
+Ideal/real security model. We use the standard ideal/real
+paradigm [19, 32] to prove security of our protocol in the
+presence of a malicious, static adversary. In the ideal-world
+execution, the parties interact with a functionalityF, and some
+of them may be corrupted by anideal-world adversary (a.k.a.,
+simulator) S. In the real-world execution, the parties interact
+with each other in an execution of protocol Π, and some of
+them may be corrupted by a real-world adversary A (that is
+often called an adversary for simplicity). We say that protocol
+Π securely realizes functionality F, if the output of the honest
+parties and A in the real-world execution is computationally
+indistinguishable from the output of the honest parties and S
+in the ideal-world execution. We consider security with abort,
+and thus allow the ideal-world/real-world adversary to abort
+the functionality/protocol execution at some point. We prove
+security of our protocol in the G-hybrid model in which the
+parties execute a protocol with real messages and also have
+access to a sub-functionality G.
+Use case. Similar to DECO [71], our protocol involves three
+parties: a prover P , a verifier V and a TLS server S, where P
+and V jointly play the role of the client to interact with the
+server S. Prover P has data stored on S, and intends to prove
+to V about properties of the data, without any modification to
+the TLS server. For example, a Coinbase user (i.e.,P ) wants to
+prove to a loan agency (i.e.,V ) that his wallet balance satisfies
+an agreed-upon predicate (e.g., it is greater than a threshold).
+1960    33rd USENIX Security Symposium USENIX Association
+
+[PDF PAGE 6]
+Ideally, the user wants to prove it without revealing any other
+information (e.g., transaction details or the exact balance).
+Our protocol enables this: (1) P interacts with S via TLS to
+get the balance; (2) P can prove to V that the balance sent
+over the TLS protocol satisfies the predicate. The protocol
+ensures that V learns nothing except for that the predicate is
+true, and that P cannot use an inconsistent balance. We refer
+the reader to [71] for more application examples.
+Functionality for authenticating web data. We model the
+security of authenticating web data by giving an ideal func-
+tionality. At a high level, the protocols to authenticate web
+data will involve the following steps performed in a secure
+and distributed way:
+1. P and V (on behalf of the client) run the TLS protocol with
+S to establish an authenticated and confidential channel.
+2. Under the secure channel, P sends a query Q to S and
+receives a response R from S.
+3. P sends the commitment of (Q,R) to V , and convinces V
+that the commitment is correct on a valid pair (Q,R).
+4. Given (Q,R) and its commitment, P can prove in zero
+knowledge to V that (Q,R) satisfies some statement.
+In this paper, we focus on constructing a secure protocol
+to realize the first three steps. The final step can be real-
+ized using a variety of zero-knowledge proofs such as zk-
+SNARKs [10, 30, 33]. In this setting, the serverS is always
+honest to run the protocol, 3 and so the security only needs
+to be guaranteed when either P or V is corrupted. For ad-
+versarial model, we consider a static, malicious adversary
+A who can corrupt one of P and V and may deviate the
+protocol arbitrarily. The ideal functionality for authenticat-
+ing web data is defined in Figure 1, and builds upon the
+definition of the oracle functionality in [71]. Following an
+example in [71], a query template could be Query(α) =
+“stock price of GOOG on June 1st, 2023 with API key = α”.
+Functionality FAuthData (shown in Figure 1) implies the
+following security properties, where similar properties were
+described in DECO [71].
+• Prover-integrity : A malicious prover P cannot cause the
+query and response, whose commitments are sent to an
+honest verifier V , to be inconsistent from that received or
+sent by the server S.
+• Verifier-integrity: A malicious verifier V cannot cause P
+to receive an incorrect response, i.e., if P outputs (Q,R), R
+must be S’s response to the queryQ sent by P .
+• Privacy : A malicious verifier V cannot learn any informa-
+tion on query Q and response R, except for the public infor-
+mation (|Q|, |R|, Query) and which server S is accessed.
+3We do not require any server-side modification or cooperation.
+In the ideal world, all channels between honest parties and
+functionality FAuthData are confidential and authenticated.
+This guarantees the privacy of secret values Q,R. As in [71],
+we always consider that the length of a query|Q|, the length of
+a response |R| and the name of a serverS are known by the ad-
+versary. We use an identifiercid to represent a commitment on
+the query Q and response R. From the definition of FAuthData,
+we have that the query-response pair (Q,R) committed by
+FAuthData are always consistent. The adversary who corrupts
+P can only get an identifier cid and has no way to tamper
+the values committed, which guarantees the prover-integrity.
+The honest prover P will always output a response R from
+FAuthData, which is consistent with Q. Thus, the adversary
+who corrupts V cannot make the honest prover receive an
+inconsistent response, which guarantees the verifier-integrity.
+3 Technical Overview
+Third-party authentication of TLS payload could be achieved
+using a malicious 2PC protocol with a high overhead [71].
+Our key technique is to first garble and evaluate circuits, and
+then prove the correctness of the resulting outputs in zero-
+knowledge. This enables us to use lightweight MPC building
+blocks, i.e., plain Two-Party Computation protocols based on
+Garbled Circuits (GC-2PC) that are the same as semi-honest
+protocols [56,69,70] except for using malicious OT instead of
+semi-honest OT, and the recent VOLE-based interactive zero-
+knowledge (IZK) proofs [7, 28, 63]. Our garble-then-prove
+technique can be used to authenticate web data for TLS, and
+may also be of independent interest for other applications in
+which all secrets are able to be known by a prover at the end,
+e.g., authenticating data from protocols like QUIC [24, 39],
+OAuth [35] and OpenID Connect [58].
+We also present a technique to convert from IT-MACs to
+additively homomorphic commitments that are friendly to zk-
+SNARKs. This technique could also be used in other applica-
+tions such as zero-knowledge machine learning [64]. Through
+the TLS application, we give an overview of these techniques.
+Furthermore, we provide several tailored optimizations to fur-
+ther improve the efficiency, based on the details of the TLS
+protocol. To help better understand our protocol, we first give
+a detailed overview of the TLS protocol.
+3.1 An Overview of the TLS Protocol
+In Figure 2, we provide a pictorial overview, and show com-
+plete details in the full version [65]. The protocol is executed
+between a TLS client ( C) and a TLS server ( S). It can be
+roughly divided into 4 phases:
+• Phase 1: pre-master secret. C samples a random nonce
+rC ← {0,1}256, and then sends REQC = rC to S. Then, S
+samples a random nonce rS ∈ {0,1}256, a random element
+tS ∈ Zq, and computes a group element TS := tS ·G. S sends
+USENIX Association 33rd USENIX Security Symposium    1961
+
+[PDF PAGE 7]
+Handshake Protocol
+rC ← {0,1}256, REQC := rC
+REQC rS ← {0,1}256,tS ← Zq
+TS := tS · G
+σS ← Sign(skS,rC∥rS∥TS)
+Verify certS and σS
+RES S RES S := (rS,TS, certS, σS)
+tC ← Zq
+TC := tC · G
+pms := Fx(tC · TS) RESC := TC pms := Fx(tS · TC)
+(ms, keyC, stC, keyS, stS) ← Derive(pms)
+τC := H(REQC, RES S, RESC)
+UFINC := PRF96(ms, PublicStr∥τC)
+FINC ← stE.Enc(keyC, UFINC, stC) (HC, FINC) UFINC ← stE.Dec(keyC, FINC, stC)
+Check UFINC
+τS := H(REQC, RES S, RESC, UFINC)
+UFIN S := PRF96(ms, PublicStr∥τS)
+UFIN S ← stE.Dec(keyS, FINS, stS) (HS, FINS) FINS ← stE.Enc(keyS, UFIN S, stS)
+Check UFIN S
+Record Protocol
+ENC Q ← stE.Enc(keyC,Q, stC) (HQ, ENC Q) Q ← stE.Dec(keyC, ENC Q, stC)
+R ← stE.Dec(keyS, ENC R, stS) (HR, ENC R) ENC R ← stE.Enc(keyS,R, stS)
+Figure 2: Graphical depiction of TLS. PublicStr refers to strings defined in the TLS specification. HC, HS, HQ and HR are
+public metadata headers defined by the TLS specification. Some details are omitted.
+back RES S = (rS,tS, certS, σS), where certS is a certifica-
+tion and σS is a signature on (rC,rS,TS). To finish the key-
+exchange protocol, C sends back a random group element
+TC := tC · G. Now both parties agree on a pre-master se-
+cret pms = Fx(tC · TS) = Fx(tS · TC), where Fx is a function
+mapping an elliptic-curve point to its x-coordinate.
+• Phase 2: TLS session keys. With pms, C and S compute
+a master secret ms := PRF384(pms,“master secret”,rC∥rS).
+Then, both parties compute a tuple(keyC,IVC, keyS,IVS) :=
+PRF448(ms,“key expansion”,rS∥rC), where keyC, keyS ∈
+{0,1}128 are two application keys and IVC,IVS ∈ {0,1}96
+are the initial states stC, stS of AEAD encryption. In Fig-
+ure 2, we refer to the whole process as Derive.
+• Phase 3: Finished messages. Two parties exchange test
+messages, which have already been known by them, over the
+established AEAD-encrypted channel. The client’s message
+is UFINC = PRF96(ms,“client finished”, τC), where τC is
+the hash of the TLS transcripts so far. C sends the AEAD
+ciphertext FINC of this message, which is encrypted with
+keyC and stC, to S. The server decrypts FINC and checks if
+UFINC is correct based on the same session key and values.
+Then S sends back a similarly encrypted message, and C
+checks its correctness.
+• Phase 4: Exchange payload. Finally, two parties exchange
+their application payload. The exact process is essentially
+the same as Phase 3, with updated states for AEAD (based
+on AES-GCM), except that now the underlying payload is
+provided by the client and server based on the application.
+This phase could exchange several rounds of payload, de-
+pending on the application. In Figure 2, we only show one
+round of payload for simplicity. The following technical
+overview focuses on the one-round case, and our protocol
+can be extended to support multiple rounds of payload (see
+Section 4.2 for details).
+3.2 Our Protocol Design
+Now we introduce high-level ideas of our protocol based on
+the key observations described in Section 1.1. When describ-
+ing our protocol, we use a prover P and a verifier V , who
+jointly emulate C, the TLS client.
+1962    33rd USENIX Security Symposium USENIX Association
+
+[PDF PAGE 8]
+3.2.1 Phase 1: Generating pre-master secret
+The process of generating pre-master secret pms in TLS is
+essentially a Diffie-Hellman (DH) key exchange. Since nei-
+ther P nor V can know the outcome, they need to jointly
+emulate the TLS client. The first round of interaction of mes-
+sages (REQC, RES S) can be done by P alone without V . The
+message RESC and DH secret needs to be distributively com-
+puted by P and V . In more detail, P and V pick tP ← Zq,
+and tV ← Zq respectively; V sends tV · G to P , who defines
+RESC := (tP + tV ) · G and sends it to the server. In particu-
+lar, P and V have an additive secret sharing (i.e., tP · TS and
+tV · TS) of the DH secret (tP +tV ) · TS. The above step is sim-
+ilar to the previous protocols [60, 71], who then use a fully
+secure multiplicative-to-additive conversion protocol, a.k.a,
+Oblivious Linear Evaluation (OLE), to convert an additive
+sharing of the EC point (tP +tV ) · TS to an additive sharing
+of its x-coordinate (i.e., pms).
+Obtaining fully secure OLE is often expensive and requires
+tailored zero-knowledge proofs or excessive communication.
+However, in this particular setting, we show that an OLE with
+error (OLEe), where the error could even depend on parties’
+inputs, is already sufficient. Such an OLEe can be efficiently
+computed using logq correlated OTs without the need of
+any extra checks. This would lead to one-bit information
+leakage about pms to the adversary who corrupts the prover
+P . However, due to the TLS protocol, pms is of high entropy
+and we can show that such leakage does not help the adversary
+in guessing the whole secret pms. Intuitively, such an error
+could only lead to the selective-failure attack, which allows
+the adversary to guess c bits of the secret with probability2−c,
+but if the guess is incorrect the protocol execution aborts. Such
+an attack does not reduce concrete security since the adversary
+could bet on c bits of the secret too. A similar analysis has
+already been used in designing maliciously secure protocols
+(e.g., [22, 44, 67]).
+3.2.2 Phase 2: Deriving TLS session keys
+Now P and V hold an additive secret sharing of pms and
+need to derive additive sharings of TLS session keys using
+PRF based on HMAC-SHA256. This is the most expensive
+part for TLS handshake in DECO, who implemented this step
+using a fully malicious 2PC protocol to compute a circuit
+containing 779,213 AND gates. We show how to achieve a
+16× improvement in communication.
+Eliminating malicious 2PC via garble-then-prove. We ob-
+serve that using a fully malicious 2PC is a complete overkill
+for applications that allow a verifier to reveal all its secrets to
+a prover later (e.g., authenticating web data for TLS). In our
+protocol, we use a plain GC-2PC protocol with malicious OT
+between P and V to jointly derive session keys. In more de-
+tail, P is the circuit garbler andV is the circuit evaluator. Any
+value that needs to be revealed to both parties is revealed toV
+first (by letting P send the decoding information to V ), who
+sends back the value to P . In this way, V cannot break the
+privacy requirement of the function being computed (but can
+still change the output, which can be detected later). However,
+a malicious P can cheat in a seemingly catastrophic way: a
+malicious P could change a Garbled Circuit (GC) to control
+the output to be anything (could even be pms or something
+that can help P recover pms).
+As we discussed in the main philosophy, instead of prevent-
+ing P from cheating, we ensure that P ’s cheating behavior
+can be caught by V in hindsight. In more detail, we ask P to
+also commit to V its input, i.e., P ’s share ofpms. Since we re-
+veal the value to two parties byV getting it first, P ’s cheating
+behavior is “well-defined”:V has its own share of pms, the
+commitment of the other share of pms, and the output of the
+GC that P garbled. If we later reveal V ’s secret toP after the
+TLS protocol terminates, P has all secrets (in particular, P
+knows V ’s share ofpms) and can use a ZK protocol to prove
+that all outputs obtained by V are correct. We emphasize
+that P does not prove the correctness of the GC, and thus we
+are using GC in a black-box way. In conclusion, although V
+does not have a guarantee on P ’s honesty during the protocol
+execution, V can detect any cheating in hindsight as long as
+the GC output is first revealed to V .
+This optimization alone significantly reduces the overhead
+of the protocol as it eliminates the need of a malicious 2PC
+protocol, which is expensive in computation/communication
+but also requires memory linear to the circuit size to store
+the preprocessing triples. We formally model the 2PC with
+garble-then-prove approach as an ideal functionality FGP2PC
+shown in the full version [65, Section 4.1], and show how to in-
+stantiate FGP2PC using plain GC-2PC with malicious OT and
+interactive ZK, which is described in the full version [65, Sec-
+tion 4.2]. The 2PC protocol with garble-then-prove approach
+may be of independent interest, and may be applied in other
+scenarios such that all V ’s secrets are allowed to be revealed
+to P at the end.
+TLS-specific circuit optimization. Our second optimization
+is to minimize the circuit to be computed in the protocol
+above. By using unique features of how session keys are
+derived in TLS, we are able to reduce the circuit size from
+779,213 to 289,827 AND gates, a 2.7× improvement. Let’s
+look at master secret ms as an example, which has a 384-bit
+output. The exact derivation formula is as follows:
+V = “master secret”∥rC∥rS ∈ {0,1}592,
+M1 = HMAC(pms,V ) ∈ {0,1}256,
+M2 = HMAC(pms,M1) ∈ {0,1}256,
+ms = HMAC(pms,M1∥V )∥Trunc128
+ 
+HMAC(pms,M2∥V )
+
+.
+In the above equation, HMAC(k,m) = SHA256(k ⊕ opad,
+SHA256(k ⊕ ipad,m)), and that SHA256(m1,m2,m3) =
+fH( fH( fH(IV0, m1),m2),m3) where mi’s are 512-bit strings.
+USENIX Association 33rd USENIX Security Symposium    1963
+
+[PDF PAGE 9]
+To compute an HMAC-SHA256, we need at least 4 SHA256
+compress calls: 2 calls to compute the outer hash and at least
+2 calls to compute the inner hash; if m is longer than 447 bits,
+the inner hash requires even more calls.
+Although there are totally 19 SHA256 compression calls
+to derive ms, we found that only 6 of them need to be
+computed in GC-2PC. First, IV1 = fH(IV0, pms ⊕ ipad) and
+IV2 = fH(IV0, pms ⊕opad) only need to be computed once in
+GC-2PC and they can be kept as garbled labels to be reused in
+all HMAC computation. Second, the messages to all HMAC
+are public, which can be used for optimization: we reveal
+the value IV1 while keeping IV2 secret, so that subsequent
+computation taking IV1 and the message can be done locally.
+We show the exact computation as follows:
+M1 = fH
+ 
+fH(IV0, pms ⊕ opad), fH( fH( fH(IV0, pms ⊕ ipad),
+m1),m2)
+
+M2 = fH
+ 
+fH(IV0, pms ⊕ opad), fH( fH(IV0, pms ⊕ ipad),M1)
+
+ms = fH
+ 
+fH(IV0, pms ⊕ opad), fH( fH( fH(IV0, pms ⊕ ipad),
+M1∥V1),V2)
+
+∥Trunc128
+ 
+fH
+ 
+fH(IV0, pms ⊕ opad),
+fH( fH( fH(IV0, pms ⊕ ipad),M2∥V1),V2)
+
+,
+where red refers to computation in GC-2PC, green refers
+to local computation, and blue refers to reused values. In
+the above equations, (m1,m2) and (V1,V2) are the bit-strings
+about V when suitably padding V to specific bits. The process
+of deriving (keyC,IVC, keyS,IVS) is very similar to the above
+and also takes 6 SHA256 compression calls. Later, computing
+UFINC takes another 2 compression calls in GC-2PC. As a
+result, the whole circuit computing all needed HMAC takes
+289,827 AND gates. This optimization is secure in the random
+oracle model (see the full version [65, Section E] for details).
+3.2.3 Phase 3: Finished messages
+Using a similar protocol, we compute ( UFINC, UFIN S) and
+reveal them to both parties. 4 Now the main task is to perform
+AEAD encryption/decryption on public plaintext/ciphertext
+and secretly shared AEAD keys. Our focus in this paper is
+AES-GCM (see Section 2.1 for a quick recall of the scheme),
+which is the main scheme used over the Internet right now.
+We take distributedly performing AEAD encryption as an
+example, and performing AEAD decryption is totally similar.
+Note that DECO mainly supports CBC-HMAC and could
+support AES-GCM by computing in a Boolean circuit all
+ciphertext blocks Ci’s and powershi’s using a fully malicious
+2PC, where Ci = AES(key, st + i) ⊕ Mi for a state st and a
+plaintext Mi, h = AES(key,0) and key ∈ {keyC, keyS} is an
+application key. By revealing Ci to both parties while only
+revealing an additive sharing of hi, P and V can compute an
+4 We could postpone the verification of UFIN S to the phase in which
+P obtains all secrets and then can locally check UFIN S. This optimization
+removes the GC-2PC to compute UFIN S (see Section 4.2 for more details).
+additive sharing of the GMAC tag locally. This method can
+be very costly since it requires securely computing a number
+of finite field multiplications equal to the number of AES
+calls. What’s more, the circuit to compute a multiplication
+over F2128 has at least 8,765 AND gates, even larger than the
+AES circuit itself!
+AES-GCM computation consists of two tasks: computing
+the ciphertext and computing the GMAC tag. The first task is
+relatively easy as we can use the garble-then-prove approach
+again to avoid malicious 2PC, where the plaintext is known
+by both parties in this phase. However, computing the GMAC
+tag is more complicated. Roughly speaking, the GMAC tag
+is an inner product between a public vector over F2128 and
+a private vector (Z0,h1, . . . ,hn) where Z0 = AES(key, st) is
+shared by both parties. Revealing any term in the second vec-
+tor would allow the adversary to forge a GMAC tag on any
+message of its choice. Computing Z0 can be done in GC-2PC;
+however, since we reveal the additive shares ofZ0, meaning
+that the output is not well defined from V ’s perspective, the
+garble-then-prove approach does not immediately work. To
+solve this issue, we ask P to commit to its share of Z0. After
+the completion of the TLS protocol, whenP knows all secrets,
+P will prove the computation with respect to the above com-
+mitment. To avoid computing hi in circuits, we also reveal
+the additive shares of h together with Z0. Then two parties
+use an OLEe over F2128 to compute additive sharings on all
+powers of h. This way, each term only needs 2KB communi-
+cation, 100× smaller than computing in GC-2PC! Similar to
+the use of OLEe in phase 1, this also introduces a chance of a
+selective failure attack; however, it can be easily shown that
+providing multiple chances of selective failure attacks does
+not provide any more power to the adversary.
+3.2.4 Phase 4: Payload
+This phase is the first time P provides a private input (namely
+the query string) that is not part of the TLS execution. The
+overall protocol is similar to phase 3 how we compute the
+finished messages, except that the plaintext to AES-GCM-
+based AEAD is not public anymore. Therefore, we can mostly
+follow the phase-3 protocol except that P XOR its query to
+the additive share of AES output, and then sends the resulting
+value to V . In this way, V can obtain the ciphertext directly
+by XORing the resulting value with its additive share.
+After obtaining the AEAD cihertexts ENC Q and ENC R on
+the query Q and response R from P , V opens tV ∈ Zq to P ,
+who can replay the whole TLS protocol to obtain all values
+computed in GC-2PC. At this point, V holds 1) the commit-
+ment to P ’s share ofpms; 2) the commitments to all values
+revealed from GC-2PC as XOR shares of AES outputs; 3)
+the values revealed from GC-2PC to both parties. Now P can
+prove to V in zero-knowledge that the whole computation is
+correct with respect to the commitments and values that V
+has. The circuit proven in ZK includes 1) the circuit computed
+1964    33rd USENIX Security Symposium USENIX Association
+
+[PDF PAGE 10]
+in GC-2PC and 2) the decryption of the ciphertext to the re-
+sponse. However, the cost of ZK is significantly smaller than
+GC-2PC: when using the latest VOLE-based ZK [66], the
+communication of ZK is only 1 bit per AND gate, compared
+to 256 bits per AND gate required by the GC-2PC proto-
+col [70]. During the process of ZK, P also needs to commit
+to the plaintext of the query and response to prove AEAD
+computation. They will be converted to a ZK-friendly format
+in the next phase.
+3.2.5 Converting to ZK-Friendly Commitments
+Now V has commitments of the query Q and response R that
+P knows. Their correctness has been verified by V through
+VOLE-based ZK. Such commitments are instantiated by IT-
+MACs and denoted by [ [uuu] ] = ([ [u1] ], . . . ,[ [uℓ] ]), where for each
+i ∈ [1, ℓ], ui ∈ {0,1}, (ui, M[ui]) is obtained by P , (K[ui], ∆)
+is held by V , and M[ui] = K[ui] ⊕ ui∆.
+We first convert the IT-MACs from binary field F2λ to a
+large field Zq for a prime q. Let H : {0,1}λ → Zq be a random
+oracle. For each componentui, V computeseK[ui] := H(K[ui])
+and sends Wi := H(K[ui]) − H(K[ui] ⊕ ∆) +Γ ∈ Zq to P , who
+computes eM[ui] := H(M[ui]) +ui ·Wi =eK[ui] +ui · Γ, where
+Γ ∈ Zq is a uniform global key known to V . We also ask P
+to commit to (Q,R) using an additively homomorphic com-
+mitment (e.g., Pedersen [54] and KZG [42]) that is friendly
+to zkSNARKs. To check consistency between IT-MACs over
+Zq and additively homomorphic commitments, we reveal a
+random linear combination of the values committed in two
+formats, where the random challenges are chosen by V .
+There are several extra considerations. First, the random
+linear combination would lead to some leakage, so both par-
+ties need to generate one more random value committed in
+both formats to mask the linear combination before it is re-
+vealed. Two commitments of the random value only need to
+be consistent in the honest case. Second, the values {Wi} may
+not be computed correctly and thus after P opens the linear
+combination, V needs to open the values {Wi} by revealing
+∆ and Γ, so that P can check that all values are computed cor-
+rectly. Finally, the final check does not need to be done over
+bits but any packing of the values. This could significantly
+reduce the number of additively homomorphic commitments.
+In addition, two additional checks need to be performed to pre-
+vent the possible privacy leakage on uuu by using inconsistent
+∆ and Γ. See the full version [65, Section C] for details.
+3.3 Protocol Summary
+Previous discussions provide a high-level intuition on how we
+design the protocol. However, partially due to the complexity
+of TLS, the whole protocol is very complicated. Below, we
+provide a summary of the whole protocol omitting the details
+when considering the optimization shown in Footnote 4. The
+exact details of our protocol, along with the proof of security,
+can be found in Section 4 and related appendices.
+1. P samples and sends REQC to S and gets back RES S.
+2. P forwards ( REQC,RES S) to V , who sends tV · G to P .
+Then P picks tP and sends (tP +tV ) · G to S. Then P and
+V run the conversion from an elliptic-curve point to its
+x-coordinate, based on OLE with errors, so that two parties
+obtain an additive sharing of pms.
+3. Two parties run the GC-2PC protocol with the garble-then-
+prove technique to derive the key material and client fin-
+ished message. In particular, they obtain: 1) XOR shares
+of hC = AES(keyC,0) and ZC = AES(keyC, stC); 2) ini-
+tial vectors IVC,IVS, intermediate public values revealed
+in HMAC-based PRF, UFINC and its AES encryption; 3)
+pms, ms, keyS, keyC in the form of garbled labels.
+4. Based on OLEe over F2128, P and V compute the GMAC
+tag with these XOR shares on(hC, ZC) in the offline-online
+mode. Then P assembles FINC and sends it to the server
+S. After receiving FINS from S, P forwards it to V .
+5. P and V execute the GC-2PC protocol with the garble-
+then-prove approach to generate the AES ciphertext that
+encrypts P ’s query and XOR shares of an AES output
+ZQ = AES(keyC, stC + 2). Both parties use OLEe and the
+XOR shares on (hC, ZQ) to compute the GMAC tag, and
+then P sends the AEAD ciphertext ENC Q on the query Q
+to S. Then, S returns the AEAD ciphertext ENC R on the
+response R to P , who forwards it to V .
+6. P reveals its XOR shares of hC, ZC, ZQ to V , who can re-
+cover hC, ZC, ZQ and then use them to locally verify the
+correctness of AEAD ciphertexts FINC and ENC Q. Besides,
+ENC R can also be locally verified by revealing the corre-
+sponding AES outputs to V .
+7. V sends tV to P who checks that it is consistent withtV ·G
+received earlier. P then computes tP + tV , and recovers
+all values in the execution of TLS, including all values
+revealed previously. If any value is incorrect,P aborts.
+8. V now holds commitments to P ’s share ofpms and values
+revealed as XOR shares earlier. P proves to V in zero-
+knowledge that these commitments are consistent with the
+values revealed to V based on the TLS specification.
+9. Two parties run a protocol to convert the commitments on
+Q and R based on IT-MACs to additively homomorphic
+commitments like Pedersen on the same values.
+4 Authenticating Web Data for TLS
+In the full version [65, Section 4], we define an ideal func-
+tionality FGP2PC for 2PC in the garble-then-prove framework,
+USENIX Association 33rd USENIX Security Symposium    1965
+
+[PDF PAGE 11]
+and then show an efficient protocol securely realizingFGP2PC
+by using a plain GC-2PC protocol with malicious OT and
+the recent interactive ZK proof based on IT-MACs. Based on
+FGP2PC we provide a complete description of our protocol (de-
+noted by ΠAuthData) that authenticates web data for TLS 1.2 in
+Section 4.1. Then, we show how to extend protocolΠAuthData
+to support multi-round query-response sessions and describe
+further optimizations in Section 4.2. While ΠAuthData focuses
+on the case of reading user data, we also extend it to support
+for writing user data in Section 4.2. In Section 4.3, we also
+show how to extend our protocol to support TLS 1.3.
+4.1 Detailed Protocol for Authenticating Data
+Our protocol ΠAuthData is divided into four phases, where the
+last three phases are jointly called online phase.
+• Preprocessing: A prover P and a verifier V generate cor-
+related randomness before the TLS connection.
+• Handshake: P and V call FGP2PC to perform client opera-
+tions. This phase establishes the connection with S while
+neither of P and V know any secrets or application keys.
+• Record: P and V call FGP2PC to encrypt a query Q, and
+then P locally decrypts the ciphertext on a response R.
+• Post-record: In this phase, the TLS protocol has terminated.
+Now, P is allowed to know all secret values in the TLS ses-
+sion. Then P and V call FGP2PC to prove the correctness
+of all values revealed to V . Finally, both parties transform
+IT-MACs ofQ and R into their additive-homomorphic com-
+mitments, which are connected to a variety of zk-SNARKs.
+ΠAuthData invokes the following three sub-protocols, whose
+details are described in the full version [65, Section B.4].
+• Sub-protocol ΠE2F (shown in the full version [65, Section
+B.1]) converts additive sharings of elliptic-curve points
+into that of x-coordinates, and will be used to generate an
+additive sharing [pms]p of pre-master secret.
+• Sub-protocol ΠPRF (shown in the full version [65, Sec-
+tion B.2]) calls FGP2PC to compute HMAC-based PRF in
+the handshake phase. Then, it proves correctness of all
+opened values by calling FGP2PC in the post-record phase.
+Protocol ΠPRF will be used to generate the master secret
+ms, application keys keyC, keyS, initial vectors IVC,IVS and
+UFINC, UFIN S.
+• Sub-protocol ΠAEAD (shown in the full version [65, Sec-
+tion B.3]) calls FGP2PC to compute AES blocks used for
+encryption/decryption of AEAD, and uses OLEe to com-
+pute GMAC tags, in the handshake and record phases. In
+the post-record phase, ΠAEAD calls FGP2PC to prove cor-
+rectness of all AES blocks, and invokes FIZK to generate
+IT-MACs [ [Q] ]on a query Q. Sub-protocol ΠAEAD is used
+to encrypt UFINC,Q to obtain the ciphertexts FINC, ENC Q
+and decrypt FINS to get UFIN S.
+P and V generate authenticated bits [ [Q] ]and [ [R] ]in the post-
+record phase by calling an ideal functionality FIZK for ZK
+proofs based on IT-MACs. FunctionalityFIZK (shown in the
+full version [65, Section A.4]) is a simple extension of the
+ideal functionality defined in [64], and can be securely real-
+ized using the recent VOLE-based ZK protocols [7,28,63,66].
+Besides, P and V call an ideal functionality FConv (shown
+in the full version [65, Section C]) to convert [ [Q] ]and [ [R] ]
+into their additively homomorphic commitments in the post-
+record phase. In the full version [65, Section C], we present
+an efficient protocol to securely realize FConv.
+We postpone the details of protocolΠAuthData to the full ver-
+sion [65, Section B.4]. As in DECO [71], protocol ΠAuthData
+focuses on the case of one-round query-response session, i.e.,
+a prover P and a verifier V jointly generate and send the
+AEAD ciphertext of a single query Q to a server S who re-
+turns the AEAD ciphertext of a single response R to P . Note
+that one-round session is enough for a lot of applications [71].
+For one-round session,P is unnecessary to decrypt the AEAD
+ciphertext ENC R on the response R and verify its GMAC tag
+by running sub-protocol ΠAEAD with V . These operations can
+be performed locally by P after it knows the server-to-client
+key keyS, where the TLS session terminates after ENC R was
+received by P and forwarded to V . Nevertheless, P and V
+still need to generate [ [ZR] ]and [ [R] ]by calling functionality
+FIZK. V also needs to check the correctness of the GMAC
+tag in ciphertext ENC R via getting hS = AES(keyS,0) and
+ZR = AES(keyS, stC
+d ).
+The security of protocol ΠAuthData depends on the PRF-
+Oracle-Diffie-Hellman (PRF-ODH) assumption, which has
+been used for proving the security of TLS 1.2 [40,48] and is re-
+called in the full version [65, Section E]. Besides, we assume
+that the underlying signature scheme satisfies Existential Un-
+Forgeability under Chosen-Message Attack (EUF-CMA).
+Theorem 1. If the PRF-ODH assumption holds and the un-
+derlying signature scheme is EUF-CMA secure, then proto-
+col ΠAuthData securely realizes functionality FAuthData in the
+(FOLEe,FGP2PC,FCom,FIZK,FConv)-hybrid model, assuming
+that the compression function fH underlying PRF is a random
+oracle and AES is an ideal cipher.
+We provide a formal proof of Theorem 1 in the full ver-
+sion [65, Section E].
+4.2 Extensions and Optimizations
+Extend to multi-round query-response sessions. We are
+able to extend the protocol ΠAuthData to support multiple
+rounds of payload. Specifically, P and V can execute sub-
+protocol ΠAEAD (shown in the full version [65, Section B.3])
+multiple times to encrypt multiple queries, where the additive
+1966    33rd USENIX Security Symposium USENIX Association
+
+[PDF PAGE 12]
+sharings of powers of hC = AES(keyC,0) need to be com-
+puted only once and are reused among these sub-protocol
+executions. Note that the state stC is always increased for
+computing multiple AEAD ciphertexts following the TLS
+specification. This prevents P or V to forge GMAC tags by
+using the same state for different ciphertexts.
+If every query is independent of previous responses (Case
+1), P can locally decrypt the AEAD ciphertexts of all re-
+sponses, after the TLS session terminates and it obtains the
+server-to-client application key keyS. If every query relies on
+previous responses (Case 2), P has to decrypt the ciphertexts
+of all responses via interacting with V . This can be done by
+running sub-protocol ΠAEAD with type1 = “decryption” and
+type2 = “secret”, where ΠAEAD was designed for supporting
+decryption of AEAD ciphertexts in the record phase. During
+the protocol execution, ΠAEAD also allows P and V to ver-
+ify the correctness of GMAC tags in AEAD ciphertexts of
+responses. Therefore, in both cases, P can check the correct-
+ness of AEAD ciphertext on every response via sending the
+ciphertext to V and then running sub-protocolΠAEAD with V ,
+before generating the ciphertext on the next query. In fact, this
+is unnecessary and the GMAC tags of AEAD ciphertexts on
+all responses can be verified locally by P after it knows keyS
+(see below for discussion of this optimization). In Case 2, the
+decryption of the response’s ciphertext sent in the final-round
+session can still be performed locally with keyS.
+In the case of multi-round sessions, both P and V can
+use the same approach implied in the post-record phase of
+main protocol ΠAuthData (shown in the full version [65, Sec-
+tion B.4]) to check the correctness of all AEAD ciphertexts
+on multiple queries and responses. In Case 2, we note that
+P needs to decrypt the AEAD ciphertexts on responses us-
+ing keyS, and then compares the resulting plaintexts with
+that obtained during the execution of sub-protocol ΠAEAD,
+when it performs the local verification with keyS in the post-
+record phase. This verification aims to check that no error
+is introduced to the responses computed via the distributed
+decryption in sub-protocol ΠAEAD. Both parties are also able
+to obtain the IT-MACs on all responses in a way totally simi-
+lar to main protocol ΠAuthData. Note that the IT-MACs on all
+queries have already been obtained during multiple executions
+of sub-protocol ΠAEAD.
+Optimization. We can further optimize the efficiency of pro-
+tocol ΠAuthData by delaying the check of UFIN S and AEAD
+ciphertext FINS from the handshake phase to the post-record
+phase. That is, P and V do not execute sub-protocol ΠAEAD
+to generate UFIN S and the GMAC tag used to check FINS.
+Instead, P can locally check their correctness after it obtains
+master secret ms. VerifierV checks the correctness of UFIN S
+by calling the (prove) command of functionality FGP2PC with
+P , and then checks the correctness of FINS = (C, σ) in the
+following two steps:
+1. P sends Z1 to V , and then provesZ1 = AES(key∗
+S,IVS +1)
+by calling the (prove) command ofFGP2PC, where key∗
+S
+and IVS are the server-to-client application key and ini-
+tial vector whose correctness has been proved in the post-
+record phase. Then, V checks that UFIN S ⊕ Z1 = C.
+2. V checks the correctness of GMAC tag σ in the way
+shown in the post-record phase of protocol ΠAuthData.
+This has no impact on privacy and integrity, as this optimiza-
+tion only delays the check. If one of these values is incorrect,
+P or V aborts. Note that this optimization is supported by the
+TLS implementation. Furthermore, this optimization can be
+applied in the case of multi-round sessions. That is, P and V
+can delay the correctness check of all AEAD ciphertexts on
+responses from the record phase into the post-record phase
+by checking the correctness of GMAC tags via the approach
+shown in main protocol ΠAuthData. Recall that P also checks
+that the responses output by sub-protocol ΠAEAD are identical
+to that via the local decryption with keyS, when it performs
+the local verification in the post-record phase. This optimiza-
+tion allows us to reduce communication rounds and improve
+the whole performance.
+Extend to support for writing user data. Our protocol
+ΠAuthData focuses on reading user data from a website acting
+as the TLS server. For most of Web2 and Web3 applications,
+it is sufficient. Nevertheless, for a few applications, a user
+(i.e., prover) may be desirable to write its data on the website
+(e.g., updating personal information) during the protocol exe-
+cution of ΠAuthData. In this case, a malicious verifier V may
+tamper the queries sent from a prover P to the TLS server
+by adding some errors into the AES ciphertexts on queries.
+The attack would be detected by P after it obtains all secrets.
+However, the user data on the website has already been tam-
+pered. To prevent such attacks, we need to extend functionality
+FGP2PC to an ideal functionality F noerr
+GP2PC (defined in the full
+version [65, Section 4.1]) that does not allow V to introduce
+any errors. In the full version [65, Section 4.2], we show how
+to extend the protocol instantiating FGP2PC to securely real-
+ize F noerr
+GP2PC with no extra communication. When replacing
+FGP2PC with F noerr
+GP2PC, protocol ΠAuthData would allow P to
+securely write user data.
+This holds for multi-round sessions. For the multi-round
+session extension as described above, we point out a caveat. If
+the writing queries relying on previous responses, then P and
+V need to execute sub-protocol ΠAEAD to check the correct-
+ness of the AEAD ciphertext on each response except for the
+final response, before sending the AEAD ciphertext on the
+next query to the server. Otherwise, the above optimization,
+which locally checks the AEAD ciphertexts on all responses
+after obtaining keyS, can still be used.
+4.3 Extending Our Protocol for TLS 1.3
+While the protocol ΠAuthData (shown in the full version [65,
+Section B.4]) focuses on the case of TLS 1.2, we are also able
+USENIX Association 33rd USENIX Security Symposium    1967
+
+[PDF PAGE 13]
+to extend it for TLS 1.3, and will implement the protocol to
+authenticate web data for TLS 1.3 in the future work. The
+main differences between TLS 1.2 and TLS 1.3 are the key
+derivation function (KDF) and the handshake phase. In this
+section, we focus on the handshake mode of full 1-RTT, where
+the optional mode of 0-RTT based on a pre-shared key can be
+securely computed in a similar way.
+The key derivation in TLS 1.3 adopts the HMAC-based
+key derivation function (HKDF) [46, 47], which consists
+of two sub-functions: HKDF.Extract and HKDF.Expand.
+Specifically, prk ← HKDF.Extract(salt, ikm) takes as input
+a non-secret random salt and a secret input key material
+ikm, and then extracts a pseudorandom key prk, i.e., prk =
+HMAC(salt, ikm). Note that salt is the HMAC key, and ikm
+is the HMAC input. In this case, we can securely compute
+HKDF.Extract in the following manner:
+prk = fH
+ 
+fH(IV0,salt ⊕ opad), fH( fH(IV0,salt ⊕ ipad), ikm)
+
+,
+where red refers to computation in GC, and green refers to
+local computation. Then prk is expanded to an output keying
+material okm with a specified length. Specifically, okm ←
+HKDF.Expandℓ(prk,info) takes as inputprk, a public context-
+specific information info and an output length ℓ, and outputs
+okm = T1 ∥ . . .∥Tn−1 ∥ Truncm(Tn),
+where Ti = HMAC(prk,Ti−1∥info∥i) for each i ∈ [1,n], T0 is
+an empty string, n = ⌈ℓ/256⌉ and m = ℓ − 256 · (n − 1). It is
+easy to see that the sub-protocol ΠPRF (shown in the full ver-
+sion [65, Section B.2]) for TLS 1.2 can be directly extended
+to securely compute HKDF.Expandℓ(prk,info) for TLS 1.3.
+In particular, the circuit optimization for PRF in TLS 1.2 is
+able to be applied for HKDF.Expand in TLS 1.3.
+In the handshake phase of TLS 1.3, the client and server
+run the Diffie-Hellman key exchange protocol without au-
+thentication to establish a pre-master secret pms, which can
+be executed similar to protocol ΠAuthData. Then pms is de-
+rived to a handshake secret hs via HKDF.Extract, and then
+hs is derived to the client handshake traffic secret chts and
+server handshake traffic secret shts via HKDF.Expand. The
+secrets chts, shts are used to generate the client handshake
+key chk and server handshake key shk via HKDF.Expand.
+Then, hs is also used to derive a mater secret ms via invoking
+HKDF.Extract and HKDF.Expand respective once. Next,ms
+is used to drive four secrets with HKDF.Expand: the client
+application traffic secret cats, server application traffic secret
+sats, exporter master secret ems and resumption master secret
+rms. Using HKDF.Expand, the secrets cats, sats are derived
+to the client application key cak and server application key
+sak. The derivation of all secrets and keys can be securely
+computed by P and V by executing a protocol similar to
+sub-protocol ΠPRF.
+While chk and shk are used to encrypt/decrypt the sub-
+sequent messages (e.g., client/server finished messages, sig-
+natures and certifications) in the handshake phase, cak and
+sak are independent and used to encrypt/decrypt application
+data in the record phase. Therefore, we can open chk and shk
+to the prover P , and then P is able to locally perform the
+encryption/decryption in the handshake phase. 5 That is, it
+is unnecessary to run sub-protocol ΠAEAD (shown in the full
+version [65, Section B.3]) to compute stateful AEAD in the
+handshake phase. Besides, handshake traffic secrets chts and
+shts are used to produce client and server finished messages,
+and are independent from application traffic secrets cats and
+sats. In this case, we can open chts and shts to P , and then
+P can locally generate the finished messages. Furthermore,
+ems can be computed locally by P after it knows all secrets in
+the post-record phase, as ems is an exporter master secret and
+not used in the record phase. The secret rms is also able to be
+computed locally by P after it knows all secrets in the post-
+record phase, if P and V will not jointly execute a session
+resumption with rms. The optimizations would significantly
+reduce the cost in the handshake phase. Overall, 21 invoca-
+tions of SHA256 compression functions need to be executed
+in GC-2PC, compared to that 14 invocations in TLS 1.2 for
+our protocol and 30 invocations in TLS 1.3 for DECO [71].
+As for our protocols, the communication in the handshake
+phase of TLS 1.3 is about 1.5× larger than that in TLS 1.2.
+5 Performance Evaluation
+5.1 Implementation and Experimental Setup
+We implemented our protocol in C++, including 4000 lines
+of code of protocol development and 3000 lines of testing
+code. Our implementation is complete and can interact with
+real-world APIs. We use the EMP toolkit [61] for the imple-
+mentation of the following building blocks: KOS OT [44],
+Ferret OT [68], half-gates-based GC with optimization of
+concrete security [34, 70] and interactive ZK (called Quick-
+Silver) [66]. We leave it as the future work to incorporate the
+recent three-halves GC construction [56] to further reduce the
+communication cost of our protocol.
+All benchmarks are performed over AWS m5.large in-
+stances, with 2 vCPUs and 8 GB of memory. Note that our
+protocol only needs about 150 MB of memory for 2KB query
+and response. Every experiment involves three parties: the
+TLS server S, the prover P and the verifier V . Except for
+the global-scale experiment based on real-world APIs in Sec-
+tion 5.3, we place S and P on the same machine and V on a
+different machine with changing network condition, where
+the communication between S and P is negligible compared
+to that between P and V . We use one thread for all running
+time, and adopt tc to manually control the network bandwidth
+and roundtrip latency to desired levels. The running time and
+communication reported in this section are the end-to-end
+performance, including the preprocessing and setup costs.
+5This observation has been found in DECO [71].
+1968    33rd USENIX Security Symposium USENIX Association
+
+[PDF PAGE 14]
+Figure 3: Performance of our protocol under different
+network bandwidths and latency. The length of query and
+response is 2 KB.
+5.2 Scalability of Our Protocol
+Performance of protocol ΠAuthData. In Figure 3, we show
+the performance of our protocol ΠAuthData (shown in the full
+version [65, Section B.4]) under different bandwidths and
+latency, while fixing the query and response to 2KB. We
+show both the offline cost (which can be done before the
+TLS connection) and the online cost (which can only be done
+during the TLS connection). Overall, our protocol is highly
+efficient. For example, under a realistic network with 200
+Mbps bandwidth and 50 ms latency, the end-to-end running
+time is under four seconds while the runtime in the online
+phase is less than two seconds.
+We can also see that the online performance is highly de-
+pendent on the latency: it is less than 50 ms when the latency
+is low, but could be up to 3 seconds when the latency is
+as high as 100 ms. This matches the roundtrip complexity
+that we measured from our implementation, which needs 31
+roundtrips of communication. The offline cost is less affected
+by the latency but more on the network bandwidth; this is
+because the transmission of garbled circuits, which is majority
+of the communication of our protocol, is in the offline phase.
+Comparison with prior work. We compare the performance
+of our protocol with DECO [71]. Since the code of DECO
+is not open sourced and that the performance of malicious
+2PC has been constantly improving, we benchmark the per-
+formance based on the latest implementation of authenticated
+garbling. We also incorporate the Ferret OT [68] to the im-
+plementation to further reduce the communication cost. This
+is the most practically efficient malicious 2PC implementa-
+tion so far. We only included the time needed in malicious
+2PC, which includes computing the TLS session keys and 4
+AES-GCM ciphertexts. When computing the GMAC tag, we
+assume that one field multiplication over F2128 takes 8,765
+AND gates, including 8,192 ANDs to compute the multipli-
+cation and 573 ANDs to compute the reduction. Note that
+there exists more efficient garbling for binary extension field
+multiplication [38] but only in the semi-honest setting. This
+is a lower bound as the DECO protocol also includes other
+components. All performance numbers are measured using
+the same type of AWS instances. The result of the comparison
+is shown in Table 2, where we can observe roughly14× im-
+provement in communication and 7.5× to 15× improvement
+in running time over LAN and W AN.
+We record the peak memory usage of both protocols. Un-
+der 2KB query and response, the malicious 2PC needed in
+DECO requires a peak memory of 3 GB while our protocol
+only needs about 150 MB of memory. The huge difference
+is mainly due to the fact that authenticated garbling requires
+storing preprocessed triples for all AND gates in the circuit
+before the execution (to achieve constant roundtrips), while
+all building blocks that we use can be streamed without the
+need to store them all at once.
+Performance of conversion. We also benchmarked the per-
+formance of commitment conversion of our protocol in dif-
+ferent network settings, which is shown in Table 3. The IT-
+MAC-based commitments on payload is converted to Peder-
+sen commitments [54]. We observe that in both WAN and
+LAN settings, the conversion protocol is very cheap compared
+to the overall web authentication protocol, and the cost of con-
+version is linear to the payload size. It takes roughly 37 ms
+to convert an additional kilobyte of payload to Pedersen com-
+mitments under LAN and roughly 67 ms per KB under W AN.
+The basetime in W AN is higher due to the higher latency.
+5.3 Global-Scale Benchmarks
+We integrate our protocol to access real-world web servers and
+test the performance, as shown in Figure 4. Specifically, we
+utilize provided APIs to query Coinbase and Twitter servers.
+• Coinbase API: We benchmark fetching the balance of
+BTC using the prover’s API secret [3]. It has a query of size
+426 bytes and response of size 5701 bytes. Our protocol
+communicates 17.6 MB in the offline phase and 0.9 MB in
+the online phase.
+• Twitter API: We benchmark using the prover’s credential
+token to retrieve the number of followers [4]. This API has
+a query size of 587 bytes and response size of 894 bytes.
+Our protocol communicates 18.9 MB in the offline phase
+and 0.4 MB in the online phase.
+In all experiments, the verifier V is deployed in the US West
+(represented by the purple circle), while the provers (repre-
+sented by the blue circles) are distributed across 18 cities
+worldwide. All prover and verifier machines are hosted in
+AWS while the TLS server is hosted by Coinbase/Twitter,
+which may have nodes close to the prover. The online time
+required for the process ranges from 0.3 seconds to 10 sec-
+onds, depending on the round-trip time between the prover
+USENIX Association 33rd USENIX Security Symposium    1969
+
+[PDF PAGE 15]
+Communication cost W AN (100 Mbps, RTT = 50 ms) LAN (1 Gbps, RTT = 0 ms)
+Payload 256 B 512 B 1 KB 2 KB 256 B 512 B 1 KB 2 KB 256 B 512 B 1 KB 2 KB
+DECO [71] 206 MB 255 MB 345 MB 475.7 MB 24 s 27.2 s 36.3 s 51.6 s 5.91 s 6.46 s 8.9 s 11.21 s
+This work 15.2 MB 17.8 MB 22.9 MB 33.3 MB 3.19 s 3.43 s 3.96 s 4.9 s 0.46 s 0.51 s 0.61 s 0.72 s
+Table 2: Comparing the performance of DECO [71] and our protocol under LAN and W AN.
+W AN (100 Mbps, RTT = 50 ms) LAN (1 Gbps, RTT = 0 ms)
+Payload 256 B 512 B 1 KB 2 KB 256 B 512 B 1 KB 2 KB
+Conversion 161 ms 173 ms 202 ms 278 ms 11 ms 20 ms 38 ms 76 ms
+Table 3: Performance of commitment conversion with different payload length under LAN and W AN.
+1.66 (2.43)0.83 (1.62)
+6.06 (11.4)
+2.85 (4.98)
+2.31 (3.95)3.23 (5.76)4.49 (8.69)
+7.06 (12.5)6.47 (11.9)
+4.96 (9.33)
+9.25 (17.4)
+9.94 (19.8)
+8.07 (15.9)
+6.05 (11.7)
+5.77 (10.5)
+5.68 (11.1)
+4.63 (8.64)3.94 (7.35)
+Coinbase
+0.94 (1.71)0.29 (0.63)
+6.11 (12.8)
+2.08 (4.10)
+1.78 (3.4)2.59 (5.22)4.22 (8.36)
+5.35 (10.9)5.21 (10.8)
+4.55 (9.04)
+8.35 (16.8)
+9.61 (19.8)
+7.77 (15.7)
+5.78 (11.7)
+4.61 (9.30)
+4.69 (10.1)
+4.35 (8.76)3.56 (7.12)
+Twitter
+Figure 4: Online and total performance of accessing Coinbase and Twitter servers with globally distributed provers.All
+numbers are reported in seconds in the form of “online time (total time)”. The verifier is fixed at California. The server is hosted
+by Coinbase/Twitter, which may have mirrors in various locations.
+and verifier, which aligns with our expectation. From the ex-
+perimental results shown in Figure 4, we conclude that our
+protocol is concretely efficient for real-world applications.
+The performance of our protocol only depends on the band-
+width and latency in different network settings, and is inde-
+pendent of the concrete city in which the verifier locates. In
+practical scenarios, one could deploy multiple verifiers in
+proximity to the provers. This deployment strategy serves
+to minimize the round-trip time and significantly boost the
+overall performance of the system.
+Acknowledgements
+The authors would like to thank the members from TL-
+SNotary for their helpful discussion. Kang Yang is sup-
+ported by the National Natural Science Foundation of China
+(Grant Nos. 62102037 and 61932019). Yu Yu is sup-
+ported by the National Natural Science Foundation of China
+(Grant Nos. 62125204 and 92270201), and the Major Pro-
+gram of Guangdong Basic and Applied Research (Grant
+No. 2019B030302008). Yu Yu’s work has also been sup-
+ported by the New Cornerstone Science Foundation through
+the XPLORER PRIZE. Xiao Wang is supported by DARPA
+under Contract No. HR001120C0087, NSF awards #2016240,
+#2236819, #2310927 and research awards from Meta and
+Google. The views, opinions, and/or findings expressed are
+those of the author(s) and should not be interpreted as rep-
+resenting the official views or policies of the Department of
+Defense or the U.S. Government.
+References
+[1] https://www.gigamon.com/content/dam/
+resource-library/english/infographic/
+in-tls-adoption-research.pdf .
+[2] https://ciphersuite.info/cs/TLS_RSA_WITH_
+AES_256_CBC_SHA256/.
+[3] https://docs.cloud.coinbase.com/
+sign-in-with-coinbase/docs/api-accounts .
+1970    33rd USENIX Security Symposium USENIX Association
+
+[PDF PAGE 16]
+[4] https://developer.twitter.com/en/docs/
+twitter-api/users/lookup/api-reference/
+get-users-me.
+[5] Nadhem J. AlFardan and Kenneth G. Paterson. Lucky
+thirteen: Breaking the TLS and DTLS record proto-
+cols. In IEEE Symposium on Security and Privacy
+(S&P) 2013, pages 526–540, 2013.
+[6] Marshall Ball, Tal Malkin, and Mike Rosulek. Gar-
+bling gadgets for Boolean and arithmetic circuits. In
+ACM Conf. on Computer and Communications Security
+(CCS) 2016, pages 565–577. ACM Press, 2016.
+[7] Carsten Baum, Alex J. Malozemoff, Marc B. Rosen, and
+Peter Scholl. Mac’n’cheese: Zero-knowledge proofs
+for boolean and arithmetic circuits with nested disjunc-
+tions. In Advances in Cryptology—Crypto 2021, Part IV,
+LNCS, pages 92–122. Springer, 2021.
+[8] Eli Ben-Sasson, Alessandro Chiesa, Eran Tromer, and
+Madars Virza. Succinct non-interactive zero knowledge
+for a von neumann architecture. In USENIX Security
+Symposium 2014, pages 781–796. USENIX Association,
+2014.
+[9] Rikke Bendlin, Ivan Damgård, Claudio Orlandi, and
+Sarah Zakarias. Semi-homomorphic encryption and
+multiparty computation. In Advances in Cryptology—
+Eurocrypt 2011, LNCS, pages 169–188. Springer, 2011.
+[10] Nir Bitansky, Ran Canetti, Alessandro Chiesa, and Eran
+Tromer. From extractable collision resistance to succinct
+non-interactive arguments of knowledge, and back again.
+pages 326–349, 2012.
+[11] Elette Boyle, Geoffroy Couteau, Niv Gilboa, Yuval Ishai,
+Lisa Kohl, Nicolas Resch, and Peter Scholl. Correlated
+pseudorandomness from expand-accumulate codes. In
+Advances in Cryptology—Crypto 2022, Part II , LNCS,
+pages 603–633. Springer, 2022.
+[12] Elette Boyle, Geoffroy Couteau, Niv Gilboa, Yuval Ishai,
+Lisa Kohl, Peter Rindal, and Peter Scholl. Efficient two-
+round OT extension and silent non-interactive secure
+computation. In ACM Conf. on Computer and Commu-
+nications Security (CCS) 2019, pages 291–308. ACM
+Press, 2019.
+[13] Elette Boyle, Geoffroy Couteau, Niv Gilboa, Yuval Ishai,
+Lisa Kohl, and Peter Scholl. Efficient pseudorandom
+correlation generators: Silent OT extension and more. In
+Advances in Cryptology—Crypto 2019, Part III , LNCS,
+pages 489–518. Springer, 2019.
+[14] Elette Boyle, Geoffroy Couteau, Niv Gilboa, Yuval Ishai,
+Lisa Kohl, and Peter Scholl. Efficient pseudorandom
+correlation generators from ring-LPN. In Advances in
+Cryptology—Crypto 2020, Part II , LNCS, pages 387–
+416. Springer, 2020.
+[15] Luís T. A. N. Brandão. Secure two-party computation
+with reusable bit-commitments, via a cut-and-choose
+with forge-and-lose technique - (extended abstract). In
+Advances in Cryptology—Asiacrypt 2013, Part II , vol-
+ume 8270 of LNCS, pages 441–463. Springer, 2013.
+[16] Sai Sheshank Burra, Enrique Larraia, Jesper Buus
+Nielsen, Peter Sebastian Nordholt, Claudio Orlandi, Em-
+manuela Orsini, Peter Scholl, and Nigel P. Smart. High-
+performance multi-party computation for binary circuits
+based on oblivious transfer. J. Cryptology, 34(3):34,
+July 2021.
+[17] Matteo Campanelli, Antonio Faonio, Dario Fiore, Anaïs
+Querol, and Hadrián Rodríguez. Lunar: A toolbox
+for more efficient universal and updatable zkSNARKs
+and commit-and-prove extensions. LNCS, pages 3–33.
+Springer, 2021.
+[18] Matteo Campanelli, Dario Fiore, and Anaïs Querol.
+LegoSNARK: Modular design and composition of suc-
+cinct zero-knowledge proofs. In ACM Conf. on Com-
+puter and Communications Security (CCS) 2019, pages
+2075–2092. ACM Press, 2019.
+[19] Ran Canetti. Security and composition of multiparty
+cryptographic protocols. J. Cryptology, 13(1):143–202,
+January 2000.
+[20] Alessandro Chiesa, Yuncong Hu, Mary Maller, Pratyush
+Mishra, Psi Vesely, and Nicholas P. Ward. Marlin: Pre-
+processing zkSNARKs with universal and updatable
+SRS. LNCS, pages 738–768. Springer, 2020.
+[21] Geoffroy Couteau, Peter Rindal, and Srinivasan Raghu-
+raman. Silver: Silent VOLE and oblivious transfer from
+hardness of decoding structured LDPC codes. In Ad-
+vances in Cryptology—Crypto 2021, Part III , LNCS,
+pages 502–534. Springer, 2021.
+[22] Ronald Cramer, Ivan Damgård, Daniel Escudero, Pe-
+ter Scholl, and Chaoping Xing. SPD Z2k: Efficient
+MPC mod 2k for dishonest majority. In Advances in
+Cryptology—Crypto 2018, Part II , volume 10992 of
+LNCS, pages 769–798. Springer, 2018.
+[23] Hongrui Cui, Xiao Wang, Kang Yang, and Yu Yu. Ac-
+tively secure half-gates with minimum overhead under
+duplex networks. LNCS, pages 35–67. Springer, 2023.
+[24] Britt Cyr, Jeremy Dorfman, Ryan Hamilton, Jana
+Iyengar, Fedor Kouranov, Charles Krasic, Jo Kulik,
+Adam Langley, Jim Roskind, Robbie Shade, Satyam
+Shekhar, Cherie Shi, Ian Swett, Raman Tenneti,
+Victor Vasiliev, Antonio Vicente, Patrik Westin,
+USENIX Association 33rd USENIX Security Symposium    1971
+
+[PDF PAGE 17]
+Alyssa Wilk, Dale Worley, Fan Yang, Dan Zhang,
+and Daniel Ziegler. QUIC wire layout specification,
+2016. https://docs.google.com/document/d/
+1WJvyZflAO2pq77yOLbp9NsGjC1CHetAXV8I0fQe-B_
+U/edit#heading=h.1jaf9kehau4e.
+[25] Ivan Damgård, Jesper Buus Nielsen, Michael Nielsen,
+and Samuel Ranellucci. The TinyTable protocol for
+2-party secure computation, or: Gate-scrambling revis-
+ited. In Advances in Cryptology—Crypto 2017, Part I ,
+volume 10401 of LNCS, pages 167–187. Springer, 2017.
+[26] T. Dierks and E. Rescorla. The transport layer security
+(TLS) protocol version 1.2. RFC 5246, August 2008.
+http://www.rfc-editor.org/rfc/rfc5246.txt.
+[27] Samuel Dittmer, Yuval Ishai, Steve Lu, and Rafail Ostro-
+vsky. Authenticated garbling from simple correlations.
+LNCS, pages 57–87. Springer, 2022.
+[28] Samuel Dittmer, Yuval Ishai, and Rafail Ostrovsky. Line-
+point zero knowledge and its applications. In 2nd Con-
+ference on Information-Theoretic Cryptography, 2021.
+[29] Tore Kasper Frederiksen, Marcel Keller, Emmanuela
+Orsini, and Peter Scholl. A unified approach to
+MPC with preprocessing using OT. In Advances in
+Cryptology—Asiacrypt 2015, Part I , LNCS, pages 711–
+735. Springer, 2015.
+[30] Craig Gentry and Daniel Wichs. Separating succinct
+non-interactive arguments from all falsifiable assump-
+tions. pages 99–108. ACM Press, 2011.
+[31] Niv Gilboa. Two party RSA key generation. In Ad-
+vances in Cryptology—Crypto 1999 , volume 1666 of
+LNCS, pages 116–129. Springer, 1999.
+[32] Oded Goldreich. Foundations of Cryptography: Basic
+Applications, volume 2. Cambridge University Press,
+Cambridge, UK, 2004.
+[33] Jens Groth. Short non-interactive zero-knowledge
+proofs. In Advances in Cryptology—Asiacrypt 2010 ,
+LNCS, pages 341–358. Springer, 2010.
+[34] Chun Guo, Jonathan Katz, Xiao Wang, and Yu Yu. Effi-
+cient and secure multiparty computation from fixed-key
+block ciphers. In IEEE Symposium on Security and
+Privacy (S&P) 2020, pages 825–841, 2020.
+[35] Dick Hardt. The OAuth 2.0 Authorization Framework.
+RFC 6749, October 2012. https://www.rfc-editor.
+org/info/rfc6749.
+[36] Carmit Hazay, Peter Scholl, and Eduardo Soria-Vazquez.
+Low cost constant round MPC combining BMR and
+oblivious transfer. In Advances in Cryptology—
+Asiacrypt 2017, Part I, LNCS, pages 598–628. Springer,
+2017.
+[37] Carmit Hazay, Peter Scholl, and Eduardo Soria-Vazquez.
+Low cost constant round MPC combining BMR and
+oblivious transfer. J. Cryptology, 33(4):1732–1786, Oc-
+tober 2020.
+[38] David Heath and Vladimir Kolesnikov. One hot gar-
+bling. In ACM Conf. on Computer and Communications
+Security (CCS) 2021, pages 574–593. ACM Press, 2021.
+[39] Jana Iyengar and Martin Thomson. QUIC: A UDP-
+Based Multiplexed and Secure Transport. RFC 9000,
+May 2021. https://www.rfc-editor.org/info/
+rfc9000.
+[40] Tibor Jager, Florian Kohlar, Sven Schäge, and Jörg
+Schwenk. On the security of TLS-DHE in the stan-
+dard model. In Advances in Cryptology—Crypto 2012 ,
+volume 7417 of LNCS, pages 273–293. Springer, 2012.
+[41] Marek Jawurek, Florian Kerschbaum, and Claudio Or-
+landi. Zero-knowledge using garbled circuits: how to
+prove non-algebraic statements efficiently. InACM Conf.
+on Computer and Communications Security (CCS) 2013,
+pages 955–966. ACM Press, 2013.
+[42] Aniket Kate, Gregory M. Zaverucha, and Ian Goldberg.
+Constant-size commitments to polynomials and their ap-
+plications. In Advances in Cryptology—Asiacrypt 2010 ,
+LNCS, pages 177–194. Springer, 2010.
+[43] Jonathan Katz, Samuel Ranellucci, Mike Rosulek, and
+Xiao Wang. Optimizing authenticated garbling for
+faster secure two-party computation. In Advances in
+Cryptology—Crypto 2018, Part III , volume 10993 of
+LNCS, pages 365–391. Springer, 2018.
+[44] Marcel Keller, Emmanuela Orsini, and Peter Scholl. Ac-
+tively secure OT extension with optimal overhead. In
+Advances in Cryptology—Crypto 2015, Part I , volume
+9215 of LNCS, pages 724–741. Springer, 2015.
+[45] Marcel Keller, Emmanuela Orsini, and Peter Scholl.
+MASCOT: Faster malicious arithmetic secure computa-
+tion with oblivious transfer. In ACM Conf. on Computer
+and Communications Security (CCS) 2016, pages 830–
+842. ACM Press, 2016.
+[46] H. Krawczyk and P. Eronen. HMAC-based extract-
+and-expand key derivation function (HKDF). RFC
+5869, 2010. https://www.rfc-editor.org/rfc/
+rfc5869.txt.
+[47] Hugo Krawczyk. Cryptographic extraction and key
+derivation: The HKDF scheme. In Advances in
+Cryptology—Crypto 2010 , volume 6223 ofLNCS, pages
+631–648. Springer, 2010.
+1972    33rd USENIX Security Symposium USENIX Association
+
+[PDF PAGE 18]
+[48] Hugo Krawczyk, Kenneth G. Paterson, and Hoeteck
+Wee. On the security of the TLS protocol: A systematic
+analysis. In Advances in Cryptology—Crypto 2013,
+Part I, volume 8042 of LNCS, pages 429–448. Springer,
+2013.
+[49] Enrique Larraia, Emmanuela Orsini, and Nigel P. Smart.
+Dishonest majority multi-party computation for binary
+circuits. In Advances in Cryptology—Crypto 2014,
+Part II, volume 8617 ofLNCS, pages 495–512. Springer,
+2014.
+[50] Yehuda Lindell and Benny Pinkas. An efficient protocol
+for secure two-party computation in the presence of
+malicious adversaries. In Advances in Cryptology—
+Eurocrypt 2007, LNCS, pages 52–78. Springer, 2007.
+[51] Yehuda Lindell, Benny Pinkas, Nigel P. Smart, and
+Avishay Yanai. Efficient constant round multi-party
+computation combining BMR and SPDZ. In Advances
+in Cryptology—Crypto 2015, Part II , volume 9216 of
+LNCS, pages 319–338. Springer, 2015.
+[52] Jesper Buus Nielsen, Peter Sebastian Nordholt, Claudio
+Orlandi, and Sai Sheshank Burra. A new approach to
+practical active-secure two-party computation. In Ad-
+vances in Cryptology—Crypto 2012 , volume 7417 of
+LNCS, pages 681–700. Springer, 2012.
+[53] Jesper Buus Nielsen and Claudio Orlandi. LEGO for
+two-party secure computation. In Theory of Cryptog-
+raphy Conference (TCC) 2009, volume 5444 of LNCS,
+pages 368–386. Springer, 2009.
+[54] Torben P. Pedersen. Non-interactive and information-
+theoretic secure verifiable secret sharing. In Advances
+in Cryptology—Crypto 1991 , LNCS, pages 129–140.
+Springer, 1992.
+[55] E. Rescorla. The transport layer security (TLS) protocol
+version 1.3. RFC 8446, August 2018. https://www.
+rfc-editor.org/rfc/rfc8446.txt.
+[56] Mike Rosulek and Lawrence Roy. Three halves make
+a whole? Beating the half-gates lower bound for gar-
+bled circuits. In Advances in Cryptology—Crypto 2021,
+Part I, LNCS, pages 94–124. Springer, 2021.
+[57] Lawrence Roy. SoftSpokenOT: Quieter OT extension
+from small-field silent VOLE in the minicrypt model. In
+Advances in Cryptology—Crypto 2022, Part I , LNCS,
+pages 657–687. Springer, 2022.
+[58] Nat Sakimura, John Bradley, Michael B. Jones, Breno de
+Medeiros, and Chuck Mortimore. OpenID Connect Core
+1.0 incorporating errata set 1, 2014.
+[59] abhi shelat and Chih-Hao Shen. Two-output secure
+computation with malicious adversaries. In Advances
+in Cryptology—Eurocrypt 2011 , LNCS, pages 386–405.
+Springer, 2011.
+[60] TLSNotary. Proof of data authenticity. https://docs.
+tlsnotary.org, Access at 2023. Source code is avail-
+able at https://github.com/tlsnotary/tlsn.
+[61] Xiao Wang, Alex J. Malozemoff, and Jonathan Katz.
+EMP-toolkit: Efficient MultiParty computation toolkit.
+https://github.com/emp-toolkit, 2016.
+[62] Xiao Wang, Samuel Ranellucci, and Jonathan Katz. Au-
+thenticated garbling and efficient maliciously secure
+two-party computation. In ACM Conf. on Computer
+and Communications Security (CCS) 2017, pages 21–
+37. ACM Press, 2017.
+[63] Chenkai Weng, Kang Yang, Jonathan Katz, and Xiao
+Wang. Wolverine: Fast, scalable, and communication-
+efficient zero-knowledge proofs for boolean and arith-
+metic circuits. In IEEE Symposium on Security and
+Privacy (S&P) 2021, pages 1074–1091, 2021.
+[64] Chenkai Weng, Kang Yang, Xiang Xie, Jonathan Katz,
+and Xiao Wang. Mystique: Efficient conversions for
+zero-knowledge proofs with applications to machine
+learning. In USENIX Security Symposium 2021, pages
+501–518. USENIX Association, 2021.
+[65] Xiang Xie, Kang Yang, Xiao Wang, and Yu Yu.
+Lightweight authentication of web data via garble-then-
+prove. Cryptology ePrint Archive, Paper 2023/964, 2023.
+https://eprint.iacr.org/2023/964.
+[66] Kang Yang, Pratik Sarkar, Chenkai Weng, and Xiao
+Wang. QuickSilver: Efficient and affordable zero-
+knowledge proofs for circuits and polynomials over any
+field. In ACM Conf. on Computer and Communications
+Security (CCS) 2021 , pages 2986–3001. ACM Press,
+2021.
+[67] Kang Yang, Xiao Wang, and Jiang Zhang. More efficient
+MPC from improved triple generation and authenticated
+garbling. In ACM Conf. on Computer and Communi-
+cations Security (CCS) 2020, pages 1627–1646. ACM
+Press, 2020.
+[68] Kang Yang, Chenkai Weng, Xiao Lan, Jiang Zhang, and
+Xiao Wang. Ferret: Fast extension for correlated OT
+with small communication. In ACM Conf. on Computer
+and Communications Security (CCS) 2020, pages 1607–
+1626. ACM Press, 2020.
+[69] Andrew Chi-Chih Yao. How to generate and exchange
+secrets (extended abstract). In 27th Annual Symposium
+on Foundations of Computer Science (FOCS) , pages
+162–167. IEEE, 1986.
+USENIX Association 33rd USENIX Security Symposium    1973
+
+[PDF PAGE 19]
+Functionality FOT
+Upon receiving (ot, (m0,m1)) from a sender P and
+(ot,b) from a receiver V , where m0,m1 ∈ {0,1}ℓ and
+b ∈ {0,1}, this functionality outputs mb to V .
+Figure 5: Functionality for oblivious transfer.
+[70] Samee Zahur, Mike Rosulek, and David Evans. Two
+halves make a whole - reducing data transfer in garbled
+circuits using half gates. In Advances in Cryptology—
+Eurocrypt 2015, Part II, volume 9057 of LNCS, pages
+220–250. Springer, 2015.
+[71] Fan Zhang, Deepak Maram, Harjasleen Malvai, Steven
+Goldfeder, and Ari Juels. DECO: Liberating web data
+using decentralized oracles for TLS. In ACM Conf. on
+Computer and Communications Security (CCS) 2020,
+pages 1919–1938. ACM Press, 2020.
+A More Preliminaries
+OT.Oblivious Transfer (OT) allows a sender to transmit one
+of two messages (m0,m1) to a receiver, who inputs a choice
+bit b and obtains mb. For security, b is kept secret against
+the malicious sender, and m1−b is unknown for the malicious
+receiver. The standard OT functionality is recalled in Figure 5.
+Correlated OT (COT) is an important variant of OT where two
+messages m0 and m1 satisfy a fixed correlation, i.e.,m0 ⊕m1 =
+∆. Both OT and COT correlations can be generated in the
+malicious setting using either the IKNP-like protocols [44,57]
+or the PCG-like protocols [12, 13, 68].
+OLE with errors. Oblivious Linear Evaluation (OLE) can
+be viewed as an arithmetic generalization of OT, and allows
+two parties to obtain an additive sharing of multiplication of
+two field elements. When applying OLE into our protocol,
+we show that OLE with errors (OLEe) is sufficient, where
+the privacy is guaranteed against malicious adversaries but
+a malicious sender can introduce an error into the resulting
+OLE correlation.
+Functionality for OLE with errors is shown in Figure 6.
+Without loss of generality, we focus on a finite field either
+F = Zp for a prime p or F = F2λ. We define a “gadget” vector
+ggg = (1,g, . . . ,gm−1) for m = ⌈log |F|⌉, where g = 2 if F =
+Zp for a prime p and g = X if F = F2λ. For a vector xxx ∈
+{0,1}m, we have ⟨ggg,xxx⟩ = ∑m
+i=1 xi · gi−1 ∈ F. We also denote
+by ggg−1 : F → {0,1}m the bit-decomposition function that
+maps a field element x ∈ F to a bit vector xxx ∈ {0,1}m, such
+that ⟨ggg,ggg−1(x)⟩ = x. Following previous work (e.g., [14]),
+we allow a corrupted party to choose its output. If a sender
+P is corrupted, then it can introduce an error vector eee into
+functionality FOLEe. Then, FOLEe computes an error e′ relying
+Functionality FOLEe
+This functionality operates over a finite field F. Let m =
+⌈log |F|⌉. This functionality interacts with a sender P , a
+receiver V and an adversary.
+• Upon receiving (ole,x) from a sender P and (ole,y)
+from a receiver V where x,y ∈ F, execute as follows:
+1. If P is honest, sample z1 ← F. Otherwise, receive
+z1 ∈ F from the adversary.
+2. If P is malicious, receive a vectoreee ∈ (F)m from the
+adversary, and compute an error e′ := ⟨ggg ∗ eee,yyy⟩ ∈ F
+where yyy = ggg−1(y) is the bit-decomposition of y ∈ F,
+∗ is a component-wise product and ⟨aaa,bbb⟩ denotes
+the inner product of two vectors aaa,bbb.
+3. If V is honest, compute z2 := x · y − z1 + e′ ∈ F
+(where e′ is set as 0 if P is also honest). Otherwise,
+receive z2 ∈ F from the adversary, and recompute
+z1 := x · y − z2 ∈ F.
+• Output z1 to P and z2 to V .
+Figure 6: Functionality for OLE with errors.
+on the inputy of a receiverV . Finally, the errore′ is added into
+the output z2 of V . The introduction of errors is asymmetric,
+i.e., V is not allowed to add an error into the output ofP . This
+model the asymmetric security of the COT-based protocol [31,
+45] that securely realizes functionality FOLEe.
+Additive secret sharings over fields.Our protocol will adopt
+additive secret sharings between P and V over a finite fieldF.
+For a field element x ∈ F, we write [x] = (xP ,xV ) such that
+xP + xV = x ∈ F, where one of xP ,xV is random in F. For an
+element a ∈ F only known by a party V , two parties V and
+P can locally define an additive sharing [a]p = (a,0). It is
+well-known that additive secret sharings are additively homo-
+morphic. In particular, give public constants c0,c1, . . . ,cℓ and
+additive sharings [x1], . . . ,[xℓ], P and V can locally compute
+[y] := c0 + ∑ℓ
+i=1 ci · [xi]. For an additive sharing [x], we define
+its opening procedure:
+• x ← Open([x]): P sends xP to V , and V sends xV to P in
+parallel. Then, both parties compute x := xP + xV ∈ F.
+For a field element x only known by P (resp., V ), both par-
+ties can locally define its additive sharing [x] = (x,0) (resp.,
+[x] = (0,x)). When applying additive secret sharings into our
+protocol, we only need two types of finite fields: one isZp for
+a large prime p and the other is F2128. The additive sharing of
+x is denoted by [x]p for former and [x]2128 for latter.
+1974    33rd USENIX Security Symposium USENIX Association

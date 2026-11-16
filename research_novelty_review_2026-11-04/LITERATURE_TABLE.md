@@ -1,0 +1,43 @@
+# 文献核验表
+
+核验日期为2026-11-04。F表示本轮核读相关原文，H表示沿用历史全文核读记录，A表示摘要或元数据。F不代表全文通读。题录中的版本和发表状态按所核实来源保留。
+
+|ID|题名、作者与年份|发表状态|阅读范围|未决项|
+|---|---|---|---|---|
+|R01|Authorization Revocation for Long-Running AI Agents: Root-Scoped Quiescence under Delegation and Asynchronous Execution。Genliang Zhu、 Chu Wang，2026。[来源](https://arxiv.org/abs/2609.21284v1)|arXiv v1, 2026-09-18|F，复用R2全文，本轮重读§3.4 A1–A9与§4 Definition 3|原生黑盒契约获取及资源谱的完整覆盖尚待逐命题比较|
+|R02|ResidualAuth: What Authorization State Must Agent Systems Preserve under Revocable Delegation?。Moonwon Choi、 Seokho Jeong、 Sian Choi、 Seunggeun Lee，2026。[来源](https://arxiv.org/abs/2609.08062v2)|arXiv v2, 2026-09-30|F，§3–4定义、Proposition 1、Theorem 1–3及假设|查询成本和当前任务充分状态需要另外比较|
+|R03|AID-Guard: Stateful Authorization for Delegated Agent Effects。Yingzhe Tong、 Leyu Dai、 Songhui Guo，2026。[来源](https://arxiv.org/abs/2608.21159v1)|arXiv v1, 2026-08-21|F，Assumptions and State、P1/P2、Limitations|论文给出条件性证明梗概，有限供应商测试由作者报告|
+|R04|Authorization Closure Graph: Minimal Repair for LLM Agents with Evolving User Instructions。Qingzhuo Wang et al.，2026。[来源](https://arxiv.org/abs/2609.32428v1)|arXiv v1, 2026-09-26|F，§3.1–3.2、式7及Proposition 1陈述、§5限制|固定规范Λ和权威观察是明确前提，全球最小核验策略另议|
+|R05|SUDP: Secret-Use Delegation Protocol for Agentic Systems。Xiaohang Yu、 Hejia Geng、 Xinmeng Zeng、 William Knottenbelt，2026。[来源](https://arxiv.org/abs/2604.24920v4)|arXiv v4, 2026-10-21|F，ASU定义、§VIII假设/接口前提/Theorem 1/L1–L5|硬件组合及原生轮换能力属于条件，本文未独立重证|
+|R06|Beyond OAuth: Task-Scoped Authorization for AI Agents via Natural Language Slices。Reshabh K Sharma、 Linxi Jiang、 Shuo Chen、 Zhiqiang Lin，2026。[来源](https://arxiv.org/abs/2603.17170v2)|arXiv v2, 2026-08-25|A，官方元数据与下载全文摘要|服务器配合与本方案接口约束需逐项对齐|
+|R07|Heartbeat-Bound Hierarchical Credentials: Cryptographic Revocation for AI Agent Swarms。Saurabh Deochake，2026。[来源](https://arxiv.org/abs/2605.20704v1)|arXiv v1, 2026-05-20|A，官方摘要与下载全文摘要|时钟/密钥保护前提明确，全文安全证明待核读|
+|R08|API Secrets Should Never Become Tokens in the LLM’s Vocabulary: A Threat Analysis of API Credential Handling in LLM Agent Systems and an Empirical Evaluation of a Vault-Mediated Execution Boundary。Patrick Kenney et al.，2026。[来源](https://arxiv.org/abs/2609.33371)|arXiv 2609.33371|A，已取7页全文，本轮读摘要|作者有限黑盒测量，本文未复验|
+|R09|Position: AI Agents Need Authenticated Delegation。Tobin South et al.，2025。[来源](https://proceedings.mlr.press/v267/south25a.html)|ICML 2025 position paper, PMLR267|A，正式论文页与摘要|立场论文的证据类型与完整安全构造分别登记|
+|R10|Verifying Account Ecosystems With Graph Transformations。Freya Murphy、 Saša Radomirović，2026。[来源](https://doi.org/10.1109/EuroSP68448.2026.00038)|IEEE EuroS&P 2026|A，机构摘要与正式发表记录|R2/R3作者稿获取403，完整命题覆盖仍未决|
+|R11|Tactics for Account Access Graphs。Luca Arnaboldi、 David Aspinall、 Christina Kolb、 Saša Radomirović，2023/2024。[来源](https://doi.org/10.1007/978-3-031-51479-1_23)|ESORICS2023，2024出版|H，沿用R2对§2、§3.1–3.3、Definition5、Proposition1的核读记录|本轮未重新逐行复核全文|
+|R12|Near Optimal Bayesian Active Learning for Decision Making。Shervin Javdani et al.，2014。[来源](https://proceedings.mlr.press/v33/javdani14.html)|AISTATS2014, PMLR33|A，本轮官方摘要，既有研究已登记DRD/HEC|应用其近似保证前须匹配静态假设/代价/先验|
+|R13|Safe Reinforcement Learning via Shielding under Partial Observability。Steven Carr、 Nils Jansen、 Sebastian Junges、 Ufuk Topcu，2023。[来源](https://doi.org/10.1609/AAAI.V37I12.26723)|AAAI2023|A，正式条目与摘要，沿用项目先例占坑|有界保证完成与该文具体目标需分别核对|
+|R14|Multi-Cost-Bounded Reachability Analysis of POMDPs。Alexander Bork、 Joost-Pieter Katoen、 Tim Quatmann、 Svenja Stein，2025。[来源](https://proceedings.mlr.press/v286/bork25a.html)|UAI2025, PMLR286|A，正式页与摘要|概率可达性与所有结果安全完成的量词须对齐|
+|R15|Querying to Find a Safe Policy under Uncertain Safety Constraints in Markov Decision Processes。Shun Zhang、 Edmund H. Durfee、 Satinder Singh，2020。[来源](https://doi.org/10.1609/AAAI.V34I03.5638)|AAAI2020|F，作者全文的模型、查询目标、约束分区、引言|查询是人类特征许可回答，认证探测有外部状态变化|
+|R16|Autonomous Assessment of Generalizability of AI Agent Capabilities。Daniel Bramblett et al.，2025/2026。[来源](https://arxiv.org/abs/2512.16733v4)|arXiv2512.16733v4, 2026-09-14|F，§2模拟器接口、查询定义、摘要、证明仅定位|明确允许reset/revert，无法直接当原生不可复位等预算基线|
+|R17|Securing AI Agents with Information-Flow Control。Manuel Costa et al.，2025。[来源](https://arxiv.org/abs/2505.23643)|arXiv2505.23643v2, 2025-09-03（下载PDF内版本标识）|F，摘要、§1机制与安全/表达力定位|完整定理及与最小决策输出的关系待核读|
+|R18|Progent: Securing AI Agents with Privilege Control。Tianneng Shi et al.，2025/2026。[来源](https://arxiv.org/abs/2504.11703v3)|arXiv2504.11703v3, 2026-05-14|A，官方最新版摘要|早期标题为Programmable Privilege Control、本轮按v3登记|
+|R19|IsolateGPT: An Execution Isolation Architecture for LLM-Based Agentic Systems。Yuhao Wu et al.，2025。[来源](https://www.ndss-symposium.org/ndss-paper/isolategpt-an-execution-isolation-architecture-for-llm-based-agentic-systems/)|NDSS2025|A，正式会议页与摘要|细粒度撤销规划能力本轮未作覆盖判断|
+|R20|Privacy-preserving policy evaluation in multi-party access control。Mina Sheikhalishahi、 Ischa Stork、 Nicola Zannone，2021。[来源](https://doi.org/10.3233/JCS-200007)|Journal of Computer Security29(6),613–650|F，§3.2–3.3、输出及安全假设|半诚实且服务器非串通，与恶意安全/来源认证不同维度|
+|R21|DECO: Liberating Web Data Using Decentralized Oracles for TLS。Fan Zhang et al.，2020。[来源](https://doi.org/10.1145/3372297.3417239)|ACM CCS2020|A，作者/NSF原文摘要与正式题录|本轮未复核协议证明|
+|R22|Lightweight Authentication of Web Data via Garble-Then-Prove。Xiang Xie、 Kang Yang、 Xiao Wang、 Yu Yu，2024。[来源](https://www.usenix.org/conference/usenixsecurity24/presentation/xie-xiang)|USENIX Security2024|A，正式会议摘要及机构|同输出、同安全模型下的强密码学比较对象|
+|R23|Proxying Is Enough: Security of Proxying in TLS Oracles and AEAD Context Unforgeability。Zhongtang Luo、 Yanxue Jia、 Yaobin Shen、 Aniket Kate，2025。[来源](https://doi.org/10.4230/LIPIcs.AFT.2025.4)|AFT2025|A，官方摘要、发表记录和机构|全文攻击与本地固定密钥AES-GCM关系电路未对齐，不能推断本地实现漏洞|
+|R24|Declassification: Dimensions and Principles。Andrei Sabelfeld、 David Sands，2009。[来源](https://doi.org/10.3233/JCS-2009-0352)|Journal of Computer Security|A，作者机构与出版元数据|详细组合泄漏覆盖待取得核读全文|
+|R25|SoK: SSO-MONITOR — The Current State and Future Research Directions in Single Sign-On Security Measurements。Louis Jannett et al.，2024。[来源](https://doi.org/10.1109/EuroSP60621.2024.00018)|IEEE EuroS&P2024|A，作者项目全文已下载，本轮读摘要与复现README|支持测量领域已有工作，具体撤销语义覆盖待全文逐表核验|
+|R26|A First Measurement Study on Authentication Security in Real-World Remote MCP Servers。Huijun Zhou et al.，2026。[来源](https://arxiv.org/abs/2605.22333v1)|arXiv2605.22333v1|A，摘要、作者机构、官方元数据|其首次是作者主张、本文未复验大规模数据|
+|R27|AuthSaber: Automated Safety Verification of OpenID Connect Programs。Tamjid Al Rahat、 Yu Feng、 Yuan Tian，2024。[来源](https://doi.org/10.1145/3658644.3670318)|ACM CCS2024|A，作者全文已下载，本轮读摘要、方法概述|源码验证和未知原生黑盒接口应分别比较|
+|R28|MAFOAuth: A multi-party automated framework for revealing protocol logic vulnerabilities in OAuth 2.0 implementations。Guanping Zhang et al.，2026。[来源](https://doi.org/10.1016/j.compeleceng.2026.111458)|Computers and Electrical Engineering139 Part C,111458、11月期|A，出版商摘要及2026-03 SSRN记录|全文未核读，11月期早于截止日的在线检索记录已保存|
+|R29|混合云环境下面向数据生命周期的自适应访问控制。林莉、毛新雅、储振兴、解晓宇，2024。[来源](https://www.jos.org.cn/html/2024/3/6809.htm)|软件学报35(3),1357–1376、2023在线|F，官方HTML摘要、§1方法和实验定位|研究数据生命周期，OAuth原生撤销保证需另立条件|
+|R30|支持访问策略部分隐藏的CP-ABE方案。刘霞、王馨族、张涛等，2024。[来源](https://doi.org/10.11959/j.issn.1000-436x.2024179)|通信学报45(10),180–190|A，官方摘要、作者机构与题录|正文安全证明未核读，密文解密撤销与服务停止分开|
+|R31|OAuth Profile for Delegated AI Agent Authorization。Sanjeev Kumar，2026。[来源](https://datatracker.ietf.org/doc/draft-mishra-oauth-agent-grants/02/)|个人Internet-Draft draft-mishra-oauth-agent-grants-02, 2026-08-30|A，状态、摘要及协议范围|旧DAAP-01题名及功能列表须按版本引用、非正式RFC|
+|R32|Mission-Bound Authorization for OAuth 2.0。Karl McGuinness，2026。[来源](https://datatracker.ietf.org/doc/draft-mcguinness-oauth-mission/02/)|个人Internet-Draft -02, 2026-11-02|A，状态、摘要及撤销边界|已发行令牌可能存活、非正式RFC|
+|R33|Parameterized Complexity of Categorical Clustering with Size Constraints。Fedor V. Fomin、 Petr A. Golovach、 Nidhi Purohit，2021。[来源](https://arxiv.org/abs/2104.07974v1)|arXiv2104.07974v1|H，沿用R3对§1–5相关定义、Observation/Lemma的核读|全资源谱及逐行预算覆盖未决|
+|R34|On Computing Centroids According to the p-Norms of Hamming Distance Vectors。Jiehua Chen、 Danny Hermelin、 Manuel Sorge，2018/2019。[来源](https://arxiv.org/abs/1807.06469v3)|arXiv1807.06469v3|H，沿用R3对问题定义及主要定理的核读|逐请求预算和共同配置谱需作精确归约|
+|R35|Parameterized Low-Rank Binary Matrix Approximation。Fedor V. Fomin、 Petr A. Golovach、 Fahad Panolan，2018。[来源](https://doi.org/10.4230/LIPIcs.ICALP.2018.53)|ICALP2018|F，官方PDF开篇Binary r-Means定义|全局误差预算与本项目逐行预算/付费备用根尚有差异|
+|R36|The Complexity of Change。Jan van den Heuvel，2013。[来源](https://arxiv.org/abs/1312.2816)|arXiv1312.2816|H，沿用R3对重配置定义的核读|精确资源谱优先权未决|
+|R37|Constrained Role Mining。Carlo Blundo、 Stefania Cimato，2012。[来源](https://arxiv.org/abs/1203.3744v1)|arXiv1203.3744v1|H，沿用R3对Problem2.1–2.3/Theorem2.1–2.3的核读|角色复用与整根撤销的语义需映射|

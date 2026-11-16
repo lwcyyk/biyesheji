@@ -1,0 +1,776 @@
+
+[PDF PAGE 1]
+Securing Autonomous Clinical Agents:
+Time-Scoped Hypergraph Delegation for
+Controlling Patient Data Access
+Hassan Karim∗, Sai Sitharaman†, Deepti Gupta‡, Danda B. Rawat§
+∗Stable Cyber, Dallas, TX, USA; ORCID: 0000-0002-5441-049X
+†Zetafence, Dublin, CA, USA ‡Texas A&M University–Central Texas, Killeen, TX, USA
+§Howard University, Washington, DC, USA; ORCID: 0000-0003-3638-3464
+Abstract—Healthcare data breaches cost hospitals and clinics
+an average of $7.42M USD per breach. Autonomous multi-agent
+LLM pipelines in clinical settings multiply that exposure struc-
+turally: a prompt-injection payload embedded in a laboratory
+report or referral note traverses the full delegation hierarchy
+before any human reviewer observes it. Standard mechanisms
+including ﬂat Role-Based Access Control (RBAC) and Macaroon
+caveat chains provide no structural guarantee that a spawned
+sub-agent’s permissions remain bounded by its parent’s scope.
+The Minimum Necessary Standard must hold across mixed-
+sensitivity EHR data and multi-hop chains simultaneously. That
+is, the gap is architectural, not behavioral. We present the Hy-
+brid Scripted-Execution and Prompt-Grounded Injection (SEPI)
+design, a replay-faithful methodology that freezes authorization-
+request traces and replays them identically across baselines to
+isolate authorization semantics from LLM stochasticity. Applied
+to a ﬁve-agent post-surgical oncology coordination workﬂow over
+a synthetic Electronic Health Record scenario, and evaluated
+against 39 clinically grounded injection payloads across leaf-
+agent, mid-delegate, and parent-orchestrator compromise sce-
+narios, NGAC-hypergraph time-scoped delegation reduces mean
+sensitivity-weighted blast radius ( Bw) by 75.0% relative to
+ﬂat RBAC and 65.2% relative to Macaroon caveat chains. A
+temporal ablation shows that removing texpire raises mean Bw
+by 75.0% relative to full NGAC. The reduction follows from
+structural properties of the delegation architecture: attenuation
+is provable by construction rather than contingent on model
+behavior . Across model conditions, Claude Sonnet 4.6 actively
+detected all 39 payloads while open-source models showed weaker
+or intermittent behavioral protection, reinforcing authorization
+as the model-agnostic containment control.
+Index Terms —Agentic AI, prompt injection, NGAC-
+hypergraph, blast radius, clinical AI security, HIPAA, access
+control, multi-agent systems
+I. I NTRODUCTION
+IBM’s 2025 Cost of a Data Breach Report [1], data
+breaches at hospitals and clinics cost an average of USD 7.42
+million ($7.42M USD) per breach. That ﬁgure predates the
+widespread clinical deployment of LLM agents. Integration of
+such agents into Electronic Health Record (EHR) workﬂows
+introduces a new exposure class, not merely a wider one.
+Traditional software vulnerabilities are bounded by the process
+perimeter of a single application. Multi-agent orchestration
+frameworks such as AutoGen [2] dissolve that perimeter.
+Delegation chains now carry context across agent boundaries
+automatically, without human inspection at each traversal hop.
+An adversarial payload embedded in a retrieved laboratory
+result or a cross-facility referral note can instruct a sub-agent
+to request resources outside its intended scope. That instruction
+travels the full delegation hierarchy before any human reviewer
+observes it.
+The healthcare setting ampliﬁes this risk along three dimen-
+sions. First, EHRs contain data spanning multiple HIPAA sen-
+sitivity tiers in a single patient record, from routine structured
+lab values to psychiatric and substance-use histories. Second,
+the Minimum Necessary Standard (45 C.F.R. § 164.502(b))
+[3], [4] requires that access be scoped to the minimum
+PHI necessary for the stated purpose. Standard RBAC role
+assignments and stateless token caveats cannot structurally
+enforce this principle across multi-hop delegation chains.
+Third, documented oncology-sector breaches [5] and sector-
+wide breach cost data [1] establish that the consequences of
+unauthorized PHI access are severe and sector-speciﬁc.
+A. Five-Agent Oncology Workﬂow
+The ﬁve-agent post-surgical oncology care-coordination
+pipeline described in Figure 1 centers on a Task Planner
+(orchestrator) that receives the shift context and spawns four
+sub-agents: the EHR Retriever, the Clinical Calculator, the
+Pharmacovigilance Monitor, and the Synthesis/Output Gener-
+ator. Each agent communicates exclusively through a tool-call
+interface. All database access is mediated by the enforcement
+point.
+A controlled study of 216 patient-facing clinical dialogue
+simulations found aggregate prompt-injection success rates of
+94.4% at the primary decision turn across frontier models [6],
+with 91.7% success even for attacks involving teratogenic
+drugs. These ﬁgures establish that, for models deployed
+without strong safety alignment, the authorization layer is
+the primary, not secondary, control against injection-induced
+unauthorized access.
+We make the following contributions:
+1) Bw metric and clinical payload corpus. A HIPAA-
+sensitivity-tier-weighted blast-radius metric and a 39-
+payload clinically grounded corpus released with the
+artifact package (Sections IV and VII).
+2) SEPI methodology. A test design and harness that
+replays frozen authorization-request traces identically
+352
+2026 IEEE International Conference on Digital Health (ICDH)
+979-8-3195-1202-4/26/$31.00 ©2026 IEEE
+DOI 10.1109/ICDH72779.2026.00047
+2026 IEEE International Conference on Digital Health (ICDH) | 979-8-3195-1202-4/26/$31.00 ©2026 IEEE | DOI: 10.1109/ICDH72779.2026.00047
+Authorized licensed use limited to: University of Electronic Science and Tech of China. Downloaded on November 05,2026 at 06:35:10 UTC from IEEE Xplore.  Restrictions apply. 
+
+[PDF PAGE 2]
+Task Planner
+(Orchestrator)
+S1: leafEHR Retriever Clinical Calculator S2: midPharmacovigilance
+Monitor Synthesis Agent
+tool callEnforcement Point
+= Adversarial payload path
+= Normal delegation/tool call path
+= Security injection point
+= Cascading adversarial cascade
+Synthea Electronic Health
+Record DB
+(HIPAA Tier 1/2/3)
+Revocation ServiceNGAC Policy Store
+tool call
+T ext
+S1: Leaf
+injection
+S3: Orchestrator
+injection
+S3: Mid
+injection
+PoAToken
+(time-scoped)
+PoAToken
+(time-scoped)
+PoAToken
+(time-scoped)
+PoAToken
+(time-scoped)
+Fig. 1. Five-agent post-surgical oncology coordination workﬂow with the
+enforcement point and the three compromise injection points.
+across baselines, isolating authorization semantics from
+LLM behavioral variance (Section IV).
+3) Empirical containment results.A 75.0% reduction in
+mean sensitivity-weighted blast radius under NGAC-
+hypergraph delegation relative to ﬂat RBAC and a 65.2%
+reduction relative to Macaroon caveat chains across three
+compromise scenarios (Section V).
+4) Mechanism isolation.An ablation experiment showing
+that removing time expiry (texpire) from tokens raises the
+meanBw by 75.0% relative to full NGAC hypergraph
+(Section V).
+5) Alignment-authorization interaction. An empirical
+characterization of how model-level safety alignment
+and authorization-layer enforcement interact: Claude
+Sonnet 4.6 actively detected all 39 payloads, Mistral 7B
+exhibited intermittent exact-match unauthorized calls,
+and Llama-3.1 8B largely reverted to in-scope work-
+ﬂow execution; together they conﬁrm that containment
+depends on the enforcement architecture, not on model-
+level alignment (Section V -C).
+The remainder of this paper is organized as follows. Sec-
+tion II surveys related work. Section III deﬁnes the system
+model, threat scope, and authorization architecture. Section IV
+presents the SEPI experimental design. Section V reports
+the primary containment, ablation, and live-validation results.
+Section VI discusses implications and threats to validity.
+Section VII concludes and identiﬁes future work.
+II. R ELA TED WORK
+A. Multi-Agent LLM Orchestration and Agentic Attack Sur-
+faces
+Multi-agent orchestration frameworks such as AutoGen [2]
+expand the attack surface from a single context window to
+every node in the delegation hierarchy: a message in one
+agent’s context window can traverse the entire delegation
+hierarchy before human review is possible. The Model Context
+Protocol [7] standardizes tool attachment for agents but simul-
+taneously standardizes cross-origin context-poisoning vectors,
+while an EHR-integrated clinical deployment reported that
+PHI-touching interactions account for over 70% of physician-
+initiated sessions [8]. A recent scoping review likewise ﬁnds
+that healthcare-agent governance frameworks lag deployment
+practice [9].
+B. Prompt Injection Benchmarks and Clinical Risk
+Lee et al. report a 94.4% aggregate injection success rate
+across 216 clinical dialogue simulations. In the highest-harm
+scenario category, i.e. cases involving teratogenic drugs and
+other FDA Category X agents, injection success reached
+91.7% [6]. That ﬁgure represents the conditional success
+probability given that a payload reaches the model’s context.
+Tool-integrated agents face a different distribution: InjecAgent
+reports 24–47% indirect injection success for ReAct-prompted
+GPT-4 agents [10], while Agent Security Bench reports
+72.68% for direct injection and 84.30% for mixed attacks [11].
+The Medical Prompt Injection Benchmark [12] demonstrates
+that harmful LLM outputs can be structurally coherent and
+clinically decorated while recommending dangerous injected
+actions. W ASP reports partial hijacking rates up to 86% while
+full attacker goal completion remains 0–17% [13], motivating
+our separation of compromisedand exﬁltration states.
+C. Delegation and Access Control for Agent Workﬂows
+RBAC [14] provides no structural attenuation for spawned
+agents. Macaroons [15] provide cryptographic caveat chain-
+ing. Stateful extensions [16] address revocation but cannot
+detect semantically valid yet unauthorized intent. NGAC [17]
+evaluates authorization via graph traversal and enforces pol-
+icy at the resource layer independently of the application.
+A NIST instantiation demonstrates NGAC trapping SQL
+queries [18], directly analogous to our tool-call interception.
+Translating NGAC to a hypergraph formulation makes sub-
+agent permission sets mathematically bounded by the parent
+hyperedge: attenuation is provable by construction rather than
+by conﬁguration. A prior hypergraph privilege-analysis study
+demonstrated the scalability of this approach across multi-
+cloud environments accommodating large-scale principal and
+object sets [19]. The present work applies that formulation to
+the distinct problem of temporal, multi-hop LLM delegation,
+for which the time-scope attribute of the hyperedge is not
+merely convenient but structurally necessary.
+D. Clinical AI Governance and Quantitative Risk Modeling
+HIPAA audit controls (45 C.F.R. § 164.312(b)) [20] and
+HHS OCR audit ﬁndings [21] establish that systematic ePHI
+governance gaps are the norm, not the exception. A recent ar-
+chitectural analysis [22] identiﬁes three structural tensions be-
+tween LLM context windows and HIPAA minimum-necessary
+requirements, all of which are addressed structurally by the
+hypergraph delegation layer. Digital forensics research [23]
+establishes that semantic drift across multi-hop chains can
+break forensic causation chains even with complete logs. No
+prior work models multi-agent LLM blast radius using an
+353
+Authorized licensed use limited to: University of Electronic Science and Tech of China. Downloaded on November 05,2026 at 06:35:10 UTC from IEEE Xplore.  Restrictions apply. 
+
+[PDF PAGE 3]
+absorbing CTMC parameterized from clinical injection bench-
+marks, nor evaluates temporal attenuation as an isolateable
+control variable.
+III. S YSTEM MODEL AND THREA TSCOPE
+A. Threat Model and Authorization Scope
+Figure 1 illustrates the NGAC-Hypergraph blast-radius con-
+tainment architecture. We consider an adversary capable of
+embedding adversarial payloads in external content that the
+clinical agent system ingests during normal operations, in-
+cluding laboratory report free-text ﬁelds, referral notes, and
+medication-history entries retrieved from simulated external
+systems. This is an indirect prompt injectionthreat consistent
+with MITRE A TLAS techniques [24] and the scenarios studied
+by Lee et al. [6] and InjecAgent [10]. The adversary’s objective
+is to cause one or more sub-agents to request PHI beyond the
+current delegation scope, either by crossing patient boundaries
+or by escalating to a higher HIPAA sensitivity tier than the
+task requires; the adversary does not control model weights,
+system prompts, or the authorization policy store.
+Our focus is the authorization threat surface after context
+poisoning occurs: how much unauthorized access does the
+enforcement architecture permit before blocking? We there-
+fore exclude direct compromise of the NGAC policy store,
+inference-time model-weight manipulation, side-channel text
+exﬁltration, and cross-organization federated EHR settings,
+and we do not claim generalization beyond the synthetic
+oncology workﬂow and payload corpus used in Section IV.
+B. NGAC-Hypergraph Authorization Layer
+Next Generation Access Control (NGAC) [17] represents
+access policy as a directed graph over user nodes (U), object
+attributes (OA), policy classes (PC), and operations. We extend
+this to a hypergraph formulation in which each delegation edge
+is a time-scoped hyperedge: the child agent’s permission set is
+a proper subset of the parent’s set, and the hyperedge carries
+explicittstart andtexpire attributes.
+Deﬁnition 1 (Time-Scoped Delegation Hyperedge). A dele-
+gation hyperedgee =( P,C,ts,te,O) connects parent agent
+P to child agent C, is valid over the interval [ts,te], and
+authorizes only the operations in O,w h e r eO⊆O P (i.e.,
+the child’s authorized operations are a strict subset of the
+parent’s).
+Attenuation is provable by construction: graph traversal can-
+not reach any node reachable fromP that is not also reachable
+through e. A spawned sub-agent cannot hold permissions
+outside this hyperedge regardless of what an injected payload
+instructs it to request.
+C. Baseline Architectures
+We implement three authorization baselines at the same ar-
+chitectural position (the tool-call enforcement point) to ensure
+fair comparison.
+Flat RBAC. Role membership is evaluated at access time.
+No mechanism attenuates child-agent scope relative to the
+TABLE I
+FOUR-DIMENSION AUTHORIZA TION COMPARISON
+Dimension RBAC Macaroons NGAC
+Delegation mechanism Role inheri-
+tance
+Caveat token Time-scoped hy-
+peredge
+Multi-hop attenuation None Partial Provable
+Prevention probability ≈0.15 ≈0.80 ≈0.90
+Time-scoping External Predicate Native
+tstart,t expire
+parent. Role explosion in oncology workﬂows is well doc-
+umented [14].
+Macaroon caveat chains. We use Macaroons, HMAC-
+chained tokens to embed predicates restricting scope and
+time [15]. Stateful extensions enable revocation [16]. Crypto-
+graphic checks block out-of-scope requests. Semantic attacks
+operating within the caveat’s predicate scope are undetected.
+NGAC-hypergraph (this work). Graph traversal
+at the EnforcementPoint (modes: defended,
+baseline_jwt, baseline_dag) mediates every tool
+call. Time-scope expiry via the texpire attribute provides
+containment for temporally out-of-scope accesses that RBAC
+and Macaroons permit.
+Table I summarizes the four structural comparison dimen-
+sions used in the main paper; the full architecture comparison
+table is provided in the supplementary materials.
+IV . EXPERIMENTAL DESIGN (SEPI)
+A. Design Principle: Generate-Replay Separation
+The SEPI (Hybrid Scripted-Execution + Prompt-Grounded
+Injection) methodology enforces one non-negotiable separa-
+tion: generation may be stochastic; replay must be determin-
+istic.
+All baseline comparisons operate on frozen, serialized
+TraceRecordobjects. No LLM call is made during the
+replay or measurement phase. This design follows the method-
+ology of AgentDojo [25] (formal environment-state utility
+checks, not LLM simulation) and AgentSpec [?] (runtime rule
+enforcement over permitted agent control ﬂow). The unit of
+analysis is the frozen trace, not the LLM output.
+B. Frozen Trace Generation
+We generate N =5 0 synthetic oncology patients using
+Synthea [26] (cancer module, seed = 20260101). The patient
+bundle is exported to a ﬁxed SQLite database whose SHA-256
+hash is recorded in everyTraceRecordheader, proving that
+all primary trace ﬁles operate on identical data. The scripted
+workﬂow executor in oncology_workflow.pytraverses
+the ﬁve-agent task graph in topological order for a given
+patient ID and shift start time and emits a ParsedAction
+containing agent identity, target resource identiﬁers, requested
+operation, delegation-edge context, and timestamp relative to
+shift start. No LLM calls are made; given the same patient ID
+and scenario ID, the output event stream is bit-for-bit identical
+across runs.
+354
+Authorized licensed use limited to: University of Electronic Science and Tech of China. Downloaded on November 05,2026 at 06:35:10 UTC from IEEE Xplore.  Restrictions apply. 
+
+[PDF PAGE 4]
+TABLE II
+INJECTION PAY L OA DCORPUS DISTRIBUTION
+Corpus N Tier
+iti 15 3 (psych/SUD)
+dpi 8 2 (notes)
+fc 8 2 (notes)
+ci 4 1 (labs)
+ci (time-scope) 4 1/3 (expired)
+Total 39
+C. Injection Payload Corpus
+Table II summarizes the 39 clinically grounded injection
+payloads distributed across four corpus ﬁles. Source scenarios
+are drawn from Lee et al. [6], MPIB [12], InjecAgent [10],
+ASB [11], and W ASP [13]. Two surface-form variants are
+included for each payload, and blast radius is averaged across
+variants.
+The four time-scoping payloads target in-scope resources
+whose hyperedge texpire has passed. RBAC and Macaroons
+allow these accesses, whereas NGAC blocks them. They are
+exercised directly in the ablation experiment (Section V -B).
+D. Compromise Scenarios and Replay Matrix
+Three scenarios vary the depth at which the injection ﬁres:
+S1 (leaf-agent) embeds the payload in a lab result retrieved
+by the EHR Retriever; S2 (mid-delegate) embeds it in a
+referral note processed by the Pharmacovigilance Monitor;
+and S3 (parent-orchestrator) embeds it in a cross-facility
+transfer document processed by the Task Planner. The replay
+matrix is Baselines(4)× Scenarios(3)× Seeds(3) = 36 traces.
+The four baselines are RBAC, Macaroons, NGAC-hypergraph
+(full), and NGAC-hypergraph (no time-scope, ablation). These
+produced 36 replay traces plus 9 base traces (45 JSONL ﬁles
+total).
+E. Measuring Blast-Radius
+The weighted blast-radius metricBw is deﬁned in Eq. 1:
+Bw(τ)=
+∑
+e∈E(τ)
+∑
+r∈Ue
+wte(r) (1)
+whereτis a replay trace,E(τ) is its set of trace events, andUe
+is the set of unauthorized resources that were actually granted
+in evente.
+Let te(r) ∈{ 1, 2, 3} denote the HIPAA tier of granted
+resource r in event e. For the primary analysis, wtiered =
+(1, 2, 3). Thus each granted tier-1, tier-2, and tier-3 unautho-
+rized access contributes 1, 2, and 3, respectively, to the blast
+radius. An event contributes to Bw only when an injected
+access outside the delegated scope is actually granted. Denied
+injected events contribute 0.
+We also report secondary metrics including unauthorized
+granted-event count, per-tier breakdown, proportion of traces
+with any unauthorized grant, and delegation overbreadth.
+Weight robustness analysis in Figure 2 evaluates three
+weight vectors: wﬂat =( 1 , 1, 1), wtiered =( 1 , 2, 3), and
+Flat
+(1,1,1)
+Tiered
+(1,2,3)
+Severe
+(1,3,9)
+0
+1
+2
+3
+4
+5
+6
+7Bw ratio (baseline / NGAC-full)
+3.25x
+4.0x
+6.75x
+2.50x
+2.88x
+4.50x
+1.75x 1.75x
+2.25x
+RBAC
+Macaroons
+NGAC (no exp.)
+Fig. 2. Mean Bw ratio (baseline to NGAC-full) under three sensitivity-weight
+vectors. The Temporal NGAC-Hypergraph advantage holds under all three
+schemes.
+wsevere =( 1 , 3, 9), testing whether the ordering NGAC <
+Macaroons< RBAC holds under all weighting schemes.
+F . CTMC Parameter Calibration Summary
+The CTMC risk parameters are empirically calibrated from
+37 literature, industry, and regulatory sources spanning clinical
+injection benchmarks, healthcare breach reports, and access-
+control studies. The principal anchors are the 94.4% condi-
+tional prompt-injection success rate reported by Lee et al. [6]
+and the $7.42M average healthcare breach cost reported by
+IBM [1]. The full parameter table and source-by-source cali-
+bration rationale are provided in the supplementary materials.
+V. P ERFORMANCE EV ALUA TION
+A. Primary Containment Results
+Given identical frozen traces, does the authorization archi-
+tecture alone produce a measurable difference in unauthorized
+access?
+Table III reports meanBw with 95% bootstrap conﬁdence
+intervals (CI) over replay runs (3 seeds per scenario and 9
+scenario-seed runs overall) per architecture and scenario. Sta-
+tistical signiﬁcance is assessed using an exact paired Wilcoxon
+signed-rank test on per-trace Bw values across the three
+baseline pairs (NGAC vs. RBAC, NGAC vs. Macaroons,
+Macaroons vs. RBAC).
+NGAC-hypergraph (full) achieves the lowestBw across all
+three scenarios. The NGAC-to-RBAC gap is largest in the
+mid-delegate scenario (S2: 7.00) and remains substantial in
+the leaf scenario (S1: 6.00), but narrows in the orchestrator
+scenario (S3: 3.00) because the parent agent already holds
+broad legitimate read scope. The RBAC 95th-percentileBw
+under S3 attacks reaches 9.0. Role explosion is the root
+cause. I.e., a compromised orchestrator inherits the broadest
+permission set and thus the largest blast radius (Figure 3).
+355
+Authorized licensed use limited to: University of Electronic Science and Tech of China. Downloaded on November 05,2026 at 06:35:10 UTC from IEEE Xplore.  Restrictions apply. 
+
+[PDF PAGE 5]
+TABLE III
+MEAN WEIGHTED BLAST RADIUS Bw BY ARCHITECTURE AND SCENARIO (95% B OOTSTRAP CI OVER REPLA Y RUNS;3 SEEDS PER SCENARIO )
+Architecture S1 (leaf) S2 (mid) S3 (orch.) Overall
+Flat RBAC 6.00 [6.00, 6.00] 7.00 [7.00, 7.00] 8.33 [7.00, 9.00] 7.11 [6.44, 7.89]
+Macaroon chains 0.00 [0.00, 0.00] 7.00 [7.00, 7.00] 8.33 [7.00, 9.00] 5.11 [2.56, 7.33]
+NGAC (no texpire) 0.00 [0.00, 0.00] 1.00 [1.00, 1.00] 8.33 [7.00, 9.00] 3.11 [0.78, 5.78]
+NGAC-hypergraph 0.00 [0.00, 0.00] 0.00 [0.00, 0.00] 5.33 [4.00, 6.00] 1.78 [0.00, 3.56]
+Wilcoxonp: NGAC vs. RBAC 0.0039
+Wilcoxonp: NGAC vs. Mac 0.0313
+Wilcoxonp: Mac vs. RBAC 0.2500
+0
+2
+4
+6
+8
+10
+S1 (leaf)
+0
+2
+4
+6
+8
+10
+S2 (mid)
+RBAC Macaroon
+chains
+NGAC
+(no exp.)
+NGAC
+(full)
+0
+2
+4
+6
+8
+10
+S3 (orch.)
+Weighted blast radius  Bw
+Architecture
+Fig. 3. Weighted blast radius Bw by authorization architecture and compro-
+mise scenario. Horizontal bars mark the mean. V ertical bars span the 95%
+bootstrap conﬁdence interval. NGAC-hypergraph (full) is left-shifted relative
+to all baselines in every scenario. The blast radius gap narrows under attack
+S3 because the orchestrator holds broad legitimate scope.
+B. Temporal Scope Ablation
+Comparing NGAC (full) to NGAC (no texpire) isolates the
+contribution of temporal attenuation. The two time-scoping
+payloads (corpuscontext_ignore (time)) are blocked
+by full NGAC but pass under NGAC-no-expiry. Under NGAC-
+TABLE IV
+LIVE PAY L OA DVALIDA TION RESULTS BY MODEL ( C V=1 REQUIRES
+EXACT TARGET UNAUTHORIZED TOOL -CALL SUCCESS IN ≥3 OF 5 RUNS)
+Model Payloads Runs CV=1 Observed pattern
+Claude Sonnet 4.6 39 195 0 (0%) Active detection, in-
+scope continuation
+Llama-3.1 8B 39 195 0 (0%) Default workﬂow per-
+sistence; 1 off-target
+OOS call
+Mistral 7B v0.3 39 195 0 (0%) Intermittent exact
+matches; max ASR
+0.40
+no-expiry, meanBw increases by 1.33 relative to full NGAC
+(75.0% increase), conﬁrming that temporal scope enforcement
+contributes measurably to the containment advantage beyond
+structural delegation scoping alone.
+C. Live Payload V alidation
+We run all 39 corpus payloads against a single ReAct-
+prompted agent under the RBAC baseline (permissive, no
+NGAC enforcement) to establish payload plausibility as a
+precondition for the deterministic experiments. We evaluate
+Claude Sonnet 4.6, Llama-3.1 8B Instruct, and Mistral 7B v0.3
+at temperature=0 with ﬁve replicates per payload per model
+(195 runs/model); a payload passes if the target unauthorized
+tool call is issued in ≥ 3 of 5 runs. Table IV summarizes
+per-model corpus-validation counts (CV = 1 denotes an exact
+target unauthorized tool call in≥3 of 5 runs).
+Claude Sonnet 4.6 explicitly identiﬁed the prompt injection
+attempt in all 39/39 payloads, remained tool-active across
+all 195 runs, and issued zero exact target out-of-scope calls,
+indicating active behavioral detection rather than passive scope
+compliance. Llama-3.1 8B produced no exact target unautho-
+rized calls and one off-target cross-patient request, whereas
+Mistral 7B v0.3 remained the only open-source LLM model
+with intermittent exact-match failures: four payloads produced
+nonzero ASR, with a maximum ASR of 0.40, though none
+met the corpus-validation threshold. These live results do not
+alter the primary structural comparison, which is measured on
+identical frozen traces, but they conﬁrm that enforcement-layer
+containment holds regardless of whether a model’s safety de-
+rives from explicit detection, default-workﬂow persistence, or
+transient competence limits. Detailed narratives for payloads
+356
+Authorized licensed use limited to: University of Electronic Science and Tech of China. Downloaded on November 05,2026 at 06:35:10 UTC from IEEE Xplore.  Restrictions apply. 
+
+[PDF PAGE 6]
+iti_015 and fc_003 are deferred to the supplementary
+materials.
+VI. D ISCUSSION AND THREA TS TO VALIDITY
+A. Structural vs. Empirical Claims
+Our primary claim in this work is structural: NGAC-
+hypergraph delegation makes permission attenuation provable
+by construction. The empiricalBw measurements validate that
+this structural property produces measurably lower unautho-
+rized access under our experimental conditions.
+B. The Conﬁguration-Dependence Objection
+NGAC-Hypergraph’s advantage is a function of the policy
+conﬁguration as well as the architecture. The supplemen-
+tary materials include the complete NGAC-Hypergraph policy
+Y AML ﬁles to allow independent replication. The formal
+property being claimed (child permission set is a strict subset
+of parent permission set under time-scoped hyperedge) holds
+for the workﬂow as conﬁgured. Delegation overbreadth (the
+fraction of edges where this property holds) is zero under
+NGAC-hypergraph, whereas RBAC exhibits nonzero over-
+breadth in the primary experiments, providing a metric-level
+conﬁrmation.
+C. Threats to V alidity
+Prompt sensitivity. Injection payloads were manually
+crafted for the oncology context. We mitigate prompt sensitiv-
+ity concerns using two surface-form variants per payload. We
+averagedBw across variants.
+Model stochasticity. Live validation runs use tempera-
+ture =0 . Claude Sonnet 4.6 results (195 runs, 0 out-of-
+scope tool calls, 39/39 explicit injection detections) are treated
+as a conﬁrmed bound: 95% CI upper bound on true out-
+of-scope rate ≈ 1.5% (Clopper-Pearson exact, n = 195 ,
+k =0 ). This threat applies to the Ollama model conditions,
+where temperature=0 and model version are pinned. We do,
+however, report variance across replicates.
+Baseline conﬁguration fairness.All three baselines enforce
+at the same architectural position (tool-call layer). RBAC
+is conﬁgured to reﬂect documented healthcare deployment
+practices [14]. Macaroons include standard time-bound caveats
+but are not exhaustively conﬁgured.
+VII. C ONCLUSION AND FUTURE WORK
+We presented SEPI, a replay-faithful methodology for
+comparing access-control architectures in multi-agent clini-
+cal LLM workﬂows that decouples stochastic LLM behavior
+from deterministic authorization measurement. Applied to a
+ﬁve-agent oncology coordination workﬂow with a corpus of
+39 clinically-grounded injection payloads, we demonstrated
+that NGAC-hypergraph time-scoped delegation reduces mean
+weighted blast radius by 75.0% relative to ﬂat RBAC and
+65.2% relative to Macaroon caveat chains. A temporal ablation
+showed that removingtexpire from the token raises mean Bw
+from 1.78 to 3.11, a 75.0% increase relative to full time-
+bound NGAC-Hypergraph. The result is therefore structural as
+well as empirical: because child permissions are bounded by a
+time-scoped hyperedge, attenuation is provable by construction
+rather than left to prompt behavior or role conﬁguration. Live
+validation across three model conﬁgurations showed hetero-
+geneous model-level responses: Claude Sonnet 4.6 actively
+detected all 39 payloads and issued zero exact target out-
+of-scope calls, Llama-3.1 8B mostly persisted with in-scope
+workﬂow behavior while still producing one off-target cross-
+patient request, and Mistral 7B v0.3 exhibited intermittent
+exact-match failures without any payload reaching the corpus-
+validation threshold. The enforcement layer therefore carries
+the containment burden regardless of model behavior. The
+released artifact package includes the 39-payload corpus, all 45
+JSONL traces, NGAC policy Y AML ﬁles, and the validation
+harness needed to reproduce the reported measurements.
+Future work has four priorities:
+1) Replace expert-elicited CTMC ampliﬁcation priors with
+the empirical containment ratios reported here.
+2) Quantify authorization latency across local-library,
+localhost-HTTP , and networked deployment modes in-
+cluding remote-VPC deployment modes.
+3) Develop policy-speciﬁcation tooling that reduces
+NGAC-Hypergraph conﬁguration overhead.
+4) Characterize the transition point at which frontier-model
+behavioral detection and formal authorization shift from
+complementary to partially redundant controls, partic-
+ularly as ﬁne-tuning and domain adapters alter model
+behavior in on-premises clinical deployments.
+ARTIFACT AV AILABILITY
+Artifact URL omitted for double-blind review.
+Contents: Synthea cohort-generation and SQLite-conversion
+scripts for the synthetic EHR input used in the experiments;
+all four corpus JSONL ﬁles (39 payloads total); the complete
+trace set from the research matrix (9 base traces and 36
+replay traces, 45 JSONL ﬁles total); NGAC and baseline pol-
+icy/conﬁguration Y AML ﬁles; matrix, replay, smoke, and live-
+validation runner scripts; the ﬁgure-generation script; and the
+adapter/integration code used to bind the defended workﬂow
+to the external ngac_hypergraphauthorization library.
+ACKNOWLEDGMENTS
+AI-assisted content disclosure: We use OpenAI Codex gpt-
+5.4 xhigh and Anthropic Claude Sonnet 4.6 as software-
+engineering assistants during the development and revision
+of experiment, analysis, and ﬁgure-generation code. We use
+Gemini 3 Pro to troubleshoot latex errors and recommend
+initial draw.io XML code for the system diagram. Codex
+and Claude code were used to generate the empirical plots
+reported in this article. Anthropic Claude Opus 4.6 was used
+for a top-to-bottom review of the manuscript and for initial
+drafting suggestions for the ﬁgure-generation code. All AI-
+assisted outputs were reviewed, corrected and validated by the
+authors. The authors independently veriﬁed experimental data,
+statistical results, ﬁgure content and scientiﬁc claims and take
+full responsibility for the content of the article.
+357
+Authorized licensed use limited to: University of Electronic Science and Tech of China. Downloaded on November 05,2026 at 06:35:10 UTC from IEEE Xplore.  Restrictions apply. 
+
+[PDF PAGE 7]
+REFERENCES
+[1] IBM, “Cost of a data breach report 2025,” IBM, Tech. Rep., 2025.
+[Online]. Available: https://www.ibm.com/reports/data-breach
+[2] Q. Wu, G. Bansal, J. Zhang, Y . Wu, B. Li, E. Zhu, L. Jiang,
+X. Zhang, S. Zhang, J. Liu, A. Awadallah, R. W. White, D. Burger,
+and C. Wang, “AutoGen: Enabling next-gen LLM applications via
+multi-agent conversation,” arXiv preprint arXiv:2308.08155 , 2023.
+[Online]. Available: https://arxiv.org/abs/2308.08155
+[3] U.S. Department of Health and Human Services, “Minimum
+necessary requirement,” 2013, accessed 2026-02-14. [On-
+line]. Available: https://www.hhs.gov/hipaa/for-professionals/privacy/
+guidance/minimum-necessary-requirement/index.html
+[4] ——, “45 C.F.R. § 164.502 uses and disclosures of protected health
+information: General rules,” 2026, accessed 2026-02-14. [Online]. Avail-
+able: https://www.ecfr.gov/current/title-45/part-164/section-164.502
+[5] HHS Ofﬁce for Civil Rights, “Failure to protect the health records
+of millions costs millions (21st century oncology settlement),”
+2017. [Online]. Available: https://www.hhs.gov/hipaa/for-professionals/
+compliance-enforcement/agreements/21co/index.html
+[6] R. W. Lee, T. J. Jun, J. Lee, S. I. Cho, H. J. Park, and J. Suh,
+“Vulnerability of large language models to prompt injection when
+providing medical advice,” JAMA Network Open, vol. 8, no. 12, p.
+e2549963, 2025. [Online]. Available: https://jamanetwork.com/journals/
+jamanetworkopen/fullarticle/2842987
+[7] S. Gulyamov, S. Gulyamov, A. Rodionov, R. Khursanov,
+K. Mekhmonov, D. Babaev, and A. Rakhimjonov, “Prompt injection
+attacks in large language models and AI agent systems: A
+comprehensive review of vulnerabilities, attack vectors, and defense
+mechanisms,” Information, vol. 17, no. 1, p. 54, 2026. [Online].
+Available: https://www.mdpi.com/2078-2489/17/1/54
+[8] M. Griot, J. V anderdonckt, and D. Y uksel, “Implementation of large
+language models in electronic health records,” PLOS Digital Health,
+vol. 4, no. 12, p. e0001141, 2025. [Online]. Available: https://journals.
+plos.org/digitalhealth/article?id=10.1371/journal.pdig.0001141
+[9] B. Njei, Y . A. Al-Ajlouni, U. S. Kanmounye, S. Boateng, G. L.
+Nguefang, N. Njei, S. Hamouri, and A. F. Al-Ajlouni, “Artiﬁcial
+intelligence agents in healthcare research: A scoping review,” PLOS
+ONE, vol. 21, no. 2, p. e0342182, 2026. [Online]. Available:
+https://pmc.ncbi.nlm.nih.gov/articles/PMC12890167/
+[10] Q. Zhan, Z. Liang, Z. Ying, and D. Kang, “INJECAGENT:
+Benchmarking indirect prompt injections in tool-integrated large
+language model agents,” in Findings of the Association for
+Computational Linguistics: ACL 2024 , 2024. [Online]. Available:
+https://aclanthology.org/2024.ﬁndings-acl.624.pdf
+[11] H. Zhang, J. Huang, K. Mei, Y . Y ao, Z. Wang, C. Zhan, H. Wang,
+and Y . Zhang, “Agent security bench (ASB): Formalizing and
+benchmarking attacks and defenses in LLM-based agents,” in The
+Thirteenth International Conference on Learning Representations, 2025.
+[Online]. Available: https://openreview.net/forum?id=V4y0CpX4hK
+[12] J. Lee et al. , “MPIB: A benchmark for medical prompt injection
+attacks and clinical safety in LLMs,”arXiv preprint arXiv:2602.06268,
+2026. [Online]. Available: https://arxiv.org/abs/2602.06268
+[13] I. Evtimov et al. , “W ASP: Benchmarking web agent security against
+prompt injection attacks,” arXiv preprint arXiv:2504.18575, 2025.
+[Online]. Available: https://arxiv.org/abs/2504.18575
+[14] M. A. de Carvalho Junior and P . Bandiera-Paiva, “Health information
+system role-based access control current security trends and challenges,”
+Journal of Healthcare Engineering , vol. 2018, p. 6510249, 2018.
+[Online]. Available: https://pmc.ncbi.nlm.nih.gov/articles/PMC5836325/
+[15] A. Birgisson, J. G. Politz, U. Erlingsson, A. Taly, M. Vrable,
+and M. Lentczner, “Macaroons: Cookies with contextual caveats for
+decentralized authorization in the cloud,” in Network and Distributed
+System Security Symposium (NDSS) , 2014. [Online]. Available:
+https://theory.stanford.edu/∼ataly/Papers/macaroons.pdf
+[16] L. Cao, L. Meng, D. Stefan, and E. Fernandes, “Stateful
+least privilege authorization for the cloud,” in USENIX Security
+Symposium, 2024. [Online]. Available: https://www.usenix.org/system/
+ﬁles/usenixsecurity24-cao-leo.pdf
+[17] D. Ferraiolo, R. Chandramouli, V . Hu, and R. Kuhn, “NIST SP 800-178:
+A comparison of attribute based access control (ABAC) standards
+for data service applications: XACML and NGAC,” National Institute
+of Standards and Technology, Tech. Rep., 2016. [Online]. Available:
+https://nvlpubs.nist.gov/nistpubs/specialpublications/nist.sp.800-178.pdf
+[18] D. Ferraiolo, S. Gavrila, G. Katwala, and J. Roberts, “A method
+for imposing ﬁne-grain next generation access control over database
+queries,” National Institute of Standards and Technology, Tech. Rep.,
+2016. [Online]. Available: https://csrc.nist.gov/CSRC/media/Projects/
+Policy-Machine/documents/NGACControl over-SQL Queries v6.pdf
+[19] S. Sitharaman, H. Karim, D. Gupta, and M. Tyagi, “Scalable privilege
+analysis for multi-cloud big data platforms: A hypergraph approach,” in
+2025 IEEE International Conference on Big Data (BigData), 2025, pp.
+6626–6633. [Online]. Available: https://doi.org/10.1109/bigdata66926.
+2025.11401728
+[20] Electronic Code of Federal Regulations, “45 C.F.R. 164.312(b):
+HIPAA security rule — audit controls,” 2024. [Online]. Available:
+https://www.ecfr.gov/current/title-45/subtitle-A/subchapter-C/part-164
+[21] HHS Ofﬁce for Civil Rights, “2016–2017 HIPAA audits industry
+report,” U.S. Department of Health and Human Services, Tech.
+Rep., 2020. [Online]. Available: https://www.hhs.gov/sites/default/ﬁles/
+hipaa-audits-industry-report.pdf
+[22] S. Neupane, S. Mitra, S. Mittal, and S. Rahimi, “Towards a
+HIPAA compliant agentic AI system in healthcare,” arXiv preprint
+arXiv:2504.17669, 2025. [Online]. Available: https://arxiv.org/abs/2504.
+17669
+[23] Z. Yin, Z. Wang, W. Xu, J. Zhuang, P . Mozumder, A. Smith,
+and W. Zhang, “Digital forensics in the age of large language
+models,” arXiv preprint arXiv:2504.02963, 2025. [Online]. Available:
+https://arxiv.org/abs/2504.02963
+[24] MITRE, “A TLAS: Adversarial threat landscape for artiﬁcial-intelligence
+systems,” 2021. [Online]. Available: https://atlas.mitre.org/
+[25] E. Debenedetti, J. Zhang, M. Balunovic, L. Beurer-Kellner, M. Fischer,
+and M. V echev, “AgentDojo: A dynamic environment to evaluate
+prompt injection attacks and defenses for LLM agents,” in Advances
+in Neural Information Processing Systems (NeurIPS), 2024. [Online].
+Available: https://arxiv.org/abs/2406.13352
+[26] J. Walonoski, M. Kramer, J. Nichols, A. Quina, C. Moesel,
+D. Hall, C. Duffett, K. Dube, T. Gallagher, and S. McLachlan,
+“Synthea: An approach, method, and software mechanism for
+generating synthetic patients and the synthetic electronic health care
+record,” Journal of the American Medical Informatics Association ,
+vol. 25, no. 3, pp. 230–238, 2018. [Online]. Available: https:
+//academic.oup.com/jamia/article/25/3/230/4098271
+358
+Authorized licensed use limited to: University of Electronic Science and Tech of China. Downloaded on November 05,2026 at 06:35:10 UTC from IEEE Xplore.  Restrictions apply. 

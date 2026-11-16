@@ -1,0 +1,2174 @@
+
+[PDF_PAGE 1]
+This paper is included in the Proceedings of the 
+34th USENIX Security Symposium.
+August 13–15, 2025 • Seattle, WA, USA
+978-1-9391 33-52-6
+Open access to the Proceedings of the 
+34th USENIX Security Symposium is sponsored by USENIX.
+Mitigating Injection Attacks against E2EE 
+Applications via View-Based Partitioning
+Andrés Fábrega, Samuel Breckenridge, and Armin Namavari, 
+Cornell University; Thomas Ristenpart, Cornell Tech
+https://www.usenix.org/conference/usenixsecurity25/presentation/fabrega-partitioning
+
+[PDF_PAGE 2]
+Mitigating Injection Attacks against E2EE Applications
+via View-Based Partitioning
+Andrés Fábrega1, Samuel Breckenridge1, Armin Namavari1, Thomas Ristenpart2
+1 Cornell University 2 Cornell Tech
+Abstract
+A recent line of work has explored injection attacks against
+end-to-end encrypted (E2EE) applications. These break con-
+ﬁdentiality by sending adversarial content to a target victim
+E2EE client—thereby “injecting” this content into otherwise
+honest client state—followed by monitoring some encrypted
+backup or other server-side state. Known injection attacks
+exploit features such as compression before encryption of
+backups, and practitioners so far lack a way to prevent these
+attacks while retaining practicality.
+We address this gap by introducing a framework for pre-
+venting injection attacks that can be used with a variety of
+E2EE applications. Underlying the framework is a new ap-
+proach that we call view-based partitioning, which allows
+application features to be designed to ensure that injection
+attacks cannot be exploited to leak conﬁdential information.
+Intuitively, application state can be partitioned according to
+potentially adversarial views, and within individual views
+(e.g., all the messages visible to a particular sender in an
+E2EE messaging app) compression and other performance
+features can be used without risk of injection attacks.
+We provide a formal security model for injection attacks,
+and prove that application developers can use our framework
+to prevent injection attacks. We evaluate various implementa-
+tions of our framework as applied to backing up E2EE appli-
+cation state via SQLite and XML databases. Our experiments
+show that security comes with manageable performance over-
+heads for these applications.
+1 Introduction
+Popular applications utilize end-to-end encryption (E2EE) to
+help protect the data of billions of users worldwide (e.g., [47]).
+While extensive research (c.f., [5, 7, 11, 14]) has studied the
+security of the E2EE protocols used, such as the Signal proto-
+col [28,29], the increasing complexity of modern, feature-rich
+E2EE applications raises new security challenges.
+Our focus is on injection attacks against E2EE applica-
+tions [12, 15, 16, 48, 53]. These involve an adversary that
+sends payloads to a victim using some standard interface pro-
+vided by the application (e.g., sending text messages), thus
+“injecting” content into the victim’s plaintext application state.
+In turn, per the standard E2EE threat model, the adversary
+can additionally observe snapshots of the victim’s encrypted
+data that are sent to back-end servers. From these adaptive
+injections and observations, the adversary extracts sensitive
+information from the victim. Recent proof-of-concept injec-
+tion attacks have shown how to recover sensitive message data
+from WhatsApp [16], metadata about conversations in Sig-
+nal [16], and passwords from E2EE password managers [15].
+These attacks exploit intricacies of application-level logic—
+which process data before encryption—in order to bypass the
+strong guarantees of E2EE.
+There has been little progress in our understanding of how
+to defend against injection attacks efﬁciently. One potential
+solution is to disable all mechanisms that introduce interac-
+tions between different sending clients’ data, such as turn-
+ing off database compression, deduplication, and shared data
+structures. But this approach is not practical, since it pro-
+hibitively impacts the performance and user-experience of
+applications [15, 16, 23]. For example, turning off attachment
+deduplication and compression in WhatsApp results in back-
+ups requiring orders of magnitude more space. With billions
+of users, this is prohibitive, and we thus need better solutions.
+We introduce a general framework for efﬁciently mitigating
+injection attacks. Our framework serves as a design template
+for introducing features into an application (e.g., compressed,
+encrypted backups), in a way that is robust to injection attacks,
+without sacriﬁcing the efﬁciency beneﬁts of these features.
+The core idea underlying our approach is what we call
+view-based partitioning: instead of performing some sensi-
+tive feature-related computation (e.g., compression) over the
+entire application state, we can partition a client’s application
+state based on the views of different actors—for example,
+partitioning database rows for messages based on the external
+user that sent the message—and then process each partition in-
+dependently. This approach allows feature developers to strike
+a balance between security and performance: we leverage the
+USENIX Association 34th USENIX Security Symposium    2965
+
+[PDF_PAGE 3]
+beneﬁts of features in a per-view context, while disabling the
+cross-user interactions of data that lead to injection attacks.
+We provide an abstract, formal speciﬁcation of our view-based
+partitioning framework.
+To exercise it and demonstrate practicality, we implement
+view-based partitioning for encrypted backups based on two
+E2EE applications: WhatsApp and KeePassXC. Both use
+encrypted backups that have been shown to be vulnerable
+to injection attacks 1 that exploit deduplication or compres-
+sion [15, 16]. We discuss in the body how we mapped our
+abstract framework onto these applications, with relatively
+modest engineering effort. The most complex part of our im-
+plementation involves refactoring backup format processing—
+SQLite for WhatsApp and XML for KeePassXC—to provide
+isolation between partitioned views. Here we experimented
+with various approaches to achieve modularity and efﬁciency.
+As SQLite and XML are widely used for client-side appli-
+cations [41], future developers will be able to build off our
+engineering efforts.
+We provide a formal model to analyze the security of our
+framework in light of injection attacks. Doing so is subtle,
+because standard notions, such as left-or-right security, would
+not allow any non-trivial client-side processing, even those
+that cannot be exploited by injection attacks. Instead, our deﬁ-
+nition captures the following guarantee: an application feature
+is considered resistant to injection attacks if any injection-
+using adversary that succeeds in learning one bit of infor-
+mation about client state can be simulated by an efﬁcient
+adversary that does not perform injections. Using this model,
+we formally show that injections do not assist attackers when
+using our view-based partitioning approach. Of course, this
+guarantee comes with important caveats, such as implementa-
+tions correctly partitioning views; see Section 4 for a discus-
+sion of such limitations.
+Despite enjoying much stronger security, our new en-
+crypted backup features are efﬁcient. To showcase this, we
+perform an extensive performance evaluation. Given the lack
+of existing benchmark datasets for the relevant applications,
+we devise a comprehensive evaluation pipeline that utilizes
+synthetic, but realistic, testing data, using off-the-shelf gener-
+ative AI models. Our experiments with these datasets show
+that our framework mitigates injection attacks while main-
+taining backup sizes that are comparable to existing, insecure
+backup approaches. For example, our framework increases
+the size of a KeePassXC backup with 200 passwords from
+29.7 KB to 36.5 KB. A naive approach that disables compres-
+sion would result in a 530 KB backup, which is 14× worse
+than our approach. For WhatsApp, our experiments show that
+we can modestly decrease backup size: for a chat history
+of 200 K messages, we show a reduction from 21.9 MB to
+21.4 MB. We discuss why computational overhead during
+backups is small. Our framework introduces no overhead to
+1While KeePassXC has deployed mitigations in response to [15], they do
+not fully prevent injection attacks. See Section 2.
+the applications’ most frequent operations (e.g., sending or
+receiving messages).
+Summary of contributions. Our work begins the princi-
+pled study of injection attacks, an emerging threat model for
+E2EE applications. We make several contributions:
+• View-based partitioning: We introduce a new mitigation
+framework for injection attacks (Section 4), which re-
+lies on partitioning application state based on possible
+adversarial views.
+• Case studies: Our framework is developer-friendly, con-
+ﬁgurable, generalizes to a wide array of features, and
+is compatible with both new and existing applications.
+To showcase this, we apply it to implement injection
+security for E2EE deduplication and compression based
+on WhatsApp and KeePassXC (Section 5).
+• Security formalization : We provide the ﬁrst formal,
+general-purpose security model for injection attacks, and
+prove within it the security guarantees of our framework
+(Section 6).
+• Evaluation: We perform an extensive evaluation of our
+framework implementations, showing that our system
+is practical (Section 7). We develop a comprehensive
+methodology and evaluation pipeline for test-data gener-
+ation in the application domains we consider.
+We have released our implementations and testing pipeline as
+public, open-source projects [2].
+2 Background on Injection Attacks
+We start by providing an overview of injection attacks, and
+describing the components of E2EE applications that are most
+relevant to this threat model.
+E2EE applications. We denote byU an application client
+that some user uses to exchange content with other users of
+the service. Content is relayed as encrypted messages through
+platform-operated servers. The client encodes and stores all
+relevant user information (such as exchanged messages) in the
+device’s internal storage; we refer to this stored information
+as U’s application state, which we denote by st. This stored
+data is underpinned by the application’s data model, which is
+an abstract speciﬁcation of the structure of the data. While the
+data model varies by application, a common structure consists
+of a primary database for most content, with an auxiliary
+blob store for larger ﬁles [41]. The data model deﬁnes the
+fundamental data units for the application, which are the
+smallest items that are relevant to the model (e.g., rows in a
+database, and ﬁles in a blob store), and how these relate to
+one another.
+The user’s application statest consists of the “logical” view
+of this stored data, i.e., the data units and their relationships.
+2966    34th USENIX Security Symposium USENIX Association
+
+[PDF_PAGE 4]
+U ′
+A
+Victim device
+Client U
+st
+Export (st ) 2
+4
+1
+3
+Figure 1: Basic setting for injection attacks. The victim’s ap-
+plication state contains both benign data (1) and injected data
+(2). This state is exported outside the device (3) and is visible
+to the adversary (4), who uses injections and observations
+adaptively to recover sensitive information.
+This state is serialized into a binary string in a ﬁle format com-
+patible with the data model, which is what is ultimately stored
+on the device’s physical storage. For instance, a relational
+database may be stored in SQLite’s database ﬁle format [42].
+The application client interacts with user data at the logical
+level, using some API that also depends on the data model
+(e.g., SQL commands for the relational database), and is un-
+bothered by the physical representation of st in storage.
+To support various features, the client may periodically
+export all or part of st outside U’s device. For example, the
+application may support backups, which requires storing pe-
+riodic snapshots of st in the cloud; or the application may
+support multi-device synchronization, which requires propa-
+gating changes inst to U’s other devices. We denote exports of
+st by {0,1}∗ ← Export(st), which generally consists of three
+logical subroutines. First, st is serialized into a binary string,
+which we denote by ˆst ← encode(st). Note that ˆst may corre-
+spond to the same physical representation of st in storage, or
+may be re-serialized using a different structure. For example,
+a relational database may be encoded using a simpler struc-
+ture such as a list of SQL statements that reconstruct st [16].
+(For our purposes, we treat this as a separate step within the
+export process, even in the case where the format is the same.)
+Following this, ˆst may be processed in additional ways, us-
+ing some “ﬁlter” function F : {0,1}∗ → {0,1}∗, such as a
+compression algorithm. Lastly, F( ˆst) is encrypted—using an
+application-speciﬁc encryption schemeE := (Kg,Enc,Dec)
+and a per-user key k2 from the key space of E—and uploaded
+to some location outside the device.
+Injection attacks. We consider the following injection at-
+tack threat model, which we summarize in Figure 1. An adver-
+sary A seeks to learn sensitive information about U’s internal
+2The encryption key is sometimes derived from a user password.
+state, e.g., messages or attachments sent by another honest
+client U ′ to U. To do so, the adversary can adaptively and
+iteratively utilize two capabilities: (1) an injection channel,
+and (2) passive observations of encrypted application state.
+An injection channel is any way by which A can inter-
+act with U in order to add adversarially-chosen content to
+st. We restrict our attention to injection channels enacted via
+an unmodiﬁed but adversarially-controlled application client.
+Therefore, A can interact with U in any way allowed by the
+E2EE application. For example, the adversary may be able
+to send text messages to U, which get added as new rows in
+the relational database on U’s device. In other cases, injec-
+tion channels are more subtle. For example, a feature present
+in many modern password managers is credential sharing,
+which allows users to jointly own credentials (e.g., for shared
+accounts). In this case, the shared credential is present in the
+vaults of all users with access to it, and updates are automati-
+cally propagated. So, A can share credentials with the victim,
+which get stored in the victim’s vault alongside all their per-
+sonal credentials, thereby injecting content into the victim’s
+application state.
+The adversary can interleave injections with passive obser-
+vations of encrypted application state exported to backend
+servers. This can arise from, for example, compromise of the
+cloud account within which backups are stored, a compro-
+mised service provider, or insider attacks at the provider. We
+note that such passive observation is a standard adversarial
+capability assumed in E2EE threat models; we do not assume
+the ability to decrypt encrypted exports
+This process then repeats iteratively: A injects informa-
+tion into U’s state st, observes a resulting encrypted export—
+which now depends on both adversarial data and U’s private
+data—adaptively chooses the next payload to inject, and so on.
+The adversary’s goal is to somehow back out conﬁdential in-
+formation. Since exports are encrypted, a priori, the adversary
+should not be able to learn any information. However, injec-
+tion attacks arise from client logic thatcombines data received
+from different senders in subtle ways, resulting in cross-user
+data interactions in st, which lead to perceivable differences
+in the behavior of encrypted exports (e.g., lengths or number
+of ciphertexts) that allow for the recovery of information.
+Prior work. There is a long line of work exploiting content-
+dependent mechanisms (e.g., compression, deduplication,
+etc.) used in encrypted applications [22, 25]. Even without
+injections, passive observation of encrypted payloads can lead
+to vulnerabilities, since adversaries can “ﬁngerprint” cipher-
+texts and correlate them to known plaintexts.
+Injection capabilities greatly increase the attack surface
+with respect to passive attacks [25]. Injection-style attacks
+against encrypted applications were ﬁrst explored in the con-
+text of compression mechanisms applied before encryption:
+ﬂuctuations in the sizes or number of ciphertexts can reveal
+to an adversary whether their injected data compresses more
+USENIX Association 34th USENIX Security Symposium    2967
+
+[PDF_PAGE 5]
+Application Channel Vulnerability Mitigated?
+WhatsApp [16]
+File sharing Deduplication No
+Messaging zlib compression No
+Messaging FTS4 search index No
+Signal [16] Messaging Encrypted record seri-
+alization
+Yes
+KeePassXC [15] File sharing Deduplication Yes
+PW sharing zlib compression Partially
+Figure 2: Example injection attacks against E2EE applica-
+tions, including messaging (WhatsApp, Signal) and password
+managers (KeePassXC).
+efﬁciently with the victim’s other data, thus leaking whether
+known payloads are “redundant” with conﬁdential data. A
+number of works have uncovered vulnerabilities in various
+settings, such as attacks against TLS [38], the iMessage en-
+crypted messaging protocol [17], client-side encrypted ﬁle
+storage [9, 21–23], and more [19, 43, 44, 46].
+A second, related line of work has studied injection attacks
+against searchable encryption [8, 12, 36, 48, 52, 53], showing
+that, under certain leakage patterns, an adversary that can in-
+ject ﬁles into an encrypted index is able to recover signiﬁcant
+information about its content.
+More recently, a series of works [15, 16, 34, 40] have ex-
+plored injection attacks against modern E2EE applications,
+leading to discovery of vulnerabilities in widely used ap-
+plications such as WhatsApp, Signal, and popular password
+managers. These attacks target application-level logic, which
+processes data before encryption. A summary of a few rep-
+resentative injection attacks appears in Figure 2. Several of
+these vulnerabilities exploit attack vectors from the afore-
+mentioned lines of work, such as compression of plaintext
+client side state and/or deduplication of ﬁles such as images.
+These allow injection attackers to infer, from the lengths of
+encrypted backups, conﬁdential information about messages,
+ﬁles, or passwords sent to the target by other (honest) users.
+Besides storage-saving mechanisms, other injection attacks
+against E2EE applications exploit more subtle features, such
+as search indexes, vault-health reports in password managers,
+UI icons, and more [12, 15, 16, 48, 53]. While the speciﬁcs
+of the attacks from prior work vary, they all follow the com-
+mon pattern of exploiting some feature or mechanism that
+leads to “interactions” between data in st, which the adversary
+can trigger via injections. In terms of our basic abstraction
+of E2EE clients from earlier in the section, we can model
+these cross-user data interactions as arising when the “ﬁl-
+ter” function F used during Export is such that F( ˆst) varies
+in some predictable way depending on whether the items
+stored in st satisfy some relationship; we call such functions
+similarity-sensitive functions, examples of which include ﬁle
+deduplication and database compression. If this is the case,
+the adversary can leverage variations in |F( ˆst)|—which prop-
+agate to the sizes of the encrypted exports—to tell whether
+their injections are somehow “similar” to other content in st.
+Towards mitigations. Mitigating all attacks that arise from
+content-dependent mechanisms requires addressing both pas-
+sive and active attacks. This work primarily studies the latter,
+since active attacks lead to signiﬁcantly more leakage than
+passive attacks [25]. That is, we focus on the problem of dis-
+abling injection channels, reducing security to that of passive
+attacks. Mitigating passive leakage is an orthogonal problem,
+deserving of focused study, which we leave out of scope
+The ﬁndings from prior work highlight a key lesson: in-
+jection attacks are a potentially ubiquitous problem—arising
+from common design patterns and features—and will increase
+in relevance as E2EE applications become more complex and
+feature-rich. In the presence of adversarial senders, any client-
+side data interactions may provide a channel for injection
+attacks. Thus, the formal study of injection attacks, and the
+search for principled mitigations, is of critical importance.
+As explained in the introduction, disabling all cross-user
+interactions is not practical for most applications. For some
+attack vectors, such as compression, we have no practical
+solutions that scale to the demands of large workloads, and
+thus many attacks remain either completely unpatched [16]
+or only partially mitigated [15] (e.g., by introducing noise).
+While some works have explored mitigations for these vectors
+in other contexts, these mitigations are not applicable to E2EE
+applications, either because they are speciﬁcally tailored to
+other settings (e.g., web applications [4, 24, 35]), or do not
+meet the demands of modern applications [4, 24, 35].
+While other injection attacks have indeed been fully miti-
+gated (for example, some of the attacks in [15]), these ﬁxes
+are bespoke patches to the speciﬁc bugs that were found, and
+do not point to more general approaches to address injec-
+tion attacks. Moreover, there have been no formal security
+models suggested for injection attacks, and so we lack strong
+assurance about the security of mitigations.
+In summary, there is a lack of general approaches for ad-
+dressing injection attacks and frameworks for reasoning about
+security-performance trade-offs. This has resulted in promi-
+nent attack vectors remaining unresolved in practice. We now
+turn to ﬁlling these gaps.
+3 Mitigation Framework Overview
+We ﬁrst provide an overview of the main ideas behind our
+mitigation framework, deferring details to Section 4.
+We use two application settings to illustrate the core ideas
+of our framework. First, we considerDedupMsg, a messaging
+application that supports attachment deduplication. During
+backups, application clients store unique copies (veriﬁed by
+comparing checksums) of received attachments as standalone
+ﬁles in the cloud. Additionally, we consider a separate messag-
+ing application, CompMsg, that employs database compres-
+2968    34th USENIX Security Symposium USENIX Association
+
+[PDF_PAGE 6]
+sion. Messages are stored in a relational database on the user’s
+device, which is serialized and compressed during backups.
+Both deduplication and compression are common vectors for
+injection attacks (Section 2). Our framework mitigates such
+attacks in both application settings.
+Main insight: exports as user views. The starting point
+for our framework is the insight that, conceptually, st acts as
+a form of shared storage for the other application users that
+interact withU. That is, users can “read” or “write” to st as de-
+termined by their communications withU: a message fromU ′
+to U can be thought of as a write fromU ′ to st, and a message
+from U to U ′ can be thought of as granting read-permissions
+to U ′ for a particular database row. Thus, st consists of the
+union of storage views from multiple (potentially adversar-
+ial) users. Through this lens, we can cast injection attacks
+as an interference problem [20]: they arise from performing
+some sensitive computation (e.g., compression, deduplication)
+over parts of a shared storage that “belong” to different users.
+In the language of Section 2, injection attacks result from
+computing a similarity-sensitive function F over the entire
+(shared) application state. In CompMsg (resp. DedupMsg), F
+corresponds to compression (resp. deduplication).
+This directly leads to the main idea behind our framework,
+which we call view-based partitioning: instead of applying F
+to all of ˆst, we can partition ˆst based on the views of different
+users, and then apply F independently to each partition. In
+other words, st can be divided into separate subsets that are
+readable by a common set of (one or more) users—for exam-
+ple, in a messaging application, each partition corresponds to
+a separate (group or individual) chat; and in a password man-
+ager, each partition corresponds to a separate shared folder.
+Each partition constitutes a separate “trust context”, and thus
+all data therein can be processed together, separate from the
+rest of the application state.
+For example, in CompMsg, instead of monolithic database
+compression, we can compress in individual streams the
+database rows that are accessible to a common set of users,
+i.e., the sent and received messages within a conversation.
+Each compression stream may contain messages in the view
+of a single user (for individual chats), or multiple users (for
+group chats). Similarly, in DedupMsg, instead of deduplicat-
+ing all received attachments, we can separately deduplicate
+the ﬁles sent within each chat.
+With this approach, we isolate F according to user views.
+Therefore, A’s injections only interact with data that A knew
+a priori, and thus A cannot learn any information about U’s
+sensitive data. This approach strikes a balance between us-
+ability and security: instead of completely disabling F, we
+still leverage its beneﬁts in a per-view basis, while achieving
+the strict isolation necessary to prevent injection attacks.
+Design goals. There are many approaches one might take
+towards realizing view-based partitioning, but making it prac-
+tically useful requires a solution that satisﬁes a number of
+st
+Partitioner
+bk1 ... bkn
+F F
+Enc Enc
+F(bk1) F(bkn)
+...
+...
+...
+Π
+Enc(F(bk1)), ...,
+Enc(F(bkn))
+st
+ˆst
+F( ˆst)
+Enc
+Enc(F( ˆst))
+encode
+F
+Figure 3: Comparison between insecure exports (left) and our
+framework (right). The core idea is to partition the application
+state in a per-sender basis.
+design goals. In particular, we want a framework that has the
+following properties:
+• Generality: The framework should be applicable to a
+variety of E2EE application types and features, and not
+tailored to speciﬁc similarity-sensitive functions (e.g.,
+only useful for compression or deduplication).
+• Low developer overhead: The framework should be fea-
+sible to integrate into existing applications, avoiding
+extensive and disruptive changes to existing codebases.
+• Low performance overhead: The framework should sup-
+port improving security in the face of injection attacks
+without signiﬁcant performance degradation.
+• Conﬁgurability: Developers should have the option to
+ﬁne-tune the balance between security and performance
+imposed by the framework. Some applications may pre-
+fer more granular security guarantees at the cost of de-
+creased performance, while others may prefer more ﬂex-
+ible guarantees in order to increase performance.
+Overview of framework construction. Equipped with this
+list of goals, we now provide a brief overview of the construc-
+tion of our framework. We show a summary of our system in
+Figure 3. The ﬁrst design decision of our construction is to
+dynamically partition st during exports. That is, we leave st
+as-is during the standard runtime of the application, and in-
+corporate the framework logic exclusively into the export
+process. Alternative approaches could have partitioned st dur-
+ing runtime, such as maintaining separate database copies
+for each user. However, such approaches would require more
+developer effort and may incur prohibitive runtime overheads
+(e.g., changes to group structures would require reorganizing
+multiple database instances).
+In more detail, at the heart of our framework lies a par-
+titioner, a software module that intercepts st at the start of
+Export, and splits all data units (database cells, individual
+USENIX Association 34th USENIX Security Symposium    2969
+
+[PDF_PAGE 7]
+ﬁles, etc.) according to user views. That is, a partitioner pro-
+cesses st, and assigns each of its data units to a “bucket”,
+depending on the users with access to it: for example, all
+database rows for the messages between U ′ and U are as-
+signed to a bucket for U ′, and all rows for messages sent in
+a group chat G get assigned to a bucket for G. (We explain
+shortly how the mapping between data units and user views
+is established.) The output of the partitioner is thus a series
+of bitstrings (“buckets”) bk1, ...,bkn, which collectively en-
+code all data units in st, but partitioned based on user views.
+Then, to complete the export, F is computed individually on
+each bki, and each resulting string is encrypted.
+Partitioners must be tailored to the application’s data model,
+and be able to carefully reason about its ﬁle formats and
+data structures: what are the relevant data units for each ﬁle
+type, how to parse the serialized ﬁles, etc. Towards our goal
+of minimizing developer effort, however, partitioners should
+be independent of the application’s schema, depending only
+on the application’s data model. This allows application de-
+velopers to leverage existing implementations for their data
+models, e.g., all Android applications can beneﬁt from the
+implementation of a generic SQLite partitioner. As mentioned
+earlier, however, (schema-agnostic) partitioners also need to
+be able to dynamically map data units to buckets during
+their processing of st, which naturally depends on the ap-
+plication’s schema.
+We resolve this tension by making this mapping a pa-
+rameter to the framework, which partitioners can use in a
+black-box way. That is, we introduce the concept of a view
+policy, a speciﬁcation of how data units map to user views.
+Abstractly, a view policy implements an “oracle” Π which can
+be queried with some s ∈ st, and returns an identiﬁer for its
+respective bucket. For example, view policies forCompMsg
+and DedupMsg would map database rows and individual ﬁles,
+respectively, to bucket identiﬁers. The goal of a view policy
+(and view-based partitioning more broadly) is to ensure that
+data units which are assigned to the same bucket are read-
+able by the same set of users, enforcing our desired per-view
+isolation. In other words, view policies lift the application’s
+implicit notion of “trust contexts” (e.g., chats) to the level of
+our framework, so that partitioners can split st in a way that
+respects user views.
+Developers thus specify a view policy as an input to the
+framework, and partitioners “query” Π(s) as they iterate over
+data units, and assign them to buckets. So, a partitioner’s
+speciﬁcation is general for a data model, but its function-
+ing is guided by a (schema-dependent) policy. (We explain
+the details of partitioner implementations in Section 4.) An
+added beneﬁt of this approach is that it is conﬁgurable by de-
+fault: developers can specify an arbitrary granularity to their
+view policies.
+Going back to our examples, CompMsg can use a generic
+partitioner for its particular data model, which intercepts the
+relational database during backups, and computes an input
+view policy Π on each row s (corresponding to messages) to
+allocate it to the bucket corresponding to a subset of users with
+a shared view (i.e., a particular chat.) Similarly, DedupMsg
+can use a partitioner that intercepts attachment ﬁles during
+exports, and allocates each ﬁle f to a bucket by evaluating Π′
+on f ; the ﬁles within the same bucket are then deduplicated
+between (only) themselves.
+In principle, any language can be used to specify view
+policies, as long as they abide by the input-output behavior
+described above. However—leveraging our insight of client
+state as a form of shared storage—we will implement view
+policies in a simple way usingaccess control policies: a user’s
+view in st is equivalent to their “access” in this shared storage,
+and thus we can leverage the rich literature on access control
+to specify view policies in a user-friendly way. (In Section 4,
+we describe in detail the speciﬁc format of access control
+policies that we adopt.)
+While the central goal of view-based partitioning is to
+split st according to user views, we further relax this require-
+ment to make the partitioning strategy more conﬁgurable.
+That is, we additionally introduce ﬁlter policies, which reﬁne
+the output of access control policies in order to specify more
+granular bucketization schemes. For example, a ﬁlter policy
+could say that all data units that map to saved contacts of
+U can be merged into a single bucket, and can thus be com-
+pressed together. So, instead of being limited to just per-group
+and user buckets, ﬁlter policies provide a way to ﬁnetune the
+trade-off between performance and security, according to trust
+models of the application. In summary, our implementation
+of view policies will consist of a two-step process, whereby
+data units are ﬁrst mapped to users using standard access
+control policies, and these users are (optionally) narrowed fur-
+ther using a ﬁlter policy, which ultimately returns the bucket
+identiﬁer for this data unit.
+4 Mitigation Framework Design
+We describe our mitigation framework in detail in this section.
+View policies. As described in Section 3, our framework
+consists of an atomic module that developers integrate (exclu-
+sively) into their exports, in order to implement view-based
+partitioning and mitigate injection attacks. The core com-
+ponent of our framework is a partitioner, the program that
+intercepts st at the start of Export and performs the partition-
+ing. The behavior of a partitioner is guided by a view policy,
+which is a mapping Π from data units to bucket identiﬁers.
+View policies are thus the speciﬁcation that determines how
+view-based partitioning should be performed.
+View policies can be implemented in any language, as
+our framework uses them in a black-box way. Partitioners
+just require that a view policy Π satisﬁes two requirements.
+First, we assume that Π is underpinned by the interface de-
+scribed above, mapping data units from st to bucket labels.
+2970    34th USENIX Security Symposium USENIX Association
+
+[PDF_PAGE 8]
+A policy must thus be compatible with the data model of st.
+The second requirement is that Π must be complete: it must
+output some value for every data unit in st. For example, a
+view policy for CompMsg must output some value for every
+database row; and a view policy for DedupMsg must output
+some value for every attachment ﬁle. In many cases, a policy
+can just output some generic label to denote that this data
+unit is not sensitive, and can thus go in some catch-all bucket
+(e.g., for metadata). By supporting custom view policies, our
+framework lets developers ﬁne-tune the granularity of how
+partitioning is performed, which is a goal of our system.
+View-based partitioning. As described in Section 3, the
+goal of a partitioner is to implement a view-based partitioning
+of st, as speciﬁed by view policyΠ. We now specify this goal
+in more detail. Let B = (bk1, ...,bkn) be the buckets output
+by the partitioner. To achieve view-based partitioning, these
+buckets must satisfy two properties. The ﬁrst iscompleteness,
+which means that the strings in B can be combined in some
+deterministic way to reconstruct ˆst. The second (and main)
+property is that the buckets should be consistent with Π. That
+is, the partitioner should assigns ∈ st to bki, where i = Π(s). If
+this holds, view-based partitioning leads to non-interference
+between buckets: any changes to any s should only result
+in changes to bucket Π(s). We call this property view non-
+interference, which we deﬁne formally in Section 6.
+Main framework component: partitioner. We now ex-
+plain the speciﬁcation of partitioners. Their high-level behav-
+ior is simple: the partitioner iterates over every data units ∈ st,
+veriﬁes the bucket fors by computing Π(s), and appends s
+to this bucket. At the end, the output is a list of bitstrings
+bk1, ...,bkn, corresponding to the ﬁnal bucket contents. The
+speciﬁc implementation of each step in this process depends
+on the format of st. For any given ﬁle type, we distinguish
+between two partitioner implementations, which operate at
+different levels of abstraction and present different tradeoffs.
+The ﬁrst type is anapplication-layer partitioner, which op-
+erates at the logical level, splitting st before seralization (e.g.,
+in CompMsg, partitioning the logical relational database). To
+do so, the partitioner iterates directly over s ∈ st, using the
+same application-level API through which the client interacts
+with storage. If Π(s) corresponds to a new bucket label, the
+partitioner creates an empty copy of st (e.g., a new relational
+database), and inserts s to it; otherwise, it inserts s to the
+existing copy. These operations are also performed with the
+application-level API. At the end, there will be multiple copies
+of the logical storage. The partitioner serializes each using
+encode, which yields bk1, ...,bkn. The copies of the storage
+are then deleted.
+The second type is a data-layer partitioner, which operates
+on the encoded data, splitting ˆst instead after st has been seri-
+alized (e.g., in CompMsg, partitioning the encoded database).
+These partitioners are more complex: instead of iterating over
+the data units in s, they iterate directly over the bytes of ˆst,
+AppPartitioner(st, Π):
+S = /0
+for s ∈ st do
+i ← Π(s)
+if sti /∈ S then
+sti ← init()
+S ← S ∪ {sti}
+sti.put(s)
+B = /0
+for sti ∈ S do
+bki ← encode(sti)
+B ← B ∪ {bki}
+return B
+DataPartitioner( ˆst, Π):
+B ← /0
+for ˆs ∈ iter( ˆst) do
+s ← decode( ˆs)
+i ← Π(s)
+if bki /∈ B then
+bki ← ε
+B ← B ∪ {bki}
+bki ← bki ∥ ˆs
+return B
+Figure 4: Pseudocode template for the application-layer and
+data-layer partitioners of our framework.
+and must work backwards to decode which bits correspond
+to which data units in st, on which they can then compute
+Π. The buckets bk1, ...,bkn for this partitioner are not copies
+of st, but rather just byte streams: once a sequence of bytes
+has been determined to belong to a bucket, these bytes are
+just appended to the bucket’s stream.
+Pseudocode for both application-layer and data-layer parti-
+tioners is shown in Figure 4. There, we abstract the process
+of initializing and inserting into client-side state via init and
+put operations, respectively. Application-layer partitioners
+lend themselves to a simpler implementation, but they incur a
+higher overhead (see Section 7). While the conceptual behav-
+ior of both is simple, implementation details are where the
+challenges lie, particularly for complex ﬁle formats (see Sec-
+tion 5). This is why, as mentioned earlier, it is beneﬁcial for
+partitioners to be able to be reused across applications, hence
+why we have them depend only on particular ﬁle formats.
+An implementation of view policies. While our framework
+can be used with any suitable implementation of view policies,
+we now describe an example format, which is easy to use,
+update, and conﬁgure. As described in Section 3, we can
+implement view policies by composing an access control
+policy with what we call a “ﬁlter” policy. The former maps
+data units to users with access to them, and the latter speciﬁes
+the bucket for these senders, which allows conﬁgurability. We
+describe each of these policies below.
+An access control policy is a functionΠacc that maps a data
+unit s to a set of user IDs {uid1, ...,uidn} that have access
+to it. There are many standard approaches for specifying
+access control, such as schema annotations [31, 37], runtime
+labels [51], and more [39, 50]. Following various works [18,
+27,33,49], our approach is to specify Πacc using a centralized
+controller, i.e., a singular location in client-side code that
+encodes this information. This could be handled in many
+ways; for example, one could dynamically maintain at runtime
+a separate list mapping identiﬁers for data units (e.g., primary
+keys of database rows) to user IDs. Such a dynamic approach,
+however, would incur some runtime overhead and might be
+harder to update in response to policy changes.
+USENIX Association 34th USENIX Security Symposium    2971
+
+[PDF_PAGE 9]
+Instead, we rely on the observation that most applications’
+data models already implicitly or explicitly encode access
+information for other reasons. For example, in a messaging
+application, a database table storing messages will inevitably
+contain columns for the sender and recipients of the message,
+which are also users with “access” to this row. So, Πacc can be
+speciﬁed in terms of the data modelitself, via a list of static
+functions that evaluate to user identiﬁers. In the prior exam-
+ple, Πacc could have a single clause encoding the statement
+“if s is a row in the messages table, return s.sender”. This
+single line would capture the policy for the entire table.
+An access control policy on its own enforces strict isola-
+tion between individual senders and groups. As mentioned
+earlier, however, view policies should be conﬁgurable, and
+support more ﬂexible isolation conditions. We handle this via
+ﬁlter policies. These policies are functions Πﬁlt that map a
+set of user IDs {uid1, ...,uidn} to a bucket label. Intuitively,
+ﬁlter policies specify whether certain user groups can be “col-
+lapsed” together, meaning that their data should be processed
+together. Concretely, Πﬁlt outputs a “proxy” value, which ex-
+tracts a particular feature from a group of users. 3 The sim-
+plest ﬁlter policy is just Πﬁlt(uid1, ...,uidm) = uid1, ...,uidm,
+which speciﬁes standard group-based partitioning. A more
+advance policy could, for example, return 1 if (uid1, ...,uidm)
+are all contacts of U, and 0 otherwise. Access control policies
+and ﬁlter policies compose to implement a full view policy
+Π(s) = Πﬁlt(Πacc(s)). The access policy speciﬁes the access
+boundaries of st, and ﬁlter policies provide a simple lever to
+conﬁgurable the balance of security and performance.
+Summary. We now summarize the use of our framework.
+First, in the setup phase, the developer speciﬁes a view pol-
+icy for their application. In our example format, they specify
+a single conﬁguration ﬁle, which denotes (as a function of
+their data model) how to map data units to users IDs. For
+instance, this ﬁle could consist of a list of sensitive database
+tables, and, for each, the column(s) encoding the users with
+“access” to each row. The developer additionally speciﬁes, if
+desired, a ﬁlter policy ﬁle; the framework defaults to the stan-
+dard group-based ﬁlter. Both of these policy ﬁles are placed
+in some arbitrary location in the client code. In this same
+setup phase, the developer incorporates a partitioner into their
+Export code, initialized with pointers to the conﬁguration
+ﬁles. The developer can rely on existing implementations for
+the ﬁle types used by their application. The modiﬁed appli-
+cation can then be shipped to end-user devices. Regular-use
+operations, such as sending or receiving messages, are un-
+modiﬁed, and thus incur no overhead. During exports, the
+framework kicks into gear: the partitioner silently intercepts
+the input to F, reads from both policies to determine how to
+split the application state, computes F independently on each
+partition, and encrypts the resulting outputs.
+3This is similar to the notion of keys in sorting algorithms, which deﬁne
+the criteria to compare the elements by.
+Framework extensions. View-based partitioning can be
+adapted to a variety of different types of cross-user computa-
+tions. We describe two examples here. First, in some cases,
+st contains data structures that are themselves a function of
+cross-user data. A notable example is (inverted) search in-
+dices, which map keywords to the documents in which they
+appear (e.g., an index for text messages would map individual
+words to identiﬁers for the chats that contain them). As shown
+by prior work [16, 48], an adversary can use injection attacks
+to exploit ﬂuctuations in the size of such data structures to
+learn information about their contents.
+To deal with search indices, our framework can be used to
+create a “partitioned index”, where every keyword-document
+mapping is split according to user views. Consider an inverted
+index that maps every keyword w to a set of document identi-
+ﬁers{d1, ...,dn}. In this context, the relevant data units—that
+is, what we want to partition—are the document identiﬁers.
+So, we can use a view policy Π to map document identiﬁers
+to buckets. A partitioner can then iterate over each index key-
+word, and use Π to split {d1, ...,dn} into equivalence classes
+D1, ...,Dt, where Π(d′) = Π(d′′) for every d′,d′′ in the same
+class. The partitioner then creates a new index entry sepa-
+rately mapping w to each set Di. Note that our framework can
+be applied dynamically during exports, leaving the index un-
+changed during regular application usage. During imports, we
+can then efﬁciently re-merge the index, simply by combining
+all entries for the same keyword.
+As a second example, view-based partitioning can also be
+applied to network-based features. For instance, password
+managers often display a small identifying icon (e.g., a com-
+pany logo) next to a user’s saved credentials. Such icons,
+however, are fetched only once per domain: new credentials
+for an existing domain reuse the icon stored in the client. As
+shown in prior work [15], an adversary can inject credentials
+for particular domains and observe whether network requests
+are triggered or not, which reveals whether these domains are
+already present in the victim’s vault. To mitigate this, we can
+use view-based partitioning to perform a “partitioned fetch”
+of URL icons: icons are only reused across credentials in
+the same bucket. We can use a view policy that maps creden-
+tials to bucket identiﬁers, and a partitioner can then intercept
+the request that determines whether a new icon needs to be
+fetched, verify if the domain is present in credentials within
+the same bucket as this new credential (as opposed to across
+all credentials), and fetch the icon if and only if it is not.
+Additional security considerations. Our framework en-
+forces view-non interference as a function of the speciﬁed
+view policy. Therefore, similar to other policy-based sys-
+tems [10, 27, 31, 49] our resulting guarantees rely on policy
+correctness. We opt for this approach, since data models can
+vary signiﬁcantly across applications; it is not feasible to
+have a single partitioning strategy for all applications. Using
+custom policies means our framework is highly conﬁgurable
+2972    34th USENIX Security Symposium USENIX Association
+
+[PDF_PAGE 10]
+across applications, and allows developers to ﬁne-tune the
+granularity of how partitioning is performed. Further, as our
+case-studies in Section 5 show, specifying policies is feasi-
+ble, and can generally be bootstrapped from the application’s
+existing access control logic.
+Since similarity-sensitive functions are still applied within
+each bucket, an adversary could possibly learn information
+via passive attacks. As discussed in Section 2, however, this is
+outside the guarantees of our framework; its goal is to disable
+injection channels. Mitigating passive leakage requires differ-
+ent techniques (e.g., size-locked constructions [48]), which
+can compose with our framework (i.e., using them within
+individual buckets) for even stronger security guarantees.
+5 Case-Study Implementations
+We exercise our framework in this section, and use it to con-
+struct injection-robust encrypted backups based on two case-
+study applications: WhatsApp and KeePassXC. As mentioned
+in Section 2, prior work [15,16] found both applications to be
+vulnerable to injection attacks, and so we apply view-based
+partitioning to address these attack vectors. We make our
+framework implementations available as an open-source ar-
+tifact [2]. As described later, these implementations should
+be useful to a broader set of applications, since they work for
+widely-used ﬁle formats, and thus may serve as the starting
+point for injection attack mitigations for other applications.
+5.1 Example # 1: WhatsApp
+Two unmitigated attack vectors in WhatsApp are ﬁle dedupli-
+cation and compression. We describe each of these in turn.
+Mitigating deduplication attacks. As described in Sec-
+tion 2, WhatsApp clients perform client-side deduplication of
+sent and received attachments during backups, which leads to
+injection attacks. At a high-level, applying our framework to
+ﬁle deduplication translates to deduplicating ﬁles separately
+for each bucket, instead of globally across all ﬁles. Thus, there
+will be at most one copy of each ﬁleper bucket, and so we mit-
+igate injection attacks while still leveraging the performance
+beneﬁts of deduplication. In the context of deduplication, the
+client state st corresponds to attachments (binary ﬁles) stored
+in the device’s ﬁlesystem, and the similarity-sensitive function
+F(st) returns the same ﬁles as st, but with duplicate copies
+removed. Therefore, a partitioner implementation for this data
+model takes as input a path to the location in the ﬁlesystem
+where attachments are stored, and (as usual) an access control
+policy and a partition policy.
+As described in Section 4, view policies must be compatible
+with st. In this case, the data units in st are individual ﬁles,
+so a view policy Π takes as input the path for an individual
+ﬁle, and returns a bucket identiﬁer. As described in Section 4,
+we implement Π as the composition of an access control
+policy and a ﬁlter policy. The access control policy receives
+as input the path for an individual ﬁle, and returns a set of
+user IDs who have access to this ﬁle, i.e., the members of
+the chat—group or individual—in which the ﬁle was sent.
+Our partitioner implementation (described below) makes no
+assumptions about how this policy is written, but an example
+implementation could consist of a (single) SELECT statement
+to a database table where ﬁle metadata is stored. Then, a ﬁlter
+policy takes as input the set of user identiﬁers, and returns
+the bucket that these are assigned to. For example, a policy
+could read the database table where user metadata is stored,
+and return 1 if all users are stored contacts.
+The partitioner itself must also be compatible withst, i.e., it
+must be aﬁlesystem partitioner. Its implementation is straight-
+forward: it iterates through all ﬁle paths inst, veriﬁes which
+users can read this ﬁle (using the access control policy), and
+appends this ﬁle path to a list (based on the ﬁlter policy). The
+output is then a list of lists, where each inner list speciﬁes the
+ﬁles that belong to each bucket. Lastly, deduplication is com-
+puted on each inner list. Note that, in the case of ﬁlesystems,
+the application-layer and data-layer partitioner are the same,
+since ﬁles are exported in the same way in which they are
+stored on the device.
+As mentioned in Section 2, client-side ﬁle deduplication
+is a common vector for injection attacks. Therefore, other
+applications can leverage our ﬁlesystem partitioner to mitigate
+deduplication-based attacks.
+Mitigating compression attacks. We now switch gears
+to compression attacks. As described in Section 2, What-
+sApp clients compress application databases before encrypt-
+ing them during backups, which leads to injection attacks.
+Applying our framework to compression translates to com-
+pressing in individual streams the database rows that belong
+to each bucket. In this setting,st corresponds to the client-side
+database, ˆst to the serialized database during backups, and
+F to a compression algorithm. For WhatsApp, application
+databases are relational databases, which are serialized using
+SQLite’s database ﬁle format [42], and then compressed with
+zlib. Our framework implementation must thus be tailored to
+this data model and serialization format. The data units for a
+relational database correspond to the database rows, which
+are thus the inputs to view policies for this data model. An
+access control policy encodes the database tables that contain
+sensitive information, and the column in each table that stores
+the set of users with “access” to this row. This can be imple-
+mented, for example, via a function that veriﬁes whether the
+input row belongs to one of the sensitive tables, and then has,
+for every sensitive table, a SELECT statement to extract the
+set of relevant user labels (e.g., the sender of a text message).
+The application-layer partitioner iterates over all tables
+and all rows in the input database, using standard SQLite
+APIs, and veriﬁes the view policy for every row. Buckets are
+initialized as empty copies of the relational database, with the
+USENIX Association 34th USENIX Security Symposium    2973
+
+[PDF_PAGE 11]
+same schema as st. We then add rows to the corresponding
+bucket (database copy) using SQL INSERT statements. Once
+all data units have been assigned to a bucket, we serialize
+each database copy individually using SQLite’s database ﬁle
+format, which are the bitstrings returned by the partitioner.
+The data-layer SQLite partitioner is more complex, since
+SQLite’s database ﬁle format is intricate. We describe it at a
+high-level here, and refer interested readers to our code [2]
+for more details. In this format, each database table and index
+is stored as a B-tree, with the rows of the table stored in the
+leaf nodes of the corresponding tree. A serialized database
+consists of the nodes for each table and index organized in
+sequential pages of a ﬁxed size. Our data-layer partitioner
+iterates over the bytes of a ﬁle in page-sized jumps, checking
+whether each page corresponds to an intermediate or leaf
+node and whether it is an index page or a table page. If it
+corresponds to an intermediate node or is an index page, no
+users have permission for it, so it is sent to a default bucket
+designated for metadata. If it is a leaf node, the partitioner
+carefully reconstructs the database rows, which as data units
+can be fed to the view policy to determine the correct bucket
+for the corresponding bytes.
+Unlike ﬁle deduplication, compressing data in multiple
+streams raises additional engineering challenges, due to the
+fact that we must be able to reconstruct the database after
+decompression. This is not an issue for application-layer
+partitioners, as they compress each database copy individu-
+ally. Later, these can be decompressed individually again, and
+database rows can be arranged in their original order based on
+primary keys. However, data-layer partitioners have no con-
+cept of the application-level structure of st: the byte streams
+in each bucket correspond to potentially non-contiguous por-
+tions of ˆst, so there is no natural way to reorganize the decom-
+pressed byte streams to recover st.
+We thus had to implement a custom multi-stream com-
+pression functionality as a wrapper around existing com-
+pression algorithms, that allows for seamless reintegration
+of the decompressed byte steams. At a high-level, our wrap-
+per maintains an internal data structure called a stream key,
+which keeps track of the way in which compression streams
+were used: every time data is fed to one of the compressions
+streams, the stream key records which stream was used, and
+how many bytes were fed to it. Once all streams are closed,
+our wrapper returns the concatenated output of all streams,
+with the stream key prepended as a header; the stream key
+itself is not compressed. Later, the stream key can be used to
+interleave the decompressed streams to recoverst, by progres-
+sively appending bytes from streams in the order and quantity
+speciﬁed by the stream key.
+5.2 Example # 2: KeePassXC
+KeePassXC addressed compression-based attacks by insert-
+ing random noise of some random length (between 64 and
+512 bytes) every time databases are saved [15]. While this
+signiﬁcantly degrades the feasibility of attacks, it is not a full,
+provable mitigation, since noise can potentially be bypassed
+by, for example, using statistical techniques. Our framework
+thus provides a more robust mitigation.
+In KeePassXC, application databases (corresponding to st)
+are object-oriented databases, which are serialized using an
+XML-based format [15] during exports (corresponding to ˆst),
+and then compressed with gzip. Therefore, in this context,
+data units correspond to XML elements and their associated
+paths in the tree representation of the XML ﬁle. While we
+make no assumptions about how access control policies are
+speciﬁed, we provide a high level syntax for deﬁning policies.
+Simply, a user deﬁnes rules each consisting of two expres-
+sions using XPath syntax. One expression speciﬁes a set of
+XML elements, and the second speciﬁes a corresponding
+set of elements whose values encode the user permissions
+for the ﬁrst set. For instance, if the database contains shared
+folders, each accessible by a different set of users, the two
+expressions might be root/folder and root/folder/sharedwith
+to represent the rule “The elements under root/folder are acce-
+sible to the users speciﬁed by the value of the corresponding
+root/folder/sharedwith element”.
+Our application-layer XML partitioner creates multiple
+copies of the original database S1,S2, ...,Sn, each of which
+only contains elements from one bucket such that F can be
+safely applied to each individually. The original st is recov-
+ered by merging S1,S2, ...,Sn. The data-layer XML partitioner
+parses ˆst byte by byte, allocating bytes to buckets as it tra-
+verses the tree of elements. These byte streams (one per
+bucket) are fed into the multi-stream compression algorithm
+(Section 5.1), which combines these into a single compressed
+ﬁle and reassembles the original ˆst at decompression time.
+As described in Section 2, compression is a common attack
+vector for injection attacks. Since partitioners are schema-
+agnostic, other applications that use SQLite or XML can
+beneﬁt from our implementations. Further, our multi-stream
+compression approach may be of general interest, even for
+applications with ﬁle formats that differ from the ones of our
+case studies.
+6 Security Analysis
+We analyze the security of our framework in this section. We
+begin by introducing a formal model and security deﬁnition
+for injection attacks, and then prove that our framework meets
+this deﬁnition. Of independent interest, as part of this proof,
+we derive a simple, general property of E2EE clients that
+we show is sufﬁcient for robustness against injection attacks
+(and, indeed, is met by our framework); this may be useful
+for guiding other mitigation approaches in the future.
+2974    34th USENIX Security Symposium USENIX Association
+
+[PDF_PAGE 12]
+6.1 Security Deﬁnition for Injection Attacks
+We present our formalism for injection attacks in this sec-
+tion. We ﬁrst deﬁne the syntax of the relevant primitive, and
+then introduce our security deﬁnition, which formally models
+(in)security against injection attacks.
+Primitive: encrypted exports client. Recall from Section 2
+that injection attacks primarily leverage application clients
+in end-user devices (how they store data locally, how they
+export the application state, etc.), and that application servers
+are assumed to be honest-but-curious. Thus, our primitive
+will be client-centric, ignoring application servers and other
+external elements. We then narrow our focus exclusively to
+the components of clients that play a role in injection attacks:
+(1) interactions with other clients, and (2) observations of
+clients exports. Therefore, we only need to model these two
+main operations. Putting these ideas together, our primitive
+consists of a simple abstraction over individual application
+clients. We deﬁne anE2EE encrypted exports client C as a
+triple of stateful algorithms C = (Init,Send,Export):
+• st0 ← Init(): Initializes the state of the client to some de-
+fault st0 in some universe of possible states S ⊆ {0,1}∗.
+• sti+1 ← Send(sti,uids, {uidr},m): Sends message m ∈
+{0,1}∗ from user uids to the set of recipients {uidr},
+where all uid are application-speciﬁc identiﬁers from
+some universe I, and returns the updated state. The user
+ID for the owner of the client, which we denote by uidC,
+must be either the sender or one of the recipients.
+• ({0,1}∗)∗←$ Export(st): Returns a vector of bit strings
+representing some function of the storage’s state.
+We focus on clients for which the Export algorithm con-
+sists of the three-part structure described in Section 2: it ﬁrst
+encodes st into a sequence of one or more bit strings; then
+(possibly) applies a similarity-sensitive function F individu-
+ally to each bit string; and lastly encrypts each individually
+using a symmetric encryption scheme E, returning a vector
+of ciphertexts c1, ...,cn. For notational simplicity, we leave
+the encryption key—generated during initialization and used
+throughout—implicit in our notation. Moving forward, we
+will overload notation and use |Export(st)| to denote the vec-
+tor of resulting ciphertext lengths, i.e., (|c1|, ...,|cn|). Further,
+note that, in this model, we use “messages” in a general
+sense, to capture all the ways in which external users can
+interact with clients for a particular application. This mirrors
+approaches from works in other contexts, such as [6].
+We conclude our primitive deﬁnition by introducing ad-
+ditional notation. First, we deﬁne atranscript τ to be an or-
+dered sequence of inputs to Send, i.e., each entry in τ is a
+triple of the form (uids, {uidr},m), where all uids,uidr ∈ I
+and m ∈ {0,1}∗. We then introduce two operations over tran-
+scripts, formally deﬁned in Figure 5: (1)st ← RunC(τ), which
+“runs” transcript τ by iteratively calling C.Send on every ele-
+ment of τ; and (2) ˆτ ← Filter(τ,P), which “ﬁlters” τ according
+RunC(τ):
+st ← C.Init()
+for (uids, {uidr},m) ∈ τ do
+st ← C.Send(st,uids, {uidr},m)
+return st
+Filter(τ,P):
+ˆτ ← ε
+for (uids, {uidr},m) ∈ τ do
+if P(uids, {uidr},m) = 1 then
+ˆτ ← ˆτ ∥
+(
+(uids, {uidr},m)
+)
+return ˆτ
+Figure 5: Syntax of the Run and Filter operations.
+to some predicate P : I × P (I) × {0,1}∗ → {0,1}, returning
+a new transcript including only the elements in τ for which P
+evaluates to 1. Moving forward, we will use the shorthand τP
+as the result of running Filter(τ,P).
+Security deﬁnition. Having introduced the concept of en-
+crypted exports clients, we are now ready to formally deﬁne
+injection attacks. Following standard approaches, we employ
+a left-or-right (LOR) security deﬁnition: the adversary sub-
+mits pairs of challenge messages to an oracle, and one of the
+messages gets added to the application state (via the Send
+operation) based on the value of a randomly-chosen challenge
+bit b. The adversary then has access to the standard Send
+and Export algorithms—which model adaptive injections and
+exports—which they use to try and identify the value of b.
+This approach models the fact that an adversary that can in-
+ject content and observe exports should not be able to learn a
+single bit of information about honest messages.
+While simple, there is a key challenge that limits the util-
+ity of just directly using this deﬁnition: schemes may have
+some “baseline” leakage of information, orthogonal to injec-
+tion attacks, which could lead to trivial wins; by submitting
+challenge messages that differ with respect to this leakage,
+the adversary could immediately identify b. For example, in
+the case of ﬁle deduplication, the adversary could submit as
+challenge messages ﬁles(F0,F1) followed by (F0,F2). If the
+next export includes one (resp. two) encrypted ﬁle(s), the ad-
+versary knows that b = 0 (resp. b = 1). This is a vacuous win,
+since it does not require injections, but rather relies just on
+challenge messages. Preventing such attacks is outside the
+scope of our framework.
+To deal with this issue, we devise a new approach, which
+we call a “relative” security deﬁnition. We will deﬁnetwo sep-
+arate security games. In the ﬁrst game, the adversary cannot
+perform injections; they can only submit challenge messages,
+and a simulator is able to trigger exports. In the second game,
+the adversary additionally has an injection oracle. Then, intu-
+itively, a scheme is secure if the advantage of an adversary in
+the second game is not much greater than the advantage of
+the simulator in the ﬁrst game, i.e., performing injections does
+not “help” to break security. We call this security guarantee
+injection simulatability. This approach bypasses the problem
+of trivial wins, as these simply amount to wins in both games;
+we only care about whether there are cases where there is
+a difference in success probability. We stress that injection
+simulatability reﬂects the speciﬁc security goal of disabling
+USENIX Association 34th USENIX Security Symposium    2975
+
+[PDF_PAGE 13]
+I-IS A1 ,A2
+C,P :
+b←$ {0,1}
+corr,st1←$ A1()
+st2←$ A2()
+st ← C.Init()
+while true do
+in,st1←$ A1(st1)
+if in = ⊥ then break
+SendH(in)
+st2←$ A Inject,Exp
+2 (st2,in)
+b ← A2(st2)
+return b = b′
+SendH(uids, {uidr},m0,m1):
+assert P(uids, {uidr},m0, corr) = 0
+assert P(uids, {uidr},m1, corr) = 0
+st ← Send(st,uids,uidr,mb)
+Inject(uids, {uidr},m):
+assert P(uids, {uidr},m, corr) = 1
+st ← Send(uids,uidr,m)
+Exp():
+return C.Export(st)
+NI-IS A1 ,S
+C,P :
+b←$ {0,1}
+corr,st1 ← A1()
+st2←$ S ()
+st ← C.Init()
+while true do
+in,st1←$ A1(st1)
+if in = ⊥ then break
+SendH(in)
+st2←$ S Exp(st2,in)
+b ← S (st2)
+return b = b′
+SendH(uids, {uidr},m0,m1):
+assert P(uids, {uidr},m0, corr) = 0
+assert P(uids, {uidr},m1, corr) = 0
+st ← Send(st,uids, {uidr},mb)
+Exp():
+return C.Export(st)
+Figure 6: Injection simulatability game with injections (top)
+and without injections (bottom).
+injection capabilities. As mentioned in Section 4, further dis-
+abling passive leakage is an orthogonal security goal.
+We show both security games for injection simulatability
+in Figure 6. Importantly, both games are parametrized by a
+corruption predicate p ← P
+(
+(uids, {uidr},m),corr
+)
+, where
+p ∈ {0,1} and corr ⊆ I is some set of user IDs, which is
+veriﬁed at the start of both theSendH and Inject oracles, for an
+adversarially-chosen set of corrupted user IDs. The purpose of
+P is to encode the set of message inputs that are “corrupted”,
+i.e., messages that are visible to a set of corrupted users, and
+thus are considered injections. In most schemes, corrupted
+messages are simply those where either the sender or one of
+the recipients is a corrupted user. However, certain schemes
+may support more ﬁne-grained notions of corruption, such as
+messages that are not sent directly to a user but may still be
+visible to them. Looking ahead, we will use P to encode the
+developer-speciﬁed view policies of our framework.
+Finally, we deﬁne the advantage of an adversaryA2 over
+an encrypted exports client C, with respect to an adversary
+A1, simulator S, and corrupted predicate P to be
+Advis
+C,P,S ,A1(A2) =
+⏐⏐⏐Pr
+[
+I-IS A1,A2
+C,P = 1
+]
+− Pr
+[
+NI-IS A1,S
+C,P = 1
+]⏐⏐⏐.
+Note that, critically, the set of challenge messages is cho-
+sen by the same adversary A1 in both games. This allows
+us to compare the advantage of injection capabilities against
+a non-injection baseline. Informally, we say that a scheme
+is secure if, for any computationally-limited adversaries A1
+and A2, we can give an efﬁcient simulator S such that the
+difference between A2 and S’s advantage is negligible, i.e.,
+the injection capability does not help an adversary break con-
+ﬁdentiality. We will use a concrete security approach, and
+focus on simulators S that work in time close to that of A2.
+More broadly, we say a simulator or adversary used in a re-
+duction is resource efﬁcient if it works in time close to that
+of the underlying adversary and, when relevant, makes the
+same number of queries as the underlying adversary. The
+underlying adversary should be clear from context.
+6.2 General Security Result
+Our goal is to show that our framework meets our security
+deﬁnition. However, proving this directly is challenging, due
+to the complexities of our framework. Our strategy will thus
+be to ﬁrst distill a simpler, higher-level property of E2EE
+clients, which we show is sufﬁcient for security, and then
+separately show that our framework meets this property.
+Length independence property. Our goal is to identify
+a particular property of encrypted exports schemes that can
+be used to build a generic simulator, which can emulate any
+adversary with injection capabilities. The main challenge for
+such a generic simulator is that it only has access to exports of
+honest operations, but needs to simulate exports of additional
+operations (i.e., injections). This directly leads to the main
+insight of our generic result: for such a simulator to exist, C
+needs to be such that injections alter exports in a predictable
+way, which only depends on these injections, and can thus be
+simulated. In fact, as we show later on, being able to simulate
+lengths of exports is sufﬁcient. We call this propertylength
+independence. Just like our security games, length indepen-
+dence is parametrized by a corruption predicate P.
+Deﬁnition 1. Let P be any corruption predicated. For a ﬁxed
+set of user IDs U ⊆ I, deﬁne predicate ˆPU (uids, {uidr},m) =
+P
+(
+(uids, {uidr},m),U
+)
+. An encrypted exports scheme C is
+ε-length independent with respect to P if one can give an
+efﬁciently-computable function SimLen such that, for any
+possible transcript τ and any integer ℓ, it follows that
+δ(|Export(RunC(τ))|,
+SimLen(|Export(RunC(τ − τ ˆPU ))|, τ ˆPU )) ≤ ε
+where δ denotes the total variation distance between both
+random variables.
+Length independence requires that, given the length of an
+export of a sub-transcript of τ, where the missing operations
+are known and satisfy some relation P, we can simulate (with
+high probability) the length of the export of the entire tran-
+script τ. The simulator will therefore be able to, for schemes
+that satisfy length independence, “extend” the length of an en-
+crypted export to account for the additional messages (without
+knowing them). We say a scheme’s length independence is
+perfect if it is ε-length independent for ε = 0. Looking ahead,
+2976    34th USENIX Security Symposium USENIX Association
+
+[PDF_PAGE 14]
+our framework will achieve perfect length independence. We
+use total variation distance in our deﬁnition of length inde-
+pencence since this is a standard statistical distance used in
+cryptography, as it upper bounds the distinguishing advantage
+of any distinguisher [30]. We note, however, that our results
+are compatible with other natural statistical measures.
+Length independence is sufﬁcient to achieve security
+against injection attacks when the underlying encryption
+scheme is secure. We use a standard real-or-random (ROR)
+indistinguishability goal for an encryption scheme E =
+(Kg,Enc,Dec) consisting of a key generation, (randomized)
+encryption, and (deterministic) encryption algorithms.4 This
+security property considers two simple games: in the ﬁrst,
+the adversary has access to an E.Enc oracle which uses a key
+K ←$ Kg to encrypt each queried message; in the second, the
+adversary has access to an oracle that returns a random string
+of the same length as the encryption of the queried message.
+The adversary’s goal is to determine which oracle it is inter-
+acting with, and we denote adversary B’s advantage in doing
+so by Advror
+E (B).
+We now present our main theorem, showing how to reduce
+the injection attack security of an encrypted exports scheme
+to the ROR security of the underlying encryption scheme and
+the level of length independence of the scheme.
+Theorem 1. Let C be an encrypted exports scheme that is
+ε-length independent with respect to a corruption predicate P.
+Then, for all adversaries A1 and A2, we give simulator Sgen
+and adversary B such that
+Advis
+C,P,Sgen,A1(A2) ≤ 2 · Advror
+E (B) +ε .
+Moreover, Sgen and B are both resource efﬁcient.
+We give a proof of this theorem in Appendix A. Our proof
+is constructive, giving an explicit simulator construction. At
+a high-level, Sgen runs A2 as a subroutine, simulating its en-
+vironment, and returns its same output bit. Every time A2
+performs an injection, Sgen collects the inputs in a transcript ˆτ.
+Then, every time A2 performs an export, Sgen calls its own
+Exp oracle to get a string s, and returns a random string of
+length SimLen(|s|, ˆτ) to A2. By the length independence of C,
+this is the right length with high probability. Assuming the
+encryption scheme is secure, Sgen and A2 end up providing
+the same distribution of output bits, as desired.
+6.3 Security of our Framework
+Finally, we prove that our framework satisﬁes length indepen-
+dence, and thus mitigates injection attacks. We begin by for-
+malizing our framework in terms of the syntax of our model.
+As discussed in Section 4, our framework enhances an E2EE
+client by modifying (only) the client’s export process. We
+4For simplicity we use symmetric encryption here as we only need
+chosen-plaintext attack security. We recommend, and our implementation
+uses, AEAD.
+ˆC.Init():
+return C.Init()
+ˆC.Send(st,uids, {uidr},m):
+return C.Send(st,uids, {uidr},m)
+ˆC.Export(st, Π):
+out ← ()
+for bk ∈ Partencode(st, Π) do
+bk′ ← F(bk)
+out ← out ∥
+(
+Enc(bk′)
+)
+return out
+Figure 7: Formal syntax of the scheme ˆC ← Framework(C)
+deﬁned by our framework.
+model this as an algorithm ˆC ← Framework(C), which de-
+rives a new client ˆC from an input client C. We denote the
+execution of a partitioner by bk1, ...,bkn ← Partencode(st, Π).
+The syntax of ˆC in terms of our model is shown in Figure 7.
+Length independence of framework. We now show that
+view-based partitioning leads to length independence. Recall
+from Section 3 that view-based partitioning leads to view non-
+interference, i.e., changes to sender views only lead to changes
+in buckets that those senders have access to, as determined
+by Π. We formally deﬁne this property as follows:
+Deﬁnition 2. Let τ1 and τ2 be any two transcripts that differ
+in exactly one index i, for any i ∈ |τ1|. Let S1 be the set of
+data units in st1 ← Run(τ1) that are not in st2 ← Run(τ2),
+and vice versa for S2. Then, a partitioner Part satisﬁesview
+non-interference if, for any view policy Π, it follows that
+{
+bki ∈ Part(st1)
+⏐⏐⏐ ∀s ∈ S1, i ̸= Π(s)
+}
+=
+{
+bki ∈ Part(st2)
+⏐⏐⏐ ∀s ∈ S2, i ̸= Π(s)
+}
+We now show that view non-interference implies length
+independence, completing the security proof of our frame-
+work. To state our result, we need to deﬁne the corruption
+predicate P for length independence that encodes Π. Simply,
+PΠ(uids, {uidr},m,U) will return 1 if m modiﬁes any data
+units that are visible by any members of U. That is, PΠ re-
+turns 1 if, for any s ∈ st that change after sending m, there is
+some uid ∈ U that belongs to bucket Π(s).
+Theorem 2. Let C be an encrypted exports client, and let
+ˆC ← Framework(C) be such that Framework.Part satisﬁes
+view non-interference. Then it follows that, for any policy Π,
+ˆC achieves perfect length independent with respect to PΠ.
+Due to space constraints, we defer the proof of this theorem
+to Appendix B. Combining the statements of Theorems 1
+and 2, we ﬁnally get that if partitioners satisfy view non-
+interference, robustness against injection attacks reduces to
+the security of the encryption scheme, as desired:
+Corollary 1. Let C be an encrypted exports client, and let
+ˆC ← Framework(C) be such that Framework.Part satisﬁes
+view non-interference. Then, for any view policyΠ, and for all
+adversaries A1 and A2, we give a simulatorSgen and adversary
+B such that Advis
+C,PΠ,Sgen,A1(A2) ≤ 2 · Advror
+E (B).
+USENIX Association 34th USENIX Security Symposium    2977
+
+[PDF_PAGE 15]
+As described in Section 4, view-based partitioning, by con-
+struction, leads to view non-interference. The results in this
+section thus show that the speciﬁcation of our framework dis-
+ables injection channels. Of course, as mentioned earlier, our
+framework (by design) reveals information in a per-bucket
+context, which could lead to passive attacks; mitigating these
+is outside the scope of injection simulatability, and of this
+work more broadly. Security in practice depends on whether
+implementations of our framework (speciﬁcally, partitioners)
+correctly meet their speciﬁcation. In Appendix C, we argue
+why our implementations from Section 5 do so. We also de-
+scribe a testing-based approach for checking that a partitioner
+implementation provides the expected non-interference prop-
+erty, which can be used to further increase assurance.
+7 Evaluation
+In this section, we explore the performance of our implemen-
+tations from Section 5. We show that our framework is a
+practical approach for mitigating injection attacks.
+For deduplication, we did not have to experimentally deter-
+mine the overhead introduced by our framework, since this
+can be directly characterized deterministically: deduplication
+overhead is agnostic to the speciﬁc content of ﬁles, as it is
+(only) a direct function of the size and number of duplicate
+ﬁles. Intuitively, overhead is a function of the number of buck-
+ets spanned by each set of duplicate ﬁles: every additional
+bucket adds a copy of the respective ﬁle. We show a precise,
+closed-form formula for the resulting overhead in Appendix D.
+While this lead to a noticeable performance overhead for some
+workloads, others may see better performance. Further, note
+that there is no overhead added in terms of runtime, since
+deduplication can be performed in parallel across all buckets.
+Unlike deduplication, the performance of view-based parti-
+tioning needs to be assessed experimentally. We thus perform
+an extensive evaluation of it, which is the focus of the rest of
+this section. All of the code and data used in our experiments
+can be found alongside our open-source library [2].
+7.1 Methodology
+We measure the overhead of our framework in terms of export
+size, latency, and CPU utilization. All experiments are run
+on a laptop with an Apple M3 processor and 16GB of RAM.
+Since the performance of compression depends heavily on the
+structure of data, it is critical to perform our experiments on
+representative workloads: inputs to our framework implemen-
+tation should be real WhatsApp and KeePassXC databases,
+populated with representative application data.
+The ﬁrst step in our methodology was to identify the rele-
+vant parameters to vary across our experiments. We identiﬁed
+three main variables: the amount of data in the database, de-
+noted by m; the number of buckets that result after partitioning
+the database, which we denote by n; and how the m bytes of
+data are distributed across alln buckets. For the latter, we used
+two distribution models in our experiments: an “even” model
+(all buckets have the same amount of data), and a “long-tail”
+model (data is allocated across buckets according to a power-
+law). We describe shortly how values ofm and n were chosen.
+Next, we acquired representative testing data for each ap-
+plication. For KeePassXC, we used open-source lists of user-
+names and passwords from real-world data breaches [32], and
+the Tranco list [26] for URLs. For WhatsApp, we had to gen-
+erate our own synthetic data; to our knowledge, there are no
+high-quality datasets of personal messages publicly available.
+Note that the performance of compression depends heavily on
+the relationships between parts of the input data, and thus sim-
+ply generating random words would have not been sufﬁcient.
+Therefore, our approach was to use a large language model
+(LLM) to generate internally-consistent multi-message con-
+versations, speciﬁcally tailored to imitate the style and content
+of instant messaging conversations.
+Using this testing data, we set up a comprehensive eval-
+uation pipeline. This included scripts for generating empty
+copies of real WhastApp and KeePassXC databases, sampling
+from the relevant testing datasets, populating the databases
+in accordance with each applications’ client logic, and then
+running our framework implementations on the resulting
+databases. Our entire evaluation pipeline, including LLM
+prompts, are included in our open-source artifact [2].
+Equipped with this experimental setup, we were ready to
+run our experiments. We took care to estimate representative
+values of m and n for our experiment runs. Users of password
+managers generally store approximately 200 passwords [45].
+We were unable to ﬁnd statistics on typical number of folders
+used, so we chose 10 folders as a baseline, which we deem
+reasonable. WhatsApp handles around 100 billion messages
+a day as of 2020 [13], and currently has around 2 billion daily
+users [1]. Using these ﬁgures, we estimate an average user
+sends 50 messages a day. So, if we pick 10 years of usage as a
+baseline, we estimate that a typical WhatsApp database could
+easily store 200,000 messages. We do not have statistics for
+typical number of groups, and thus chose 100 as a baseline
+(this includes one-on-one conversations).
+7.2 Results
+Figure 8 shows the storage overhead of our implementation
+for the baseline parameters. Our framework signiﬁcantly out-
+performs the approach of disabling compression completely,
+and is comparable to standard (insecure) compression with no
+partitioning. As expected, the data-layer partitioner has con-
+sistently less compression overhead than the application-layer
+partitioner. Note that, when using the data-layer partitioner,
+backup size for WhatsApp actually decreases by about 0.5
+MB irrespective of distribution. We explain why this is the
+case in Appendix D, including a simple experimental evalua-
+tion of this hypothesis. There, we also describe why we did
+2978    34th USENIX Security Symposium USENIX Association
+
+[PDF_PAGE 16]
+Database/Distribution No Compression Insecure Compression Application-layer
+Partitioning
+Data-layer
+Partitioning
+WhatsApp/Long-Tail 47.7 MB 21.8 MB (2.19) 23.7 MB (2.01) 21.3 MB (2.24)
+WhatsApp/Even 48.0 MB 21.9 MB (2.19) 23.7 MB (2.02) 21.4 MB (2.24)
+KeePassXC/Long-Tail 530.0 KB 29.7 KB (17.8) 40.0 KB (13.3) 36.5 KB (14.5)
+KeePassXC/Even 735.0 KB 34.0 KB (21.6) 44.7 KB (16.5) 39.6 KB (18.6)
+Figure 8: Backup sizes and compression ratio (in parentheses) for each approach. A smaller backup size and greater compression
+ratio indicates better performance. Our framework signiﬁcantly outperforms the setting where compression is disabled and
+performs comparably to regular insecure compression with no partitioning; the data-layer partitioning even outperforms insecure
+compression for WhatsApp databases. These experiments were run using our baseline parameters of 200k messages / 100 groups
+for WhatsApp and 200 passwords / 10 folders for KeePassXC
+5 10 50 100 200 400
+1
+2
+3
+Number of groups
+Compression ratio
+no partitioning
+data-layer
+application-layer
+Figure 9: Compression ratio for WhatsApp database with
+200k messages evenly distributed across groups
+2 3 4 5 10 20 50
+10
+15
+20
+25
+Number of shared folders
+Compression ratio
+Figure 10: Compression ratio for KeePassXC database with
+200 passwords evenly distributed across folders
+not observe this behavior in KeePassXC, which is related to
+the fact that individual buckets can sometimes be smaller than
+the ﬁxed-size sliding window of the compression algorithms.
+Figures 9 and 10 show the effect of varying n
+(groups/folders) while keeping m (messages/passwords) con-
+stant. We show the results for the even distribution, but ob-
+served the same effects with the long-tail distribution. With
+both, as n increases, the compression ratio stays approxi-
+mately constant with no partitioning, but drops off if our
+framework is used. We expect this effect to be less noticeable
+for WhatsApp than for KeePassXC, as the amount of data per
+bucket will be larger for WhatsApp. This matches what we
+10k 50k 100k 200k 300k
+1
+2
+3
+Number of messages in database
+Compression ratio
+10k 50k 100k 200k 300k
+0
+20
+40
+60
+Uncompressed
+database size (MB)
+Figure 11: Compression ratio and uncompressed database
+size for WhatsApp database with messages evenly distributed
+across 100 groups
+observe for the WhatsApp data-layer partitioner. The What-
+sApp application-layer partitioner has noticeable overhead;
+we believe this is mostly due to the SQLite metadata that is
+duplicated on every database copy. This overhead also occurs
+for the XML application-layer partitioner.
+Figures 11 and 12 show the overhead from varyingm while
+keeping n constant. For both applications, increasing m in-
+creases the compression ratio with the application-layer parti-
+tioner, as the overhead of duplicating database-level metadata
+decreases. For KeePassXC, increasing m also increases the
+compression ratio with regular compression and the data-layer
+partitioner. This makes sense, as a compression stream with
+more data should allow for more effective compression (for
+both a single stream or multiple streams across buckets). For
+WhatsApp, as m increases, compression ratio decreases for
+regular compression and the data-layer partitioner. This is
+possibly because smaller databases have relatively more leaf
+pages that are not completely ﬁlled with row data and are thus
+padded with null bytes, which are highly compressible.
+Latency and CPU utilization. In our experiments with
+the baseline databases, our framework increased compression
+latency from 1s to 4s for WhatsApp and 5ms to 90ms for
+KeePassXC. We used the psutil [3] Python library to measure
+CPU utilization. KeePassXC latencies were below the granu-
+larity at which psutil is able to reliably report measurements.
+USENIX Association 34th USENIX Security Symposium    2979
+
+[PDF_PAGE 17]
+100 200 300 600 1200
+10
+15
+20
+25
+Number of passwords in database
+Compression ratio
+100 200 300 600 1200
+0
+2
+4
+Uncompressed
+database size (MB)
+Figure 12: Compression ratio and uncompressed database size
+for KeePassXC database with passwords evenly distributed
+across 10 folders
+Measurement CPU utilization
+Mean (%) SD (%)
+Idle 2.35 1.07
+Compression (no partitioning) 13.7 1.31
+Compression (data-layer) 14.0 0.80
+Partitioning (data-layer) 13.8 1.06
+Figure 13: CPU utilization across 10 backups of a baseline
+WhatsApp database (200k messages / 100 groups).
+For WhatsApp, we measured CPU utilization separately for
+partitioning and compression, to gauge whether either opera-
+tion led to a bottleneck. We show the results in Table 13. We
+can see that our framework does not introduce a noticeable
+CPU utilization overhead beyond standard compression. As
+WhatsApp backups on mobile devices already use standard
+compression, we do not expect use of our framework to cause
+performance degradation related to CPU utilization.
+8 Conclusion
+In this work, we present an efﬁcient and provably secure
+framework for preventing injection attacks against E2EE ap-
+plications. To formally analyze our approach, we introduce a
+novel security model for injection attacks, and show security
+of our constructions within this model. We perform experi-
+ments to assess the overhead of our framework based on two
+example applications, and ﬁnd that our approach is amenable
+to practical adoption. As E2EE applications grow in number
+and complexity, we hope our work can help ensure that this
+will not lead also to a growth in attack vectors.
+Ethical Considerations
+In our work, we propose principled mitigations for injection
+attacks on E2EE applications, and evaluate their performance
+using workloads that reﬂect real-world use scenarios. Below,
+we describe the ethical considerations raised by our work.
+Privacy of experimental workloads. The usernames and
+passwords for the input data come from SecLists and the
+URLs come from Tranco, as we discuss in Section 7. SecLists
+is a testing tool for security applications that includes public
+datasets. Tranco maintains a list of top-ranked websites. Given
+that these data sources are public and widely available, our
+usage of them to generate workloads does not put users at risk
+of security or privacy breaches. In addition, we used a large
+language model to generate synthetic message data for our
+WhatsApp workloads. By doing so, we avoid compromising
+the privacy of real user messages.
+Addressing unresolved vulnerabilities. Many existing
+E2EE applications have either partial or, in some cases, no mit-
+igations for the injection attacks that we address in this paper.
+However, these attacks have been established in prior work,
+and are public knowledge. Although mentioning them can in-
+crease awareness of their existence, we do so in a constructive
+way and provide a concrete solution to protect against them.
+We are also reaching out to affected platforms to make them
+aware of the mitigations we propose.
+Open Science
+We have made our implementation and datasets public and
+open source [2]. This repository contains all artifacts involved
+in our work, including evaluation pipelines and datasets to
+reproduce our results. Concretely, the contained artifacts are:
+ﬁlesystem partitioner (Section 5.1); multi-stream dedupli-
+cation library (Section 5.1); SQLite application-layer and
+data-layer partitioners (Section 5.1); XML application-layer
+and data-layer partitioners (Section 5.2); multi-stream com-
+pression library (Section 5.1); evaluation pipeline, including
+scripts to generate fresh synthetic data and evaluate frame-
+work implementations (Section 7.1); and the synthetic data
+speciﬁcally used by our experimental evaluation (Section 7.2).
+Acknowledgements
+This work was supported in part by NSF grant CNS-2120651
+and a gift from Google.
+References
+[1] About WhatsApp. https://www.whatsapp.com/
+about.
+[2] Injection Attacks Mitigation Framework. https://
+doi.org/10.5281/zenodo.15645001.
+[3] psutil documentation. https://
+psutil.readthedocs.io/en/latest/.
+2980    34th USENIX Security Symposium USENIX Association
+
+[PDF_PAGE 18]
+[4] Janaka Alawatugoda, Douglas Stebila, and Colin Boyd.
+Protecting encrypted cookies from compression side-
+channel attacks. In FC, 2015.
+[5] Joël Alwen, Sandro Coretti, and Yevgeniy Dodis. The
+double ratchet: security notions, proofs, and modulariza-
+tion for the Signal protocol. In EUROCRYPT, 2019.
+[6] Matilda Backendal, Hannah Davis, Felix Günther, Miro
+Haller, and Kenneth G. Paterson. A Formal Treatment
+of End-to-End Encrypted Cloud storage. In CRYPTO,
+2024.
+[7] Alexander Bienstock, Jaiden Fairoze, Sanjam Garg,
+Pratyay Mukherjee, and Srinivasan Raghuraman. A
+more complete analysis of the Signal double ratchet
+algorithm. In CRYPTO, 2022.
+[8] Laura Blackstone, Seny Kamara, and Tarik Moataz. Re-
+visiting leakage abuse attacks. In NDSS, 2020.
+[9] Erik Bosman, Kaveh Razavi, Herbert Bos, and Cristiano
+Giuffrida. Dedup est machina: Memory deduplication
+as an advanced exploitation vector. In IEEE S&P, 2016.
+[10] Lukas Burkhalter, Nicolas Küchler, Alexander Viand,
+Hossein Shafagh, and Anwar Hithnawi. Zeph: Cryp-
+tographic enforcement of end-to-end data privacy. In
+OSDI, 2021.
+[11] Ran Canetti, Palak Jain, Marika Swanberg, and Mayank
+Varia. Universally composable end-to-end secure mes-
+saging. In CRYPTO, 2022.
+[12] David Cash, Paul Grubbs, Jason Perry, and Thomas Ris-
+tenpart. Leakage-abuse attacks against searchable en-
+cryption. In CCS, 2015.
+[13] Will Cathcart. We are proud that WhatsApp is able to
+deliver roughly 100B messages every day. https://
+x.com/wcathcart/status/1321949078381453314.
+[14] Katriel Cohn-Gordon, Cas Cremers, Benjamin Dowling,
+Luke Garratt, and Douglas Stebila. A formal security
+analysis of the Signal messaging protocol. Journal of
+Cryptology, 2020.
+[15] Andrés Fábrega, Armin Namavari, Rachit Agarwal, Ben
+Nassi, and Thomas Ristenpart. Exploiting leakage in
+password managers via injection attacks. In USENIX
+Security, 2024.
+[16] Andrés Fábrega, Carolina Ortega Pérez, Armin Na-
+mavari, Ben Nassi, Rachit Agarwal, and Thomas Ris-
+tenpart. Injection attacks against end-to-end encrypted
+applications. In IEEE S&P, 2024.
+[17] Christina Garman, Matthew Green, Gabriel Kaptchuk,
+Ian Miers, and Michael Rushanan. Dancing on the Lip
+of the Volcano: Chosen Ciphertext Attacks on Apple
+iMessage. In USENIX Security, 2016.
+[18] Daniel B Gifﬁn, Amit Levy, Deian Stefan, David Terei,
+David Mazieres, John C Mitchell, and Alejandro Russo.
+Hails: Protecting data privacy in untrusted web applica-
+tions. In USENIX OSDI, 2012.
+[19] Yoel Gluck, Neal Harris, and Angelo Prado. Breach:
+reviving the crime attack. Unpublished manuscript,
+2013.
+[20] Joseph A Goguen and José Meseguer. Security policies
+and security models. In IEEE S&P, 1982.
+[21] Shai Halevi, Danny Harnik, Benny Pinkas, and Alexan-
+dra Shulman-Peleg. Proofs of ownership in remote
+storage systems. In CCS, 2011.
+[22] Danny Harnik, Benny Pinkas, and Alexandra Shulman-
+Peleg. Side channels in cloud services: Deduplication
+in cloud storage. In IEEE S&P, 2010.
+[23] Mathew Hogan, Yan Michalevsky, and Saba Eskandar-
+ian. Dbreach: Stealing from databases using compres-
+sion side channels. In IEEE S&P, 2023.
+[24] Dimitris Karakostas, Aggelos Kiayias, Eva Saraﬁanou,
+and Dionysis Zindros. Ctx: Eliminating breach with
+context hiding. Black Hat EU, 2016.
+[25] John Kelsey. Compression and information leakage of
+plaintext. In International Workshop on Fast Software
+Encryption, 2002.
+[26] Victor Le Pochat, Tom Van Goethem, Samaneh Tajal-
+izadehkhoob, Maciej Korczy´nski, and Wouter Joosen.
+Tranco: A Research-Oriented Top Sites Ranking Hard-
+ened Against Manipulation. In NDSS, 2019.
+[27] Nico Lehmann, Rose Kunkel, Jordan Brown, Jean Yang,
+Niki Vazou, Nadia Polikarpova, Deian Stefan, and Ran-
+jit Jhala. STORM: Reﬁnement types for secure web
+applications. In USENIX OSDI, 2021.
+[28] Moxie Marlinspike and Trevor Perrin. The dou-
+ble ratchet algorithm. https://signal.org/docs/
+specifications/doubleratchet/, 2016.
+[29] Moxie Marlinspike and Trevor Perrin. The x3dh
+key agreement protocol. https://signal.org/docs/
+specifications/x3dh/, 2016.
+[30] Ueli Maurer, Krzysztof Pietrzak, and Renato Renner.
+Indistinguishability Ampliﬁcation. In CRYPTO, 2007.
+USENIX Association 34th USENIX Security Symposium    2981
+
+[PDF_PAGE 19]
+[31] Aastha Mehta, Eslam Elnikety, Katura Harvey, Deepak
+Garg, and Peter Druschel. Qapla: Policy compliance for
+database-backed systems. In USENIX Security, 2017.
+[32] Daniel Miessler, Jason Haddix, and g0tmi1k. SecLists.
+https://github.com/danielmiessler/SecLists.
+[33] James Parker, Niki Vazou, and Michael Hicks. Lweb:
+Information ﬂow security for multi-tier web applications.
+In PACMPL, 2019.
+[34] Kenneth G Paterson, Matteo Scarlata, and Kien Tuong
+Truong. Three lessons from threema: Analysis of a
+secure messenger. In USENIX Security, 2023.
+[35] Brandon Paulsen, Chungha Sung, Peter AH Peterson,
+and Chao Wang. Debreach: Mitigating compression
+side channels via static analysis and transformation. In
+IEEE/ACM (ASE), 2019.
+[36] Rishabh Poddar, Stephanie Wang, Jianan Lu, and
+Raluca Ada Popa. Practical volume-based attacks on
+encrypted databases. In EuroS&P, 2020.
+[37] Raluca Ada Popa, Catherine MS Redﬁeld, Nickolai Zel-
+dovich, and Hari Balakrishnan. CryptDB: Protecting
+Conﬁdentiality with Encrypted Query Qrocessing. In
+SOSP, 2011.
+[38] Juliano Rizzo and Thai Duong. The crime attack. In
+ekoparty security conference, 2012.
+[39] Muhammad I Sarfraz, Mohamed Nabeel, Jianneng Cao,
+and Elisa Bertino. DBMask: Fine-Grained Access Con-
+trol on Encrypted Relational Databases. In CODASPY,
+2015.
+[40] Yuanming Song, Lenka Mareková, and Kenneth G. Pa-
+terson. Cryptographic Analysis of Delta Chat. In
+USENIX Security, 2024.
+[41] Riley Spahn, Jonathan Bell, Michael Lee, Sravan
+Bhamidipati, Roxana Geambasu, and Gail Kaiser. Peb-
+bles: Fine-Grained Data Management Abstractions for
+Modern Operating Systems. In USENIX OSDI, 2014.
+[42] Database ﬁle format. https://www.sqlite.org/
+fileformat2.html.
+[43] Po-An Tsai, Andres Sanchez, Christopher W Fletcher,
+and Daniel Sanchez. Safecracker: Leaking Secrets
+through Compressed Caches. In ASPLOS, 2020.
+[44] Mathy Vanhoef and Tom Van Goethem. HEIST: HTTP
+Encrypted Information can be Stolen through TCP-
+windows. In Black Hat US Brieﬁngs, 2016.
+[45] Kamile Viezelyte. Juggling security: How many
+passwords does the average person have in
+2024? https://nordpass.com/blog/how-many-
+passwords-does-average-person-have/ , 2024.
+[46] Yingchen Wang, Riccardo Paccagnella, Zhao Gang,
+Willy R Vasquez, David Kohlbrenner, Hovav Shacham,
+and Christopher W Fletcher. Gpu. zip: On the side-
+channel implications of hardware-based graphical data
+compression. In IEEE S&P, 2024.
+[47] WhatsApp. Two billion users – connecting the world pri-
+vately. https://blog.whatsapp.com/two-billion-
+users-connecting-the-world-privately , 2020.
+[48] Min Xu, Armin Namavari, David Cash, and Thomas
+Ristenpart. Searching encrypted data with size-locked
+indexes. In USENIX Security, 2021.
+[49] Jean Yang, Travis Hance, Thomas H Austin, Armando
+Solar-Lezama, Cormac Flanagan, and Stephen Chong.
+Precise, dynamic information ﬂow for database-backed
+applications. ACM Sigplan Notices, 2016.
+[50] Wen Zhang, Aurojit Panda, and Scott Shenker. Access
+Control for Database Applications: Beyond Policy En-
+forcement. In HotOS, 2023.
+[51] Wen Zhang, Eric Sheng, Michael Chang, Aurojit Panda,
+Mooly Sagiv, and Scott Shenker. Blockaid: Data access
+policy enforcement for web applications. In USENIX
+OSDI, 2022.
+[52] Xianglong Zhang, Wei Wang, Peng Xu, Laurence T
+Yang, and Kaitai Liang. High recovery with fewer in-
+jections: Practical binary volumetric injection attacks
+against dynamic searchable encryption. In USENIX
+Security, 2023.
+[53] Yupeng Zhang, Jonathan Katz, and Charalampos Papa-
+manthou. All your queries are belong to us: the power
+of ﬁle-injection attacks on searchable encryption. In
+USENIX Security Symposium, 2016.
+A Proof of Theorem 1
+We show the proof of Theorem 1 in this section.
+Proof. We prove this theorem using a series of game hops.
+We ﬁrst reduce both injection simulatability games to versions
+that return random ciphertexts during exports. Let ROR-I be
+a hybrid game that is identical to I-IS but replaces the Exp
+oracle for one that returns random strings of the same length
+as those returned by C.Export(st). Since the only difference
+between both games is sampling random strings instead of
+using Enc, there exists an ROR adversary B ′ such that
+⏐⏐⏐Pr
+[
+I-IS A1,A2
+C,P = 1
+]
+− Pr
+[
+ROR-I A1,A2
+C,P = 1
+]⏐⏐⏐ ≤ Advror
+E (B ′)
+2982    34th USENIX Security Symposium USENIX Association
+
+[PDF_PAGE 20]
+Adversary B ′ runs I-IS A1,A2
+C,P , but replaces all calls to Exp
+with calls to the encryption oracle in its own ROR game with
+F(encode(st)) as the input message(s), and outputs the same
+bit as A2.
+Next we turn to NI-IS , and deﬁne another hybrid game
+ROR-NI that is identical to NI-IS but, just like ROR-I , re-
+places the Exp oracle for one that return random strings of
+the appropriate ciphertext lengths. It thus follows that there
+exists an ROR-adversary B ′′, analogous to B ′, such that
+⏐⏐⏐Pr
+[
+NI-IS A1,S
+C,P = 1
+]
+−Pr
+[
+ROR-NI A1,S
+C,P = 1
+]⏐⏐⏐ ≤ Advror
+E (B ′′)
+We now proceed to the next game hop, which bridges
+ROR-I and ROR-NI . To do so, we build a generic simulator
+Sgen that can simulate the injections from any adversary A2,
+and thus yield the same distinguishing advantage. Our strat-
+egy will be forSgen to run A2 as a subroutine, and leverage the
+length-independence property of C to mock the result of injec-
+tions on exports. Concretely,Sgen operates as follows. First, at
+the start of the game,Sgen initializes an empty transcript ˆτ = ()
+that it saves in statest2, which will be used to store the history
+of injections. Then, during every iteration of the main loop
+of the game, Sgen runs A2, and simulates its Inject and Exp
+oracles. To do so, whenever A2 calls Inject(uids, {uidr},m),
+Sgen simply appends (uids, {uidr},m) to ˆτ if P evaluates to 1;
+and whenever A2 calls Exp(), Sgen calls its own Exp() oracle
+to get some random bitstring s1, ...,sn, and returns a random
+string of length SimLen
+(
+(|s1|, ...|sn|), ˆτ
+)
+to A2. Lastly, at the
+end of the game, Sgen calls A2 once more, and returns what-
+ever bit A2 outputs. Since the scheme is ε-length independent
+with respect to P—and all elements of ˆτ satisfy P, while no
+inputs from A1 to SendH satisfy P— A2 will be able to dis-
+tinguish simulated export lengths from Sgen (computed using
+SimLen) from real export lengths with probability ε. So, with
+probability 1 − ε, Sgen and A2 will have the same distribution
+of output bits, and thus
+⏐⏐⏐Pr
+[
+ROR-I A1,A2
+C,P = 1
+]
+− Pr
+[
+ROR-NI A1,Sgen
+C,P = 1
+]⏐⏐⏐ ≤ ε.
+Combining all game hops, we get that
+Advis
+C,P,Sgen,A1(A2) =
+⏐⏐⏐Pr
+[
+I-IS A1,A2
+C,P = 1
+]
+−
+Pr
+[
+NI-IS A1,Sgen
+C,P = 1
+]⏐⏐⏐ ≤ 2 · Advror
+E (B) +ε,
+as desired. Adversary B simply samples a random bit and
+runs B ′ if it is 0 and B ′′ if it us 1; by a standard reduction, B
+satisﬁes that Advror
+E (B ′) +Advror
+E (B ′′) ≤ 2 · Advror
+E (B).
+B Proof of Theorem 2
+We show the proof of Theorem 2 in this section.
+Proof. To prove perfect length independence, we need to
+deﬁne a functionSimLen that satisﬁes the equation in Deﬁ-
+nition 1 for ε = 0. First, note that the lengths of ciphertexts
+returned by ˆC.Export are deterministic, and based exclusively
+on its inputs: our framework uses E in a standard way (with-
+out, for example, randomized padding), for which ciphertext
+lengths are exclusively a function of the plaintexts. Con-
+cretely, for a transcript τ, it follows that | ˆC.Export(Run(τ))|
+will be determined by |F(bk1)|, ...,|F(bkn)| for bki ∈
+Partencode(Run(τ), Π). So, SimLen needs to be such that, for
+any U ⊆ I, SimLen can extend an export of this form for sub-
+transcript τ − τPΠ(·,U) to an export of this form for all of τ. If
+so, our framework will achieve perfect length independence,
+since, as explained above, the length of this longer export
+uniquely determines the length of any encryption of it.
+To show this, the key insight is that, due to view non-
+interference, any particular bki in the export of τ will only
+be a function of Send calls that are either all in τPΠ(·,U) or
+all in τ − τPΠ(·,U): by Deﬁnition 2, allbki that do not depend
+on elements of τPΠ(·,U) will be the same in both exports; on
+the other hand, by construction, PΠ(·,U) will ﬁlter allSend
+calls that impact any data unit s that affects any modiﬁedbki.
+It thus follows that SimLen only needs to construct the new
+bki that are in the export of τ but not of τ − τPΠ(·,U), since all
+other bki are unchanged. Further, these new bki depend only
+on the content of τPΠ(·,U), and can thus be simulated. Con-
+cretely, SimLen can simply run an empty instance of ˆC with
+these additional sends, and trigger an export; the resulting bk
+will be the same as the expected ones in the full export of τ.
+This follows from the fact that, by view non-interference, the
+value of these bk is the same irrespective of any changes to
+the entries in τ − τPΠ(·,U); in particular, all bki are the same
+even when these entries are deleted completely.
+C Details on Security of Implementations
+By design, the speciﬁcation of both application-layer and
+data-layer partitioners leads to view non-interference. For the
+former, each sti corresponds to a completely fresh encoding
+of the data units that are assigned to this bucket by Πacc and
+Πﬁlt, which is equivalent to running an instance of the appli-
+cation with just those data units, and thus changes to other
+data units do not affect sti. Similarly, for the latter, each sti
+contains the bits of encode(st) that depend on the data units
+that are assigned to this bucket. Therefore, thespeciﬁcation of
+partitioners is secure against injection attacks. Showing that
+an implementation meets its speciﬁcation requires arguing
+that it (1) iterates over all data units at the appropriate granu-
+larity, (2) evaluates Π over all data units, and (3) isolates data
+units that have been partitioned into different buckets.
+For our XML partitioners, XML elements are the natural
+choice for data units, as these are the smallest logical compo-
+nent of the database. The XML partitioners parse a database
+USENIX Association 34th USENIX Security Symposium    2983
+
+[PDF_PAGE 21]
+element by element (although the data-layer partitioner op-
+erates at the byte level, it reads bytes until an element can
+be parsed to evaluate Πacc). So, as the content of an XML
+database consists entirely of elements, the partitioners will
+evaluate Πacc on all elements. Once XML elements have been
+allocated to buckets, both the application-layer and data-layer
+partitioner enforce isolation. The application-layer partitioner
+guarantees this by creating database copies each consisting
+of only elements from a single bucket, whereas the data-layer
+partitioner instead maintains separate byte streams for bytes
+corresponding to elements from separate buckets
+Our SQLite partitioners use table rows as data units, since
+this is the granularity at which injections are possible for most
+applications. The application-layer partitioner uses the SQLite
+API to iterate over all rows of a database, and evaluates Π
+on each to allocate it to a bucket. To maintain isolation, the
+application-layer partitioner creates a new database with the
+same structure as the original (by copying the schema) for
+each bucket. The data-layer partitioner iterates over the pages
+of the SQLite ﬁle (Section 5), and parses table leaf pages into
+rows that are fed into Π. Because table leaf pages are the only
+pages that contain rows, this guarantees that all rows will be
+processed by the partitioner. To enforce isolation, the data-
+layer partitioner maintains separate byte streams for bytes
+corresponding to row data from separate buckets.
+We now describe a simple heuristic test, which can be
+performed multiple times to increase conﬁdence in the non-
+interference of a partitioner implementation. First, one initial-
+izes an application state st1 (e.g., an SQLite database) with
+some initial data, and triggers an export to obtain a snapshot
+C1 of it. Then, one changes a single, arbitrary data units in st1
+to some other value (e.g., changing a single database row), to
+obtain a new state st2. This is followed by an export of st2 to
+obtain C2. Lastly, C1 and C2 are compared. If the partitioner
+satisﬁes non-interference, then the only difference between
+C1 and C2 should be the content of bucket Πﬁlt(Πacc(s)), and
+all other buckets should remain unchanged.
+D Details of Evaluation
+Here we explain more details about the results form Section 7.
+Formula for deduplication storage overhead. We show
+a closed-form formula for the storage overhead of using
+view-based partitioned deduplication. Let F = ( f1, ..., fn)
+be the ﬁles in st, and let F1, ...,Fq be a partition of F such
+that each Fi contains a subset of F corresponding to dupli-
+cate ﬁles (or one ﬁle if it is unique). Let size(Fi) be the
+function that returns the size of every (equal) ﬁle in Fi.
+Using standard deduplication, the resulting export size is
+E1 := ∑i∈[q] size(Fi). Then, let Π : F → {0,1}∗ be a view pol-
+icy that maps ﬁles to bucket identiﬁers. Letcount(Fi) be the
+function that denotes how many buckets are spanned by the
+ﬁles inFi, i.e., count(Fi) =
+⏐⏐{Π( f j) | f j ∈ Fi}
+⏐⏐. Using view-
+based partitioned deduplication, the resulting export size is
+E2 := ∑i∈[q] count(Fi) · size(Fi). Thus, the total overhead is
+E2 − E1 = ∑
+i∈[q]
+count(Fi) · size(Fi) − ∑
+i∈[q]
+size(Fi)
+= ∑
+i∈[q]
+size(Fi) · (count(Fi) − 1).
+Note that when Π is a constant function (i.e., equivalent to
+standard deduplication), this is equal to 0, as expected.
+Intuition behind compression storage overhead. Our
+evaluation showed the surprising result that the data-layer
+partitioning decreases WhatsApp backup size for baseline
+databases (see Table 8). We suspect that this could be be-
+cause, when using insecure compression with a single stream,
+the ﬁxed-size sliding window (which defaults to 32 KB for
+zlib and gzip) may be ﬁlled with database rows corresponding
+to messages from a mix of groups. On the other hand, when
+using partitioned compression of large databases, the sliding
+window of many streams will be ﬁlled with database rows
+corresponding to messages from a single group, which may
+be more compressible as they share metadata and content.
+To test this, we performed an experiment where we parti-
+tioned the database using the data-layer partitioner, but com-
+pressed each bucket sequentially using a single stream. We
+would expect this approach to result in an even smaller backup
+size than when the data-layer partitioner is used, as it beneﬁts
+from database rows corresponding to messages from the same
+group being coalesced without the overhead associated with
+multiple streams. Indeed, this approach produced WhatsApp
+backups that were about 0.5 MB smaller than those from the
+regular data-layer partitioner, supporting our hypothesis. For
+KeePassXC, this approach resulted in a backup size 1-2 KB
+larger than regular insecure compression, suggesting that the
+effect is weaker for smaller databases.
+Another interesting result is that a long-tail distribution
+adds overhead for KeePassXC but not for WhatsApp (see Ta-
+ble 8). There are a few possible reasons for this. First, in the
+baseline experiments with a long-tail distribution, the smallest
+folders in the password manager contain <5 entries. Since
+the serialization of each entry is only a few KB in size, the
+compression stream for these small folders never ﬁlls the 32
+KB sliding window, resulting in suboptimal compression. Ad-
+ditionally, KeePassXC maintains a single Root folder, where
+serializations of entries are slightly smaller than in shared
+folders. Because our long-tail distribution always chooses the
+Root folder as the folder with the most entries, this distribu-
+tion produces a smaller database than an even distribution for
+the same parameters; for KeePassXC our framework intro-
+duces more overhead for smaller databases. We suspect the
+choice of distribution does not affect overhead for WhatsApp
+because the database is much larger, so with a long-tail distri-
+bution even the smallest groups will always have enough data
+to ﬁll the 32 KB window of their compression stream.
+2984    34th USENIX Security Symposium USENIX Association

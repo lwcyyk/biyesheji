@@ -1,0 +1,883 @@
+[PDF_PAGE 1]
+                           CHECKMATE: BREAKING THE MEMORY WALL
+                           WITH OPTIMAL TENSOR REMATERIALIZATION
+
+
+
+                                       Paras Jain*1  Ajay Jain*1  Aniruddha Nrusimha1
+                   Amir Gholami1  Pieter Abbeel1  Kurt Keutzer1  Ion Stoica1  Joseph E. Gonzalez1
+
+                                                              ABSTRACT
+     We formalize the problem of trading-off DNN training time and memory requirements as the tensor remateri-
+     alization optimization problem,a generalization ofprior checkpointingstrategies. We introduceCheckmate, a
+     system that solves for optimal rematerialization schedules in reasonable times (under an hour) using off-the-shelf
+     MILPsolversornear-optimalscheduleswith anapproximationalgorithm,thenuses theseschedulestoaccelerate
+     millions of training iterations.  Our method scales to complex, realistic architectures and is hardware-aware
+     throughtheuseofaccelerator-speciﬁc,proﬁle-basedcostmodels. Inadditiontoreducingtrainingcost,Checkmate
+     enablesreal-worldnetworkstobetrainedwithupto5.1×largerinputsizes. Checkmateisanopen-sourceproject,
+     available athttps://github.com/parasj/checkmate.
+
+1    INTRODUCTION
+Deep learning training workloads demand large amounts
+of high bandwidth memory. Researchers are pushing the
+memory capacity limits of hardware accelerators such as
+GPUs by training neural networks on high-resolution im-
+ages(Dongetal.,2016;Kimetal.,2016;Taietal.,2017),
+3Dpoint-clouds(Chen etal.,2017;Yangetal.,2018), and
+long natural language sequences (Vaswani et al.,2017;De-
+vlin et al.,2018;Child et al.,2019). In these applications,
+training memory usage is dominated by the intermediate
+activation tensors needed for backpropagation (Figure3).
+The limited availability of high bandwidth on-device mem-                Figure1.This 32-layer deep neural network requires 30GB of
+ory createsamemorywall that stiﬂesexplorationof novel                     memory during training in orderto cache forward pass activations
+architectures. Across applications, authors of state-of-the-              for thebackward pass. Freeing certainactivationsearly andrema-
+art models citememory asa limitingfactor indeep neural                    terializing them later reduces memory requirements by 21GB at
+network(DNN)design(Krizhevskyetal.,2012;Heetal.,                          the cost of a modest runtime increase. Rematerialized layers are
+                                                                          denotedasshadedblueregions. WepresentCheckmate,asystem
+2016;Chenetal.,2016a;Gomezetal.,2017;Pohlenetal.,                         to rematerialize large neural networks optimally. Checkmate is
+2017;Child et al.,2019;Liu et al.,2019;Dai et al.,2019).                  hardware-aware, memory-aware and supports arbitrary DAGs.
+As there is insufﬁcient RAM to cache all activation tensors               Griewank&Walther(2000)andChenetal.(2016b)present
+for backpropagation,some selecttensorscan bediscarded                     heuristicsforrematerializationwhentheforwardpassforms
+during forward evaluation. When a discarded tensor is nec-                a linear graph,or path graph. Theyrefer to the problemas
+essary as a dependency for gradient calculation, the tensor               checkpointing. However,theirapproachescannotbeapplied
+can berematerialized. Asillustrated in Figure1, rematerial-               generallyto nonlinearDNNstructures such asresidualcon-
+izing values allows a large DNN to ﬁt within memory at the                nections,andrelyonthestrongassumptionthatallnodesin
+expense of additional computation.                                        thegraphhavethesamecost. Priorworkalsoassumesthat
+
+  *Equal contribution   1Department of EECS, UC Berkeley.                 gradients may never be rematerialized. These assumptions
+Correspondence to: Paras Jain<parasj@berkeley.edu>.                       limit the efﬁciency and generality of prior approaches.
+
+Proceedings of the 3rd Conference on Machine Learning and                 Our work formalizes tensor rematerialization as a con-
+Systems,Austin,TX,USA,2020. Copyright2020bytheauthor(s).                  strainedoptimizationproblem. Usingoff-the-shelfnumeri-
+                                                                          cal solvers, we are able to discover optimal rematerializa-
+[PDF_PAGE 2]
+                          Checkmate: Breaking the Memory Wall with Optimal Tensor Rematerialization
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+          Figure2. Overview of the Checkmate system.
+
+
+tion strategies for arbitrary deep neural networks in Ten-
+sorFlow with non-uniform computation and memory costs.
+We demonstrate that optimal rematerialization allows larger
+batch sizes and substantially reduced memory usage with
+minimal computational overhead across a range of image
+classiﬁcationandsemanticsegmentationarchitectures. Asa
+consequence, our approach allows researchers to easily ex-
+plore larger models, at larger batch sizes, on more complex               Figure3.Memoryconsumedbyactivationsfaroutweighparame-
+signals with minimal computation overhead.                                 tersforpopularmodelarchitectures. Moreover,advancesinGPU
+In particular, the contributions of this work include:                     DRAM capacity are quickly utilized by researchers; the dashed
+                                                                           line notes the memory limit of the GPU used to train each model.
+   •  a formalization of the rematerialization problem as a
+      mixedintegerlinearprogramwithasubstantiallymore                      arbitrarynetworkwithinourmemorybudgetwhileincurring
+      ﬂexible search space than prior work, in Section4.7.                 the minimal additionalruntime penalty from recomputation.
+   •  a fast approximation algorithm based on two-phase                    Mostpriorworkassumesnetworkshavelineargraphs. For
+      deterministic LP rounding, in Section5.                              example,Chenetal.(2016b)dividesthecomputationinto
+   •  Checkmate, a system implemented in TensorFlow that                   √nsegments,eachwith√nnodes. Eachsegmentendpoint
+      enables training models with up to 5.1× larger input                 isstoredduringtheforwardpass. Duringthebackwardpass,
+      sizes than prior art at minimal overhead.                            segments are recomputed in reverse order atO(n) cost.
+                                                                           Linear graph assumptions limit applicability of prior work.
+2    MOTIVATION                                                            For example, while the popular ResNet50 (He et al.,2016)
+Whileinferenceoptimizationsarewellstudied(Jainetal.,                       can be linearized by treating each residual block as a single
+2019),  training workloads have received less attention.                   node,thisleads toinefﬁcientsolutions. Fornetworkswith
+Memory consumption during training consists of (a) in-                     longer skip connections, e.g., U-Net (Ronneberger et al.,
+termediate features, or activations, whose size depends on                 2015), grouping nodes oversimpliﬁes the graph.
+input dimensions and (b) parameters and their gradients                    Prior work also assumes all layers are equally expensive
+whose size depends on weight dimensions. Given that in-                    to recompute.  In the VGG19 architecture (Simonyan &
+putsareoftenseveralorderofmagnitudelargerthankernels,                      Zisserman,2014),thelargestlayeris                         sixordersofmagnitude
+mostmemoryis usedbyfeatures,demonstratedin Figure3.                        more expensive than the smallest layer.
+Frameworks such as TensorFlow (Abadi et al.,2016) and                      Ourworkmakesfewassumptionsonneuralnetworkgraphs.
+PyTorch (Paszke et al.,2017;2019) store all activations                   We explore a solution space that allows for (a) arbitrary
+duringtheforwardpass. Gradientsarebackpropagatedfrom                       graphs with several inputs and outputs for each node, (b)
+the loss node, and each activation is freed after its gradient             variable memory costs across layers and (c) variable com-
+has been calculated. InFigure1, we compare this memory                     putation costs for each layer (such as FLOPs or proﬁled
+intensive policy and a rematerialization strategy for a real               runtimes). We constrain solutions to simply be correct (a
+neural network.  Memory usage is signiﬁcantly reduced                      node’sdependencies must be materialized before itcan be
+by deallocating some activations in the forward pass and                   evaluated)andwithintheRAMbudget (atanypoint during
+recomputingtheminthebackwardpass. Ourgoalisﬁtan                            execution, resident tensors must ﬁt into RAM).
+[PDF_PAGE 3]
+                          Checkmate: Breaking the Memory Wall with Optimal Tensor Rematerialization
+
+Subjecttotheseconstraints,weﬁndsolutionsthatminimize                      et al.,1992;Punjani,2004).  While similar to our setup,
+the amount of time it takes to perform a single training                  register rematerialization is limited to exceptional values
+iteration. Weprojectschedulesintospaceandtime,allowing                    that can be recomputed in a single instruction with depen-
+us to cast theobjective asa linear expression. This problem               dencies already in registers. For example, memory offset
+can thenbe solved usingoff-the-shelf mixedintegerlinear                   computationscanbecheaplyrecomputed,andloadsofcon-
+programsolverssuchasGLPKorCOIN-ORBranch-and-                              stantscanbestaticallyresolved. Incontrast,Checkmatecan
+Cut (Forrest et al.,2019). An optimal solution to the MILP                recompute entire subgraphs of the program’s data-ﬂow.
+willminimizetheamountofadditionalcomputecostwithin                        During the evaluation of a single kernel, GPUs spill per-
+the memory budget.                                                        thread registers to a thread-local region of global memory
+                                                                          (i.e. local memory) (Micikevicius,2011;NVIDIA,2017).
+3    RELATED WORK                                                         NNtraining executesDAGsofkernelsandstores intermedi-
+We categorize related work as checkpointing, reversible net-              ate values in shared global memory. This produces a high
+works,distributedcomputation,and activationcompression.                   range of value sizes, from 4 byte ﬂoats to gigabyte tensors,
+                                                                          whereas CPU and GPU registers range from 1 to 64 bytes.
+Checkpointingandrematerialization Chenetal.(2016b)                        Ourproblemofinterkernelmemoryschedulingthusdiffers
+proposeaheuristicforcheckpointingidealizedunit-costlin-                   in scale from the classical problem of register allocation
+earn-layergraphswithO(√n) memoryusage.Griewank                            within a kernel or program. Rematerialization is more ap-
+& Walther(2000) checkpoint similar linear unit-cost graphs                propriate than copying values out of core as the cost of
+withO(logn) memoryusageand proveoptimality forlin-                        spillingvalues fromglobalGPU memoryto main memory
+ear graphs with unit per-node cost and memory. In practice,               (RAM)issubstantial(Micikevicius,2011;Jainetal.,2018),
+DNN layers vary signiﬁcantly in memory usage and com-                     though possible (Meng et al.,2017).
+putational cost (Sze et al.,2017), so these heuristics are                Reversible Networks  Gomez et al.(2017) propose a re-
+not optimal in practice.Chen et al.(2016b) also develop                   versible (approximately invertible) residual DNN architec-
+a greedy algorithm that checkpoints layers of a network in                ture, where intermediate temporary values can be recom-
+roughlymemoryequalsegments,withahyperparameterb                           puted from values derived later in the standard forward
+forthesizeofsuchsegments. Still,neitherprocedureiscost-                   computation. Reversibility enables recomputation during
+awarenordeallocatescheckpointswhenpossible.Gruslys                        the backward pass.Bulo et al.(2018) replace only ReLU
+et al.(2016) develop a dynamic programming algorithm for                  and batchnormalization layerswith invertiblevariants and
+checkpoint selection in unrolled recurrent neural network                 reducememoryusage upto50%. We ﬁndrematerialization
+training, exploiting their linear forward graphs.Feng &                   enables greater savings and a wider range of budgets, but
+Huang(2018) provide a dynamic program to select check-                    reversibility is a promising complementary approach.
+points that partition branching networks, but ignore layer
+costsandmemoryusage.Siskind&Pearlmutter(2018a)de-                         Distributed computation  Orthogonal approaches to ad-
+velopadivide-and-conquerstrategyinprograms.Beaumont                       dressthelimitedmemoryproblemaredistributed-memory
+etal.(2019)usedynamicprogrammingforcheckpointse-                          computations and gradient accumulation. However, model
+lectionina speciﬁcarchitecturewithjoiningsub-networks.                    parallelism requires access to additional expensive com-
+Intermediate value recomputation is also common in reg-                   pute accelerators, fast networks, and non-trivial partition-
+ister allocation. Compiler backends lower an intermediate                 ing of model state to balance communication and compu-
+representationofcodetoanarchitecture-speciﬁcexecutable                    tation(Gholamietal.,2018;Jiaetal.,2018b;McCandlish
+binary. During lowering, an abstract static single assign-                et al.). Gradient accumulation enables larger batch sizes by
+ment (SSA) graph of values and operations (Rosen et al.,                  computingthegradientswithmultiplesub-batchesacrossa
+1988;Cytronet al.,1991)is concretized bymapping values                    mini-batch. However, gradient accumulation can degrade
+to a ﬁnite number of registers. If insufﬁcient registers are              performance as batch normalization performs poorly on
+available for an SSA form computation graph, values are                   smallbatch sizes(Wu& He,2018;Ioffe& Szegedy,2015).
+spilled to main memory by storing and later loading the                   Activation compression  In some DNN applications, it is
+value.  Register allocation has been formulated as graph                  possible to process compressed representations with mini-
+coloring problem (Chaitin et al.,1981), integer program                   mal accuracy loss.Gueguen et al.(2018) classify discrete
+(Goodwin & Wilken,1996;Lozano et al.,2018), and net-                      cosine transforms of JPEG images rather than raw images.
+work ﬂow (Koes & Goldstein,2006).                                         Jainetal.(2018)quantizeactivations,cuttingmemoryusage
+Register allocators may recompute constants and values                    inhalf. Compression reducesmemoryusageby aconstant
+with register-resident dependencies if the cost of doing so               factor, but reduces accuracy. Our approach is mathemati-
+is less than the cost of a spill (Chaitin et al.,1981;Briggs              callyequivalenttorematerialization-freetrainingandincurs
+                                                                          no accuracy penalty.
+[PDF_PAGE 4]
+                                          Checkmate: Breaking the Memory Wall with Optimal Tensor Rematerialization
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+                              Table1. Rematerialization baselines and our extensions to make them applicable to non-linear architectures
+
+                4    OPTIMAL REMATERIALIZATION                                            comes at the cost ofO(Tn) decision variables.
+                In this section, we develop an optimal solver that schedules              To trade-offthe number ofdecision variablesand schedule
+                computation and garbage collection during the evaluation                  ﬂexibility, we limitT toT  =n.  This allows forO(n2)
+                of general data-ﬂow graphs including those used in neu-                   operations and constant memory in linear graphs.
+                ral network training.  Our proposed scheduler minimizes
+                computation or execution time while guaranteeing that the                 4.3   Scheduling with ample memory
+                schedule will not exceed device memory limitations. The                   First, consider neural network evaluation on a processor
+                rematerializationproblem isformulated asa mixedinteger                    with ample memory.  Even without a memory constraint,
+                linear program (MILP) that can be solved with standard                    our solver mustensure that checkpointed and computed op-
+                commercial or open-source solvers.                                        erationshavedependenciesresidentinmemory. Minimizing
+                4.1   Problem deﬁnition                                                   thetotalcostofcomputationacrossstageswithdependency
+                                                                                          constraints yields objective (1a):
+                A computationor data-ﬂowgraphG = (V,E) is adirected                                           n∑   t∑
+                acyclicgraphwithnnodesV ={v1,...,vn}thatrepresent                             argmin                  CiRt,i                                       (1a)
+                operations yielding values (e.g. tensors). Edges represent                      R,S          t=1 i=1
+                dependencies between operators, such as layer inputs in a                     subjectto
+                neural network. Nodes are numbered according to a topo-                           Rt,j ≤Rt,i+St,i           ∀t∀(vi,vj)∈E,   (1b)
+                logical order, such that operationvj may only depend on
+                the results of operationsvi<j.                                                ∑   St,i≤Rt−1,i+St−1,i     ∀t≥ 2∀i,              (1c)
+                Each operator’soutput takesMv memoryto storeand costs                        ∑iS1,i = 0,                                                             (1d)
+                Cv tocomputefromitsinputs. Wewishtoﬁndtheterminal                               tRt,n≥ 1,                                                             (1e)
+                nodevn with peak memory consumption under a memory                          Rt,i,St,i∈{0,1}                 ∀t∀i                       (1f)
+                budget,Mbudget, and minimum total cost of computation.                    Constraints ensure feasibility and completion. Constraint
+                4.2   Representing a schedule                                             (1b)and(1c)ensurethatanoperationiscomputedinstage   t
+                                                                                          onlyifalldependenciesareavailable. Tocovertheedgecase
+                We represent a schedule as a series of nodes being saved                  of the ﬁrst stage,constraint (1d) speciﬁes that no values are
+                or (re)computed. We unroll the execution of the network                   initiallyinmemory. Finally,coveringconstraint(1e)ensures
+                into T stages and only allow a node to be computed once                   that the last node in the topological order is computed at
+                perstage.St,i∈{0,1}indicatesthattheresultofoperation                      some point in the schedule so that training progresses.
+                i shouldberetainedin memory atstaget−1untilstaget.
+                We also deﬁneRt,i∈{0,1} be a binary variable reﬂecting                    4.4   Constraining memory utilization
+                whether operation i is recomputed at time step t.                         Toconstrainmemoryusage,weintroducememoryaccount-
+                Our representation generalizes checkpointing (Griewank                    ing variablesUt,k∈R+ into the ILP. LetUt,k denote the
+                & Walther,2000;Chen et al.,2016b;Gruslys et al.,2016;                     memory usedjust aftercomputing nodevk in staget.Ut,k
+                Siskind & Pearlmutter,2018b;Feng & Huang,2018), as                        is deﬁned recursively in terms of auxiliary binary variables
+                values can be retained and deallocated many times, but                    FREEt,i,k for (vi,vk) ∈E, which speciﬁes whether node
+METHOD                            DESCRIPTION                                                                                          GENERALCOSTMEMORY
+                                                                                                         GRAPHS        AWARE         AWARE
+Checkpoint all (Ideal)        No rematerialization. Default in deep learning frameworks.      √    ×    ×
+Griewank et al. logn         Griewank & Walther(2000)                        REVOLVE procedure          ×    ×    ×
+Chen et al.√n                   Chen et al.(2016b) checkpointing heuristic                ×    ×    ×
+Chen et al. greedy   Chen et al.(2016b), with search over parameter                      b          ×    ×    ∼
+AP√n                               Chen et al.√n on articulation points + optimal R solve       ∼    ×    ×
+AP greedy                          Chen et al. greedy on articulation points + optimal R solve      ∼    ×    ∼
+Linearized√n                   Chen et al.√n on topological sort + optimal R solve        √    ×    ×
+Linearized greedy              Chen et al. greedy on topological sort + optimal R solve       √    ×    ∼
+Checkmate ILP                  Our ILP as formulated in Section4                 √    √    √
+Checkmate approx.            Our LP rounding approximation algorithm (Section5)           √    √    √
+[PDF_PAGE 5]
+                          Checkmate: Breaking the Memory Wall with Optimal Tensor Rematerialization
+
+
+
+
+
+
+
+
+
+
+
+
+Figure4.Dependencies ofvk can onlybe garbagecollected afterit is evaluated. Ut,k measures thememory usedafter evaluatingvk and
+before deallocating its dependencies. vb andvc may be deallocated during garbage collection, butva may not due to a forward edge.
+
+
+vi may be deallocated in staget after evaluating nodevk.                  the stage, since thenvi needs to be retained for later use.
+We assume that (1) network inputs and parameters are al-                  MultiplyingbyRt,k in(5)ensuresthatvaluesareonlyfreed
+ways resident in memory and (2) enough space is allocated                 at most once per stage according to Theorem4.1,
+for gradients of the loss with respect to parameters.1  Pa-               Theorem 4.1 (No doubledeallocation).  If (5)    holds forall
+rameter gradients are typically small, the same size as the               (vi,vk)∈E, then∑k∈USERS[i]FREEt,i,k≤ 1∀t,i.
+parameters themselves. Additionally, at the beginning of
+a stage, all checkpointed values are resident in memory.                  Proof.  Assume forthe sakeof contradictionthat∃k1,k2∈
+Hence, we initialize the recurrence,                                      USERS[i] such that FREEt,i,k1 = FREEt,i,k2 = 1. By the
+                                            n∑                            ﬁrstfactorin(5)   ,wemusthaveRt,k1 =Rt,k2 = 1. Assume
+          Ut,0 =Minput+2Mparam          +        MiSt,i         (2)      withoutlossofgeneralitythatk2>k1. Bytheﬁnalfactor
+                                                                   in (5)   , we have FREEt,i,k1 ≤ 1−Rt,k2 = 0, which is a
+                      Constant overhead    i=1  Checkpoints               contradiction.
+
+SupposeUt,k bytes of memory are in use after evaluating                   4.5   Linear reformulation of memory constraint
+vk. Beforeevaluatingvk+1,vk anddependencies(parents)
+ofvk may be deallocatedif there are no futureuses. Then,                  While the recurrence (2-3) deﬁning  U is linear, the right
+an outputtensor forthe resultofvk+1 is allocated, consum-                 hand size of (5) is a polynomial. To express    FREE in our
+ing memoryMk+1. The timeline is depicted in Figure4,                      ILP, it must be deﬁned via linear constraints. We rely on
+yielding recurrence (3):                                                  Lemma4.1and4.2toreformulate(5)intoatractableform.
+   Ut,k+1 =Ut,k−mem           freedt(vk)+Rt,k+1Mk+1,    (3)               Lemma 4.1 (Linear Reformulation of Binary Polynomial).
+                                                                          Ifx1,...,xn∈{0,1},then
+where mem      freedt(vk) is the amount of memory freed by                               n∏        {
+deallocatingvk and its parents at staget. Let                                                xi =    1 ∑ni=1(1−xi) = 0
+
+                                                                                        i=1          0   otherwise
+              DEPS[k] ={i : (vi,vk)∈E}, and
+             USERS[i] ={j : (vi,vj)∈E}
+                                                                          Proof.  If allx1,...,xn = 1, then∑ni=1(1−xi) = 0 and
+denote parents and children of a node, respectively. Then,                we have Πni=1xi = 1.  If otherwise anyxj = 0, then we
+in terms of auxiliary variable FREEt,i,k, for(vi,vk)∈E,                   have Πni=1xi = 0, as desired. This can also be seen as an
+                                                                          applicationofDeMorgan’slawsforbooleanarithmetic.
+  mem    freedt(vk) =∑i∈DEPS[k]
+                               ∪{k} Mi∗FREEt,i,k, and   (4)∏              Lemma4.2(LinearReformulationofIndicatorConstraints).
+  FREEt,i,k =Rt,k∗(1−St+1,i)                        (1−Rt,j)     (5)      Given 0 ≤y ≤κ wherey is integral andκ is a constant
+                                    j∈USERS[i]                    upperboundony,then
+                          Not checkpoint    j>k       Not dep.                                        {
+Thesecondfactorin(5)    ensuresthatMi bytesarefreedonly                                         x =     1 y = 0
+ifvi isnotcheckpointedforthenextstage. Theﬁnalfactors                                                   0   otherwise
+ensure that FREEt,i,k = 0 if any child ofvi is computed in                ifandonlyifx∈{0,1}and(1−x)≤y≤κ(1−x).
+
+   1Whilegradientscanbedeletedafterupdatingparameters,we
+reserve constant space since many parameter optimizers such as            Proof.  For the forward direction, ﬁrst note that by con-
+SGD with momentum maintain gradient statistics.                           struction,x  ∈  {0,1}.    Ify  =  0 andx  =  1,  then
+[PDF_PAGE 6]
+                          Checkmate: Breaking the Memory Wall with Optimal Tensor Rematerialization
+
+(1−x) = 0 ≤y ≤ 0 =κ(1−x).  Similarly, ify ≥ 1                             4.7   Complete Integer Linear Program formulation
+andx = 0,then1≤y≤κ,which istrue since0≤y≤κ                                The complete memory constrained MILP follows in (9),
+andy is integral. The converse holds similarly.                           withO(|V||E|) variables and constraints.
+
+
+                                                                                                    n∑   t∑
+ToreformulateConstraint5,let                   numhazards(t,i,k) bethe            argmin                     CiRt,i
+numberofzerofactorsontheRHSoftheconstraint. Thisis                             R,S,U,FREE          t=1  i=1
+a linear function of the decision variables,                                      subjectto    (1b),(1c),(1f),(2) ,(3) ,                    (9)
+num   hazards(t,i,k) = (1−Rt,k)+St+1,i+ ∑                       Rt,j                               (7a),(7b),(7c),(8a),(8b)  ,(8c) ,
+
+                                                     j∈USERS[i]                                    Ut,k≤Mbudget
+                                                        j>k
+ApplyingLemma4.1tothepolynomialconstraint,wehave,                         4.8   Constraints implied by optimality
+                        {                                                 Problem9can be simpliﬁed by removing constraints im-
+                          1   num    hazards(t,i,k) = 0                   plied by optimality of a solution.  FREEt,k,k = 1 only if
+         FREEt,i,k =      0   otherwise                               (6) operationk is spuriously evaluated with no uses of the re-
+                                                                          sult.  Hence, the solver can setRt,k = 0 to reduce cost.
+By  Lemma4.2,   if       κ  is  the  maximum  value  that                 We eliminate|V|2 variables FREEt,k,k, assumed to be 0,
+num   hazards(t,i,k)canassume,thefollowingconstraints                     by modifying (4) to only sum over i ∈ DEPS[k].  These
+are equivalent to (6),                                                    variables can be computed inexpensively after solving.
+
+                    FREEt,i,k∈{0,1}                              (7a)     4.9   Generating an execution plan
+              1−FREEt,i,k≤ num           hazards(t,i,k)       (7b)        Given a feasible solution to (9),    (R,S,U,FREE), Algo-
+          κ(1−FREEt,i,k)≥ num            hazards(t,i,k)       (7c)        rithm1generates an execution plan via a row major scan
+                                                                          ofR andS with deallocations determined by FREE.  An
+                                                                          execution plan isa programP = (s1,...,sk) withk state-
+4.6   Tractability via frontier-advancing stages                          ments. When statement%r  =  compute  v is interpreted,
+Fixing the execution order of nodes in the graph can im-                  operationv is evaluated.  The symbol %r denotes a vir-
+prove the running time of the algorithm. In eager-execution               tual register used to track the resulting value.  Statement
+frameworks such as PyTorch, the order is given by user                    deallocate  %r marks the value tracked by virtual reg-
+codeandoperationsareexecutedserially. Separatingorder-                    ister%r for garbage collection.
+ing and allocation is common in compiler design, and both                 The execution plan generated by Algorithm1is further
+LLVM (Lattner,2002) and GCC (Olesen,2011) have sepa-                      optimized by moving deallocations earlier in the plan when
+rate instruction scheduling and register allocation passes.               possible. Spuriouscheckpointsthatareunusedinastagecan
+Any topological order of the nodes is a possible execution                bedeallocatedatthestart ofthestageratherthanduringthe
+order.  Given a topological order, such as the one intro-                 stage. Still,thiscodemotionisunnecessaryforfeasibility
+duced in Section4.1, we partition the schedule into frontier-             asthesolverguaranteesthattheunoptimizedschedulewill
+advancingstagessuchthatnodevi isevaluatedfortheﬁrst                       not exceed the desired memory budget.
+timeinstagei. We replaceconstraints(1d,1e) thatensure                     Theexecutionplancaneitherbeinterpretedduringtraining,
+the last node is computed with stricter constraints (8a-8c),              or encoded as a static computation graph. In this work, we
+                                                                          generateastaticgraphG′ = (V′,E′) fromtheplan,which
+   ∑      Ri,i = 1 ∀i   (frontier-advancing partitions)   (8a)            is executed by a numerical machine learning framework.
+      i≥tSt,i = 0   (lower tri., no initial checkpoints)   (8b)           See Section6.2for implementation details.
+  ∑
+     i>tRt,i = 0   (lower triangular)                             (8c)    4.10   Cost model
+
+This reduces the feasible set, constraining the search space              To estimate the runtime of a training iteration under a re-
+and improving running time.   For an 8 layer (n = 17)                     materialization plan, we apply an additive cost model (1a),
+lineargraph neuralnetwork withunitCi,Mi ata memory                        incurring costCi when nodevi is evaluated. Costs are de-
+budget of 4, Gurobi optimizes the unpartitioned MILP in                   termined prior to MILP construction by proﬁling network
+9.4 hours and the partitioned MILP in 0.23 seconds to the                 layersontargethardwarewithrandominputsacrossarange
+sameobjective. InAppendixA,weanalyzetheintegrality                        of batch sizes and input shapes, and exclude static graph
+gapofbothformsoftheproblemtounderstandthespeedup.                         construction and input generation time. As neural network
+[PDF_PAGE 7]
+                          Checkmate: Breaking the Memory Wall with Optimal Tensor Rematerialization
+
+Algorithm 1Generate execution plan                                       to solve. For DenseNet161 (Huang et al.,2017), no feasible
+   Input: graphG = (V,E), feasible(R,S,FREE)                             solution was found within one day.
+   Output: execution planP = (s1,...,sk)                                 For many classical NP-hard problems, approximation al-
+   Initialize REGS[1...|V|] =−1,r = 0,P = ().                            gorithms give solutions close to optimal with polynomial
+   fort = 1 to|V| do                                                     runtime.  We review a linear program that produces frac-
+     fork = 1 to|V| do                                                   tional solutions in polynomial time in Section5.1. Using
+        ifRt,k then                                                      the fractional solutions, we present a two-phase rounding
+           //Materializevk                                               algorithminSection5.2thatroundsasubsetofthedecision
+           add%r  =  compute  vk toP                                     variables,thenﬁndsaminimumcost,feasiblesettingofthe
+           REGS[k] =r                                                    remaining variables to ﬁnd near-optimal integral solutions.
+           r =r+1
+        end if                                                           5.1   Relaxing integrality constraints
+        //Freevk anddependencies
+        fori∈ DEPS[k]∪{k} do                                             By relaxing integrality constraints (1f), the problem be-
+           if FREEt,i,k then                                             comestrivialtosolveasitisalinearprogramovercontinu-
+              adddeallocate  %REGS[i] toP                                ousvariables. ItiswellknownthatanLPissolvableinpoly-
+           end if                                                        nomialtimeviaKarmarkar’salgorithm(Karmarkar,1984)
+        end for                                                          or barrier methods (Nesterov & Nemirovskii,1994). With
+     end for                                                             relaxationR,S,FREE ∈ [0,1],the objective (1a)deﬁnes a
+   end for                                                               lower-bound for the cost of the optimal integral solution.
+   returnP                                                               Rounding is a common approach to ﬁnd approximate inte-
+                                                                         gralsolutionsgiventheresultofanLPrelaxation. Forexam-
+operationsconsistofdensenumericalkernelssuchasmatrix                     ple,onecanachievea 34-approximationforMAXSAT(Yan-
+multiplication, these runtimes are low variance and largely              nakakis,1994) via a simple combination of randomized
+independent of the speciﬁc input data (Jia et al.,2018a;Si-              rounding(Pr[xinti  = 1]=x∗i)anddeterministicrounding
+vathanuetal.,2019). However,forwardpasstimeperbatch                      (xinti  = 1 ifx∗i ≥p, where commonlyp = 0.5).
+itemdecreaseswithincreasingbatchsizeduetoimproved                        We attempt to round the fractional solutionR∗,S∗ using
+data parallelism (Canziani et al.,2016), so it is important to           thesetwostrategies,andthenapplyAlgorithm1to       Rint,Sint.
+compute costs with appropriate input dimensions.                         However, direct application of deterministic rounding re-
+The memory consumption of each value in the data-ﬂow                     turns infeasible results: the rounded solution violates con-
+graph is computed statically as input and output sizes are               straints. Randomizedroundingmayshowmorepromiseasa
+known. Values aredense, multi-dimensionaltensors stored                  single relaxed solution can beused to samplemany integral
+at 4 byteﬂoating point precision. Thecomputed consump-                   solutions, some of which are hopefully feasible. Unfortu-
+tionMi is used to construct memory constraints (2-3).                    nately, using randomized rounding with the LP relaxation
+                                                                         for VGG16 at a 4× smaller budget than default, we could
+                                                                         not ﬁnd a single feasible solution out of 50,000 samples.
+5    APPROXIMATION
+Manyofourbenchmarkprobleminstancesaretractableto                         5.2   A two-phase rounding strategy
+solveusingoff-the-shelfintegerlinearprogramsolvers,with                  Toﬁndfeasiblesolutions,weintroducetwo-phaserounding,
+practicalsolvetimesrangingfromsecondstoanhour. ILP                       detailedinAlgorithm2. Two-phaseroundingisapplicable
+results in this paper are obtained with a 1 hour time limit              whenasubsetofvariablescanbesolvedinpolynomialtime
+on a computer with at least 24 cores. Relative to training               giventheremainingvariables. Ourapproximationalgorithm
+time,e.g. 21daysfortheBERTmodel(Devlinetal.,2018),                       onlyroundsthecheckpointmatrixS∗. GivenS∗,wesolve
+solvingtheILPaddslessthanapercentofruntimeoverhead.                      fortheconditionallyoptimalbinarycomputationmatrixRint
+WhileCOTSsolverssuchasCOIN-OR(Forrestetal.,2019)                         bysettingasfewvaluesto1aspossible. Algorithm2begins
+leverage methods like branch-and-bound to aggressively                   with an all-zero matrixRint = 0, then iteratively corrects
+prune the decision space, they can take superpolynomial                  violated correctness constraints.
+timeintheworst-caseandsolvingILPsisNP-hardingen-                         Note that during any of the above steps, once we set some
+eral. Intheworst-case,forneuralnetworkarchitectureswith                  Rinti,j = 1, the variable is never changed. Algorithm2cor-
+hundreds of layers, it is not feasible to solve the remateri-            rectsconstraintsina particular ordersothatconstraintsthat
+alization problem via our ILP. An instance of the VGG16                  are satisﬁed will continue to be satisﬁed as other violated
+architecture (Simonyan &Zisserman,2014) takes seconds                    constraints are corrected. The matrixRint generated by this
+[PDF_PAGE 8]
+                          Checkmate: Breaking the Memory Wall with Optimal Tensor Rematerialization
+
+Algorithm 2Two-phase rounding                                             allows trainingwithlarger inputsizesthanpreviously possi-
+   Input: Fractional checkpoint matrixS∗ from LP                          ble, upto 5.1× higher batchsizes on thesame accelerator.
+   Output: BinarySint,Rint, FREE                                          Finally,weﬁndthatourtwo-phaseroundingapproximation
+   RoundS∗ deterministically:Sintt,i←           1 [S∗t,i> 0.5]            algorithm ﬁnds near-optimal solutions in polynomial time.
+   Rint←In thereby satisfying (8a)
+   while∃t ≥ 2,i ∈ [n] such thatSintt,i>Rintt−1,i +Sintt−1,i              6.1   Baselines and generalizations
+   i.e. (1c) violated      do                                             Table1summarizes baseline rematerialization strategies.
+      Computevi to materialize checkpoint:Rintt−1,i← 1                    Thenominalevaluationstrategystoresallfeaturesgenerated
+   end while                                                              duringtheforwardpassforuseduringthebackwardpass—
+   while∃t≥ 1,(i,j)∈E such thatRintt,j>Rintt,i+Sintt,i                    thisisthedefaultinframeworkssuchasTensorFlow. Hence,
+   i.e. (1b) violated      do                                             every layer is computed once. We refer to this baseline as
+      Computevi as temporary for dependency:Rintt,i← 1                    Checkpointall, an ideal approach given ample memory.
+   end while
+   Evaluate FREE by simulating execution                                  Onthelinear grapharchitectures,suchas VGG16andMo-
+   returnSint,Rint, FREE                                                  bileNet(v1),wedirectlyapplypriorworkfromGriewank&
+                                                                          Walther(2000)andChenetal.(2016b),baselinesreferredto
+                                                                          asGriewankandWaltherlogn,Chenetal.√nandChenet
+                                                                          al. greedy. To build a tradeoff curve for computation versus
+roundingschemewillbeoptimaluptothechoiceofSint as                         memorybudget,wesearch overthesegmentsizehyperpa-
+every entry inRint is set to 1 if and only if it is necessary             rameterb in the greedy strategy. However, these baselines
+to satisfy a constraint. In implementation, we detect and                 cannot be used for modern architectures with residual con-
+correct violations of (1b) in reverse topological order for               nections.  For a fair comparison, we extend the √n and
+each stage, scanningRint,Sint matrices from right to left.                greedy algorithms to apply to general computation graphs
+                                                                          (e.g. ResNet50 and U-Net).
+5.3   Memory budget feasibility                                           Chen et al.(2016b) suggests manually annotating good
+Since we approximateS by rounding the fractional solu-                    checkpointing candidates in a computation graph. For the
+tion,Sint,Rint can be infeasible by the budget constraint                 ﬁrst extensions, denoted byAP √n and AP greedy, we
+Ut,k ≤Mbudget.  While the fractional solution may come                    automatically identify articulation points, or cut vertices,
+underthebudgetandtwo-phaseroundingpreservescorrect-                       verticesthatdisconnecttheforwardpassDAG,andusethese
+nessconstraints,theroundingproceduremakesnoattempt                        as candidates. The heuristics then select a subset of these
+to maintain budget feasibility. Therefore, we leave an al-                candidates,andweworkbackwardsfromthecheckpoints
+lowance on the total memory budget constraint (Ut,k ≤                     to identify which nodes require recomputation.
+(1−ϵ)Mbudget). We empirically ﬁndϵ = 0.1 to work well.                    Still, some networks have few articulation points, including
+                                                                          U-Net. We also extend heuristics by treating the original
+6    EVALUATION                                                           graph as a linear network, with nodes connectedin topolog-
+Inthissection,weinvestigatetheimpactoftensorremate-                       ical order, again backing out the minimal recomputations
+rialization on the cost and memory usage of DNN training.                 fromtheselectedcheckpoints. Theseextensionsarereferred
+We study the following experimental questions: (1) What                   to asLinearized√n andLinearizedgreedy.
+isthetrade-offbetweenmemoryusageandcomputational                          SectionsB.1andB.2provide more details on our gener-
+overhead when using rematerialization? (2) Are large in-                  alizations. Note that all proposed generalizations exactly
+putspracticalwithrematerialization? and(3)Howwellcan                      reproduce the original heuristics on linear networks.
+weapproximatetheoptimalrematerializationpolicy?
+We compare our proposed solver against baseline heuristics                6.2   Evaluation setup
+on representative image classiﬁcation and high resolution                 CheckmateisimplementedinTensorﬂow2.0(Abadietal.,
+semanticsegmentation modelsincluding VGG16,VGG19,                         2016),acceptinguser-deﬁnedmodelsexpressedviathehigh-
+ResNet50, MobileNet, U-Net and FCN with VGG layers,                       level Keras interface. We extract the forward and backward
+andSegNet. Aspriorworkislargelylimitedtolineargraphs,                     computation graph, then construct and solve optimization
+weproposenovelextensionswherenecessaryforcompar-                          problem (9) with the Gurobi mathematical programming
+ison.  Results show that optimal rematerialization allows                 library as an integer linear program.  Finally, Checkmate
+signiﬁcantly lower computational overhead than baselines                  translates solutions into execution plans and constructs a
+at all memory budgets, and lower memory usage than previ-                 newstatic training graph. Together, these componentsform
+ouslypossible. Asaconsequence,optimalrematerialization                    the Checkmate system, illustrated in Figure2.
+[PDF_PAGE 9]
+                          Checkmate: Breaking the Memory Wall with Optimal Tensor Rematerialization
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Figure5.Computational overhead versus memory budget for (a) VGG16 image classiﬁcation NN (Simonyan & Zisserman,2014), (b)
+MobileNetimageclassiﬁcationNN,and(c)theU-NetsemanticsegmentationNN(Ronnebergeretal.,2015). Overheadiswithrespectto
+thebestpossiblestrategywithoutamemoryrestrictionbasedonaproﬁle-basedcostmodelofasingleNVIDIAV100GPU.ForU-Net(c),
+at the 16 GB V100 memory budget, we achieve a1.20× speedup over the best baseline—linearized greedy—and a1.38× speedup over
+thenext best—linearized√n. Takeaway: ourmodel- andhardware-awaresolver producesin-budgetsolutions withthe lowest overhead
+on linear networks (a-b), and dramatically lowers memory consumptionand overhead on complex architectures (c).
+
+
+To accelerate problem construction, decision variablesR                  Takeaways:  For all three DNNs, Checkmate produces
+andS are expressed as lower triangular matrices, as are                  clearly faster execution plans as compared to algorithms
+accountingvariablesU. FREE isrepresentedasa|V|×|E|                       proposedbyChenetal.(2016b)andGriewank&Walther
+matrix. Except for our maximum batch size experiments,                   (2000) – over         1.2× faster than the next best on U-Net at
+solutionsaregeneratedwithauser-conﬁgurable timelimit                     the NVIDIA V100 memory budget. Our framework allows
+of 3600 seconds, though the majority of problems solve                   trainingaU-Netatabatchsizeof32imagesperGPUwith
+within minutes. Problems with exceptionally large batch                  less than 10% higher overhead. This would require 23 GB
+sizes or heavily constrained memory budgets may reach                    of memory without rematerialization, or with the original
+this time limit while the solver attempts to prove that the              baselines without our generalizations.
+problem is infeasible. The cost of a solution is measured
+withaproﬁle-basedcostmodel(Section4.10)andcompared                       6.4   Are large inputs practical with rematerialization?
+to the ideal, unachievable cost with no recomputation.                   Themaximumbatchsizeenabledbydifferentrematerializa-
+The feasible set of our optimal ILP formulation is a su-                 tion strategies is shown in Figure6. The y-axis shows the
+perset of baseline heuristics.  We implement baselines as                theoreticalmaximumbatchsizewecouldfeasiblytrainwith
+a static policy for the decision variableS and then solve                bounded computecost. This is calculatedby enforcingthat
+forthelowest-costrecomputationscheduleusingasimilar                      thetotalcostmustbelessthanthecostofperformingjust
+procedure to that described in Algorithm2.                               one additional forward pass. That is, in Figure6the cost is
+                                                                         at most an additional forward pass higher, if the speciﬁed
+6.3   What is the trade-off between memory usage and                     batch sizewouldhave ﬁtin GPU memory. Toﬁnd Check-
+      computational overhead?                                            mate’smaximumbatchsize,wereformulateProblem(9)to
+Figure5comparesremateralizationstrategiesonVGG-16,                       maximize a batch sizevariableB∈N subject to modiﬁed
+MobileNet,andU-Net. They-axisshowsthecomputational                       memory constraints that useB∗Mi in place ofMi and
+overhead of checkpointing in terms of time as compared to                subject to an additional cost constraint,
+baseline. Thetimeiscomputedbyproﬁlingeachindividual                              n∑   t∑
+layer of the network. The x-axis shows the total memory                                  CiRt,i≤ 2 ∑           Ci+ ∑          Ci.        (10)
+budgetrequired to runeachmodelwith thespeciﬁedbatch
+size,computed forsingleprecisiontraining. Exceptfor the                         t=1  i=1               vi∈Gfwd        vi∈Gbwd
+√n heuristics, each rematerialization algorithm has a knob
+totrade-offtheamountofrecomputationandmemoryusage,                       Themodiﬁedintegerprogramhasquadraticconstraints,and
+where a smaller memory budget leads to higher overhead.                  is difﬁcult to solve. We set a time limit of one day for the
+                                                                         experiment,butGurobimaybeunabletoreachoptimality
+[PDF_PAGE 10]
+                                         Checkmate: Breaking the Memory Wall with Optimal Tensor Rematerialization
+
+
+
+
+
+
+
+
+
+
+
+
+
+                                                                                        Table2.ApproximationratiosforbaselineheuristicsandourLP
+                                                                                        rounding strategy.   Results are given as the geometric mean
+                                                                                        speedup of the optimal ILP across feasible budgets.
+
+
+              Figure6. MaximumbatchsizepossibleonasingleNVIDIAV100                      6.5   How well can we approximate the optimal
+               GPUwhenusingdifferentgeneralizedrematerializationstrategies                     rematerialization policy?
+              with at most a single extra forward pass. We enable increasing            To understand how well our LP rounding strategy (Sec-
+               batch size by up to 5.1× over the current practice of caching            tion5)  approximates  the  ILP,  we  measure  the  ratio
+               all activations (on MobileNet), and up to 1.73× over the best            COSTapprox/COSTopt,i.e. the speedup of the optimal sched-
+               checkpointing scheme (on U-Net).                                         ule,inFLOPs. AsinSection6.3,wesolveeachstrategyata
+                                                                                        rangeofmemorybudgets,thencomputethegeometricmean
+                                                                                        of the ratio across budgets.  The aggregated ratio is used
+              withinthatlimit. Figure6then providesalowerboundon                        because some budgets are feasible via the ILP but not via
+               the maximum batch size that Checkmate can achieve.                       theapproximations. Table2showsresults. Thetwo-phase
+               For fair comparison on the non-linear graphs used in U-                  deterministicroundingapproachhasapproximationfactors
+               Net, FCN, and ResNet, we use the AP√n and linearized                     close to optimal, at most1.06× for all tested architectures.
+               greedy baseline generalizations described in Section6.1.
+               Forthebaselines,weiterateoverbatchsizes,ﬁndcandidate                     7    CONCLUSION
+               solutions (multiple candidates for linearized greedy), and               Oneof themain challenges whentraining largeneuralnet-
+               ﬁlter out the solutions that cost more than an additional                works is the limited capacity of high-bandwidth memory
+               forwardpassorthatwouldexceedthe16GBmemorybudget.                         on accelerators such as GPUsand TPUs. This has created
+              The iteration stops when no solutions are available.                      a memory wall that limits the size of the models that can
+               Costs are measured in FLOPs, determined statically.  U-                  be trained.  The bottleneck for state-of-the-art model de-
+               Net, FCN8 and SegNet semantic segmentation networks                      velopment is now memory rather than data and compute
+               use a resolution of416×608, and classiﬁcation networks                   availability,andweexpectthistrendtoworseninthefuture.
+               ResNet50,VGG19andMobileNetuseresolution224×224.                          Toaddressthischallenge,weproposedanovelrematerial-
+              Takeaways: We can theoretically increase the batch size                   ization algorithm which allows large models to be trained
+               of U-Net to 61 at a high resolution, an unprecedented re-                withlimitedavailablememory. Ourmethoddoesnotmake
+               sult. For many tasks such as semantic segmentation, where                the strong assumptions required in prior work, supporting
+               U-Net is commonly used, it is not possible to use batch                  generalnon-linearcomputationgraphssuchasresidualnet-
+               sizes greater than16, depending on resolution. This is sub-              works and capturing the impact of non-uniform memory
+               optimal for batch normalization layers, and being able to                usage and computation cost throughout the graph with a
+               increasethe batchsizeby3.8× (61vs16atthis resolution)                    hardware-aware,proﬁle-guided cost model. We presented
+               is quite signiﬁcant. Orthogonal approaches to achieve this               anILPformulationfortheproblem,implementedtheCheck-
+               include model parallelism and distributed memory batch                   mate system for optimal rematerialization in TensorFlow,
+               normalization which can be signiﬁcantly more difﬁcult to                 andtestedtheproposedsystemonarangeofneuralnetwork
+               implement and have high communication costs.                             models. In evaluation, we ﬁnd that optimal rematerializa-
+               Furthermore, for MobileNet, Checkmate allows a batch                     tionhasminimalcomputationaloverheadatawiderangeof
+               size of1105 which is1.73× higher than the best baseline                  memorybudgetsand showedthatCheckmateenablesprac-
+               solution, a greedy heuristic, and 5.1× common practice,                  titionersto trainhigh-resolution models withsigniﬁcantly
+               checkpointing allactivations. Thesame schedules canalso                  larger batch sizes.  Finally, a novel two-phase rounding
+               be used to increase image resolution rather than batch size.             strategy closely approximates the optimal solver.
+
+
+
+                 AP√       AP       Griewank       Two-phase
+                   n     greedy        logn       LP rounding
+MobileNet      1.14×   1.07×      7.07×           1.06×
+   VGG16       1.28×   1.06×      1.44×           1.01×
+   VGG19       1.54×   1.39×      1.75×           1.00×
+     U-Net     1.27×   1.23×           -               1.03×
+ ResNet50      1.20×   1.25×           -               1.05×
+[PDF_PAGE 11]
+                         Checkmate: Breaking the Memory Wall with Optimal Tensor Rematerialization
+ACKNOWLEDGEMENTS                                                       Chen, L.-C., Papandreou, G., Kokkinos, I., Murphy, K., and
+We would like to thank Barna Saha and Laurent El Ghaoui                   Yuille, A. L. DeepLab: Semantic Image Segmentation
+for guidance on approximation, Mong H. Ng for help in                     withDeepConvolutionalNets,AtrousConvolution,and
+evaluation, and the paper and artifact reviewers for helpful              FullyConnectedCRFs. June2016a. arXiv: 1606.00915.
+
+suggestions. In addition to NSF CISE Expeditions Award                 Chen,T.,Xu,B.,Zhang,C.,andGuestrin,C. TrainingDeep
+CCF-1730628 and ONR PECASE N000141612723, this                            Nets with Sublinear Memory Cost. April 2016b. arXiv:
+work was supported by gifts from Alibaba, Amazon Web                      1604.06174.
+Services, Ant Financial, CapitalOne, Ericsson, Facebook,               Chen,X.,Ma,H.,Wan,J.,Li,B.,andXia,T. Multi-view3D
+Futurewei, Google, Intel, Microsoft, NVIDIA, Scotiabank,                  ObjectDetection Network forAutonomous Driving. In
+Splunk and VMware. This work was alsosupported by the                     2017IEEEConferenceonComputerVisionandPattern
+NSFGRFPunderGrantNo. DGE-1752814. Anyopinions,
+ﬁndings,andconclusionsorrecommendationsexpressedin                        Recognition(CVPR), pp. 6526–6534. IEEE, 2017.
+thismaterialarethoseoftheauthor(s)anddonotnecessarily                  Child, R., Gray, S., Radford, A., and Sutskever, I. Gener-
+reﬂect the views of the NSF.                                              atingLongSequences withSparseTransformers. April
+                                                                          2019. arXiv: 1904.10509.
+REFERENCES                                                             Cytron, R., Ferrante, J., Rosen, B. K., Wegman, M. N.,
+Abadi,M.,Agarwal,A.,Barham,P.,Brevdo,E.,Chen,Z.,                          and Zadeck, F. K. Efﬁciently Computing Static Single
+  Citro,C., Corrado,G.S.,Davis, A.,Dean,J., Devin,M.,                     Assignment Form and the Control Dependence Graph.
+  Ghemawat, S.,Goodfellow, I.,Harp,A.,Irving, G.,Isard,                   ACMTrans.Program.Lang.Syst.,13(4):451–490, Octo-
+  M., Jia, Y., Jozefowicz, R., Kaiser, L., Kudlur, M., Lev-               ber 1991.
+  enberg, J., Mane, D., Monga, R., Moore, S., Murray, D.,
+  Olah, C., Schuster, M., Shlens, J., Steiner, B., Sutskever,          Dai, Z., Yang, Z., Yang, Y., Carbonell, J., Le, Q. V., and
+  I., Talwar, K., Tucker, P., Vanhoucke, V., Vasudevan,                   Salakhutdinov, R. Transformer-XL: Attentive Language
+  V., Viegas, F., Vinyals, O., Warden, P., Wattenberg, M.,                ModelsBeyondaFixed-LengthContext. January2019.
+  Wicke, M., Yu, Y., and Zheng, X.  TensorFlow: Large-                    arXiv: 1901.02860.
+  Scale Machine Learning on Heterogeneous Distributed                  Devlin,J.,Chang,M.-W.,Lee,K.,andToutanova,K. BERT:
+  Systems. March 2016.                                                    Pre-trainingofDeepBidirectionalTransformersforLan-
+
+Beaumont, O., Herrmann, J., Pallez, G., and Shilova, A.                   guageUnderstanding. October2018. arXiv: 1810.04805.
+  Optimal memory-aware backpropagation of deep join                    Dong, C., Loy, C. C., He, K., and Tang, X. Image super-
+  networks. Research Report RR-9273, Inria, May 2019.                     resolution using deep convolutional networks.   IEEE
+
+Briggs,P.,Cooper,K.D.,andTorczon,L. Rematerialization.                    Transactions on Pattern Analysis and Machine Intelli-
+  InProceedingsoftheACMSIGPLAN1992Conference                              gence, 38(2):295–307, Feb 2016.
+  onProgrammingLanguageDesignandImplementation,                        Feng,J.andHuang,D. CuttingDownTrainingMemoryby
+  PLDI ’92, pp. 311–321, New York, NY, USA, 1992.
+                                                                          Re-fowarding. July 2018.
+Brock,A.,Donahue,J.,andSimonyan,K. LargescaleGAN
+  trainingforhighﬁdelitynaturalimagesynthesis.arXiv                    Forrest, J. J., Vigerske, S., Ralphs, T., Santos, H. G., Hafer,
+  preprintarXiv:1809.11096, 2018.                                         L., Kristjansson, B., Fasano, J., Straver, E., Lubin, M.,
+                                                                          rlougee, jpgoncal1, Gassmann, H. I., and Saltzman, M.
+Bulo, S. R., Porzi, L., and Kontschieder, P.  In-place Ac-                COIN-OR Branch-and-Cut solver, June 2019.
+  tivated BatchNorm for Memory-Optimized Training of
+  DNNs.  In 2018 IEEE/CVF Conference on Computer                       Gholami,A.,Azad,A.,Jin,P.,Keutzer,K.,andBuluc,A. In-
+  Vision and Pattern Recognition, pp. 5639–5647. IEEE,                    tegratedmodel,batch,anddomainparallelismintraining
+  June 2018.                                                              neural networks. In Proceedings of the 30th on Sympo-
+Canziani,A.,Paszke,A.,andCulurciello,E. AnAnalysisof                      siumonParallelisminAlgorithmsandArchitectures,pp.
+  Deep Neural Network Models for Practical Applications.                  77–86. ACM, 2018.
+
+  May 2016. arXiv: 1605.07678.                                         GLPK. GNU Project - Free Software Foundation (FSF).
+
+Chaitin, G. J., Auslander, M. A., Chandra, A. K., Cocke, J.,           Gomez, A. N., Ren, M., Urtasun, R., and Grosse, R. B. The
+  Hopkins,M.E., andMarkstein,P.W. Registerallocation                      Reversible Residual Network: Backpropagation Without
+  via coloring. ComputerLanguages, 6(1):47–57, January                    Storing Activations. In Guyon, I., Luxburg, U. V., Ben-
+  1981.                                                                   gio, S., Wallach, H., Fergus, R., Vishwanathan, S., and
+[PDF_PAGE 12]
+                         Checkmate: Breaking the Memory Wall with Optimal Tensor Rematerialization
+
+  Garnett,R.(eds.),AdvancesinNeuralInformationPro-                      Jia, Z., Lin, S., Qi, C. R., and Aiken, A. Exploring Hidden
+  cessing Systems 30, pp. 2214–2224. Curran Associates,                   Dimensions in Accelerating Convolutional Neural Net-
+  Inc., 2017.                                                             works. InInternationalConferenceonMachineLearning,
+                                                                          pp. 2274–2283, July 2018a.
+Goodwin, D. W. and Wilken, K. D.  Optimal and Near-
+  optimalGlobalRegisterAllocationUsing01IntegerPro-                     Jia,Z.,Zaharia,M., andAiken, A. BeyondDataandModel
+  gramming.  Software: Practice and Experience, 26(8):                    Parallelism for Deep Neural Networks. SysML Confer-
+  929–965, 1996.                                                          ence, pp. 13, Feb. 2018b.
+
+Griewank,A. andWalther,A. Algorithm799: revolve: an                     Karmarkar, N. A new polynomial-time algorithm for linear
+  implementation of checkpointing for the reverse or ad-                  programming.  In Proceedings of the sixteenth annual
+  jointmode ofcomputationaldifferentiation. ACMTrans-                     ACMsymposiumonTheoryofcomputing,pp.302–311.
+  actionsonMathematicalSoftware,26(1):19–45,March                         ACM, 1984.
+  2000.
+                                                                        Kim, J., Lee, J. K., and Lee, K. M. Accurate image super-
+Gruslys,  A.,  Munos,  R.,  Danihelka,  I.,  Lanctot,  M.,                resolution using very deep convolutional networks.  In
+  and  Graves,  A.    Memory-efﬁcient  Backpropagation                    2016IEEEConferenceonComputerVisionandPattern
+  Through Time. InProceedingsofthe30thInternational                       Recognition (CVPR), pp. 1646–1654, June 2016.  doi:
+  Conference on Neural Information Processing Systems,                    10.1109/CVPR.2016.182.
+  NIPS’16, pp. 4132–4140, USA, June 2016. Curran Asso-
+  ciates Inc.                                                           Koes, D. R. and Goldstein, S. C.  A Global Progressive
+                                                                          Register Allocator.   In Proceedings of the 27th ACM
+Gueguen, L., Sergeev, A., Kadlec, B., Liu, R., and Yosin-                 SIGPLANConferenceonProgrammingLanguageDesign
+  ski, J. Faster Neural Networks Straight from JPEG. In                   andImplementation,PLDI’06,pp.204–215,NewYork,
+  Bengio, S., Wallach, H., Larochelle, H., Grauman, K.,                   NY, USA, 2006. ACM.  event-place: Ottawa, Ontario,
+  Cesa-Bianchi, N., and Garnett, R. (eds.), Advances in                   Canada.
+  Neural Information Processing Systems 31, pp. 3933–
+  3944. Curran Associates, Inc., 2018.                                  Krizhevsky, A., Sutskever, I., and Hinton, G.E. ImageNet
+                                                                          Classiﬁcation with Deep Convolutional Neural Networks.
+He, K., Zhang, X., Ren, S., and Sun, J. Deep residual learn-              InPereira,F.,Burges,C.J.C.,Bottou,L.,andWeinberger,
+  ing for image recognition. In Proceedings of the IEEE                   K. Q. (eds.), Advances in Neural Information Process-
+  conferenceoncomputervisionandpatternrecognition,                        ingSystems25, pp. 1097–1105. Curran Associates, Inc.,
+  pp. 770–778, 2016.                                                      2012.
+
+Holder, L. Graph Algorithms: Applications, 2008.                        Lattner, C. LLVM: An Infrastructure for Multi-Stage Op-
+                                                                          timization.   Master’s thesis, Computer Science Dept.,
+Huang, G., Liu, Z., Van Der Maaten, L., and Weinberger,                   UniversityofIllinois at Urbana-Champaign,Urbana,IL,
+  K. Q.  Densely connected convolutional networks.  In                    December 2002.
+  ProceedingsoftheIEEEconferenceoncomputervision
+  andpatternrecognition, pp. 4700–4708, 2017.                           Liu, Y., Ott, M., Goyal, N., Du, J., Joshi, M., Chen, D.,
+                                                                          Levy, O., Lewis, M., Zettlemoyer, L., and Stoyanov, V.
+Ioffe,S.andSzegedy,C.BatchNormalization: Accelerating                     RoBERTa: ARobustlyOptimizedBERTPretrainingAp-
+  Deep Network Training by Reducing Internal Covariate                    proach. July 2019. arXiv: 1907.11692.
+  Shift.  International Conference on Machine Learning,
+  February 2015.                                                        Long,J.,Shelhamer,E.,andDarrell,T. Fullyconvolutional
+                                                                          networks for semantic segmentation.   In Proceedings
+Jain, A., Phanishayee, A., Mars, J., Tang, L., and Pekhi-                 oftheIEEEconferenceoncomputervisionandpattern
+  menko, G. Gist: Efﬁcient Data Encoding for Deep Neu-                    recognition, pp. 3431–3440, 2015.
+  ral Network Training.  In Proceedings of the 45th An-
+  nualInternationalSymposiumonComputerArchitecture,                     Lozano, R. C., Carlsson, M., Blindell, G. H., and Schulte,
+  ISCA ’18, pp. 776–789, Piscataway, NJ, USA, 2018.                       C.  Combinatorial Register Allocation and Instruction
+  IEEE Press.                                                             Scheduling. April 2018. arXiv: 1804.02452.
+
+Jain,P.,Mo, X.,Jain,A., Tumanov, A.,Gonzalez,J.E., and                  McCandlish, S., Kaplan, J., Amodei, D., and Team, O. D.
+  Stoica, I.  The ooo vliw jit compiler for gpu inference.                An Empirical Model of Large-Batch Training.  arXiv:
+  arXivpreprintarXiv:1901.10008, 2019.                                    1812.06162.
+[PDF_PAGE 13]
+                         Checkmate: Breaking the Memory Wall with Optimal Tensor Rematerialization
+
+Meng, C., Sun, M., Yang, J., Qiu, M., and Gu, Y.  Train-               Simonyan, K. and Zisserman, A. Very Deep Convolutional
+  ing Deeper Models by GPU Memory Optimization on                         NetworksforLarge-ScaleImageRecognition. September
+  TensorFlow. pp. 8, December 2017.                                       2014. arXiv: 1409.1556.
+
+Micikevicius,P. LocalMemoryandRegisterSpilling,2011.                   Siskind,J.M.andPearlmutter,B.A. Divide-and-conquer
+Nakata, I.  On Compiling Algorithms for Arithmetic Ex-                    checkpointingforarbitraryprogramswithnouserannota-
+  pressions. Commun.ACM,10(8):492–494,August 1967.                        tion. OptimizationMethodsandSoftware,33(4-6):1288–
+  ISSN 0001-0782. doi: 10.1145/363534.363549.                            1330, 2018a. doi: 10.1080/10556788.2018.1459621.
+
+Nesterov, Y. and Nemirovskii, A. Interior-pointpolynomial              Siskind, J. M.and Pearlmutter, B. A. Divide-and-Conquer
+  algorithms in convex programming, volume 13.  Siam,                     Checkpointing forArbitrary Programs withNo User An-
+  1994.                                                                   notation. Optimization Methods and Software, 33(4-6):
+                                                                         1288–1330, November 2018b.
+NVIDIA. NVIDIA Tesla V100 GPU Architecture, 2017.
+                                                                       Sivathanu, M., Chugh, T., Singapuram, S.S., and Zhou, L.
+Olesen,J.S. RegisterAllocationinLLVM3.0,November                          Astra: ExploitingPredictabilitytoOptimizeDeepLearn-
+  2011.                                                                   ing. In Proceedings of the Twenty-Fourth International
+Paszke, A., Gross, S., Chintala, S., Chanan, G., Yang, E.,                Conference on Architectural Support for Programming
+  DeVito,Z.,Lin,Z.,Desmaison,A.,Antiga,L.,andLerer,                       Languages and Operating Systems - ASPLOS ’19, pp.
+  A. Automaticdifferentiation inPyTorch. InNIPS2017                       909–923, Providence, RI, USA, 2019. ACM Press.
+  AutodiffWorkshop, 2017.                                              Sze,V.,Chen,Y.-H.,Yang,T.-J.,andEmer,J.S. Efﬁcient
+Paszke, A., Gross, S., Massa, F., Lerer, A., Bradbury, J.,                processingofdeepneuralnetworks: Atutorialandsurvey.
+  Chanan,G.,Killeen,T.,Lin,Z.,Gimelshein,N.,Antiga,                       ProceedingsoftheIEEE, 105(12):2295–2329, 2017.
+  L., Desmaison, A., Kopf, A., Yang, E., DeVito, Z., Rai-              Szegedy, C., Wei Liu, Yangqing Jia, Sermanet, P., Reed,
+  son, M.,Tejani,A., Chilamkurthy, S., Steiner, B., Fang,                 S., Anguelov, D., Erhan, D., Vanhoucke, V., and Ra-
+  L., Bai, J., and Chintala, S.   Pytorch:  An imperative                 binovich,  A.    Going deeper with convolutions.    In
+  style, high-performance deep learning library.  In Wal-                 2015 IEEE Conference on Computer Vision and Pat-
+  lach,H.,Larochelle,H.,Beygelzimer,A.,d’Alch´e-Buc,                      tern Recognition (CVPR), pp. 1–9,  June 2015.    doi:
+  F.,Fox,E., andGarnett, R.(eds.),AdvancesinNeuralIn-                    10.1109/CVPR.2015.7298594.
+  formationProcessingSystems32,pp.8024–8035.Curran
+  Associates, Inc., 2019.                                              Tai, Y., Yang, J., and Liu, X.  Image super-resolution via
+Pohlen, T., Hermans, A., Mathias, M., and Leibe, B. Full-                 deep recursive residual network.   In 2017 IEEE Con-
+  resolution residualnetworksfor semantic segmentation                    ference on Computer Vision and Pattern Recognition
+  in streetscenes. InComputerVisionandPatternRecog-                      (CVPR),pp.2790–2798,July2017. doi: 10.1109/CVPR.
+  nition(CVPR),2017IEEEConferenceon, 2017.                                2017.298.
+
+Punjani, M. Register Rematerialization in GCC. In GCC                  Vaswani,A.,Shazeer,N.,Parmar,N.,Uszkoreit,J.,Jones,
+  DevelopersSummit, volume 2004. Citeseer, 2004.                          L.,Gomez,A.N.,Kaiser,L.,andPolosukhin,I. Attention
+                                                                          isAllyouNeed. InGuyon,I.,Luxburg,U.V.,Bengio,S.,
+Ronneberger,O., Fischer, P., andBrox, T. U-Net: Convolu-                 Wallach,H.,Fergus,R.,Vishwanathan,S.,andGarnett,R.
+  tional Networks for Biomedical Image Segmentation. In                   (eds.), Advances in Neural Information Processing Sys-
+  Navab, N., Hornegger,J., Wells,W. M.,and Frangi,A. F.                   tems30, pp. 5998–6008. Curran Associates, Inc., 2017.
+  (eds.),MedicalImageComputingandComputer-Assisted
+  Intervention MICCAI2015, Lecture Notes in Computer                   Wu, Y. and He, K. Group Normalization. pp. 3–19, 2018.
+  Science, pp. 234–241. Springer International Publishing,             Xie,S.,Girshick,R.,Doll´ar,P.,Tu,Z.,andHe,K. Aggre-
+  2015. ISBN 978-3-319-24574-4.                                           gatedresidualtransformationsfordeepneuralnetworks.
+Rosen, B. K., Wegman, M. N., and Zadeck, F. K. Global                     In Proceedings of the IEEE conference on computer vi-
+  Value Numbers and Redundant Computations.  In Pro-                      sionandpatternrecognition, pp. 1492–1500, 2017.
+  ceedingsofthe15thACMSIGPLAN-SIGACTSymposium                          Yang,B., Liang,M.,and Urtasun,R. HDNET:Exploiting
+  onPrinciplesofProgrammingLanguages,POPL’88,pp.                          HD Maps for 3D Object Detection. pp. 10, 2018.
+  12–27, New York, NY, USA, 1988. ACM.
+Sethi, R. Complete Register AllocationProblems. pp. 14,                Yannakakis,M. Ontheapproximationofmaximumsatisﬁa-
+  April 1973.                                                             bility. JournalofAlgorithms, 17(3):475–502, 1994.
+[PDF_PAGE 14]
+                          Checkmate: Breaking the Memory Wall with Optimal Tensor Rematerialization
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Figure7.We visualize schedules (R matrix) for VGG19.  The R matrix denotes when each layer in a neural network is evaluated.
+Rowsrefertoexecutionstagewhilecolumnsrefertoaparticularlayer. Wemakenodistinctionbetweenforwardandbackwardnodes.
+TensorFlow 2.0 can train VGG19 on a V100 with a batch size of 167. By applying the heuristic fromChen et al.(2016b), a V100 can
+sustaintrainingatabatchsizeod197. However,ourproposedmethodinCheckmatesustainstrainingatabatchsizeof289,representing
+a 73% improvement. The integer linear program took 10 seconds to solve to optimality.
+
+A    INTEGRALITY GAP                                                     B    GENERALIZATIONS OF PRIOR WORK
+
+TounderstandwhythepartitionedvariantoftheMILP(Sec-                       B.1   AP√n and AP greedy
+tion4.2) is faster to solve via branch-and-bound, we can                 We identify Articulation Points (AP) in the undirected form
+measure the integrality gap for particular problem instances.            oftheforwardpassdata-ﬂowgraphascandidatesforcheck-
+Theintegralitygapisthemaximumratio between theopti-                      pointing. APs are vertices that increase the number of con-
+mal value of the ILP and its relaxation, deﬁned as follows:              nectedcomponents(i.e. disconnect)thegraphifremoved,
+                                   COSTint                               andcanbeidentiﬁedintimeO(V +E)viaamodiﬁedDFS
+                    IG = maxI                                            traversal(Holder,2008). Anarticulation point        va isa good
+                                  COSTfrac,                              candidate for checkpointing as subsequent vertices in the
+                                                                         topological orderhave no dependencieson verticesbefore
+whereCOSTint andCOSTfrac aretheoptimalvaluetheILP                        va in the order. DNN computation graphs are connected, so
+andthatofitsrelaxation,respectively.I describesaproblem                  eachintermediate tensorcanbereconstructed fromasingle
+instance,                                                                articulationpointearlierinthetopologicalorder,orthein-
+                                                                         put ifthere is nosuch AP. APsinclude the inputand output
+                    I = (G,C,M,Mbudget).                                 nodes of residual blocks in ResNet, but not vertices inside
+                                                                         blocks. WeapplyChen’sheuristicstocheckpointasubsetof
+                                                                         thesecandidates,thensolvefortheoptimalrecomputation
+As  our  ILP  is  a  minimization  problem,  COSTint  ≥                  planR torestorecorrectness. SolvingforR ensuresthata
+COSTfrac for allI, andIG≥ 1. While it is not possible                    node’s dependencies are resident prior to evaluation.
+to measure the ratiobetween the ILP and LP solutions for                 We could ﬁndR by solving the optimization problem (9)
+allproblem instances,the ratioforanyparticularproblem                    with additional constraints onS that encode the heuristi-
+instance gives a lower bound on the integrality gap.                     cally selected checkpoints.  However, asS is given, the
+For the 8-layer linear neural network graph discussed in                 optimizationissolvableinO(|V||E|) viaagraphtraversal
+Section4.2, frontier-advancement reduces the integrality                 perrow ofR thatﬁlls inentries whenaneeded valueisnot
+gapfrom21.56to1.18,i.e. theLPrelaxationissigniﬁcantly                    in memory by the same process described in Section5.2.
+tighter. In branch-and-bound algorithms for ILP optimiz-
+tion,asubsetoffeasiblesolutionscanbeprunediftheLP                        B.2   Linearized√n and Linearized greedy
+relaxation over the subset yields an objective higher than               The forward graph of the DNNGfwd = (Vfwd,Efwd) can
+the best integer solution found thus far.  With a tight LP               be treated as a linear graphGlin = (Vfwd,Elin) with edges
+relaxation,this conditionforpruning isoftenmet, sofewer
+solutions need to be enumerated.
+[PDF_PAGE 15]
+                          Checkmate: Breaking the Memory Wall with Optimal Tensor Rematerialization
+
+                                                                         it is valid to (3) place a register atx, computing it, or (4)
+                                                                         moveastonetoxfromoneofthechildrenofx,computing
+                                                                         x. Theregisterallocation problemreducesto the following
+                                                                         no-overheadrematerializationdecisionproblem(RP-DEC):
+                                                                         Deﬁnition C.1.  (RP-DEC): Given result-terminated data-
+                                                                         ﬂow DAGG = (V,E) corresponding to a program, with
+                                                                         unit cost to compute each node and unit memory for the
+                                                                         results ofeach node,does thereexist anexecution planthat
+                                                                         evaluates the leaf (terminal) nodet ∈V  with maximum
+                                                                         memory usageb at cost at most|V|?
+
+                                                                         RP-DEC is decidable by solving the memory-constrained
+                                                                         form of Problem 1 with sufﬁcient stages, then checking if
+Figure8.Comparison of the two-phase LP rounding approxima-               thereturnedexecutionplanhascostatmost|V|. RP-DEC
+tionwithrandomizedroundingofS∗ anddeterministicrounding                  closelyresemblesSethi’sdecisionproblem,differingonly
+ofS∗ ondifferentmodels. Wecomparememoryusageandcompu-                    in subtleties. The register allocation DAG is rooted at the
+tationalcost(objective),inmillisecondsaccordingtoproﬁle-based            desiredresulttwhereasadata-ﬂowgraphterminatesatthe
+cost model.  The average of the randomized rounding costs is             result. Second,register-basedcomputationscanbeinplace,
+shown as a dotted line.                                                  e.g. asummationa+bmaybewrittentothesamelocation
+connecting consecutive vertices in a topological order:                  as either of the operands. In neural network computation
+                                                                         graphs, we cannot perform all computations in place, so we
+         Elin ={(v1,v2),(v2,v3),...,(vL−1,vL)}                           did not make this assumption. To reduce Sethi’s decision
+                                                                         problemtoRP-DEC,givenresult-rootedDAGG,construct
+WhileGlin doesnotproperlyencodedatadependencies,it                       result-terminatedG′ byreversingalledges. Then,ifSethi’s
+is a linear graph that baselines can analyze.  To extend a               instanceallowsforatmostk registers,allowforamemory
+baseline,weapplyittoGlin,generatecheckpointmatrixS                       budget ofb =k +1 bytes: one byte to temporarily write
+from the resulting checkpoint set, and ﬁnd the optimalR as               outputs of operationsthat would have been written inplace.
+with the AP baselines.                                                   Despitehardness ofregisterallocation,Goodwin& Wilken
+                                                                         (1996)observethata0-1integerprogramforoptimalalloca-
+C    HARDNESS OF REMATERIALIZATION                                       tionunder aninstruction schedulehas empiricalcomplexity
+Sethi(1973) reduced 3-SAT to a decision problem based on                 O(n2.5),polynomialinthenumberofconstraints. Similarly,
+register allocation in straight line programs, with no recom-            Section6showsthatthefrontier-advancing,constrainedop-
+putation permitted. Such programs can be represented by                  timization problem (9) is tractable for many networks.
+result-rooted Directed Ayclic Graphs (DAGs), with nodes
+corresponding to operations and edges labeled by values.                 D    COMPARISON OF APPROXIMATIONS
+In Sethi’s graphs, the desired results are the roots of the              In Section5, we discussed an approximation strategy based
+DAG. If a program has no common subexpressions,i.e. the                  onroundingtheLPrelaxation,evaluatedwithdeterministic
+graph formsa tree,optimal allocationis possiblevia alin-                 roundinginSection6.5. Figure8comparesschedulespro-
+ear time tree traversal (Nakata,1967).  However, Sethi’s                 duced byourproposed two-phase roundingstrategy when
+reduction shows a register allocation decision problem in                theS∗ matrixfromtheLPrelaxationisroundedwitharan-
+thegeneralcase—whetheraresult-rootedDAGcanbecom-                         domized and a deterministic approach. While two-phase
+putedwithfewerthank registerswithoutrecomputation—is                     randomized rounding ofS∗ offers a range of feasible so-
+NP-complete.                                                             lutions, two-phase deterministic rounding produces consis-
+The decision problem characterizes computation of a DAG                  tently lower costschedules. While appropriatefor VGG16,
+as a sequence of four possible moves of stones, or registers,            for MobileNet, our budget allowanceϵ = 0.1 is overly
+onthenodesofthegraph,analogoustostatementsdiscussed                      conservative as schedules use less memory than the 16 GB
+in Section4.9. The valid moves are to (1) place a register at            budget. Asearch procedureoverϵ∈ [0,1] couldbeused to
+a leaf, computing it, or (2) pick up a register from a node.             produce more efﬁcient schedules.
+Also, if there are registers at all children of a nodex, then

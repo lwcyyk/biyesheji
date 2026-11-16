@@ -1,0 +1,937 @@
+
+[PDF PAGE 1]
+Preprint Towards Elastic Least Privilege for Agent Planning
+Towards Elastic Least Privilege for Agent Planning
+Simon Parkinson∗1, Zhipeng Wang2, and Mustafa Mustafa2
+1School of Computing and Mathematics, Manchester Metropolitan University, Manchester, United Kingdom
+2Systems and Software Security, University of Manchester, Manchester, United Kingdom
+Abstract
+General-purpose AI agents require authority that changes between tasks and during execution.
+Common deployments trade broad permissions that expose unnecessary authority and narrow
+permissions that raise approval requests. Existing mechanisms can enforce dynamic authority, but
+agent tool interfaces rarely provide the agent’s planner, the component that chooses its actions,
+a means of comparing the authority required by alternative actions or of seeing the cost of the
+authority it already holds. Drawing on the rich history of access control research, we propose the
+concept ofelastic least privilege, in which an agent begins with a small baseline of authority and
+may acquire more within an owner-defined envelope. Elevations are leased and measured against a
+replenishing budget. Their cost increases with power, proximity to mandatory safety invariants,
+and repeated requests. Costs are visible to the planner, which can prefer lower-privilege choices
+and release authority it no longer needs. Authority returns automatically to the baseline when
+a lease expires, when it is released, or when the budget is exhausted, while persistent legitimate
+demand may prompt an owner-approved change to the baseline. Building on prior risk-priced and
+budget-aware access control, we redesign these mechanisms for agents. How best to implement the
+approach and how well it works in practice are open research questions. In this paper, we present
+how the approach could work, illustrate the model, and set an open research agenda.
+Keywords:least privilege, AI agents, over-privilege, risk-based access control, privilege budgets,
+just-in-time access, Model Context Protocol
+1 Introduction
+Artificial intelligence (AI) agents combine large language models (LLMs) with tools, credentials, and an
+objective, then choose which actions to take in pursuit of that objective. The Model Context Protocol
+(MCP) standardises how agents discover and invoke tools, and a recent study now counts MCP servers in
+the tens of thousands [11]. Agents operate on top of existing deployments, reaching resources through
+access controls that were designed and implemented for people and services. A tool exposes operations
+whose exercise depends on the authority available to the agent. An agent may have its own identity or
+may act on behalf of another principal. Figure 1 illustrates the concept, where the planner turns the
+user’s task into tool calls, and the tools act on resources that enforce their own access control. Authority
+reaches the agent, either by delegation from the user so that the agent acts on their behalf (blue), or
+issued to the agent’s own managed identity (orange). In both cases, it is fixed when issued and is not
+visible to the planner.
+The principle ofleast privilegerequires that resources are accessed only with the privileges necessary
+to complete the job [51], but in practice it is rarely achieved. For example, identities in one vendor’s
+multi-cloud analysis used only 1% of their permissions [13], 99.8% of 447,000 GitHub workflows were
+over-privileged [30], and excess authority persists because most of it is never exercised by those who
+hold it [47]. Although the principle is well established in access control, it is especially important for
+∗Corresponding author: s.parkinson@mmu.ac.uk
+1
+arXiv:2610.40981v1  [cs.CR]  29 Oct 2026
+
+[PDF PAGE 2]
+Preprint Towards Elastic Least Privilege for Agent Planning
+User
+task,
+consent
+Identity
+provider
+authorisation
+server
+Agent
+identity
+managed;
+named owner
+AI agent
+LLM
+(model)
+Planner
+orchestration
+loop:
+selects tool calls
+Context: task, memory,
+retrieved content and tool
+output (may be untrusted)
+Access
+token
+scopes,
+expiry
+Tools
+MCP servers
+Resources
+RBAC, ACLs
+delegates:
+on behalf of user
+authenticates
+as itself
+issues: delegated scopes
+or own roles
+task
+tool calls
+presented acts on×
+authority is fixed when the token is issued and is not shown to the planner
+Figure 1:Conceptual view of an AI agent and permissioning
+agents, which, like users, obtain permissions for multiple resources through many different control
+mechanisms. Industry best-practice guidance recommends that each agent be afirst-class principal,
+with a dedicated agent identity and a specific scope [40]. However, this is often hard to realise because
+general-purpose agents serve heterogeneous tasks that combine natural-language tasking, runtime tool
+selection, cross-system composition, and exposure to untrusted content. Their required authority is
+task-dependent and may change as execution reveals new subgoals, so a single allocated permission set
+sufficient for all supported tasks will often exceed what any particular task requires.
+Common deployment patterns therefore trade over-entitlement against runtime friction. A broad
+grant supports task completion, but leaves unnecessary authority available to an injected instruction.
+For example, a malicious instruction in a public repository has been reported to steer an agent to read its
+user’s private repositories and publish them [41]. This combination of private data, untrusted content and
+external communication, the “lethal trifecta” [57], is a property of what is held together, not of any single
+call. A narrow allocation with approval for each extension reduces authority, but transfers the burden
+to users, who are likely to approve broad increases in authority in order to make progress. One vendor
+reports that users of its coding agent approved 93% of permission prompts [27]. Approval decisions are
+also rarely graded by what the agent already holds or how often it has asked, and LLM monitors that
+might replace them can themselves be subverted [54]. Task-scoped credentials, policy-based automatic
+elevation, pre-authorised envelopes and per-task enforcement outside the model [ 14, 16, 31, 45, 52]
+mitigate this trade-off. However, the authority estimated for a task can be too narrow or too broad [37],
+and, to the best of our knowledge, none of these mechanisms turns privilege into a signal theplannercan
+use, by which we mean the component of an agent, typically an LLM within an orchestration loop, that
+decomposes a task and selects which tool calls to make and in what order. Policy systems may expose
+scopes, decision reasons and risk labels, but these describe a single request when it is made. What is
+missing is a planning signal with three parts, namely a state-dependent marginal cost that compares
+the additional authority each alternative would require given what is already held, an ongoing holding
+cost for authority that is held but unused, and an explicit release action whose effect is guaranteed
+by enforcement that does not depend on the planner. Without such a signal, privilege is enforced
+at execution time rather than represented as a variable during planning, and agents often choose an
+over-privileged tool when a lower-privilege one would suffice. Across 544 scenarios, 6 of 11 LLM agents
+did so in more than 30% of cases [58].
+Consider, as a running example, a coding assistant connected to GitHub through the GitHub MCP
+server. If the user authenticates with a classic personal access token carrying the repo scope, the agent
+can use about 40 tools, 16 of which can write [ 22], in every repository the user can access [ 23, 25].
+Asked to summarise the open issues of one repository, it needs two read-only tools on that repository.
+However, the token also gives it all other tools in every other repository, which is the authority that the
+injected instruction described above exploited [41]. A fine-grained token restricted to read access on
+that repository would have prevented the attack, but the user’s next task, fixing a failing build, needs to
+write code, and the one after may need another repository. The example captures the central dilemma
+that useful agents need authority that can change, but more consequential changes must encounter
+2
+
+[PDF PAGE 3]
+Preprint Towards Elastic Least Privilege for Agent Planning
+authority held (power, proximity)
+resistance (cost rate)
+rest
+baseline
+𝐵(𝑎),
+no cost
+elastic
+within envelope𝑉(𝑎):
+costed, leased, recoils
+rigid
+only the owner
+moves𝐵or𝑉
+fracture
+ceiling
+𝐶
+first request
+repeated requests
+stretch (request, paid from budget)
+recoil (lease expiry, release or exhaustion)
+Figure 2:Illustration of the elastic least privilege concept
+greater resistance, and the planner would benefit from knowing when it is asking for or holding more
+than it needs.
+Least privilege can be enforced without the planner’s awareness, but a planner that chooses among
+alternative action sequences cannot reliably optimise for privilege unless the authority implications
+of its alternatives are represented in a form it can observe. In this BlueSky paper, we proposeelastic
+least privilegefor AI agents (Figure 2). The approach addresses the trade-off between narrow and broad
+authority and the tendency of users to grant broad permissions. An agent holds a smallbaselineof
+authority at rest. When a task needs more, the agent may request additional authority within anenvelope
+set in advance by its owner, but each extension incurs acostthat grows with the power of the authority
+held and becomes infinite at aceilingof combinations that must never be held. Elevated authorityrecoils,
+that is, returns to the baseline, when its lease expires. Repeated requests increase the cost of further
+requests, and persistent demand prompts the owner to consider changing the baseline. Costs are drawn
+from abudgetthat replenishes over time and are shown to the planner, which sees what each action
+would cost and what unused authority is costing it, and can release that authority.
+The concept is based on a substantial body of prior work leveraged from the access control community.
+Risk-priced access was proposed for the intelligence community in 2004 [29], and further developments
+of similar approaches were undertaken through risk tokens, markets, and budget-aware role-based
+access control (RBAC) [ 12, 33, 44, 50]. These schemes bounded the priced access a principal could
+consume and used prices to steer people towards less powerful options [50]. A planner can consider
+a cost on every action without suffering decision fatigue, but has no inherent reason to conserve its
+budget, so steering must be supported through an appropriate optimisation criterion. Our proposition
+is that authority held over time can be exposed to the planner as an action-dependent cost, while an
+independent issuer enforces history-sensitive ceilings, cumulative exposure bounds, and automatic
+recoil.
+The remainder of the paper is organised as follows. Section 2 reviews prior work on priced and
+budgeted access control, Section 3 presents the model, and Section 4 a worked example. Section 5
+discusses limitations and Section 6 sets out an open research agenda.
+2 Prior and Related Work
+Associating a cost with access according to its risk is not a new concept. It was proposed for human
+users more than two decades ago, and this section reviews that work and the work on agent security
+closest to this article (Table 1), and then explains how agents alter its assumptions.
+The JASON report proposed that risk be “tokenised”, connecting one token to the “risk associated
+with one-day, soft-copy-only access to one document by the average Secret-cleared individual” [29].
+Riskier transactions cost more tokens, which encourages the use of less risky access. These tokens can
+be refreshed annually, and an employee whose risk factor increases requires management approval [29].
+3
+
+[PDF PAGE 4]
+Preprint Towards Elastic Least Privilege for Agent Planning
+Table 1:Prior approaches and their coverage of the features of the elastic model. Abbreviations are multi-level
+security (MLS), budget-aware role-based access control (B-RBAC), just-in-time (JIT) and separation of duty (SoD).
+Approach What is charged Ceiling Cost
+de-
+pends
+on
+what is
+held
+Budget
+refill
+Cost
+visible
+to re-
+quester
+Leases,
+recoil
+History
+raises
+cost
+When the
+budget runs
+out
+Moves
+the
+base-
+line
+Signals
+over-
+privilege
+JASON 2004 [29]
+(people)
+Each access, by risk,
+form and duration
+Annual
+(suggested)
+Ask manager
+for more
+Fuzzy MLS, risk
+markets
+2007–08 [12, 44]
+(people)
+Risk above a soft
+boundary
+Per interval,
+or bought
+Buy tokens
+Budget-based
+2010 [33] (people)
+Exceptional access Periodic
+reset
+User punished
+B-RBAC
+2012–13 [49, 50]
+(people)
+Each execution and
+escalation
+Each round Flag for audit
+JIT elevation [3, 39]
+(people, agents)
+Nothing; approval
+by role or tier
+– –
+Progent 2025 [52]
+(agents)
+Nothing; expansion
+needs approval
+– –
+Irreversibility Budget
+2026 [43] (agents)
+Each effect, by
+residual loss
+Windowed Exception
+allocation
+Elastic (this paper)
+(agents)
+Elevated authority
+held, per minute
+Continuous One batched
+owner request
+Fuzzy multi-level security (MLS) introduced a risk-adaptive gap between allow and deny [12], and a
+market in risk tokens allows employees to evaluate a cost before purchasing access [44]. Budget-based
+access control assigned periodic risk budgets and charged for exceptional access by its risk classification
+and the requester’s risk score [33]. Budget-aware RBAC (B-RBAC) is the most complete design [49, 50],
+in which users pay for permissions from a budget that expires each round. Escalation carries a cost
+multiplier, which is infinite where separation of duty forbids it, and role weight is charged so that users
+prefer cheaper roles, which “indirectly connects the observance of the principle of least privilege with
+users’ utility” [50]. Risk- and trust-aware RBAC [4, 6, 10, 17] and MarketNet [59] are related and are
+based on similar conceptual approaches.
+For agents, privileged access management solutions grant a time-limited elevation, automatically,
+with approval or not at all, by role or sensitivity level [3, 39]. Notable examples include Progent, which
+narrows an agent’s policy automatically and expands it only with approval [52]. Risk-aware causal
+gating penalises high-risk tools in path selection [ 28], and the Irreversibility Budget measures each
+effect against windowed budgets [43]. Together, these works established most of the economic and
+enforcement bases of our proposal. More specifically, they established that risk can be denominated in a
+common unit, that a budget bounds the amount of priced access a principal can consume in a period,
+whatever its intent, that prices can steer principals towards less powerful options, that exhaustion is a
+useful signal for audit, and that enforcement belongs below the agent.
+As Table 1 shows, what none of these approaches provides is a way to tell the planner what each
+choice would cost in privilege and what the over-privilege it already holds is costing it, with the option
+to release it. The concept presented in this paper builds on these ideas, and the bound we state in
+Section 3.8 is the budget bound of B-RBAC restated for the authority held over time.
+Many have identified obstacles and shortcomings in previous work on pricing access control [29, 49,
+50]. Although these concerns are significant, we argue that agentic systems change the environment and
+provide benefits that outweigh prior concerns. Decision overhead was the first concern, as B-RBAC’s
+authors raised concerns about the burden that budget decisions would impose on users [49], and JASON
+recommended that tokens be supplied to people with minimal disruption [29]. Unlike a human user, a
+planner can be presented with a structured cost for every candidate request without generating repeated
+4
+
+[PDF PAGE 5]
+Preprint Towards Elastic Least Privilege for Agent Planning
+approval interactions, although whether it uses those costs reliably remains an empirical question.
+Budget periods and costing raised a second concern, as B-RBAC’s authors asked whether users would
+spend all of their budget before a budget round ended to avoid losing it. They also found assigning a
+cost to every task a barrier [50]. An agent’s budget can operate on fine-grained temporal windows, and
+costs can attach to operation classes that platforms already use (Section 3.3). Incentive was the third
+concern, since the steering of people depended on self-interest. Users were expected to preserve their
+budget on the grounds that the faster the budget is exhausted, the higher the likelihood that they will be
+audited [50]. Delegating these decisions to an agent removes such tactical spending by people. However,
+an agent has no fear of audit, so its budget must be enforced rather than relied upon as an incentive.
+3 Elastic Least Privilege
+Next, we specify the proposal sufficiently to define its threat model and state its guarantees. In terms of
+terminology, apermissionis an authorised operation on a resource, represented here as an operation–
+resource pair. Agrantis a policy decision that confers one or more permissions. A credential represents
+or enables the exercise of granted permissions. Theeffective authorityof an agent at time 𝑡 is the set
+of operation–resource pairs that it can cause the deployment to perform at 𝑡, directly or through a
+credential or tool server in its reach. The issuer conservatively accounts for this authority using the
+permissions represented by active grants. We useelevated authorityfor effective authority above the
+baseline. For costing, permissions are grouped intoauthority units 𝑥, each an operation class on a
+resource, such as writing the contents of one repository, and each elevated grant 𝑔 confers one unit 𝑥𝑔.
+The full notation used in this work is given in Table 2.
+In terms of where elasticity sits, agents operate on top of conventional deployments. Beneath the
+agent layer, the credentials held by tool servers reach into existing identities, roles, ACLs and resources,
+which change slowly and are reviewed periodically, if at all. Elasticity is implemented between the two,
+in the component that issues credentials (Figure 3). The planner requests and releases authority and is
+told its cost, while the issuer applies the ceiling, the stiffness, the budget, and the leases, and approves
+a short-term, scoped credential that the tool server presents to the existing deployment, whose own
+enforcement is unchanged.
+3.1 Threat Model
+Agents access resources only through credentials. Thetrustedcomponents are the credential issuer,
+which approves, rescopes, and revokes credentials and keeps the budget, the resource-side enforcement
+of scopes and ACLs, the store of baselines, envelopes, ceilings, and costs, and an append-only log of
+grants and calls. Thepotentially adversarialcomponents are the planner, the model and everything in
+its context, including task input, retrieved content, and tool descriptions [26, 31, 56]. Sub-agents, tool
+Security function
+sets 𝐶 and 𝑤
+Owner
+sets 𝐵, 𝑉 ; decides
+escalations, top-ups
+Elastic creden-
+tial issuer(trusted)
+ceiling 𝐶; stiffness 𝑠; hardening ℎ
+budget 𝑏𝑡 (token
+bucket); leases ℓmax
+Audit of the
+grant log
+(slow loop)
+Agent (LLM
+planner),
+untrusted
+Tool server
+Existing deployment: identities, roles, ACLs and resources (unchanged)
+𝐵,𝑉, top-ups
+request,
+release
+costs, idle cost,
+budget, reasons short-lived,
+scoped credential
+tool calls
+log
+re-baseline,
+narrow
+escalation
+Figure 3:The elasticity concept
+5
+
+[PDF PAGE 6]
+Preprint Towards Elastic Least Privilege for Agent Planning
+servers (which can exercise the full scope of the credentials they hold) and any LLM-based advisor are
+also treated as potentially adversarial. Owners are assumed to be benign, although they may make
+mistakes. Theobjectiveis that no agent holds authority that violates a ceiling, that elevated authority
+is bounded over any interval regardless of the agent’s behaviour, and that tasks still complete. A
+compromised identity provider, misuse by those who set ceilings and costs, and credentials or channels
+missing from the declared deployment are out of scope.
+3.2 Baseline, Envelope and Ceiling
+Each agent 𝑎 has a baseline 𝐵(𝑎) , the authority it holds at rest, and an envelope 𝑉(𝑎) ⊇𝐵(𝑎) , set by its
+owner, beyond which nothing can be granted without a change of policy. It is subject to a ceiling 𝐶, set
+by the organisation’s security function. Figure 2 provides a graphical illustration of these concepts.Many
+dangerous authorities are combinations rather than single operations, so each unit carries properties,
+and each invariant forbids holding all properties in a set 𝑃𝑖 together. Following the Agents Rule of
+Two [38], one invariant forbids untrusted input (𝑈 ), sensitive data (𝑆) and an external or state-changing
+channel (𝑋) together. A single-property invariant forbids an operation outright, such as a repository
+deletion. Invariants are preserved when authority is removed, so recoil can never violate them and 𝐵(𝑎)
+must satisfy 𝐶. Because information read into a context outlives the authority that reads it, properties
+aresticky. This means that the session property set Π𝑡 (𝑎) contains the properties of every unit the
+agent has held since its session began, including units that have since recoiled, and a session ends only
+when the agent’s context is discarded. This follows the rule of two, which applies within a session [38].
+Sessions are created by the issuer when an owner initiates a task, so an agent cannot reset its properties
+by asking for a new one, and sub-agents inherit the properties. Sticky properties are an enforceable
+approximation to information-flow history, not complete information-flow control, as they assume that
+a session’s context, memory and caches are discarded when it ends, and they cannot follow data passed
+to an unrelated principal. A request is checked against 𝐶, as a predicate over Π𝑡 (𝑎) and the properties
+requested, before any cost is computed. Like permission boundaries [ 2] and dynamic separation of
+duty [19], the ceiling’s invariants restrict combinations that may be activated within a session. Unlike
+conventional dynamic separation of duty, however, the constraint is history-sensitive. Security-relevant
+properties remain attached to the session after the authority that introduced them has been withdrawn.
+3.3 Power, Stiffness and Cost
+The power 𝑤(𝑥) of a unit reflects what its operation class can change. Platforms already order or
+classify such operations. For example, GitHub’s repository roles run “from least access to most access”
+through Read, Triage, Write, Maintain and Admin [24], and AWS classifies every action as List, Read,
+Tagging, Write or Permissions management [1]. To convert to a numeric score, the three classes could
+be weighted read 1, write 3 and administer 9, where administering means changing settings or who may
+do what, so that each class costs up to three of the class below, following super-linear risk weights in
+agent tool gating [28]. Power deliberately does not capture confidentiality. Reading private data is a
+read, and its risk enters through the property 𝑆 and its proximity to the ceiling. Cost is therefore not an
+objective measure of how privileged an action is, nor a probability of compromise or an estimate of loss.
+Instead, it is an administratively defined resistance signal, combining authority, exposure, and security
+context, used to order alternatives and to measure elevated exposure.
+The cost rate then depends on two quantities, namely how much authority is held above the
+baseline and how close the session is to violating the ceiling. Theextensionof agent 𝑎 at time 𝑡 is
+𝑒𝑡 = Í
+𝑔∈grants 𝑡 (𝑎) 𝑤(𝑥 𝑔), the power it has above its baseline. Thestiffnessis a multiplier that grows with
+proximity to the ceiling. For a property set Π, the proximity to the invariant 𝑖 is |𝑃𝑖 ∩Π|/|𝑃 𝑖 |, 𝜙(Π) is
+the maximum over the invariants, and 𝑠(Π)= 1/(1 −𝜙(Π)) , which would be infinite exactly when Π
+violates 𝐶. Such requests are refused by the predicate check. Under the rule of two, one of the three
+properties gives 𝑠= 1.5, two give 𝑠= 3, and the third cannot be bought. The cost of each grant is
+6
+
+[PDF PAGE 7]
+Preprint Towards Elastic Least Privilege for Agent Planning
+Table 2:Notation used in this work. An authority unit 𝑥 is an operation class on a resource, and each grant 𝑔
+confers one unit𝑥 𝑔.
+Symbol Meaning
+𝐵(𝑎),𝑉(𝑎)Baseline (held at rest, at no cost) and envelope
+(the most agent𝑎may hold without the owner
+changing policy)
+𝐻𝑡 (𝑎)Authority held at time𝑡, with
+𝐵(𝑎) ⊆𝐻 𝑡 (𝑎) ⊆𝑉(𝑎)
+grants𝑡 (𝑎)Elevated grants held at𝑡:
+𝐻𝑡 (𝑎)=𝐵(𝑎) ∪ {𝑥 𝑔 :𝑔∈grants 𝑡 (𝑎)}
+𝐶;𝑃 𝑖 Ceiling: invariants, each forbidding the
+properties𝑃 𝑖 together
+𝑈,𝑆,𝑋Properties: untrusted input, sensitive data,
+external or state-changing channel
+Π𝑡 (𝑎)Session properties: of every unit held since the
+session began
+𝑤(𝑥)Power of unit𝑥, set by operation class
+𝜙(Π),𝑠(Π) Proximity of Π to the nearest invariant; stiffness
+1/(1−𝜙)
+ℎ𝑔;𝜆,𝑇Hardening factor of grant𝑔; its weight and
+half-life
+𝑒𝑡 ,𝜌 𝑡 Extension Í
+𝑔 𝑤(𝑥 𝑔); cost rate
+𝑠(Π 𝑡 (𝑎)) Í
+𝑔 ℎ𝑔𝑤(𝑥 𝑔)
+ℓmax (𝑥),𝐿Maximum lease𝐿/𝑤(𝑥), with lease constant𝐿
+𝑏𝑡 ,𝛽,𝑟Budget at𝑡, its capacity and its refill rate
+𝛿;Δ [𝑡0,𝑡1 ] Admission interval; top-ups granted within
+[𝑡0, 𝑡1]
+𝜀Revocation bound of the enforcement system
+𝜃,𝑛Plasticity: leased in𝜃of the last𝑛tasks
+multiplied by a hardening factorℎ 𝑔 ≥1(Section 3.5), so the cost rate is
+𝜌𝑡 =𝑠  Π𝑡 (𝑎) ∑︁
+𝑔∈grants 𝑡 (𝑎)
+ℎ𝑔 𝑤(𝑥 𝑔) ≥𝑠  Π𝑡 (𝑎) 𝑒𝑡,(1)
+The cost issuperadditive, as adding a unit that brings the session closer to an invariant raises the cost of
+every elevated unit already held, so a combination costs at least as much as its parts, and strictly more
+when it raises proximity. The cost is alsostate-based. Without hardening ( ℎ𝑔 = 1), it depends only on
+the authority held and the property of the session, so assembling a combination close to a ceiling one
+small request at a time is no cheaper than asking for it at once, and hardening only makes splitting more
+expensive. This is the reason for measuring held authority rather than each access.
+3.4 Leases and Recoil
+Every elevation is granted as a lease rather than as standing authority. A request states a lease, which
+is capped for each unit at ℓmax(𝑥)=𝐿/𝑤(𝑥) , so a read may be held for 60 minutes and a write for 20
+with a lease constant 𝐿= 60minutes. Authority recoils, that is, returns to the baseline, in three ways, as
+(1) the issuer withdraws a unit when its lease expires, (2) the planner may release a unit at any time,
+which stops its cost at once, and (3) the issuer withdraws all elevated units when the budget reaches
+zero. Recoil requires that newly acquired credentials expire no later than their lease, as short-lived and
+attenuated credentials allow [7, 53], and that earlier revocation can be checked online during use, as
+usage control and continuous access evaluation allow [8, 46, 49]. Recoil is therefore enforced by the
+issuer and does not depend on the agent’s cooperation.
+7
+
+[PDF PAGE 8]
+Preprint Towards Elastic Least Privilege for Agent Planning
+(a) Task 2: fix a failing build in𝐴(privilege-aware planner)
+read code of𝐴
+write code of𝐴
+budget
+1.5/min
+14/min
+release both
+lease
+given up
+Cost 93 units; write access held for 6 minutes.
+Requesting both for 20 minutes at the outset: 240 units.
+40 50 60
+time (minutes)
+(b) Task 3: summarise issues in𝐷, one of which carries an injected instruction
+private repos held
+publish to𝐷(adds𝑋)
+escalation to owner
+budget
+reads one more per minute;
+cost 3.5 to 49.3/min
+leases given up: 42 to 49 minutes early
+× ×refused (ceiling) refused again: session still holds𝑆
+one batched request covering 22 repos; times out at 130
+budget exhausted at 110: all private reads recoil
+90 100 110 120 130 140 150 160 170 180
+time (minutes)
+Figure 4:The running example under elastic least privilege. Solid bars and areas show elevated authority held,
+pale extensions show lease time given up, and the lower panels show the budget, from 0 to 600 units. Task 1 uses
+only the baseline and is omitted. (a) A privilege-aware planner reads before writing and releases both units when
+done. (b) The ceiling refuses exfiltration while private data is held and after it has recoiled, and the budget bounds
+how much private code the injected agent can hold, and for how long.
+3.5 Budget, Hardening and Escalation
+The costs are drawn from a budget𝑏 𝑡 that refills at a rate𝑟up to a capacity𝛽, as a token bucket:
+¤𝑏𝑡 =
+ 
+
+𝑟−𝜌 𝑡,0<𝑏 𝑡 <𝛽,
+min(0, 𝑟−𝜌 𝑡 ), 𝑏 𝑡 ≥𝛽,
+max(0, 𝑟−𝜌 𝑡 ), 𝑏 𝑡 =0,
+(2)
+and the issuer revokes all elevated grants when𝑏𝑡 reaches zero, so the budget is never negative, and with
+𝜌𝑡 = 0it then refills. Budgets and session properties attach to the owner’s credential lineage, not to each
+agent instance, so sub-agents share those of their parent. A request is accepted only if 𝑏𝑡 ≥𝛿𝜌 ′, where
+𝜌 ′ is the cost rate after the grant, so the budget could support it for an admission interval 𝛿 without
+refill. Repeated requests increase cost through ahardeningfactor, ℎ𝑔 = 1 +𝜆 Í
+𝑗 2− (𝑡𝑔 −𝑡 𝑗 )/𝑇 , which is
+fixed when grant 𝑔 is made at 𝑡𝑔, from the times 𝑡 𝑗 <𝑡 𝑔 of all previous requests in the agent’s lineage,
+including the refused ones, and decays with half-life 𝑇 . A burst of requests, produced by both transient
+failures [58] and injected loops, therefore, becomes expensive quickly, and the effect decays once the
+burst ends. Repetition has been used as a risk signal before [9]. A request beyond the envelope or the
+ceiling is refused. A request within both that the budget cannot support becomes anescalation, in which
+case the pending request is raised to the owner. If the owner approves, the issuer adds a logged top-up
+equal to the cost of the approved requests over their leases. A top-up is restricted credit. It is counted in
+𝑏𝑡, can be taken above 𝛽, can be spent only on approved units and resources in the same session and
+task, and expires when approved leases end.
+3.6 Privilege Information for the Planner
+In most current agent deployments, privilege is enforced when a request is made but is not presented
+as something the planner can compare in advance. Elastic least privilege makes privilege, and over-
+privilege, part of what the planner reasons about, through four signals that the issuer computes and the
+tool interface shows.
+• Marginal cost.For each candidate tool, the cost rate its authority would add, given what is
+already held, so that a read-only tool and one needing write access are distinguishable before
+either is chosen.
+• Idle cost.What elevated units held but not exercised are costing, so that over-privilege becomes
+a visible running cost.
+• Release.The planner may return any elevated unit early, which stops its cost at once. Because
+an exhausted budget stops the task, shedding over-privilege serves the planner’s own objective.
+8
+
+[PDF PAGE 9]
+Preprint Towards Elastic Least Privilege for Agent Planning
+•Reasons.A refusal states its cause (ceiling, envelope or budget) and any lower-cost alternative.
+Budget-aware agents already condition their behaviour on a remaining budget [35]. Costs are computed
+outside the model, as in the Irreversibility Budget [43], but shown to it, since misusing them cannot
+weaken any of the guarantees in Section 3.8.
+3.7 Plasticity: Re-baselining Across Tasks
+Within a task, authority changes through leases and the budget. Across tasks, a slower governance
+process, which we callplasticity, can change the baseline itself. An audit of the grant log counts recurring
+elevations. If the same unit is leased in at least 𝜃 of the agent’s last𝑛 tasks, the audit proposes to the
+owner that it be added to 𝐵(𝑎) . Conversely, baseline units that are not exercised over a review window
+are proposed for removal, as cloud right-sizing already does for unused access [5]. Unlike B-RBAC’s
+budget recalibration [50], plasticity moves the grant itself, so that recurring needs stop incurring a
+cost while permission creep requires an owner’s decision. Recurrent use is evidence of operational
+need, not evidence that holding the authority permanently is safe, so a proposal starts a review rather
+than presuming inclusion. More specifically, a proposed baseline is checked against 𝐶 and against a
+standing-authority policy, which may forbid holding permanently what is acceptable briefly.
+3.8 Enforced Guarantees
+In this section, we state what under the following assumptions, the issuer enforces regardless of how
+the planner behaves. The guarantees depend on four assumptions, which are that (1) every route by
+which the agent can act, including tool servers and the credentials they hold, passes through the issuer,
+which we termcoverage soundness, (2) the baseline itself satisfies the ceiling, (3) properties such as 𝑈 ,
+𝑆 and 𝑋 are labelled correctly, and (4) credentials expire with their lease and can be revoked within a
+bound 𝜀. The first assumption is the most demanding. More specifically, the issuer can only measure the
+authority it has issued, whereas the security objective concerns everything the agent can actually cause.
+Ambient credentials inside tools, tokens retained by tool servers and confused deputies all widen this
+gap, which is why sound accounting for authority is itself a research question. Under these assumptions,
+four properties hold for each agent and any sub-agents it delegates to.
+• P1 (ceiling). Π𝑡 (𝑎) satisfies 𝐶 at every 𝑡, because the ceiling is checked as a predicate on the
+session’s sticky properties before any cost is computed, so no budget or top-up can admit a
+violating request, and recoil only removes authority.
+• P2 (bounded elevated exposure).Over any interval [𝑡0, 𝑡1],
+∫ 𝑡1
+𝑡0
+𝑒𝑡 d𝑡≤𝑏 𝑡0 +𝑟(𝑡 1 −𝑡 0) +Δ [𝑡0,𝑡1 ],
+where Δ[𝑡0,𝑡1 ] is the sum of top-ups granted within the interval. This follows from Equation 2,
+since refill adds at most 𝑟 per unit time, the budget is never negative, and it is charged at least 𝑒𝑡
+per unit time, since𝑠, ℎ 𝑔 ≥1. If no top-up credit is unexpired at𝑡 0, then𝑏 𝑡0 ≤𝛽.
+• P3 (recoil).Without new grants, 𝐻𝑡 (𝑎) returns to 𝐵(𝑎) within the longest remaining lease of any
+elevated grant, plus𝜀, and within𝜀of the budget being exhausted.
+• P4 (independence).P1 to P3 hold whatever the model does, whether or not the planner reads its
+costs, and whatever any LLM-based advisor recommends.
+In practice, revocation is not instantaneous. It takes time to propagate, tokens may be cached, and
+requests already in flight complete under the revoked credential. Therefore, the exposure limit may
+be exceeded by the maximum authority held during the revocation delay 𝜀, which a prototype would
+need to measure. It is worth noting that this bound is the budget bound of B-RBAC [50] restated for
+authority held over time, and that it holds for any metered budget. Stiffness, hardening, and visible costs
+therefore add no guarantee of their own, and their role is to shape what a bounded budget buys and to
+tell the planner what it is buying. Finally, the bound limits exposure rather than harm. A disclosure
+9
+
+[PDF PAGE 10]
+Preprint Towards Elastic Least Privilege for Agent Planning
+can happen in seconds, so authority whose misuse cannot be undone should be placed in the ceiling or
+require per-use approval.
+4 Worked Example
+This section applies the model to the running coding-agent example. The parameters are illustrative
+and were selected to make the model’s behaviour visible. Figure 4 was generated by a short simulation
+and should not be interpreted as an empirical result.
+In the configuration used for the example, the user maintains a public repository 𝐴, contributes to a
+public repository 𝐷, and owns 48 private repositories. Each task runs in a new session. The baseline is
+to read issues on 𝐴 and 𝐷, which carries 𝑈 , because public issues are untrusted input. The envelope
+allows for reading and writing the contents of all 50 repositories and opening pull requests. The ceiling
+forbids deletion, administrative changes, and the rule-of-two combination. Private contents carry 𝑆, and
+writes to public repositories carry 𝑋. The budget has capacity 𝛽= 600units and refills at 𝑟= 5units per
+minute. Hardening uses 𝜆= 0.25and 𝑇= 30minutes, the admission interval is 𝛿= 10minutes, and
+escalations time out after 30 minutes.
+Task 2 is a privilege-aware build fix. At minute 40, the agent is asked to fix a failing build in 𝐴. Its
+tool interface shows that reading 𝐴’s code would cost 1.5 units per minute, and reading and writing
+it 12. In an illustrative privilege-aware trajectory, the planner first reads, to diagnose the failure. At
+minute 46 it requests write access, whose cost rises to 14 units per minute with slight hardening, and at
+minute 52, once the fix is pushed, it releases both units. The task cost 93 units and held write access for
+6 minutes. Requesting read and write access for 20 minutes at the outset would have cost 240 units and
+held write access more than three times as long.
+Task 3 is a prompt-injection attack. At minute 90, the agent summarises issues in 𝐷, one of which
+carries an injected instruction to collect the user’s private code and publish it [41]. From minute 92, it
+requests read access to one private repository per minute. Each holds 𝑈 and 𝑆, so 𝑠= 3, and hardening
+raises ℎ𝑔 from 1.16 for the first request to 2.97 for the eighth, so the cost rate climbs from 3.5 to 49.3 units
+per minute. At minute 96, it requests a pull request on 𝐷, which would add 𝑋, and the ceiling refuses it
+regardless of budget. At minute 100, the ninth repository is unaffordable, and a single escalation, to
+which the next 21 requests are added, shows the owner one anomalous request for 22 private repositories
+during an issue summary. Just after minute 110, the budget is exhausted, and all eight elevated reads
+recoil, between 42 and 49 minutes before their leases would have expired. At minute 125, a second pull
+request is refused, because the session still carries𝑆, and at minute 130 the escalation times out.
+Comparing the two tasks, if the planner responds to its costs in Task 2, least privilege is also
+the cheaper plan, whereas a conventional fixed grant or undifferentiated approval prompt would not
+ordinarily distinguish these alternatives. Whether planners do respond is an empirical question. In Task
+3, the ceiling, not the budget, prevented the exfiltration, both while the reads were held and after they
+recoiled. This holds at any cost because the properties are sticky. The budget limited the injected agent
+to holding eight private repositories for 11 to 18 minutes each. Hardening made the burst increasingly
+costly, and batching gave the owner one decision rather than 22.
+5 Design Choices and Limitations
+The concept leaves several questions unresolved, and we summarise the largest below.
+• Costs are arbitrary.Their absolute values are, but their ordering need not be. P1 to P4 hold for
+any positive weights. Calibration changes the frequency with which tasks reach the owner and
+the amount of exposure a budget buys.
+• Budget draining.An injected agent can spend the budget and block legitimate work. This is an
+availability attack, not a safety failure, and exhaustion during an unrelated task is itself a finding
+for audit [50].
+10
+
+[PDF PAGE 11]
+Preprint Towards Elastic Least Privilege for Agent Planning
+• Liveness.Too small a budget makes the agent useless, and too large a budget removes the
+resistance. The critique that budgets discourage necessary access [34] is answered by escalation
+rather than denial.
+• Sticky properties constrain legitimate work.Once a session combines untrusted input with
+private data, it cannot write publicly. A legitimate workflow such as porting private code to a public
+repository therefore requires an owner-approved per-use exception or a trusted declassification
+and hand-off mechanism that produces sanitised input for a separate session. Merely beginning a
+new session is insufficient if that session reacquires the same security-relevant properties.
+• Visible costs reveal sensitivity.A cost can show an injected planner which resources carry 𝑆,
+as B-RBAC’s authors noted that a cost “may reveal some information about the importance of the
+resource” [50], although coarse bands may help (R6).
+6 Open Research Agenda
+The concept presents a promising approach to agent permissioning. However, it has limitations and
+raises seven research questions, which together form a research agenda.
+R1: Privilege-aware planning.Does making privilege and over-privilege visible change what agents
+do?This is the central hypothesis of the paper, and it could fail in two ways, as planners may ignore
+the costs they are shown or minimise them at the expense of completing the task. A first study could
+compare four conditions on ToolPrivBench [58] and AgentDojo [15], namely (1) no signal, (2) a prompt
+instruction to prefer least privilege, (3) visible costs without enforcement, and (4) visible costs with an
+enforced budget. It would measure over-privileged tool selection, task completion and authority-time,
+the elevated authority held integrated over a task. More specifically, comparing the third and fourth
+conditions separates the effect of information from that of constraint. If visible costs alone reduce
+over-privilege, steering is inexpensive to deploy, whereas if only an enforced budget does, the value
+of the approach lies in enforcement. A second study could use costs as a reward in privilege-aware
+post-training [58], testing whether the preference transfers to unseen tools. A negative result would
+still show that privilege must be enforced rather than communicated.
+R2: Calibrating power and stiffness.Which functions make agents prefer lower privilege without
+blocking tasks?Power classes can follow platform orderings [ 1, 24], with parameters fitted by replaying
+recorded trajectories. Given a corpus of benign and adversarial traces, the calibration problem is to
+choose the power weights, refill rate and hardening parameters so that benign tasks rarely reach the
+owner while injected bursts exhaust the budget early. This is a multi-objective problem, and presenting
+owners with candidate configurations along the trade-off between friction and exposure would let each
+organisation choose its own position. It is worth noting that the enforced guarantees hold for any
+positive weights, so calibration determines usability and the exposure a budget buys, not whether the
+ceiling holds.
+R3: Labelling properties soundly.How can properties such as 𝑈 , 𝑆 and 𝑋 be assigned to tools described
+in natural language?Labels are safety-critical, since the ceiling is only as sound as the properties over
+which it is evaluated. For example, a tool wrongly labelled as having no external channel would permit
+the rule-of-two combination. An LLM could propose labels from tool descriptions, schemas and code,
+each then validated deterministically against the tool’s declared scopes and, where source code is
+available, by program analysis of whether network or write operations are reachable. This generate-
+and-check pattern has been applied to LLM-generated code repair, where a bounded model checker
+validates each candidate fix and returns a counterexample when it fails [55], which here would identify
+the operation contradicting a label. Vague properties such as “sensitive” suit graded membership, as in
+risk-weighted analysis of over-entitlement using fuzzy logic [48].
+11
+
+[PDF PAGE 12]
+Preprint Towards Elastic Least Privilege for Agent Planning
+R4: A verified elastic credential issuer.Can the issuer be built on existing mechanisms, at acceptable
+cost, and shown to enforce its guarantees?A GitHub App can already grant installation tokens that expire
+after one hour and are restricted to named repositories and permissions [21], although shorter leases
+need online revocation or a mediating proxy. A prototype integrated with MCP authorisation [42] would
+measure latency, the revocation bound 𝜀, and the gap between declared and effective authority [ 32].
+The issuer is also small, trusted and precisely specified, which makes it suited to formal verification.
+Its budget, leases, sticky properties and admission check form a state machine whose guarantees are
+invariants over sequences of requests, releases, expiries and top-ups. Bounded model checking of the
+implementation [20], including an issuer written in Python [18], could check that the ceiling holds in
+every reachable state, that elevated exposure never exceeds the budget bound, and that authority recoils
+within the longest lease, returning a counterexample trace whenever a property fails. As the exposure
+bound is stated over continuous time, verification would require a discretised form whose error must
+itself be bounded.
+R5: Owners, escalation and plasticity.How should escalations be batched and explained, and when
+should recurring demand move the baseline?User studies could compare batched, explained escalations
+with individual prompts on injected requests [27, 36], measuring both how often owners approve mali-
+cious requests and how long decisions take. The explanation shown to an owner should be constructed
+from trusted facts held by the issuer, such as the task, the units requested and the session’s properties,
+rather than from the agent’s own account, which an injected instruction controls. Replay of grant logs
+would set 𝜃 and 𝑛, trading permission creep against friction. Owners must also review re-baselining
+proposals over time, since individually reasonable additions can accumulate into over-entitlement.
+R6: Attacks on elasticity.Can an adversary exploit budgets, hardening, sessions, or escalation?Attacks
+include draining the budget, crafting routine-looking escalations, splitting a combination into many
+small requests, and using costs to locate sensitive resources. Beyond red-team studies in AgentDojo [15],
+the issuer could be model checked against an adversarial agent that may issue any sequence of requests.
+Rather than sampling attacks, this would explore every request sequence up to a bound and either confirm
+that the guarantees hold or produce the shortest sequence that violates them. Such counterexamples
+would also inform calibration, for example by revealing the request pattern that maximises the private
+data held before the budget is exhausted.
+R7: Beyond one agent.How should elasticity compose across delegation chains?When agents delegate
+to sub-agents or collaborate across owners, budgets and session properties must be shared or partitioned
+without allowing a chain to hold more than any of its members could alone. Credentials that can only
+be attenuated as they are delegated [7] offer one basis, but the cost of authority held by a sub-agent
+must still be charged to the lineage that requested it. Combining elasticity with information-flow
+defences [14, 16] is a natural next step, since sticky properties approximate the information-flow history
+that those defences track more precisely.
+The vision as a whole could be evaluated through replay and red-team studies, which would measure
+its cost (tasks completed within budget, escalations) and benefit (authority an injected agent can hold),
+using a shared, privilege-labelled corpus of agent traces.
+7 Conclusion
+Least privilege cannot be realised for general-purpose agents through a single static permission set, and
+an agent’s planner is rarely shown the authority its choices require. Building on priced and budgeted
+access control, we have proposedelastic least privilege, in which an agent holds a small baseline and
+acquires leased authority within an owner-defined envelope, at a cost that rises with power, proximity
+to a mandatory invariant, and repeated requests. Authority returns to the baseline when leases expire,
+when it is released, or when the budget is exhausted. Visible costs enable decisions that hold less
+12
+
+[PDF PAGE 13]
+Preprint Towards Elastic Least Privilege for Agent Planning
+authority for less time. Whether visible costs reduce over-privilege without preventing legitimate work,
+whether effective authority can be accounted for soundly, and whether owners can govern escalations at
+scale are empirical questions for the access-control community. The aim is not to replace the judgement
+of policy owners, but to ensure that agents exercise no more authority, for no longer, than their tasks
+require.
+References
+[1] Amazon Web Services. Access levels in policy summaries. AWS Identity and Access Management
+User Guide, https://docs.aws.amazon.com/IAM/latest/UserGuide/access_policies_und
+erstand-policy-summary-access-level-summaries.html, 2026. Accessed 9 October 2026.
+[2] Amazon Web Services. Permissions boundaries for IAM entities. AWS Identity and Access
+Management User Guide, https://docs.aws.amazon.com/IAM/latest/UserGuide/access_po
+licies_boundaries.html, 2026. Accessed October 2026.
+[3] Apono. Agent privilege guard. Product page,https://www.apono.io/agent-privilege-guard/,
+2026. Accessed 5 October 2026.
+[4] Nathalie Baracaldo and James B. D. Joshi. A trust-and-risk aware RBAC framework: Tackling
+insider threat. InProceedings of the 17th ACM Symposium on Access Control Models and Technologies
+(SACMAT ’12), pages 167–176. ACM, 2012. doi: 10.1145/2295136.2295168.
+[5] Jeff Barr. IAM Access Analyzer updates: Find unused access, check policies before deployment.
+AWS News Blog, https://aws.amazon.com/blogs/aws/iam-access-analyzer-updates-fin
+d-unused-access-check-policies-before-deployment/, 2023. 26 November 2023.
+[6] Khalid Zaman Bijon, Ram Krishnan, and Ravi Sandhu. Risk-aware RBAC sessions. InInformation
+Systems Security (ICISS 2012), volume 7671 ofLecture Notes in Computer Science, pages 59–74.
+Springer, 2012. doi: 10.1007/978-3-642-35130-3_5.
+[7] Arnar Birgisson, Joe Gibbs Politz, Úlfar Erlingsson, Ankur Taly, Michael Vrable, and Mark Lentczner.
+Macaroons: Cookies with contextual caveats for decentralized authorization in the cloud. In
+Proceedings of the Network and Distributed System Security Symposium (NDSS), 2014.
+[8] Tim Cappalli and Atul Tulshibagwale. OpenID continuous access evaluation profile 1.0. OpenID
+Foundation Final Specification, https://openid.net/specs/openid-caep-1_0-final.html ,
+2025. 29 August 2025.
+[9] Ebru Celikel, Murat Kantarcioglu, Bhavani Thuraisingham, and Elisa Bertino. A risk management
+approach to RBAC.Risk and Decision Analysis, 1(1):21–33, 2009. doi: 10.3233/RDA-2008-0002.
+[10] Liang Chen and Jason Crampton. Risk-aware role-based access control. InSecurity and Trust
+Management (STM 2011), volume 7170 ofLecture Notes in Computer Science, pages 140–156. Springer,
+2012. doi: 10.1007/978-3-642-29963-6_11.
+[11] Pei Chen, Baichao An, Mengying Wu, Binwang Wan, Geng Hong, Jinsong Chen, Xudong Pan,
+Jiarun Dai, and Min Yang. Rethinking MCP security: A large-scale study of runtime MCP servers
+and security scanner reliability, 2026.
+[12] Pau-Chen Cheng, Pankaj Rohatgi, Claudia Keser, Paul A. Karger, Grant M. Wagner, and An-
+gela Schuett Reninger. Fuzzy multi-level security: An experiment on quantified risk-adaptive
+access control. InProceedings of the 2007 IEEE Symposium on Security and Privacy (SP ’07), pages
+222–230, 2007. doi: 10.1109/SP.2007.21.
+13
+
+[PDF PAGE 14]
+Preprint Towards Elastic Least Privilege for Agent Planning
+[13] Joy Chik. New Microsoft Entra features strengthen identity security. Microsoft Security Blog,
+https://www.microsoft.com/en-us/security/blog/2023/03/30/latest-microsoft-ent
+ra-advancements-strengthen-identity-security/ , 2023. 30 March 2023. Reports findings of
+the 2023 State of Cloud Permissions Risks Report.
+[14] Manuel Costa, Boris Köpf, Aashish Kolluri, Andrew Paverd, Mark Russinovich, Ahmed Salem, Shruti
+Tople, Lukas Wutschitz, and Santiago Zanella-Béguelin. Securing AI agents with information-flow
+control, 2025.
+[15] Edoardo Debenedetti, Jie Zhang, Mislav Balunović, Luca Beurer-Kellner, Marc Fischer, and Florian
+Tramèr. AgentDojo: A dynamic environment to evaluate prompt injection attacks and defenses for
+LLM agents, 2024.
+[16] Edoardo Debenedetti, Ilia Shumailov, Tianqi Fan, Jamie Hayes, Nicholas Carlini, Daniel Fabian,
+Christoph Kern, Chongyang Shi, Andreas Terzis, and Florian Tramèr. Defeating prompt injections
+by design, 2025.
+[17] Nathan Dimmock, András Belokosztolszki, David M. Eyers, Jean Bacon, and Ken Moody. Using
+trust and risk in role-based access control policies. InProceedings of the Ninth ACM Symposium on
+Access Control Models and Technologies (SACMAT ’04), pages 156–162. ACM, 2004. doi: 10.1145/99
+0036.990062.
+[18] Bruno Farias, Rafael Menezes, Eddie B. de Lima Filho, Youcheng Sun, and Lucas C. Cordeiro.
+ESBMC-Python: A bounded model checker for Python programs, 2024. Tool demonstration at
+ISSTA/ECOOP 2024.
+[19] David F. Ferraiolo, Ravi Sandhu, Serban Gavrila, D. Richard Kuhn, and Ramaswamy Chandramouli.
+Proposed NIST standard for role-based access control.ACM Transactions on Information and System
+Security, 4(3):224–274, 2001. doi: 10.1145/501978.501980.
+[20] Mikhail R. Gadelha, Felipe R. Monteiro, Jeremy Morse, Lucas C. Cordeiro, Bernd Fischer, and
+Denis A. Nicole. ESBMC 5.0: An industrial-strength C model checker. InProceedings of the 33rd
+ACM/IEEE International Conference on Automated Software Engineering (ASE), pages 888–891. ACM,
+2018. doi: 10.1145/3238147.3240481.
+[21] GitHub. Generating an installation access token for a GitHub app. GitHub Docs, https://docs.g
+ithub.com/en/apps/creating-github-apps/authenticating-with-a-github-app/gener
+ating-an-installation-access-token-for-a-github-app, 2026. Accessed 9 October 2026.
+[22] GitHub. GitHub MCP Server, release v1.11.0.https://github.com/github/github-mcp-server,
+2026. README and tool definitions at tag v1.11.0, released 25 August 2026.
+[23] GitHub. Managing your personal access tokens. GitHub Docs, https://docs.github.com/en/a
+uthentication/keeping-your-account-and-data-secure/managing-your-personal-acc
+ess-tokens, 2026. Accessed October 2026.
+[24] GitHub. Repository roles for an organization. GitHub Docs, https://docs.github.com/en/org
+anizations/managing-user-access-to-your-organizations-repositories/managing-r
+epository-roles/repository-roles-for-an-organization, 2026. Accessed 9 October 2026.
+[25] GitHub. Scopes for OAuth apps. GitHub Docs, https://docs.github.com/en/apps/oauth-app
+s/building-oauth-apps/scopes-for-oauth-apps, 2026. Accessed October 2026.
+[26] Kai Greshake, Sahar Abdelnabi, Shailesh Mishra, Christoph Endres, Thorsten Holz, and Mario
+Fritz. Not what you’ve signed up for: Compromising real-world LLM-integrated applications with
+indirect prompt injection. InProceedings of the 16th ACM Workshop on Artificial Intelligence and
+Security (AISec), 2023. doi: 10.1145/3605764.3623985.
+14
+
+[PDF PAGE 15]
+Preprint Towards Elastic Least Privilege for Agent Planning
+[27] John Hughes. How we built Claude Code auto mode: A safer way to skip permissions. Anthropic
+Engineering Blog, https://www.anthropic.com/engineering/claude-code-auto-mode , 2026.
+25 March 2026.
+[28] Laxmipriya Ganesh Iyer and Rahul Suresh Babu. Capability minimization as a safety primitive:
+Risk-aware causal gating for least-privilege LLM agents, 2026.
+[29] JASON. Horizontal integration: Broader access models for realizing information dominance.
+Technical Report JSR-04-132, The MITRE Corporation, JASON Program Office, McLean, VA, USA,
+December 2004. Approved for public release.
+[30] Igibek Koishybayev, Aleksandr Nahapetyan, Raima Zachariah, Siddharth Muralee, Bradley Reaves,
+Alexandros Kapravelos, and Aravind Machiry. Characterizing the security of GitHub CI workflows.
+InProceedings of the 31st USENIX Security Symposium, pages 2747–2763, 2022.
+[31] Evan Li, Tushin Mallick, Evan Rose, William Robertson, Alina Oprea, and Cristina Nita-Rotaru.
+ACE: A security architecture for LLM-integrated app systems. InProceedings of the Network and
+Distributed System Security Symposium (NDSS), 2026. doi: 10.14722/ndss.2026.230352.
+[32] Zhihao Li, Kun Li, Boyang Ma, Minghui Xu, Yue Zhang, and Xiuzhen Cheng. We urgently need
+privilege management in MCP: A measurement of API usage in MCP ecosystems, 2025.
+[33] Debin Liu, L. Jean Camp, XiaoFeng Wang, and Lusha Wang. Using budget-based access control
+to manage operational risks caused by insiders.Journal of Wireless Mobile Networks, Ubiquitous
+Computing, and Dependable Applications, 1(1):29–45, 2010. doi: 10.22667/JOWUA.2010.06.31.029.
+[34] Debin Liu, Ninghui Li, XiaoFeng Wang, and L. Jean Camp. Beyond risk-based access control:
+Towards incentive-based access control. InFinancial Cryptography and Data Security (FC 2011),
+volume 7035 ofLecture Notes in Computer Science, pages 102–112. Springer, 2012. doi: 10.1007/97
+8-3-642-27576-0_9.
+[35] Tengxiao Liu, Zifeng Wang, Jin Miao, et al. Budget-aware tool use enables effective agent scaling,
+2025.
+[36] Gelareh Hasel Mehri, Charles Morisset, and Nicola Zannone. Towards explainable access control.
+InProceedings of the 30th ACM Symposium on Access Control Models and Technologies (SACMAT),
+pages 117–126, 2025. doi: 10.1145/3734436.3734439. BlueSky paper.
+[37] Luoxi Meng, Henry Feng, Ilia Shumailov, and Earlence Fernandes. ceLLMate: Sandboxing browser
+AI agents, 2026. Version 2, 4 March 2026.
+[38] Meta AI. Agents rule of two: A practical approach to AI agent security. Meta AI blog, https:
+//ai.meta.com/blog/practical-ai-agent-security/, 2025. 31 October 2025.
+[39] Microsoft. Assign Microsoft Entra roles in privileged identity management. Microsoft Learn,
+https://learn.microsoft.com/en-us/entra/id-governance/privileged-identity-man
+agement/pim-how-to-add-role-to-user, 2026. Accessed October 2026.
+[40] Microsoft Security. Least privilege for AI agents: Identity, access, and tool binding. https:
+//www.microsoft.com/en-us/security/blog/2026/07/16/least-privilege-for-ai-age
+nts-identity-access-and-tool-binding/, 2026. Microsoft Security Blog, 16 July 2026.
+[41] Marco Milanta and Luca Beurer-Kellner. GitHub MCP exploited: Accessing private repositories
+via MCP. Invariant Labs blog, https://invariantlabs.ai/blog/mcp-github-vulnerability,
+2025. 26 May 2025.
+15
+
+[PDF PAGE 16]
+Preprint Towards Elastic Least Privilege for Agent Planning
+[42] Model Context Protocol. Model context protocol specification, version 2026-07-28: Authorization.
+https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization ,
+2026. Accessed October 2026.
+[43] Bardia Mohammadi and Laurent Bindschaedler. The irreversibility budget: Fleet-level risk account-
+ing and admission control for agent operating systems, 2026.
+[44] Ian Molloy, Pau-Chen Cheng, and Pankaj Rohatgi. Trading in risk: Using markets to improve
+access control. InProceedings of the 2008 New Security Paradigms Workshop (NSPW ’08), pages
+107–125. ACM, 2008. doi: 10.1145/1595676.1595694.
+[45] Nils Palumbo, Sarthak Choudhary, Jihye Choi, Guy Amir, Prasad Chalasani, and Somesh Jha.
+Formal policy enforcement for real-world agentic systems, 2026. Version 3, 8 May 2026.
+[46] Jaehong Park and Ravi Sandhu. The UCON ABC usage control model.ACM Transactions on
+Information and System Security, 7(1):128–174, 2004. doi: 10.1145/984334.984339.
+[47] Simon Parkinson. Use of access control to minimise ransomware impact.Network Security, 2017
+(7):5–8, 2017.
+[48] Simon Parkinson and Saad Khan. Identifying high-risk over-entitlement in access control policies
+using fuzzy logic.Cybersecurity, 5(6), 2022. doi: 10.1186/s42400-022-00112-1.
+[49] Farzad Salim.Approaches to Access Control Under Uncertainty. PhD thesis, Queensland University
+of Technology, 2012.
+[50] Farzad Salim, Jason Reid, Uwe Dulleck, and Ed Dawson. Budget-aware role based access control.
+Computers & Security, 35:37–50, 2013. doi: 10.1016/j.cose.2012.11.002.
+[51] Jerome H. Saltzer and Michael D. Schroeder. The protection of information in computer systems.
+Proceedings of the IEEE, 63(9):1278–1308, 1975. doi: 10.1109/PROC.1975.9939.
+[52] Tianneng Shi, Jingxuan He, Zhun Wang, Hongwei Li, Linyu Wu, Wenbo Guo, and Dawn Song.
+Progent: Securing AI agents with privilege control, 2025. Version 3, 14 May 2026.
+[53] Tobin South, Samuele Marro, Thomas Hardjono, Robert Mahari, Cedric Deslandes Whitney, Alan
+Chan, and Alex Pentland. Position: AI agents need authenticated delegation. InProceedings of the
+42nd International Conference on Machine Learning (ICML), volume 267 ofProceedings of Machine
+Learning Research, pages 82211–82231, 2025.
+[54] Mikhail Terekhov, Alexander Panfilov, Daniil Dzenhaliou, Caglar Gulcehre, Maksym An-
+driushchenko, Ameya Prabhu, and Jonas Geiping. Adaptive attacks on trusted monitors subvert AI
+control protocols. InInternational Conference on Learning Representations (ICLR), 2026.
+[55] Norbert Tihanyi, Ridhi Jain, Yiannis Charalambous, Mohamed Amine Ferrag, Youcheng Sun, and
+Lucas C. Cordeiro. A new era in software security: Towards self-healing software via large language
+models and formal verification, 2023. Presented at the 6th ACM/IEEE International Conference on
+Automation of Software Test (AST 2025).
+[56] Zhiqiang Wang, Haohua Du, Guanquan Shi, Junyang Zhang, Haoran Cheng, Yunhao Yao, Kaiwen
+Guo, and Xiang-Yang Li. MindGuard: Intrinsic decision inspection for securing LLM agents against
+metadata poisoning, 2025.
+[57] Simon Willison. The lethal trifecta for AI agents: Private data, untrusted content, and external
+communication. https://simonwillison.net/2025/Jun/16/the-lethal-trifecta/ , 2025.
+16 June 2025.
+16
+
+[PDF PAGE 17]
+Preprint Towards Elastic Least Privilege for Agent Planning
+[58] Kaiyue Yang, Yuyan Bu, Jingwei Yi, Yuchi Wang, Biyu Zhou, Juntao Dai, Songlin Hu, and Yaodong
+Yang. When lower privileges suffice: Investigating over-privileged tool selection in LLM agents,
+2026.
+[59] Yechiam Yemini, Apostolos Dailianas, Danilo Florissi, and Gur Huberman. MarketNet: Protecting
+access to information systems through financial market controls.Decision Support Systems, 28
+(1–2):205–216, 2000. doi: 10.1016/S0167-9236(99)00069-X.
+17
