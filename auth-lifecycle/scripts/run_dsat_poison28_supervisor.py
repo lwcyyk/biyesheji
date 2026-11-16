@@ -135,18 +135,110 @@ def canonical(value):
                       allow_nan=False).encode("utf-8")
 
 
-def checked_path(path, exists=True):
+class ExplicitIO:
+    """Python call/byte accounting; loader, kernel and physical I/O stay outside."""
+
+    MAX = (1 << 63) - 1
+    FIELDS = ("attempts", "successes", "failures", "refusals", "read_requested",
+              "read_returned", "write_requested", "write_accepted", "files_opened",
+              "metadata_attempts", "unknown_read_returns", "unknown_write_returns")
+
+    def __init__(self):
+        self.phase = "PRE_QPC_COST"
+        self.rows = {}
+        self.totals = {}
+        self.limits = None
+        self.persisted_serialized = 0
+        self.uncertain_serialized = 0
+
+    def configure(self, values, approved):
+        names = ("io_attempts", "read_requested_bytes", "read_returned_bytes",
+                 "runtime_files", "runtime_source_bytes")
+        require(type(values) is dict, "SOURCE_READ_BUDGET_UNAPPROVED")
+        for name in names:
+            value = positive_int(values.get(name), "SOURCE_READ_BUDGET_UNAPPROVED")
+            maximum = positive_int(approved.get("pre_qpc_" + name), "SOURCE_READ_BUDGET_UNAPPROVED")
+            require(value <= maximum, "SOURCE_READ_BUDGET_EXCEEDS_APPROVAL")
+        self.limits = {name: values[name] for name in names}
+        total = self.totals.get("PRE_QPC_COST", {})
+        require(total.get("attempts", 0) <= values["io_attempts"]
+                and total.get("read_requested", 0) <= values["read_requested_bytes"]
+                and total.get("read_returned", 0) <= values["read_returned_bytes"],
+                "PRE_QPC_BOOTSTRAP_COST_EXCEEDS_APPROVAL")
+
+    def call(self, site, operation, action, *args, requested=0, direction=None, result_bytes=None):
+        require(type(requested) is int and 0 <= requested <= self.MAX, "IO_REQUEST_INVALID")
+        key = self.phase + "/" + site
+        row = self.rows.setdefault(key, {name: 0 for name in self.FIELDS})
+        total = self.totals.setdefault(self.phase, {name: 0 for name in self.FIELDS})
+        try:
+            require(all(value < self.MAX for value in total.values()), "IO_COUNTER_RANGE")
+            if direction == "read":
+                require(total["read_requested"] + requested <= self.MAX
+                        and total["read_returned"] + requested <= self.MAX, "IO_COUNTER_RANGE")
+            if direction == "write":
+                require(total["write_requested"] + requested <= self.MAX
+                        and total["write_accepted"] + requested <= self.MAX, "IO_COUNTER_RANGE")
+            if self.phase == "PRE_QPC_COST" and self.limits is not None:
+                require(total["attempts"] < self.limits["io_attempts"], "PRE_QPC_IO_LIMIT")
+                if direction == "read":
+                    require(total["read_requested"] + requested <= self.limits["read_requested_bytes"]
+                            and total["read_returned"] + requested <= self.limits["read_returned_bytes"],
+                            "PRE_QPC_READ_LIMIT")
+        except BaseException:
+            row["refusals"] += 1
+            total["refusals"] += 1
+            raise
+        for counts in (row, total):
+            counts["attempts"] += 1
+            if operation == "metadata": counts["metadata_attempts"] += 1
+            if direction is not None: counts[direction + "_requested"] += requested
+        try:
+            value = action(*args)
+        except BaseException:
+            for counts in (row, total):
+                counts["failures"] += 1
+                if direction is not None: counts["unknown_" + direction + "_returns"] += 1
+            raise
+        if direction is not None:
+            amount = result_bytes(value) if result_bytes is not None else len(value)
+            require(type(amount) is int and 0 <= amount <= requested, "IO_RETURN_INVALID")
+            label = "read_returned" if direction == "read" else "write_accepted"
+            row[label] += amount
+            total[label] += amount
+        for counts in (row, total):
+            counts["successes"] += 1
+            if operation == "open": counts["files_opened"] += 1
+        return value
+
+    def snapshot(self, pre_qpc=False):
+        selected = "PRE_QPC_COST" if pre_qpc else "QPC_SCOPED_COST"
+        return {"phase": selected, "boundary": "BEFORE_THIS_RECORD_SERIALIZATION",
+                "callsites": {key: dict(value) for key, value in self.rows.items()
+                              if key.startswith(selected + "/")},
+                "totals": dict(self.totals.get(selected, {})),
+                "persisted_serialized_before_snapshot": self.persisted_serialized,
+                "uncertain_serialized_before_snapshot": self.uncertain_serialized,
+                "unobserved": ["interpreter_bootstrap", "implicit_loader_IO", "physical_IO",
+                               "native_syscall_count", "parent_exit_tail"]}
+
+
+def checked_path(path, exists=True, audit=None):
     path = Path(path)
     raw = str(path)
     require(path.is_absolute() and not raw.startswith(("\\\\", "//")) and ":" not in raw[2:]
             and all(part not in {".", ".."} and not part.endswith((".", " ")) for part in path.parts[1:]),
             "PATH_SCOPE")
+    def metadata(site, action):
+        return audit.call(site, "metadata", action) if audit is not None else action()
     for part in reversed((path, *path.parents)):
-        if part.exists():
-            info = part.lstat()
-            require(not part.is_symlink() and not (getattr(info, "st_file_attributes", 0) & 0x400), "REPARSE_REFUSED")
+        if metadata("path.exists", part.exists):
+            info = metadata("path.lstat", part.lstat)
+            require(not metadata("path.is_symlink", part.is_symlink)
+                    and not (getattr(info, "st_file_attributes", 0) & 0x400), "REPARSE_REFUSED")
     if exists:
-        require(path.is_file() and path.stat().st_nlink == 1, "SOURCE_FILE_IDENTITY")
+        require(metadata("path.is_file", path.is_file)
+                and metadata("path.stat_identity", path.stat).st_nlink == 1, "SOURCE_FILE_IDENTITY")
     return path
 
 
@@ -159,51 +251,121 @@ class PolicyValidator:
     """Read-only admission. No WindowsApi, output creation or target imports."""
 
     def __init__(self):
-        self.read_bytes = 0
+        self.io = ExplicitIO()
         self.pins = []
+        self.source_reads = []
+
+    @property
+    def read_bytes(self):
+        return self.io.totals.get("PRE_QPC_COST", {}).get("read_returned", 0)
+
+    def source_record(self, path, kind):
+        require(len(self.source_reads) < 32789, "SOURCE_READ_CATALOGUE_LIMIT")
+        row = {"read_id": len(self.source_reads) + 1, "kind": kind,
+               "path_sha256": hashlib.sha256(str(path).encode("utf-8")).hexdigest(),
+               "file_identity": "PATH_CHECKS_ONLY_NATIVE_FILE_ID_UNKNOWN",
+               "declared_bytes": None, "read_calls": 0, "read_requested": 0,
+               "read_returned": 0, "hashed_bytes": 0, "eof": False,
+               "hash_complete": False, "metadata_matched": False,
+               "sha256": "UNKNOWN", "state": "ENTERED"}
+        self.source_reads.append(row)
+        return row
+
+    def read_hashed(self, path, expected, kind, size_limit):
+        row = self.source_record(path, kind)
+        stream = None
+        try:
+            path = checked_path(path, audit=self.io)
+            before = self.io.call("source.stat_before", "metadata", path.stat)
+            size = before.st_size
+            require(type(size) is int and 0 <= size <= size_limit, "SOURCE_SIZE_LIMIT")
+            row["declared_bytes"] = size
+            digest = hashlib.sha256()
+            chunks = [] if kind == "control" else None
+            stream = self.io.call("source.open", "open", lambda: path.open("rb", buffering=0))
+            while True:
+                request = min(65536, size + 1 - row["read_returned"])
+                require(request > 0, "SOURCE_GREW")
+                row["state"] = "READ_ATTEMPT"
+                row["read_calls"] += 1
+                row["read_requested"] += request
+                block = self.io.call("source.read", "read", stream.read, request,
+                                     requested=request, direction="read")
+                row["read_returned"] += len(block)
+                if not block:
+                    row["eof"] = True
+                    break
+                require(row["read_returned"] <= size, "SOURCE_GREW")
+                digest.update(block)
+                row["hashed_bytes"] += len(block)
+                if chunks is not None: chunks.append(block)
+            require(row["read_returned"] == size, "SOURCE_SHORT_READ")
+            after = self.io.call("source.stat_after", "metadata", path.stat)
+            require((before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+                    == (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns), "SOURCE_CHANGED")
+            row["metadata_matched"] = True
+            row["sha256"] = digest.hexdigest()
+            row["hash_complete"] = True
+            if expected is not None:
+                require(row["sha256"] == expected, "SOURCE_HASH_MISMATCH")
+            row["state"] = "VERIFIED"
+            self.pins.append({"path": str(path), "sha256": row["sha256"]})
+            return b"".join(chunks) if chunks is not None else None
+        except BaseException:
+            row["state"] = "READ_OR_VERIFY_UNCONFIRMED"
+            raise
+        finally:
+            if stream is not None:
+                self.io.call("source.close", "close", stream.close)
 
     def read(self, path, expected=None):
-        path = checked_path(path)
+        path = Path(path)
         require(path.is_relative_to(BASE) or path.is_relative_to(PROJECT) or path.is_relative_to(PYTHON.parent)
                 or path.is_relative_to(Path(r"C:\Users\a1887\.codex\attachments")), "INPUT_ROOT_SCOPE")
         require(path.suffix.lower() in {".json", ".md", ".txt", ".py", ".exe"}, "INPUT_KIND_SCOPE")
-        size = path.stat().st_size
-        require(size <= EVIDENCE_BYTES, "CONTROL_INPUT_TOO_LARGE")
-        data = path.read_bytes()
-        require(len(data) == size, "INPUT_CHANGED")
-        digest = hashlib.sha256(data).hexdigest()
-        if expected is not None:
-            require(digest == expected, "SOURCE_HASH_MISMATCH")
-        self.read_bytes += len(data)
-        self.pins.append({"path": str(path), "sha256": digest})
-        return data
+        return self.read_hashed(path, expected, "control", EVIDENCE_BYTES)
 
     def document(self, reference):
         return json.loads(self.read(reference["path"], reference["sha256"]))
 
-    def verify_source_file(self, path, expected):
-        path = checked_path(path)
+    def verify_source_file(self, path, expected, declared_size):
+        path = Path(path)
         require(path.is_relative_to(PYTHON.parent) or path.is_relative_to(PROJECT)
                 or path.is_relative_to(Path(os.environ.get("SystemRoot", r"C:\Windows"))), "RUNTIME_PATH_SCOPE")
         require(path.suffix.lower() in {".py", ".pyc", ".dll", ".pyd", ".exe", ".json", ".txt", ".zip"}
                 or path.name in {"METADATA", "RECORD", "WHEEL"},
                 "RUNTIME_FILE_KIND")
-        before = path.stat()
-        digest = hashlib.sha256()
-        with path.open("rb", buffering=0) as stream:
-            while True:
-                block = stream.read(65536)
-                if not block: break
-                self.read_bytes += len(block)
-                digest.update(block)
-        after = path.stat()
-        require((before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
-                == (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
-                and digest.hexdigest() == expected, "RUNTIME_SOURCE_CHANGED")
-        self.pins.append({"path": str(path), "sha256": expected})
+        self.read_hashed(path, expected, "runtime", declared_size)
+        require(self.source_reads[-1]["declared_bytes"] == declared_size, "RUNTIME_SOURCE_SIZE_CHANGED")
+
+    def read_pe_header(self):
+        row = self.source_record(PYTHON, "pe")
+        stream = None
+        try:
+            row["declared_bytes"] = 70
+            stream = self.io.call("pe.open", "open", lambda: PYTHON.open("rb", buffering=0))
+            values = []
+            for index, size in enumerate((64, 6)):
+                if index:
+                    self.io.call("pe.seek", "seek", stream.seek, int.from_bytes(values[0][60:64], "little"))
+                row["read_calls"] += 1
+                row["read_requested"] += size
+                data = self.io.call("pe.read", "read", stream.read, size, requested=size, direction="read")
+                row["read_returned"] += len(data)
+                require(len(data) == size, "PYTHON_PE_HEADER")
+                values.append(data)
+            require(values[0][:2] == b"MZ" and values[1][:4] == b"PE\x00\x00"
+                    and values[1][4:6] == b"\x64\x86", "AMD64_PYTHON_REQUIRED")
+            row["state"] = "PE_HEADER_VERIFIED_NOT_FULL_HASH"
+            return values
+        except BaseException:
+            row["state"] = "PE_HEADER_UNCONFIRMED"
+            raise
+        finally:
+            if stream is not None: self.io.call("pe.close", "close", stream.close)
 
     def validate(self, policy_path):
-        policy_path = checked_path(policy_path)
+        policy_path = checked_path(policy_path, audit=self.io)
         root = policy_path.parent
         require(root.parent == BASE, "POLICY_ROOT")
         parts = root.name.split("_")
@@ -230,6 +392,7 @@ class PolicyValidator:
         require(approval.get("approved") is True and approval.get("policy_body_sha256") == hashlib.sha256(canonical(body)).hexdigest()
                 and approval.get("action") == "RUN_ONE_SUPERVISED_POISON28" and approval.get("max_launches") == 1,
                 "APPROVAL_BINDING")
+        self.io.configure(policy.get("pre_qpc_accounting_limits"), rows[1]["approved_maximum"])
         resource_proof = self.document(policy["resource_bound_certificate"])
         require(resource_proof.get("approved") is True and resource_proof.get("complete") is True
                 and resource_proof.get("supervisor_sha256") == policy["supervisor_sha256"]
@@ -244,8 +407,14 @@ class PolicyValidator:
                 and runtime.get("driver_sha256") == DRIVER_SHA and runtime.get("runner_sha256") == RUNNER_SHA,
                 "RUNTIME_ORIGIN_UNRESOLVED")
         require(type(runtime.get("files")) is list and bool(runtime["files"]), "RUNTIME_ORIGIN_UNRESOLVED")
+        require(len(runtime["files"]) <= min(32768, self.io.limits["runtime_files"]), "RUNTIME_CATALOGUE_LIMIT")
         for item in runtime["files"]:
-            self.verify_source_file(item["path"], item["sha256"])
+            require(type(item.get("bytes")) is int and 0 <= item["bytes"] <= ExplicitIO.MAX,
+                    "RUNTIME_SOURCE_SIZE_UNRESOLVED")
+        require(sum(item["bytes"] for item in runtime["files"]) <= self.io.limits["runtime_source_bytes"],
+                "RUNTIME_SOURCE_BYTES_LIMIT")
+        for item in runtime["files"]:
+            self.verify_source_file(item["path"], item["sha256"], item["bytes"])
         require(runtime.get("G4_resolution_approved") is True and type(runtime.get("windows_build")) is int,
                 "RUNTIME_ORIGIN_UNRESOLVED")
         runtime_paths = {str(Path(item["path"])): item["sha256"] for item in runtime["files"]}
@@ -259,19 +428,13 @@ class PolicyValidator:
         self.read(RUNNER, RUNNER_SHA)
         self.read(DRIVER, DRIVER_SHA)
         self.read(PYTHON, policy["python_sha256"])
-        with PYTHON.open("rb", buffering=0) as image:
-            dos = image.read(64)
-            require(dos[:2] == b"MZ" and len(dos) == 64, "PYTHON_PE_HEADER")
-            image.seek(int.from_bytes(dos[60:64], "little"))
-            pe = image.read(6)
-        require(pe[:4] == b"PE\x00\x00" and pe[4:6] == b"\x64\x86", "AMD64_PYTHON_REQUIRED")
-        self.read_bytes += 70
+        self.read_pe_header()
         self.read(Path(__file__).absolute(), policy["supervisor_sha256"])
         manifest = json.loads(self.read(MANIFEST, MANIFEST_SHA))
         ids = [row["test_id"] for row in manifest["rows"]]
         require(len(ids) == len(set(ids)) == 28 and policy["test_ids"] == ids, "TEST_IDENTITY")
         child_ref = policy["driver_execution_lock"]
-        child_path = checked_path(child_ref["path"])
+        child_path = checked_path(child_ref["path"], audit=self.io)
         require(child_path.parent == root, "DRIVER_LOCK_ROOT")
         child = self.document(child_ref)
         require(child.get("schema") == "r43-poison28-execution/1" and child.get("approved") is True
@@ -282,7 +445,7 @@ class PolicyValidator:
             require(child.get(key) is True, "DRIVER_PROOF_GATE")
         require(child.get("max_suite_runs") == 1 and child.get("automatic_reruns") == 0 and child.get("wall_seconds") == 120
                 and child.get("t20_primary_call") == "State.observe_result(A01,PASS,1000000)", "DRIVER_CONTRACT")
-        child_approval = checked_path(child["approval_response_path"])
+        child_approval = checked_path(child["approval_response_path"], audit=self.io)
         require(child_approval.suffix.lower() in {".txt", ".md", ".json"}
                 and (child_approval.is_relative_to(BASE) or child_approval.is_relative_to(Path(r"C:\Users\a1887\.codex\attachments"))),
                 "DRIVER_APPROVAL_SCOPE")
@@ -362,8 +525,8 @@ class PolicyValidator:
         require(policy["output_root"] == str(root / "observer_run_001")
                 and child["output_root"] == str(root / "verification_runs/poison28_001"), "OUTPUT_ROOT_BINDING")
         for path in (root / "observer_run_001", root / "verification_runs"):
-            checked_path(path, exists=False)
-            require(not path.exists(), "RUN_ALREADY_CLAIMED")
+            checked_path(path, exists=False, audit=self.io)
+            require(not self.io.call("output.preflight_exists", "metadata", path.exists), "RUN_ALREADY_CLAIMED")
         argv = [str(PYTHON), "-I", "-B", "-X", "utf8", str(DRIVER), "--execution-lock", str(child_path)]
         require(policy["child_argv"] == argv and policy["working_directory"] == str(PROJECT), "DRIVER_INTERFACE_BLOCKED")
         require(policy["max_launches"] == 1 and policy["automatic_reruns"] == 0, "ONE_LAUNCH_CONTRACT")
@@ -372,6 +535,9 @@ class PolicyValidator:
         policy["_source_lock_sha256"] = policy["runtime_origin_lock"]["sha256"]
         policy["_validated_reads"] = self.read_bytes
         policy["_windows_build"] = runtime["windows_build"]
+        policy["_explicit_io"] = self.io
+        policy["_source_read_records"] = self.source_reads
+        policy["_pre_qpc_cost"] = self.io.snapshot(pre_qpc=True)
         return policy
 
 
@@ -543,22 +709,53 @@ class JobController:
 class OutputController:
     def __init__(self, api, deadline, policy):
         self.api, self.deadline, self.policy = api, deadline, policy
+        self.io = policy["_explicit_io"]
+        self.io.phase = "QPC_SCOPED_COST"
         self.handles = {}
         self.stream = None
-        self.charged = self.confirmed = self.sequence = 0
+        self.charged = 0
         self.poisoned = False
-        self.head = "0" * 64
         self.raw_counts = {"stdout": 0, "stderr": 0}
+        self.raw_hashers = {name: hashlib.sha256() for name in self.raw_counts}
+        empty = hashlib.sha256(b"").hexdigest()
+        self.raw_prefixes = {name: {"read_bytes": 0, "read_frames": 0, "read_sha256": empty,
+            "accepted_bytes": 0, "accepted_frames": 0, "accepted_sha256": empty,
+            "persisted_bytes": 0, "persisted_frames": 0, "persisted_sha256": empty,
+            "pending": None} for name in self.raw_counts}
+        self.witness_prefix = {"sequence": 0, "bytes": 0, "sha256": "0" * 64,
+            "raw": {name: {"bytes": 0, "frames": 0, "sha256": empty, "last_witness_seq": 0}
+                    for name in self.raw_counts}}
+        self.pre_qpc_ref = "UNKNOWN"
         self.eof = {"stdout": False, "stderr": False}
         self.close_errors = []
         self.close_attempted = set()
         self.file_close_attempted = False
 
+    @property
+    def confirmed(self):
+        return self.witness_prefix["bytes"]
+
+    @property
+    def sequence(self):
+        return self.witness_prefix["sequence"]
+
+    @property
+    def head(self):
+        return self.witness_prefix["sha256"]
+
+    def prefix_snapshot(self):
+        return {name: {**value, "pending": dict(value["pending"]) if value["pending"] else None,
+                       "witness_committed": dict(self.witness_prefix["raw"][name]),
+                       "confirmation_scope": "COMPLETE_FRAMES_AFTER_FSYNC_RETURN",
+                       "last_confirmation_phase": "AFTER_FSYNC_AND_PREFIX_PUBLICATION"}
+                for name, value in self.raw_prefixes.items()}
+
     def open(self):
         self.deadline.admit()
-        root = checked_path(self.policy["output_root"], exists=False)
-        root.mkdir(exist_ok=False)  # persistent invocation claim, never retried/reused
-        self.stream = (root / "SUPERVISOR_WITNESS.jsonl").open("xb", buffering=0)
+        root = checked_path(self.policy["output_root"], exists=False, audit=self.io)
+        self.io.call("witness.mkdir", "mkdir", lambda: root.mkdir(exist_ok=False))
+        self.stream = self.io.call("witness.open", "open", lambda:
+            (root / "SUPERVISOR_WITNESS.jsonl").open("xb", buffering=0))
         security = SECURITY_ATTRIBUTES(ctypes.sizeof(SECURITY_ATTRIBUTES), None, True)
         self.handles["stdin"] = self.api.handle("CreateFileW", "NUL", 0x80000000, 3,
             ctypes.byref(security), 3, 0, None)
@@ -589,9 +786,23 @@ class OutputController:
         self.api.close(handle)
         del self.handles[name]
 
-    def append(self, stage, value, final=False):
+    def append(self, stage, value, final=False, raw_frame=None):
         self.deadline.admit(cleanup=final)
         require(self.stream is not None and not self.poisoned, "WITNESS_UNAVAILABLE")
+        raw_name = None
+        if raw_frame is not None:
+            raw_name = raw_frame["name"]
+            previous = self.witness_prefix["raw"][raw_name]
+            state = self.raw_prefixes[raw_name]
+            require(stage == "CHILD_" + raw_name.upper() and not final
+                    and raw_frame["global_seq"] == self.sequence + 1
+                    and raw_frame["stream_seq"] == previous["frames"] + 1
+                    and raw_frame["start"] == previous["bytes"] == state["persisted_bytes"] == state["accepted_bytes"]
+                    and raw_frame["end"] == state["read_bytes"]
+                    and value["raw_bytes"] == raw_frame["end"] - raw_frame["start"]
+                    and value["base64"] == raw_frame["base64"], "RAW_FRAME_PREFIX_MISMATCH")
+        else:
+            require(stage not in {"CHILD_STDOUT", "CHILD_STDERR"}, "RAW_FRAME_BINDING_REQUIRED")
         evidence = self.policy["evidence"]
         event = {"schema": "r45-supervisor-witness/1", "seq": self.sequence + 1,
             "previous_sha256": self.head, "stage": stage, "value": value}
@@ -604,18 +815,46 @@ class OutputController:
         require(len(data) <= evidence["max_record_bytes"] and self.charged + len(data) <= cap,
                 "WITNESS_CAP_EXCEEDED")
         self.charged += len(data)
+        write_attempted = persisted = False
         try:
             self.deadline.admit(cleanup=final)
-            count = self.stream.write(data)
+            write_attempted = True
+            count = self.io.call("witness.write", "write", self.stream.write, data,
+                                 requested=len(data), direction="write", result_bytes=lambda result: result)
             require(count == len(data), "WITNESS_SHORT_WRITE")
+            if raw_name is not None:
+                self.raw_prefixes[raw_name].update(accepted_bytes=raw_frame["end"],
+                    accepted_frames=raw_frame["stream_seq"], accepted_sha256=raw_frame["sha256"])
+                self.raw_prefixes[raw_name]["pending"]["stage"] = "RAW_WRITE_ACCEPTED_PREFIX"
             self.deadline.admit(cleanup=final)
-            self.stream.flush()
+            self.io.call("witness.flush", "flush", self.stream.flush)
+            if raw_name is not None: self.raw_prefixes[raw_name]["pending"]["flush"] = "RETURNED_SUCCESS"
             self.deadline.admit(cleanup=final)
-            os.fsync(self.stream.fileno())
-            self.confirmed += len(data)
-            self.sequence += 1
-            self.head = digest
+            descriptor = self.io.call("witness.fileno", "fileno", self.stream.fileno)
+            self.io.call("witness.fsync", "fsync", os.fsync, descriptor)
+            persisted = True
+            self.io.persisted_serialized += len(data)
+            committed_raw = {name: dict(prefix) for name, prefix in self.witness_prefix["raw"].items()}
+            if raw_name is not None:
+                self.raw_prefixes[raw_name].update(persisted_bytes=raw_frame["end"],
+                    persisted_frames=raw_frame["stream_seq"], persisted_sha256=raw_frame["sha256"])
+                self.raw_prefixes[raw_name]["pending"].update(
+                    fsync="RETURNED_SUCCESS", stage="RAW_PERSISTENCE_CONFIRMED_PREFIX")
+                committed_raw[raw_name] = {"bytes": raw_frame["end"], "frames": raw_frame["stream_seq"],
+                    "sha256": raw_frame["sha256"], "last_witness_seq": self.sequence + 1}
+            # One reference publication is the authoritative in-memory commit point.
+            committed = {"sequence": self.sequence + 1, "bytes": self.confirmed + len(data),
+                         "sha256": digest, "raw": committed_raw}
+            self.witness_prefix = committed
+            if raw_name is not None: self.raw_prefixes[raw_name]["pending"] = None
+            if stage == "ADMITTED":
+                self.pre_qpc_ref = {"sequence": self.sequence, "sha256": self.head,
+                                    "field": "value.PRE_QPC_COST"}
         except BaseException:
+            if write_attempted and not persisted: self.io.uncertain_serialized += len(data)
+            if raw_name is not None and self.raw_prefixes[raw_name]["pending"] is not None:
+                self.raw_prefixes[raw_name]["pending"]["stage"] = (
+                    "WITNESS_COMMIT_UNCONFIRMED" if persisted else "RAW_PERSISTENCE_UNCERTAIN")
             self.poisoned = True
             raise
 
@@ -638,12 +877,28 @@ class OutputController:
                 if not available.value: continue
                 size = min(available.value, self.policy["observer"]["pipe_chunk_bytes"])
                 buffer, returned = ctypes.create_string_buffer(size), DWORD()
-                self.api.check("ReadFile", handle, buffer, size, ctypes.byref(returned), None)
+                self.io.call("pipe.read", "read", lambda:
+                    self.api.check("ReadFile", handle, buffer, size, ctypes.byref(returned), None),
+                    requested=size, direction="read", result_bytes=lambda result: returned.value)
                 require(returned.value <= size, "PIPE_RETURN_INVALID")
+                start = self.raw_counts[name]
                 self.raw_counts[name] += returned.value
+                state = self.raw_prefixes[name]
+                state["read_bytes"] = self.raw_counts[name]
+                state["read_frames"] += 1
+                state["read_sha256"] = "UNKNOWN"
+                state["pending"] = {"start": start, "end": self.raw_counts[name],
+                    "global_seq": self.sequence + 1, "stream_seq": state["read_frames"],
+                    "stage": "RAW_READ_PREFIX", "flush": "NOT_ATTEMPTED", "fsync": "NOT_ATTEMPTED"}
+                raw = buffer.raw[:returned.value]
+                self.raw_hashers[name].update(raw)
+                state["read_sha256"] = self.raw_hashers[name].hexdigest()
                 require(self.raw_counts[name] <= self.policy["evidence"][name + "_raw_bytes"], "PIPE_OUTPUT_LIMIT")
-                self.append("CHILD_" + name.upper(), {
-                    "raw_bytes": returned.value, "base64": base64.b64encode(buffer.raw[:returned.value]).decode("ascii")})
+                encoded = base64.b64encode(raw).decode("ascii")
+                frame = {"name": name, "start": start, "end": self.raw_counts[name],
+                    "global_seq": self.sequence + 1, "stream_seq": state["read_frames"],
+                    "sha256": state["read_sha256"], "base64": encoded}
+                self.append("CHILD_" + name.upper(), {"raw_bytes": returned.value, "base64": encoded}, raw_frame=frame)
                 progress = True
             if not progress: break
 
@@ -659,7 +914,7 @@ class OutputController:
         self.file_close_attempted = True
         try:
             self.deadline.admit(HARD_SECONDS, cleanup=True)
-            self.stream.close()
+            self.io.call("witness.close", "close", self.stream.close)
             require(self.stream.closed, "WITNESS_CLOSE_UNCONFIRMED")
         except Exception as error:
             self.close_errors.append(error_record(error, "WITNESS_CLOSE"))
