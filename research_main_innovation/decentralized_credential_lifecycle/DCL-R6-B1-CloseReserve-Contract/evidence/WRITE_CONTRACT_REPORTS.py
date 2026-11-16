@@ -324,7 +324,7 @@ answers = [
     ('关闭字节有无数值','B_B1-close=null。得到E域生产179815＋138T＋18B＋8E＋8ΣV和唯一/暂存公式，TCB/provider/index等未实例化。'),
     ('345148与close是否独立','主log路径独立；当前close独立计数/物理底线尚未建立，旧350166组合按真实路径去重。'),
     ('512行与122112归属','原global journal的256PREPARED和256COMMITTED，各238/239条件行界，已经包含在预付总写内。'),
-    ('266752是否重复','122112journal＋142592intent替换写＋2048counter覆盖写，一次相加；它不是新的关闭可用空间。'),
+    ('266752是否重复','122112journal＋142592intent替换写＋2048counter覆盖写，一次相加。该值计量预付累计写入，关闭可用空间另需保留证明。'),
     ('RootIPC/Store物理保障','权限/metadata/发布/fsync来源明确，data/inode/metadata/temp保留provider及排他凭据未取得。'),
     ('耗尽时能保留停止记录吗','无保障组合存在ENOSPC最小反例，实际回收可尝试，必要持久信息无法保证，当前B1准入BLOCKED。'),
     ('short/ENOSPC/EIO结果','拒绝新授权、烧掉模糊slot、保留raw/partial/staging与原账；共享取消/实际退出/native/admin按证据分别UNKNOWN/失败。'),
