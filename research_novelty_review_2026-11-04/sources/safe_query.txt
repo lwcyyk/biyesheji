@@ -1,0 +1,1039 @@
+Querying to Find a Safe Policy Under Uncertain Safety Constraints
+in Markov Decision Processes
+Shun Zhang, Edmund H. Durfee, Satinder Singh
+Computer Science and Engineering, University of Michigan
+{shunzh,durfee,baveja}@umich.edu
+Abstract
+An autonomous agent acting on behalf of a human user has
+the potential of causing side-effects that surprise the user
+in unsafe ways. When the agent cannot formulate a policy
+with only side-effects it knows are safe, it needs to selec-
+tively query the user about whether other useful side-effects
+are safe. Our goal is an algorithm that queries about as few
+potential side-effects as possible to ﬁnd a safe policy, or to
+prove that none exists. We extend prior work on irreducible
+infeasible sets to also handle our problem’s complication that
+a constraint to avoid a side-effect cannot be relaxed without
+user permission. By proving that our objectives are also adap-
+tive submodular, we devise a querying algorithm that we em-
+pirically show ﬁnds nearly-optimal queries with much less
+computation than a guaranteed-optimal approach, and outper-
+forms competing approximate approaches.
+Introduction
+We consider a setting where an autonomous agent (called
+the “robot”) takes actions in a domain on behalf of a hu-
+man user (called the “human”). The human speciﬁes a goal
+or a reward function for the robot to optimize. However, in
+practice, she might overlook specifying some preferences, or
+purposely leave out details she (possibly incorrectly) thinks
+are irrelevant or already known by the robot.
+For example, Figure 1 shows a robot navigation domain
+modiﬁed from our prior work (Zhang, Durfee, and Singh
+2018). The human asks the robot to turn off a switch in the
+top-right corner. After planning, the robot could follow sev-
+eral possible policies. It could traverse the carpet ( π1), but
+get the carpet dirty. It could enter the room through door d1
+and then move away box b1 or b2, open door d2, and go
+to the switch ( π2 or π3 respectively). However, the robot is
+only told to change (turn off) the switch. Dirtying a carpet,
+moving boxes, or opening a door may be changes that neg-
+atively surprise the human, and thus executing any of these
+policies is potentially not safe. That is, because the robot
+might be new to this building, it may be uncertain about the
+safety constraints and human preferences here.
+Copyright c⃝ 2020, Association for the Advancement of Artiﬁcial
+Intelligence (www.aaai.org). All rights reserved.
+We can see that in this example, without communicating
+with the human, the robot could not ﬁnd a safe policy since
+all the paths that reach the switch side effect some other ob-
+jects. So we allow the robot to ask clarifying queries (for
+example, “Can I move box b1 away?”). The robot ﬁnds a
+policy that is known to be safe when it queries and is explic-
+itly told that the carpet can be dirty, or b1 is movable and
+d2 can be opened, etc. Our main focus is on how the robot
+should ask the minimum number of queries in expectation to
+either ﬁnd a safe policy or prove that no safe policy exists.
+The literature has explored the problem of avoiding neg-
+ative side-effects (Amodei et al. 2016; Leike et al. 2017;
+Turner, Hadﬁeld-Menell, and Tadepalli 2019). Our prior
+work (Zhang, Durfee, and Singh 2018) considered a simi-
+lar problem, with the major difference being that we there
+assumed the robot initially knows a safe policy (to reach the
+switch without side effecting any objects other than ones it
+knows it can) and queries to ﬁnd a maximally better safe
+policy. In our problem here, since no initial safe policy is
+known, our prior algorithm cannot be applied. This paper’s
+contribution thus is to answer the question of how the robot
+should query to ﬁnd a safe policy or prove that no safe poli-
+cies actually exist when initially no safe policies are known.
+Essentially, our problem is to query to satisfy safety con-
+straints rather than to optimize a policy under safety con-
+straints, which requires a very different approach despite the
+setting being similar. Note that once the robot has found a
+safe policy, if it can still ask more queries then it can use the
+prior algorithms to pose queries to improve the policy.
+In this paper, we make the following contributions: 1) We
+formulate the problem of ﬁnding an initial safe policy in a
+factored Markov decision process. 2) We design a query al-
+gorithm that makes novel use of prior work on irreducible in-
+feasible sets and adaptive submodularity. 3) Empirically, we
+π1
+π2
+π3d1 d2
+b1
+b2
+carpet
+b3
+d3
+Figure 1: The robot navigation domain.
+
+show that our algorithm ﬁnds nearly-optimal queries with
+much less computation than a guaranteed-optimal approach,
+and outperforms some computationally cheaper alternatives.
+Problem Statement
+Similar to our prior work (Zhang, Durfee, and Singh 2018)
+(hereafter referred to as ZDS in this paper), we model the
+domain as a factored Markov decision process (Boutilier,
+Dean, and Hanks 1999). A ﬁnite Markov decision process
+(Sutton and Barto 2018) is a tuple⟨S, A, T, r, s0, γ⟩, with ﬁ-
+nite state space S, ﬁnite action set A, and transition function
+T where T (s, a, s′) is the probability of reaching state s′ by
+taking action a in s. r(s, a) is the reward of taking action a
+in s. s0 is the initial state and γ is the discount factor. In a
+factored MDP, a state is described in terms of values of var-
+ious features (e.g., the robot’s location, cleanliness of each
+carpet, etc.), so the state space S is the cross-product of the
+values the features can take. We will consistently use φ to
+denote one feature and Φ to denote a set of features.
+We assume that the robot can partition the features into
+the following sets, exactly as we did in ZDS:
+• ΦR
+F : The (known-to-be-) free features. The robot knows
+these features are freely changeable (e.g., its location).
+• ΦR
+L: The (known-to-be-)locked features. The robot knows
+it should never change any of these features.
+• ΦR
+? : The unknown features. These are features that the
+robot does not know whether the user considers freely
+changeable or locked.
+The human partitions features into two sets, ΦH
+L and ΦH
+F .
+Per ZDS, the robot’s knowledge is consistent with that of
+the human, that is,ΦR
+F ⊆ ΦH
+F and ΦR
+L ⊆ ΦH
+L . In general, the
+robot may not know the categories of all features (ΦR
+? ̸= ∅).
+As in our work in ZDS, to guarantee safety, the robot
+should never change features in ΦH
+L . However, the robot
+only has partial information about this set. So, like in ZDS,
+we require that the robot should not change any features in
+ΦR
+L or ΦR
+? (Requirement 1). That is, it can only change fea-
+tures that are known to be free (in ΦR
+F ).
+Only requiring that the robot not change these features
+may not lead to satisfactory policies. For example, in Fig-
+ure 1, the robot can simply stay in place to avoid changing
+any unknown features. Though safe, this behavior receives
+no positive rewards, and we do not want the robot to follow
+such a trivially safe policy. Hence, we require that the robot
+occupy some goal states, denoted by SG: The robot must
+eventually occupy goal states ( SG) with occupancy at least
+δG (Requirement 2). The robot knows both SG and δG. We
+will deﬁne occupancy later in Eq. 1.
+We refer to policies satisfying both requirements above
+as safe policies, in that they do not negatively surprise the
+human with unwanted side-effects or by not achieving the
+goal. Initially, the robot may not have a safe policy, as in Fig-
+ure 1 where the carpet, boxes, and doors are unknown fea-
+tures. We allow the robot to poseiterative queries, following
+the convention in the literature (Regan and Boutilier 2009;
+Akrour, Schoenauer, and Sebag 2012; Le et al. 2018). Sim-
+ilar to feature queries in Cakmak and Thomaz (2012), the
+robot can query about an unknown feature φ ∈ ΦR
+? , then
+receive the human’s response ( φ ∈ ΦH
+F or φ ∈ ΦH
+L ), and
+move the queried feature from ΦR
+? to ΦR
+F or ΦR
+L. As needed,
+it can then repeat this process. In this paper, we assume that
+the feature representation is given to the robot and under-
+stood by the human (in our example, the state of a carpet,
+the position of a box, etc.).
+The robot stops querying when it reaches one of the fol-
+lowing two possible outcomes. Outcome 1 (denoted by ⊤):
+The robot is able to ﬁnd one or more safe policies after
+querying. Then it would follow an optimal safe policy. This
+happens when it knows enough features are free (for exam-
+ple, in Figure 1, if carpet is free or b1 and d2 are free). Out-
+come 2 (denoted by ⊥): The robot determines that no safe
+policy exists. This happens when it knows enough features
+are locked (for example, in Figure 1, carpet and d2 are both
+locked). Then the robot should terminate and inform the hu-
+man that it cannot achieve the goal safely.
+Note that given enough queries, the robot would eventu-
+ally reach one of the two outcomes. The worst case would
+be that it queries about all unknown features, in which case
+it recovers ΦH
+F and ΦH
+L . However, to reduce the human’s
+cognitive load, the robot wants to ask about the fewest
+unknown features possible to reach either outcome. As is
+common in the literature (Ramachandran and Amir 2007;
+Mindermann et al. 2018), we assume that the robot has a
+prior over the human’s preferences. It knows the probabil-
+ity of any unknown feature φ ∈ ΦR
+? being free, denoted
+by pF (φ). The probability that φ is locked is pL(φ) =
+1−pF (φ). The robot’s objective is tominimize the number of
+queries in expectation to either ﬁnd a safe policy (reaching
+⊤) or determine that no safe policy exists (reaching ⊥).
+In this paper, we explain how ﬁnding the exact op-
+timal query policy (that maps a partition of features to
+the optimal feature to query about) is computationally in-
+tractable, while some straightforward heuristics that select
+myopically-greedy queries can perform poorly under some
+circumstances. Our contribution is to identify and exploit
+set-cover subproblems within our problem to design an al-
+gorithm that uses superior heuristics in a myopically-greedy
+way.
+Background
+In this section, we ﬁrst explain how to ﬁnd safely-optimal
+policies given a partition of features. Then we describe dom-
+inating policies and relevant features that we will use in our
+algorithm.
+Finding Safely-Optimal Policies
+Given a partition of features ( ΦR
+L, ΦR
+F and ΦR
+? ), the robot
+wants to decide if a safe policy exists, and if it does, the
+robot wants to ﬁnd asafely-optimal policy. A safely-optimal
+policy is a safe policy (satisfying Requirements 1 and 2) that
+has the optimal value, depending on the partition of features.
+It is easier to use linear programming (de Farias and Van Roy
+2003) than dynamic programming methods like value itera-
+tion to ﬁnd a safely-optimal policy because we can easily
+add constraints to it. The following LP problem ﬁnds the
+
+occupancy measure of the optimal policy, where occupancy
+measure, x(s, a), is the expected number of times states will
+be reached and action a will be taken in state s.
+max
+x
+∑
+s,a
+x(s, a)r(s, a) (1)
+s.t.
+∑
+a′
+x(s′, a′) = γ
+∑
+s,a
+x(s, a)T (s, a, s′) + 1[s′=s0], ∀s′ ∈ S
+∑
+s∈SG,a∈A
+x(s, a) ≥ δG
+∑
+s∈Sφ,a∈A
+x(s, a) = 0, φ ∈ ΦR
+L ∪ ΦR
+?
+where Sφ = {s : φ(s) ̸= φ(s0)} is the set of states whose
+value for feature φ differs from the initial state. The ﬁrst
+constraint is a ﬂow-conservation constraint that encodes the
+transition function. The second constraint makes sure that
+the robot reaches SG with occupancy at least δG. The third
+constraint prevents the robot from changing any known-
+to-be-locked or unknown features. The safely-optimal pol-
+icy is π(s, a) = x(s, a)/ ∑
+a′∈A x(s, a′) for states where∑
+a′∈A x(s, a′) > 0 (de Farias and Van Roy 2003). Other
+states are not visited by the safely-optimal policy so the ac-
+tions to take in those states are not deﬁned. In this paper, we
+require the robot to guarantee to never change any known-to-
+be-locked or unknown features. If we want to instead upper
+bound the robot’s occupancy on unsafe states (for example,
+when the transitions are stochastic), we can change the third
+constraint accordingly.
+Dominating Policies and Relevant Features
+We use some concepts from ZDS to help understand which
+policies and features we potentially need to consider. First,
+we compute the set of policies that the robot may consider
+following under any partitions of features. We call these
+policies dominating policies, denoted by Γ.
+Deﬁnition 1. (ZDS) A dominating policy is a safely-
+optimal policy for the circumstance where for some Φ ⊆
+ΦR
+? , Φ are locked features and ΦR
+? \ Φ are free features.
+To ﬁnd all dominating policies, we could enumerate all
+Φ ⊆ ΦR
+? , ﬁnd the safely-optimal policy when Φ ∪ ΦR
+L are
+locked features and, if it exists, add it to the set of domi-
+nating policies. Instead we use an algorithm ( DomPolicies)
+from ZDS that is more efﬁcient than this brute-force way to
+ﬁnd dominating policies.
+In ZDS, we further refer to the unknown features changed
+by a dominating policy as relevant features:
+Deﬁnition 2. (ZDS) The relevant features of policy π is
+the set of initially unknown features changed by π, denoted
+Φrel(π).
+The set of all relevant features is the union of the relevant
+features of all dominating policies, Φrel = ∪π∈ΓΦrel(π).
+As we observed in ZDS, the robot only needs to consider
+querying about relevant features.
+𝜙1
+𝜙3
+𝜙2
+(b)
+(a)
+𝜙4
+𝜙1
+𝜙3
+𝜙2
+𝜙4
+𝜙1
+F L
+𝜙2
+𝜙3
+(c)
+F L
+F L
+Figure 2: Example with 4 unknown features (3 of which
+are relevant). In (a) we show relevant features of dominat-
+ing policies. In (b) we show IISs. In (c) is an optimal query
+policy for the setting in Example 2. ‘F’ means the queried
+feature is free and ‘L’ means the queried feature is locked.
+Example 1. In Figure 2, a robot is tasked to turn off a
+switch. It changes any feature it visits. Illustrated in (a),
+there are two dominating policies. π1 (the upper path)
+changes φ1, φ2; π2 (the lower path) changes φ1, φ3. So
+Φrel(π1) = {φ1, φ2}; Φrel(π2) = {φ1, φ3}.
+Φrel = {φ1, φ2, φ3}. So φ4 is not a relevant feature,
+which means that knowing φ4 is free does not help us to
+ﬁnd a safe policy, and knowingφ4 is locked does not help us
+to prove that no safe policy exists.
+Querying to Find a Safe Policy
+In this section, we consider algorithms for query selection.
+We ﬁrst consider some candidate algorithms, including com-
+puting the optimal query policy and straightforward heuris-
+tics that myopically select queries. Then we describe our
+main contribution, a set-cover approach for query selection.
+We use (ΦR
+L , ΦR
+F , ΦR
+? ) to refer to the robot’s partition of
+features. When we want to be precise about the updated par-
+tition of features during the query process, we use ψ to de-
+note the current partition of features: ψ = (Φ ψ
+L, Φψ
+F , Φψ
+? ).
+Let ψ0 be the initial partition. Clearly, Φψ
+L ⊇ Φψ0
+L ; Φψ
+F ⊇
+Φψ0
+F for all ψ reached by any query policy. We denote byπq
+a query policy. Given a partition ψ, πq(ψ) is an unknown
+feature that it queries about next, or ⊤ or ⊥ when it knows
+that safe policies exist or not. A query policy can be illus-
+trated as a decision tree (for example, Figure 2 (c)). Suppose
+we want to ﬁnd the optimal query policy by considering all
+possible query policies (enumerating all possible decision
+trees as illustrated). The number of possible query policies is
+exponential in the number of relevant features. So we would
+prefer not to exhaustively evaluate all possible queries to ﬁnd
+the optimal one.
+Myopic Query Selection
+Although ﬁnding the provably-optimal query policy is in-
+tractable, we can take advantage of the fact that we do not
+need to ﬁnd a complete query policy before posing a query.
+
+Algorithm 1 Myopic Query Selection
+1: given query selection criterion h, initial partitions
+Φψ0
+F , Φψ0
+L , Φψ0
+?
+2: ψ ← ψ0
+3: while not (⊤ or ⊥) do
+4: choose φq according to h based on partition ψ
+5: query the human about φq
+6: Φψ′
+? ← Φψ
+? \ {φq}
+7: if φq is free then
+8: Φψ′
+F ← Φψ
+F ∪ {φq}
+9: else ⊿ φq is locked
+10: Φψ′
+L ← Φψ
+L ∪ {φq}
+11: end if
+12: ψ ← ψ′
+13: update ⊤ or ⊥ based on the new partition
+14: end while
+15: if ⊤ is true then
+16: return safely-optimal policy under ψ by solving
+Eq. 1
+17: else ⊿ ⊥ is true
+18: return “No safe policy exists.”
+19: end if
+We can instead myopically select a feature to query about,
+and then decide on the next feature (if any) to query about
+depending on the human’s response. Algorithm 1 gives the
+skeleton of this myopic querying procedure. The robot starts
+with its initial partitions of features and a query selection cri-
+terion h as input. Until it reaches one outcome or the other,
+it selects a feature to query about using h, and updates its
+partition of features based on the human’s response.
+We can use Eq. 1 in Line 13 to update the truth values of⊤
+and ⊥. If Eq. 1 has a feasible solution under the new partition
+of features, then the robot ﬁnds a safe policy. If Eq. 1 does
+not have a solution even if Φψ
+? are all free features, then the
+robot knows that no safe policy exists.
+One may easily come up with straightforward heuris-
+tics for h used in Line 4. For example, the robot can
+focus on the policy that is most likely to be safe and
+query about its relevant features that are still unknown.
+Concretely, the robot ﬁrst ﬁnds all dominating policies.
+Then it ﬁnds the policy that is most likely to be safe:
+arg maxπ∈Γ
+∏
+φ∈Φrel(π) pF (φ). Then it queries about that
+policy’s relevant (unknown) feature that has the largest value
+of pF (·). We refer to this heuristic asmost-likely-policy. We
+see in the following example that it does not always ﬁnd the
+optimal query policy.
+Example 2. In Figure 2, let pF (φ1) = 0 .5, pF (φ2) =
+pF (φ3) = 0.6. Aiming to ﬁnd a safe policy, the most-likely-
+policy heuristic would ﬁrst query aboutφ2 or φ3 since its pF
+value is higher. However, it is easy to verify that an optimal
+query policy would start with querying about φ1 ﬁrst. The
+optimal query policy, illustrated in Figure 2 (c), in expec-
+tation asks about 1.7 features, while using the most-likely-
+policy asks about 2.24.
+We will describe other heuristics in the Empirical Evalua-
+tion section as possible candidates, but in the following sub-
+sections, we ﬁrst introduce our main contribution: we reveal
+a set-cover structure in the problem and exploit the structural
+properties to select better queries.
+Set Cover Formulation
+In this subsection, we ﬁrst show that reaching ⊤ and ⊥ are
+each equivalent to a set cover problem.
+Non-existence of safe policies.It is easy to see that the robot
+ﬁnds a safe policy if the relevant features of a dominating
+policy are all known to be free. Formally, ⊤ ⇐ ⇒ ∃ π ∈
+Γ, ΦR
+F ⊇ Φrel(π). This is not a set cover problem and does
+not give us insights on which feature to query about. But we
+can use this observation to make the following claim about
+when safe policies do not exist. The robot knows that no
+safe policy exists if the relevant features of all dominating
+policies contain at least one known-to-be-locked feature.In-
+deed, if for all dominating policies, we know some of their
+relevant features are locked, then it is impossible to ﬁnd a
+safe policy. Formally, letSrel = {Φrel(π) : π ∈ Γ}. Then
+⊥ ⇐ ⇒ ∀ Φ ∈ S rel, ΦR
+L ∩ Φ ̸= ∅. (2)
+Example 3. In Figure 2 (a), Srel = {{φ1, φ2}, {φ1, φ3}}.
+If the robot knows that φ1 is a locked feature, or φ2 and φ3
+are both locked features, then a safe policy does not exist.
+Existence of safe policies. Relevant features of dominating
+policies (Srel) can help us determine non-existence of safe
+policies, but they do not directly help in ﬁnding a safe pol-
+icy. We could focus on one safe policy that is most likely
+to be safe, similar to the simple most-likely-policy heuristic
+(Example 2). Instead, though, we now show that existence of
+safe policies can be mapped to a different set cover problem.
+Our crucial insight is recognizing that our problem is sim-
+ilar to the maximum feasible set problem in linear program-
+ming (LP) (Chinneck 2007): When an LP problem is infea-
+sible, the objective is to ﬁnd the minimum number of con-
+straints to remove to make the problem feasible. The anal-
+ogy in our problem is that, when initially imposing the con-
+straints of all unknown and locked features, the LP problem
+(Eq. 1) is infeasible. The key difference is that our objective
+is not to ﬁnd the minimum number of constraints to remove
+since the robot cannot arbitrarily remove constraints. It can
+only decide which features to query about and remove the
+corresponding constraints when they are known to be free.
+Nonetheless, we can adapt tools in the literature for ﬁnding
+maximum feasible sets to our needs.
+To identify maximum feasible sets, Chinneck (2007) in-
+troduced the concept of an irreducible infeasible set (IIS) .
+We adopt the IIS concept in our context as follows.
+Deﬁnition 3. A subset of unknown features Φ ⊆ ΦR
+? is an
+irreducible infeasible set (IIS) if 1) safe policies do not ex-
+ist if Φ are locked features and ΦR
+? \ Φ are free features; 2)
+once any feature φ ∈ Φ is known to be free (that is, Φ \ {φ}
+are locked features andΦR
+? \ Φ ∪ {φ} are free features), the
+robot can ﬁnd a safe policy.
+We observe that the robot can ﬁnd a safe policy if there
+exists at least one known-to-be-free feature in all IISs. Oth-
+erwise, if there are any IISs that only contain unknown or
+
+known-to-be-locked features, the robot has not yet found a
+safe policy. Deﬁne SIIS to be the set of IISs induced by all
+relevant unknown features. Formally,
+⊤ ⇐ ⇒ ∀ Φ ∈ S IIS , ΦR
+F ∩ Φ ̸= ∅. (3)
+Example 4. In Figure 2(b), SIIS = {{φ1}, {φ2, φ3}}. If
+the robot knows that φ1 is a free feature, and at least one of
+φ2 or φ3 is a free feature, then a safe policy must exist.
+To compute SIIS and Srel, we use Algorithm DomPoli-
+cies from ZDS to ﬁrst ﬁnd dominating policies and their rel-
+evant features, Srel (with the computational complexity of
+O(2Φrel) in the worst case). Then to compute SIIS , we ob-
+serve that in our problem, SIIS = {Φ ⊆ Φrel : |Φ ∩ Φ′| =
+1, ∀Φ′ ∈ S rel}. By the deﬁnition of IIS, if Φ ∈ S IIS are
+locked features (and ΦR
+? \ Φ are free), no safe policy exists
+because every dominating policy has a relevant feature that
+is locked. If any φ ∈ Φ is free, we can ﬁnd a safe policy
+because for some dominating policies, the only presumed
+locked feature is now free.
+Set-Cover-Based Algorithm
+Our set-cover-based algorithm specializes Algorithm 1 by
+using query responses to not only update the partition of fea-
+tures, but to also update SIIS and Srel. Denote the two sets
+under partition ψ by S ψ
+IIS , S ψ
+rel. Speciﬁcally, it initially com-
+putes S ψ0
+IIS and S ψ0
+rel under the initial partition ψ0. It needs
+to maintain these two sets in the query process. Suppose the
+robot has partition ψ and queries about feature φq. If φq is
+free, then the sets in S ψ
+IIS that contain φq are covered, so
+they are removed fromS ψ
+IIS . Also, since φq is free, it cannot
+be used to cover sets in S ψ
+rel. We remove it from the sets in
+S ψ
+rel, meaning that the sets originally containing φq need to
+be covered by some other feature. Formally,
+S ψ′
+IIS ← S ψ
+IIS \ {Φ ∈ S ψ
+IIS : φq ∈ Φ}; (4)
+S ψ′
+rel ← {Φ \ {φq} : Φ ∈ S ψ
+rel}. (5)
+Similarly, if φq is locked, we update both sets as follows.
+S ψ′
+rel ← S ψ
+rel \ {Φ ∈ S ψ
+rel : φq ∈ Φ}; (6)
+S ψ′
+IIS ← {Φ \ {φq} : Φ ∈ S ψ
+IIS }. (7)
+Finally, for the set-cover-based version of Algorithm 1, in
+Line 13, we can avoid the expense of solving Eq. 1, because
+⊤ (or ⊥) is true simply if S ψ
+IIS (or S ψ
+rel) has become empty,
+meaning it is fully covered.
+We can also use S ψ
+IIS and S ψ
+rel to compute better heuris-
+tics h for Line 4. To describe how, we ﬁrst show that our
+objectives are adaptive submodular.
+Adaptive submodularity. While we have shown ⊤ and
+⊥ are each equivalent to a set cover problem, we should
+again note that they differ from classic set cover problems
+(Williamson and Shmoys 2011) because the robot cannot
+simply assign a feature to be free or locked (in Figure 2,
+it cannot assert φ1 is a locked feature so that it can cover
+Srel using just one query). It can only choose which feature
+to query about, and update the feature’s category based on
+the human’s response.
+Let fIIS , frel be the current coverage under partition ψ:
+fIIS (ψ) = |{Φ ∈ S ψ0
+IIS : Φψ
+F ∩ Φ ̸= ∅}| (8)
+frel(ψ) = |{Φ ∈ S ψ0
+rel : Φψ
+L ∩ Φ ̸= ∅}| (9)
+We further deﬁne the one-step gain in coverage as follows,
+similar to ∆ in Golovin and Krause (2011) (referred to
+as GK from here on): ∆IIS (φ|ψ) = pF (φ) · |S ψ
+IIS [φ]|,
+where S ψ
+IIS [φ] is the number of sets in S ψ
+IIS that contain
+φ; ∆rel(φ|ψ) = pL(φ) · |S ψ
+rel[φ]|, where S ψ
+rel[φ] is de-
+ﬁned similarly. We now show that fIIS and frel are adap-
+tive submodular functions(GK) based on the subset relation:
+ψ ⊆ ψ′ ⇐ ⇒ (Φψ
+F ⊆ Φψ′
+F ∧ Φψ
+L ⊆ Φψ′
+L ).
+Theorem 1. fIIS and frel are both adaptive submodular
+functions under ⊆.
+Proof Sketch. Take fIIS for example. It is sufﬁcient to show
+that for any ψ, ψ′ where ψ ⊆ ψ′ and any feature φ,
+∆IIS (φ|ψ) ≥ ∆IIS (φ|ψ′). We observe that ∆IIS (φ|ψ) =
+pF (φ)|S ψ
+IIS [φ]| if φ ∈ Φψ
+? , and is 0 otherwise. Since ψ ⊆
+ψ′, Φψ
+? ⊇ Φψ′
+? , that is, unknown features monotonically van-
+ish over time. We can verify that∆IIS (φ|ψ) ≥ ∆IIS (φ|ψ′),
+which completes the proof.
+One beneﬁt of this result is the following. GK im-
+plied that if the robot knows that it can cover SIIS , it
+is approximately-optimal to choose arg maxφ ∆IIS (φ|ψ).
+Similarly, if it knows that it can coverSrel, the robot should
+choose arg maxφ ∆rel(φ|ψ). However, in our problem, the
+robot does not know which outcome (⊤ or ⊥) is true before
+it ﬁnishes querying. So we need our algorithm to balance
+between two possible objectives.
+The rest of this section describes two query-selection
+heuristics. The ﬁrst (set-cover heuristic) is more straightfor-
+ward and easier to compute. The second (inverse-coverage-
+ratio heuristic) is comparatively more expensive to compute.
+We will empirically test to see if the second one ﬁnds a bet-
+ter query that is worth the extra computation in the Empirical
+Evaluation section.
+Set-cover heuristic ( hSC ). One simple way of combining
+two objectives is the sum of both, weighted by the inverse of
+the number of sets remaining to cover.
+φq = arg max
+φ
+hSC(φ; ψ) (10)
+hSC(φ; ψ) = ∆IIS (φ|ψ)
+|S ψ
+IIS |
++ ∆rel(φ|ψ)
+|S ψ
+rel|
+(11)
+We can expect this heuristic to have approximately-optimal
+performance when pF for all unknown features approaches
+0 or 1. In these cases, it would focus on covering SIIS (or
+Srel) by maximizing ∆IIS (or ∆rel), which GK show to be
+approximately-optimal. When the probabilities of change-
+ability vary, we no longer have a pure set cover problem and
+it is difﬁcult to provide a theoretical guarantee. The robot’s
+strategy is to query the feature that makes the most progress
+(in expectation) inboth set cover problems at once. We see in
+
+the following example that hSC does ﬁnd an optimal query
+policy in the example in Figure 2.
+Example 5. We consider again the domain in Figure 2.
+pF (φ1) = 0 .5, pF (φ2) = pF (φ3) = 0 .6. Consider the ﬁrst
+query to pose, hSC(φ1; ψ0) = 0.5 · 1/2 + 0.5 · 2/2 = 0.75.
+hSC(φ2; ψ0) = hSC(φ3; ψ0) = 0.6 · 1/2 + 0.4 · 1/2 = 0.5.
+Higher heuristic values mean more coverage. So the algo-
+rithm would query about φ1. We can verify that hSC ﬁnds
+the optimal query policy (same as Figure 1 (c)).
+Inverse-coverage-ratio heuristic (hICR ). The heuristic we
+describe below uses some properties offIIS and frel (Eqs. 8
+and 9). We ﬁrst describe a theorem adapted from GK. Let
+c(π∗
+q |ψ) be the expected number of features queried by an
+optimal query policy π∗
+q starting from ψ.
+Theorem 2. (Adapted from Lemma A.9 in Golovin and
+Krause (2011)) Starting from partition ψ, the optimal query
+policy π∗
+q has the following property,
+c(π∗
+q |ψ) ≥ ∆IIS (π∗
+q |ψ)
+maxφ ∆IIS (φ|ψ) . (12)
+where ∆IIS (π∗
+q |ψ) is the number of IISsπ∗
+q can cover in ex-
+pectation. Clearly, ∆IIS (π∗
+q |ψ) ≥ P[⊤; ψ] · |S ψ
+IIS |. P[⊤; ψ]
+is the probability that safe policies exist starting from par-
+tition ψ, which is computed by considering all partitions of
+Φψ
+? into locked and free features, and checking if a safe pol-
+icy exists under each partition. This is to say, with proba-
+bility P[⊤; ψ], π∗
+q needs to cover all sets in SIIS (because a
+safe policy indeed exists). Combining this with Eq. 12,
+ICR IIS (ψ) := P[⊤; ψ] · |S ψ
+IIS |
+maxφ ∆IIS (φ|ψ) ≤ c(π∗
+q |ψ). (13)
+We call the left-hand-side the inverse coverage ratio
+for SIIS . Intuitively, the inequality says the follow-
+ing. Using one query, we can greedily-optimally cover
+maxφ ∆IIS (φ|ψ) sets in SIIS in expectation. Optimisti-
+cally, we may cover the same number of sets in the follow-
+ing queries as well, but not more than this number because
+of adaptive submodularity. So to cover all the sets that it will
+cover, at least ∆IIS (π∗
+q |ψ)/ maxφ ∆IIS (φ|ψ) queries need
+to be asked in expectation. This is an optimistic estimation,
+which serves as a lower bound for c(π∗
+q |ψ).
+We deﬁne ICR rel similarly, which has a similar property.
+ICR rel(ψ) := P[⊥; ψ] · |S ψ
+rel|
+maxφ ∆rel(φ|ψ) ≤ c(π∗
+q |ψ) (14)
+The inverse coverage ratio is deﬁned as the sum of the two.
+ICR (ψ) = ICR IIS (ψ) + ICR rel(ψ) (15)
+Note that ICR is not necessarily a lower bound, but intu-
+itively it serves as an estimate of how many queries need to
+be asked starting from ψ, considering how many queries are
+needed when safe policies exist ( ICR IIS ) and when safe
+policies do not exist (ICR rel). The query selection criterion
+is hence the following.
+φq = arg min
+φ
+hICR (φ; ψ) (16)
+hICR (φ; ψ) =pF (φ)ICR (ψ|φ ∈ ΦR
+F )
++ pL(φ)ICR (ψ|φ ∈ ΦR
+L) (17)
+where ψ|φ ∈ ΦR
+F is the partition of features that, starting
+from partition ψ, the robot queries aboutφ and conﬁrms that
+it is a free feature. ψ|φ ∈ ΦR
+L is deﬁned similarly. It consid-
+ers the probability that a feature φ is free or locked, and uses
+ICR to estimate the number of queries needed under the
+partition where φ is free or locked. This is more expensive
+to compute compared with hSC since we need to compute
+P[⊤; ψ] and P[⊥; ψ]. We will empirically test if hICR ﬁnds
+better queries than hSC so it is worth the computation. In
+the following example, hICR ﬁnds the optimal query while
+hSC does not.
+Example 6. In Figure 2, let pF (φ1) = 0 .9, pF (φ2) =
+pF (φ3) = 0 .1. hSC(φ1) = .9 ∗ 1/2 + .1 ∗ 2/2 = .55;
+hSC(φ2) = hSC(φ3) = .1 ∗ 1/2 + .9 ∗ 1/2 = .5. So hSC
+would ﬁrst query about φ1. However, since safe policies are
+unlikely to exist, by computing P[⊤] and P[⊥], hICR would
+query about φ2 and (if it’s locked) then φ3 aiming to prove
+that no safe policy exists, which asks fewer queries in ex-
+pectation. In expectation, hSC asks about 2.71 features and
+hICR asks about 2.09 features.
+Empirical Evaluation
+Here we empirically answer the following three questions:
+Q1: Are queries found by hSC or hICR close to the optimal
+query, while computationally much cheaper?
+Q2: Are queries found by hSC or hICR better than queries
+based on simpler and cheaper heuristics?
+Q3: Is the additional cost of hICR over hSC worth it?
+We consider a variation of our earlier (ZDS) robot nav-
+igation domain for evaluation, illustrated in Figure 3 (left).
+The size of the domain is 6 × 6, with 5 randomly-generated
+walls which the robot cannot move through so we have vari-
+ous different dynamics. The robot starts from the bottom-left
+corner and is asked to turn off a switch in the top-right cor-
+ner. It can move in all cardinal directions to its adjacent cell
+in a time step, unless blocked by a wall or border of the do-
+main. The reward is 1 if the robot turns off the switch and
+0 in all other states, and the robot is required to turn of the
+switch (SG are the states where the switch is off; δG = 0.1).
+γ = 0.9. There are carpets randomly placed in this environ-
+ment. When the robot traverses a carpet, it makes the carpet
+dirty. For each carpet, whether the robot is allowed to make
+it dirty is unknown to the robot. So each carpet corresponds
+to an unknown feature. All carpets are initially clean and the
+number of carpets varies in different experiments.
+We compare several strategies and heuristics for query se-
+lection. One, optimal, ﬁnds the exact optimal query policy:
+Consider a Query-MDP, M q, where states are partitions of
+features. Actions are queries that probabilistically transit be-
+tween states (since feature partitions change after querying).
+The states where either outcome (⊤ or ⊥) is reached have re-
+wards of, say, 1, and are terminal. We use dynamic program-
+ming to ﬁnd an optimal policy in M q, which corresponds to
+an optimal query policy. Note that we only need to focus
+on deterministic query policies since there exists an optimal
+deterministic policy in M q (Puterman 1994). The complex-
+ity is O(3|Φrel|), which is better than evaluating all query
+policies in a brute-force way (O(|Φrel|!)).
+
+Oracle
+Optimal
+hSC
+hSC-IIS
+hSC-rel
+hICR
+Prob.-Max.
+Prob.-Max.-
+Prob.-Max.-
+Most-Likely
+Figure 3: (Left) The robot navigation domain. Blue tiles are
+carpets and dark tiles are walls. The dashed-line policy is
+safe if the robot knows that the traversed carpets are free to
+change. (Right) Legend for the following ﬁgures.
+10 11 12 13 14
+# of Carpets
+1.5
+2.0
+2.5
+3.0# of Queried Features
+10 11 12 13 14
+# of Carpets
+0
+2
+4
+6
+8
+10
+12Computation Time (sec.) per Q.
+Figure 4: (Left) The number of queried features vs. the
+number of unknown features (carpets). (Right) Computation
+time per query vs. the number of carpets.
+0.3 0.4 0.5 0.6 0.7
+pf
+2
+3
+4# of Queried Features
+0.3 0.4 0.5 0.6 0.7
+pf
+2
+3
+4# of Queried Features
+Figure 5: The number of queried features vs. pF . The hori-
+zontal axis is the midpoint of the intervals where pF is sam-
+pled from ( [0, 0.5], [0.1, 0.6], . . .). For clarity, we report a
+subset of algorithms in each ﬁgure.
+0.3 0.4 0.5 0.6 0.7
+pf
+1
+2
+3
+4
+5
+6
+7
+8
+9# of Queried Features
+0.3 0.4 0.5 0.6 0.7
+pf
+1
+2
+3
+4
+5
+6
+7
+8
+9# of Queried Features
+Figure 6: The number of queried features vs. pF in a larger
+domain.
+We also compare to variations of hSC that aim to
+cover SIIS and Srel, respectively: hSC -IIS queries
+about arg maxφ∈ΦR
+?
+∆IIS (φ|ψ)/|S ψ
+IIS |. hSC -rel queries
+about arg maxφ∈ΦR
+?
+∆rel(φ|ψ)/|S ψ
+rel|. We have also de-
+scribed the most-likely-policy in the simple heuristics
+section. Finally, we also compare against the following
+heuristics that are based on the probability of exis-
+tence of safe policies. probability-maximization-⊤
+ﬁnds the feature that, if known be to free, in-
+creases the probability of existence of safe policies
+the most: arg maxφ∈ΦR
+?
+pF (φ)P[⊤; (ψ|φ ∈ ΦR
+F )].
+Similarly, probability-maximization-⊥ ﬁnds the
+feature that, if known to be locked, decreases the
+probability of existence of safe policies the most:
+arg maxφ∈ΦR
+?
+pL(φ)P[⊥; (ψ|φ ∈ ΦR
+L)]. Lastly,
+probability-maximization optimizes the joint objec-
+tive of the previous two. arg maxφ∈ΦR
+?
+pF (φ)P[⊤; (ψ|φ ∈
+ΦR
+F )] + pL(φ)P[⊥; (ψ|φ ∈ ΦR
+L)]. We cannot adapt the algo-
+rithms in ZDS to this problem because they are designed for
+a minimax-regret setting and, crucially, depend on knowing
+a safe policy before querying.
+We evaluate these selection strategies in the following ex-
+periments. We vary the numbers of unknown features (num-
+bers of carpets in this example) in the ﬁrst experiment and
+vary the distributions of pF but ﬁx the number of carpets in
+the second experiment.
+Experiment 1: Varying the number of carpets. We ﬁrst
+consider a uniformly randompF setting with a varying num-
+ber of carpets. The values of pF (φ), φ ∈ ΦR
+? are uniformly
+randomly generated between [0, 1]. The numbers of carpets
+are 10, 12, 14. We run experiments for 200 trials for each
+data point. In each trial, the layout of walls and carpets are
+randomly generated. The performance of the heuristics and
+their computation times in domains with different numbers
+of carpets is shown in Figure 4.
+As expected, with more carpets (unknown features), the
+robot needs more queries to ﬁnd a safe policy or prove that
+none exists. Both hSC and hICR have performance close to
+optimal while their computation is much cheaper than op-
+timal (answering Q1). When the carpet number is 14, the
+optimal’s computation time per query is 41.41 ± 6.59 sec.,
+which is out of the scope of the ﬁgure. Both hSC and hICR
+ﬁnd better queries than other candidate heuristics (answer-
+ing Q2). We ﬁnd hICR has performance closer to optimal
+compared with hSC while using only slightly more compu-
+tation time (answering Q3).
+Experiment 2: Varying pF . In reality, it may not be the
+case that all unknown features have uniformly random prob-
+abilities of being free. In this experiment, we ﬁx the number
+of carpets to be 14 and generate pF in small intervals (Fig-
+ure 5). The size of intervals are 0.5, that is, the intervals are
+[0, 0.5], [0.1, 0.6], and so on.
+hICR and hSC still have performance closest to optimal
+(answering Q1). They are also robust to different distribu-
+tions of pF . Unsurprisingly, hSC -IIS performs well when
+pF values are large (so that safe policies are indeed likely to
+exist), and hSC -rel performs well when pF values are small.
+Thus, the answer to Q2 is more nuanced: cheaper heuris-
+tics are competitive under particular narrower conditions.
+We also see that although probability-maximization has per-
+formance close to hSC in Experiment 1, it actually has much
+worse performance under certain pF ranges.
+We also evaluate the heuristics in larger domains. In large
+domains, it can be expensive to ﬁnd all dominating policies
+
+and IISs. Since the robot only needs to decide what is the
+next feature to query about, it may not be necessary to com-
+pute the exact SIIS and Srel. It computes SIIS , Srel for a
+limited time (5 seconds in our experiments) and stops, then
+selects queries based on the possibly incomplete sets (a simi-
+lar idea is used in Regan and Boutilier (2010)). To determine
+⊤ or ⊥, the robot cannot simply check if SIIS or Srel is
+empty as in Algorithm SetCoverQuery (since both sets may
+be incomplete), but solves the LP problem in Eq. 1. Since
+we cannot afford to compute the optimal query policy, we
+use oracle as a baseline: It knows the true partition of the
+features and asks the minimum number of features possible
+to reach the correct outcome. We evaluate our heuristics in
+a 10 × 10 domain with 40 randomly placed carpets and 20
+walls (Figure 6). We can see a similar pattern that hICR is
+closest to optimal queries.
+To summarize, we ﬁnd both hSC and hICR are robustly
+close to the optimal query when we vary the number of un-
+known features and distribution of pF , while hICR is closer
+to the optimal at the cost of slightly more computation.
+When pF is close to 0 or 1, some other candidate heuris-
+tics also have good performance (for example, using hSC -
+IIS when pF values are large). These are also simpler cases
+since we can focus on covering either SIIS or Srel.
+Conclusion and Future Work
+We have formally deﬁned the problem of querying to ﬁnd
+a safe policy, or proving none exists, in settings where un-
+safe side-effects are possible. Through a novel casting of that
+problem into a pair of set-cover problems, we have devised
+heuristics for a myopically-greedy approach that empirically
+perform nearly optimally without excessive computational
+costs, and outperform other candidate heuristics.
+We have here assumed (as we did in ZDS) that features’
+changeabilities are independent and feature values are static
+unless changed by the robot. Future work can relax these
+assumptions (some ideas were sketched in ZDS), consider
+other heuristics (possibly from ZDS), and explore multia-
+gent settings (e.g., one user overseeing multiple robots, one
+robot answering to multiple users). We also want to derive
+a performance bound for our heuristic similar to GK, and
+incorporate values of policies, so that the robot can bias its
+efforts towards ﬁnding safe policies with higher values.
+Acknowledgements. Thanks to the anonymous reviewers.
+This work was supported in part by the Air Force Ofﬁce
+of Scientiﬁc Research under grant FA9550-15-1-0039, and
+the Open Philanthropy Project to the Center for Human-
+Compatible AI. Any opinions, ﬁndings, conclusions, or rec-
+ommendations expressed here are those of the authors and
+do not necessarily reﬂect the views of the sponsors.
+References
+Akrour, R.; Schoenauer, M.; and Sebag, M. 2012. APRIL:
+active preference learning-based reinforcement learning. In
+J. Eur. Conf. on Machine Learning and Knowledge Discov-
+ery in Databases, 116–131.
+Amodei, D.; Olah, C.; Steinhardt, J.; Christiano, P.; Schul-
+man, J.; and Man, D. 2016. Concrete problems in AI safety.
+arXiv preprint arXiv:1606.06565.
+Boutilier, C.; Dean, T.; and Hanks, S. 1999. Decision-
+theoretic planning: Structural assumptions and computa-
+tional leverage. J. of Artiﬁcial Intelligence Research (JAIR)
+11(1):94.
+Cakmak, M., and Thomaz, A. L. 2012. Designing robot
+learners that ask good questions. In Proc. 7th Annual
+ACM/IEEE Int. Conf. on Human-Robot Interaction, 17–24.
+Chinneck, J. W. 2007. Feasibility and Infeasibility in Opti-
+mization:: Algorithms and Computational Methods, volume
+118. Springer Science & Business Media.
+de Farias, D. P., and Van Roy, B. 2003. The linear pro-
+gramming approach to approximate dynamic programming.
+Operations Research 51(6):850–865.
+Golovin, D., and Krause, A. 2011. Adaptive Submodularity:
+Theory and Applications in Active Learning and Stochastic
+Optimization. J. of Artiﬁcial Intelligence Research 42:427–
+486.
+Le, T.; Tabakhi, A. M.; Tran-Thanh, L.; Yeoh, W.; and Son,
+T. C. 2018. Preference Elicitation with Interdependency and
+User Bother Cost. In Proc. 17th Int. Conf. on Autonomous
+Agents and MultiAgent Systems, 1459–1467.
+Leike, J.; Martic, M.; Krakovna, V .; Ortega, P. A.; Everitt,
+T.; Lefrancq, A.; Orseau, L.; and Legg, S. 2017. AI safety
+gridworlds. arXiv preprint arXiv:1711.09883.
+Mindermann, S.; Shah, R.; Gleave, A.; and Hadﬁeld-Menell,
+D. 2018. Active Inverse Reward Design. 1st Workshop on
+Goal Speciﬁcations for Reinforcement Learning co-located
+with IJCAI 2018.
+Puterman, M. L. 1994. Markov Decision Processes: Dis-
+crete Stochastic Dynamic Programming . New York, NY ,
+USA: John Wiley & Sons, Inc., 1st edition.
+Ramachandran, D., and Amir, E. 2007. Bayesian inverse
+reinforcement learning. In Int. J. Conf. on Artiﬁcial Intelli-
+gence, 2586–2591.
+Regan, K., and Boutilier, C. 2009. Regret-based reward
+elicitation for Markov decision processes. In Proc. Conf. on
+Uncertainty in Artiﬁcial Intelligence (UAI), 444–451.
+Regan, K., and Boutilier, C. 2010. Robust policy compu-
+tation in reward-uncertain MDPs using nondominated poli-
+cies. In Assoc. for Adv. of Artiﬁcial Intelligence (AAAI) ,
+1127–1133.
+Sutton, R. S., and Barto, A. G. 2018. Reinforcement Learn-
+ing: An Introduction. MIT Press.
+Turner, A. M.; Hadﬁeld-Menell, D.; and Tadepalli, P. 2019.
+Conservative Agency. In Proceedings of the Workshop on
+Artiﬁcial Intelligence Safety, 29–36.
+Williamson, D. P., and Shmoys, D. B. 2011. The Design of
+Approximation Algorithms. Cambridge University Press.
+Zhang, S.; Durfee, E.; and Singh, S. 2018. Minimax-
+regret querying on side effects for safe optimality in factored
+Markov decision processes. InProc. 27th Int. J. Conf. on Ar-
+tiﬁcial Intelligence (IJCAI), 4867–4873.

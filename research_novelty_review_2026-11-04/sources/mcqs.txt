@@ -1,0 +1,2571 @@
+Autonomous Assessment of Generalizability of AI Agent Capabilities
+Daniel Bramblett1, Rushang Karia1, Adrian Ciotinga1, Pulkit Verma2,
+YooJung Choi1, Siddharth Srivastava1
+1Arizona State University, AZ, USA
+2Indian Institute of Technology Madras, India
+{drbrambl,rkaria,acioting,yj.choi,siddharths}@asu.edu, pulkitv@cse.iitm.ac.in
+Abstract
+Safe deployment of black-box AI (BBAI) systems such as
+foundation model agents requires methods for evaluating
+their capabilities in novel settings. We define an agent’s capa-
+bility as its ability to achieve a short term objective and for-
+malize the problem of learning models that predict whether,
+with what effects, and under what conditions, an agent can
+perform a capability. We introduce Monte Carlo Query Syn-
+thesis (MCQS), an active query-synthesis method for learn-
+ing symbolic stochastic capability models of BBAIs. MCQS
+models capabilities as conditional probability distributions
+over outcomes and formulates capability evaluation as an ac-
+tive learning problem over policies. We use Monte Carlo tree
+search to synthesize queries that maximally distinguish be-
+tween extremal capability hypotheses: the lattice meet and
+join corresponding to the most pessimistic and optimistic
+models consistent with observed behavior. Executing these
+queries yields trajectories that prune inconsistent hypotheses.
+We prove soundness, completeness, and convergence prop-
+erties under standard realizability and sampling assumptions.
+Experiments with multiple BBAI systems show that MCQS
+learns accurate capability models more efficiently than base-
+line query strategies, enabling systematic characterization of
+agent capability boundaries with fewer interactions.
+1 Introduction
+We consider the problem of efficiently learning interpretable
+capability models of black-box AI systems (BBAIs) capable
+of planning and learning. Modern BBAIs such as Large Lan-
+guage Models (LLMs), Vision-Language Models (VLMs),
+etc. accept high-level instructions and perform long-horizon
+sequential decision-making (Ha et al. 2023; Liu et al. 2023;
+Black et al. 2025). However, it is difficult to predict what
+such BBAIs can and cannot do. For instance, our experi-
+ments show that spurious correlations in training data can
+induce RL agents to exhibit “superstitious” behaviors, such
+as opening an unnecessary door when the goal is to retrieve
+a key. Such configuration-dependent effects complicate safe
+deployment and limit the reliable use of AI systems.
+Prior work on the topic is largely restricted to agents
+with pre-determined capabilities that can be modeled in
+relatively simple modeling languages (e.g. QACE (Verma,
+Copyright © 2026, Association for the Advancement of Artificial
+Intelligence (www.aaai.org). All rights reserved.
+Karia, and Srivastava 2023)). Another related direction of
+work, on action-model learning (Sec. 5), learns models de-
+scribing how an agent’s primitive actions affect its environ-
+ment. In contrast, we focus on the relatively under-studied
+problem of learningcapability modelsthat characterize the
+types of planning problems an agent can solve, the condi-
+tions under which it can solve them, and their possible out-
+comes. This is a challenging open problem because we can-
+not assume prior knowledge of a BBAI’s internal representa-
+tions and planning algorithms. Algorithms for action model
+learning do not address this setting and existing approaches
+for capability learning cannot be used in stochastic envi-
+ronments involving agents with non-stationary policies or
+evolving capabilities. However, solving this problem is es-
+sential for determining the limits of generalizability of plan-
+ning behavior in popular BBAIs. E.g., Fig. 1 shows some of
+the discovered agent capabilities and their surprising limita-
+tions found using the approach presented in this paper. Each
+capability may involve the execution of multiple actions.
+We formalize capability discovery and learning as an ac-
+tive learning problem over a hypothesis classHof capabil-
+ity models. Each modelh∈ Hinduces a distribution over
+state-trajectories resulting from BBAI’s execution of its ca-
+pabilities. Unlike standard active learning, the query space
+here is the space of policies that map states to capabilities,
+which grows exponentially with the state space.
+Our main contribution is a class of Monte Carlo Query
+Search (MCQS) algorithms for constructing queries for this
+policy-level active learning problem. The key challenge is
+the combinatorial structure of both the policy space and the
+hypothesis class. We address this via two observations. First,
+the set of hypotheses consistent with observed BBAI ex-
+ecutions (state trajectories) constitutes a subset lattice. We
+show that it suffices to track its extremal elements, i.e., the
+join and meet of all possible consistent hypotheses (h ∨ and
+h∧ respectively), which can be computed efficiently with-
+out enumerating individual hypotheses. Second, inspired by
+Bell experiments (Bell 1964), we define discriminating poli-
+cies as those that induce disparate trajectory distributions
+under the hypothesesh ∨ andh ∧. Concretely, we measure
+a policy’s ability to discriminate among the two competing
+hypotheses in the form of expected divergence between tra-
+jectory distributions induced by each hypothesis, and treat
+this divergence measure as a maximization objective for pol-
+arXiv:2512.16733v4  [cs.AI]  14 Sep 2026
+
+(a)
+Agent Capability Conditions & Outcomes
+GPT-5.4 on
+Minigrid
+Pick up blue key (in
+SW)
+From NW or SW, achieves intent with∼0.7probability; side effect:
+opens unnecessary door in NW with∼0.5probability.
+Open blue door From SW, always achieves intent when not holding key; but probability
+of success drops to0.8when holding key.
+Go to SW From NW, achieves the intent with∼0.2probability when unnecessary
+door is closed, but only∼0.1when it is open; in the latter case, the agent
+ends up in SE.
+CSteve1 on
+Crafter
+Move away from tree Achieves intent by cutting down tree.
+Achieve drink water In some scenarios moves away from water instead (probability∼0.7).
+SayCan Stack green on yel-
+low
+Achieves intent (∼0.6); fails by picking up entire tower (∼0.4); numer-
+ous error outcomes (unstack/knock-down).
+LAO* on
+Blocksworld
+Place block A Always prefers placing on C if clear; otherwise on B.
+(b)
+Figure 1:(a) Evaluated BBAIs and environments from top-down: Overcooked, Crafter, Saycan, and Minigrid; (b) some of the salient
+capabilities discovered by MCQS. See Sec. 4.2 for details.
+icy computation. Together, these ideas lead to a principled
+approach for computing policies that are highly informative.
+We make minimal assumptions, only requiring access to a
+representation functionthat maps environment states into a
+user-interpretable symbolic space. While a substantial body
+of work studies the problem of learning representation func-
+tions (Shah, Nagpal, and Srivastava 2025; Konidaris, Kael-
+bling, and Lozano-Perez 2018; Ahmetoglu et al. 2022; Peng
+et al. 2024; James, Rosman, and Konidaris 2020), we focus
+on the complementary problem of learning capability mod-
+els given a fixed representation.
+The main contributions of this work are: (1) a capability-
+modeling framework for BBAIs, with a formal learning ob-
+jective (Sec. 2); (2) MCQS, an approach for capability dis-
+covery and learning via informative query synthesis (Sec. 3);
+(3) theoretical results showing that MCQS converges in the
+limit (Sec. 4); and (4) empirical results demonstrating its
+scope and effectiveness across diverse agents and environ-
+ments (Sec. 4).
+2 Formal Framework
+We evaluate BBAIs operating in a stochastic, fully observ-
+able environmentEcharacterized by environment statesX
+and low-level actionsA. We assume access to a simula-
+torS E forEthat supports standard functionality: resetting
+to an initial state, reverting to any previously encountered
+statex∈X, stepping the simulator with an actiona∈A
+to obtain the next state and outcome, and querying the set
+of available actions. We otherwise assume neither explicit
+knowledge ofEnor additional functionality fromS E.
+Environment statesXare often uninterpretable to users,
+motivating a high-level symbolic representation for express-
+ing both states and capability models. We assume an inter-
+pretable symbolic state spaceSdefined over a vocabularyV
+consisting of a set of predicate symbolsPand a set of ob-
+jectsO, where ground atoms are formed by applying predi-
+Capability Name:c 2;Intent:clean(l 1)
+Conditional Effectr n:
+Condition:charged(robot)∨at(charger,robot)
+Effects: 0.75 :clean(l 1)∧at(charger,robot)
+0.25 :¬charged(robot)
+Conditional Effectr n+1:
+Condition:¬charged(robot)∧ ¬at(charger,robot)
+Effects: 0.10 :at(charger,robot)∧charged(robot)
+0.90 :request help(user)
+Figure 2:Simplified example of a capability model.
+cates inPto objects inO. We use a representation function
+α:X→Swhereα(x)is the set of ground atoms that hold
+inx. As noted earlier (Sec.??), several approaches are being
+developed for learning such representations, yet the problem
+of using them for capability model learning remains under-
+studied and forms the focus of this paper.
+2.1 Capability Learning Problem
+Intuitively, each capability corresponds to a latent intent-
+conditioned option (Sutton, Precup, and Singh 1999). We
+consider intentsI, where each intent is a conjunction of
+ground atoms overV. We use “goal” for a user-assigned ob-
+jective and “intent” for the agent’s current short-term objec-
+tive, possibly pursued as a step toward a goal. Each intent
+i∈ Iis associated with a latent option consisting of an initi-
+ation set, policy, and termination function. Let∆(A)denote
+the set of probability distributions overA. Formally:
+Definition 1.LetAbe a BBAI andΩbe a set of options.
+Acapability functionofAis a mappingκ:I →Ωsuch
+thatκ(i) =⟨S i
+0, µi, βi⟩, whereS i
+0 ⊆Sis the initiation
+set,µ i :S→∆(A)is a policy for achieving intenti, and
+βi :S→ {0,1}is the termination function.
+
+We write the capability for intentiasc=κ(i). LetCbe
+the set of capabilities under consideration. Our objective is
+to learn a model for eachc∈Capproximating its initiation
+setS i
+0 and the effects induced by executingµ i from states in
+Si
+0 until termination underβ i.
+To be able to express models of real BBAIs, we model ca-
+pabilities using conditional probabilistic effects, where con-
+ditions may include conjunctions and disjunctions, and out-
+comes are stochastic. Fig. 2 shows a simplified example for
+a robot vacuum cleaner’s capability for achieving the intent
+of cleaning a location.
+We use grounded rather than lifted models for capabilities
+because agent capabilities exhibit non-liftable asymmetries
+(Sec. 4.2). Formally,
+Definition 2.Acapability modelhis a set of conditional-
+effect rules. Each ruler∈his a tuple⟨cond(r),effects(r)⟩,
+wherecond(r)is a Boolean formula overVand
+effects(r) ={(p j, ηj)}j is a probability distribution over
+effects. Each effectη j is a conjunction of literals overV,
+pj ∈(0,1], and P
+j pj = 1.
+An effectη=⟨η +, η−⟩consists of sets of positive and
+negative literals, withapply(s, η) = (s\η −)∪η +. The ef-
+fect observed in transition⟨s, c, s ′⟩isη(⟨s, c, s ′⟩) =⟨s ′ \
+s, s\s ′⟩. A transition⟨s, c, s ′⟩is consistent with capability
+modelh, denoted ash|=⟨s, c, s ′⟩, if there existsr∈h
+such thats|= cond(r)and some(p j, ηj)∈effects(r)
+satisfiess ′ = apply(s, η j). Otherwise,h̸|=⟨s, c, s ′⟩.
+A capability modelh c forcdefines a conditional proba-
+bility distribution overc’s outcomes:Pr hc(s′ |s, c) =
+(1/|Rs|)P
+r∈Rs
+P
+(pj ,ηj)∈effects(r) pj1[s′ = apply(s, η j)]
+whereR s ={r∈h c :s|= cond(r)}. If|R s|= 0, then
+Prh(s′ |s, c) = 0. We denoteh †
+C as the set of capability
+models, one for eachc∈C, and omit the subscript when
+clear from context.
+A desired property of a learned capability model is that it
+is sound and complete with respect to a dataset of observed
+transitionsD. Formally,
+Definition 3.Letα:X→Sbe a representation function.
+Acapability-transition datasetD A,E is a multiset of triples
+⟨s, c, s′⟩where executing capabilitycusing BBAIAfrom
+statex∈Xresults inx ′ ∈X, withs=α(x)ands ′ =
+α(x′).
+Definition 4.A modelh c issound w.r.t.Dif∀s, s ′ ∈
+S, h c |=⟨s, c, s ′⟩ ⇒ ⟨s, c, s ′⟩ ∈ D, andcomplete w.r.t.
+Dif∀s, s ′ ∈S,⟨s, c, s ′⟩ ∈ D ⇒h c |=⟨s, c, s′⟩.
+We omit “w.r.t.D” when clear from context. LetD ⋆ de-
+note all transitions inS×C×Sinduced by the unknown true
+modelh †⋆. Requiring soundness w.r.t.D ⊂ D ⋆ is overly re-
+strictive, since models that generalize beyond observed tran-
+sitions may violate it. Instead, we seek models that are com-
+plete w.r.t.Dand sound w.r.t.D ⋆. We use the variational
+distance (VD) to evaluate a hypothesis modelh † w.r.t.h †⋆
+(Pasula, Zettlemoyer, and Kaelbling 2004):VD(h †, h†⋆) =
+(P
+(s,c,s′)∈D⋆ |Pr h†(s′ |s, c)−Pr h†⋆(s′ |s, c)|)/|D ⋆|.
+Given a BBAIA, the capability learning problem is to
+use a representation function and a simulator to discoverA’s
+capabilities and learn associated models that minimize VD
+fromA’s (unknown) true capability model.
+3 Monte Carlo Query Synthesis
+In this section, we introduce Monte Carlo Query Synthe-
+sis (MCQS), a query-synthesis algorithm for discovering
+a BBAI’s capabilities and learning capability models. The
+complete algorithm, including the algorithm block, is pro-
+vided in Appendix E.1. MCQS reduces model uncertainty
+through falsification: it maintains a set of hypothesis mod-
+els consistent withD, synthesizes policies whose predicted
+outcomes disagree across those hypotheses, passes the pol-
+icy as aqueryto the BBAI, which then executes the policy
+and in the process creates a new trajectory that is added to
+D. Our approach works for capability definitions provided
+as a list of intents that the agent may be able to achieve.
+Alternatively, we can start with an empty set of capabilities
+and discover candidate capabilities before learning models
+for them.
+We discover BBAI capabilities by letting it perform ran-
+dom walks in the simulatorS E and collecting the result-
+ing effects. We further expand this set by observing state-
+capability transitions added toD. For each observed ef-
+fectη, we extract every grounded atomp(o 1, . . . , ok)that
+is added or removed and introduce the corresponding ad-
+dition or deletion as an intent defining a new capability. If
+any grounding of a predicatepappears inη, we assume that
+other type-consistent groundings ofpare likely achievable
+as well. Accordingly, MCQS constructs capabilities for all
+intentsp(o ′
+1, . . . , o′
+k)where(o ′
+1, . . . , o′
+k)has the same type
+signature as the observed atomp(o 1, . . . , ok).
+3.1 Hypothesis Space Lattice for Query Synthesis
+The central challenge in actively learning capability models
+is maximizing the information gained from each query. We
+show that the hypothesis space forms a lattice and, when
+restricted to hypotheses consistent with the state-capability
+transition datasetD, admits two extremal hypotheses that
+bound all consistent hypotheses.
+For state spaceSand capability setC, letT=S×C×S
+denote the set of possible transitions. Let compound hy-
+pothesish † denote a compiled set of hypotheses, one per
+capability inC, and letHdenote the set of all compound
+hypotheses.h † represents the subset ofTconsistent with
+it:T h† ={t∈T:h † |=t}. Two hypothesesh †
+1 and
+h†
+2 are equivalent,h †
+1 ≡h †
+2, iffT h†
+1
+=T h†
+2
+. This exten-
+sion of|=to compound hypotheses is well-defined because
+h† contains exactly one hypothesis per capability. Conse-
+quently, the hypothesis space is partially ordered by inclu-
+sion:h †
+1 ⪯h †
+2 ⇐ ⇒T h†
+1
+⊆T h†
+2
+. This induces a subset
+lattice overH.
+Instead of considering the intractable and combinatorial
+hypothesis space exhaustively, we restrict our attention to
+hypotheses that are complete with respect toD(Def. 4). This
+restricted space has a unique minimal element: the lattice-
+meet of all complete hypotheses, which classifies only the
+transitions inDas consistent. This model is related to prior
+
+work on “safe models” (Stern and Juba 2017); we call it the
+pessimistic modelh †
+∧ to emphasize that it permits only di-
+rectly observed transitions.
+As noted earlier, soundness w.r.t.Dis too restrictive
+for filtering hypotheses. We therefore relax it to sound-
+ness modulo unseen capability executions: a modelh † is
+possibly soundw.r.t.Diff, wheneverh † |=⟨s, c, s ′⟩, ei-
+ther⟨s, c, s ′⟩ ∈ D, or the following conditions hold: (a)
+∀s′′,⟨s, c, s ′′⟩ ̸∈ D, and (b)∃s 1, s2,⟨s 1, c, s2⟩ ∈ Ds.t.
+η(s, s′) =η(s 1, s2). This notion of soundness allows for
+the possibility that, once an execution ofcinsis observed,
+h†’s prediction will prove sound. We define theoptimistic
+modelh †
+∨ as the join of all possibly sound models w.r.t.D.
+Two properties ofDensure that pessimistic and optimistic
+models bound the true model.Distransition completeiff
+for alls, cwhenever there existss ′ such that⟨s, c, s ′⟩ ∈
+D, then for alls ′′ s.t.h †⋆ |=⟨s, c, s ′′⟩,⟨s, c, s ′′⟩ ∈ D.
+We say thatDiseffect completeiff for alls, c, whenever
+h†⋆ |=⟨s, c, s ′⟩, then there exists⟨s 1, c, s2⟩ ∈ Dsuch that
+η(s, s′) =η(s 1, s2). These conditions ensure the bounds
+(Appendix A includes proofs for all theoretical results):
+Lemma 1.LetCbe a set of agent capabilities with true
+modelh †⋆ expressible over vocabularyV, and leth †
+∧ andh †
+∨
+be the pessimistic and optimistic models constructed from
+transition dataD. IfDis transition and effect complete, then
+h†
+∧ ⪯h †⋆ ⪯h †
+∨.
+Furthermore,h †
+∧ andh †
+∨ can be computed efficiently from
+Das follows. For each capabilityc, letD c ={⟨s, c, s ′⟩:
+∃s, s′ ⟨s, c, s′⟩ ∈ D}denote the observed transitions involv-
+ingc, and letη c(s,D) ={η(⟨s, c, s ′⟩) :∃s ′ ⟨s, c, s′⟩ ∈ D c}
+denote the effects observed from statesunderc. We par-
+tition states by equality of these effect sets:s 1 ∼c s2 iff
+ηc(s1,D) =η c(s2,D), yielding partitionsΦ c. Each block
+Sφ ∈Φ c has a common effect setE φ and induces one con-
+ditional effect rule. Letℓ(s) = V
+p∈s p∧ V
+p /∈s¬pdenote
+representation of a state as a formula.
+We then derive the optimistic and pessimistic models
+using BDDs by extending effect partitioning (Mordoch
+et al. 2024) to stochastic effects. A setS φ where a cer-
+tain effect occurs can be captured with a pessimistic con-
+ditionpcond(S φ) =W
+s∈Sφ ℓ(s)or an optimistic condition
+ocond(Sφ) =¬[W
+s∈Φc\Sφ ℓ(s)]. The corresponding rule is
+rφ =⟨cond(S φ),(Pr(η), η) :η∈E φ⟩, wherecondis ei-
+therpcondorocondrepresented as a BDD andPr(η)is
+estimated fromD c by MLE. Collecting all rules for all capa-
+bilities using the pessimistic conditions yieldsh †
+∧, while us-
+ing optimistic conditions yieldsh †
+∨. This gives two hypothe-
+ses bounding the space of consistent hypotheses, enabling
+MCQS to search for queries maximizing their disagreement.
+3.2 MCQS Using Lattice-Based Learning
+We now present the overall process for query synthesis
+based on the lattice theory developed above. For hypothe-
+sesh †
+1 andh †
+2 over the capability setC, a capability policy
+π:S→Cisinformativefrom an initial statex 0 ∈Xif
+executingπfromx 0 results in disparate outcome distribu-
+tions underh †
+1 andh †
+2. Once such a policy is identified, we
+send it as a query to the agent. Since the environment may
+be stochastic, a query requires multiple independent execu-
+tions ofπfrom the same initial state, thereby increasing the
+probability of observing an informative outcome. Formally:
+Definition 5.Aqueryis a tuple⟨x 0, π, n⟩, wherex 0 ∈Xis
+an initial environment state,π:S→Cis a policy mapping
+represented states to capabilities, andn∈Z + is the number
+of executions ofπ.
+The query-synthesis objective is to identify a policy
+whose execution induces different predicted state distribu-
+tions under two capability-set hypotheses. For a capabil-
+ityc i, letτ h
+i (ρ)denote the state distribution predicted by
+modelhafter executingc i from an initial distributionρ:
+τ h
+i (ρ)(s′) = P
+s∈S Prh(s′ |s, c i)ρ(s). We writeτ h
+1,...,k(ρ)
+for the distribution induced by executing the capability se-
+quencec 1, . . . , ck fromρ. Let ˆδbe a distance function over
+distributions andδa threshold. An informative policyπis
+one under which ˆδ(τ
+h†
+1
+π (ρ0), τ
+h†
+2
+π (ρ0))> δ.
+We formulate this objective as a Markov decision pro-
+cess over pairs of predicted state distributions. Letρ1 andρ 2
+denote the state distributions maintained underh †
+1 andh †
+2,
+respectively. States for the query synthesis MDP are meta-
+states of the form⟨ρ 1, ρ2⟩; its actions select a capability
+c∈C; applyingcon a meta-state updates each distribution
+according to its corresponding model. Formally:
+Definition 6.Thedistinguishing MDPP †(s0, h†
+1, h†
+2),
+wheres 0 ∈Sis the initial state andh †
+1 andh †
+2 are capa-
+bility models, is a tuple⟨S †, A†,T †, R†, s†
+0⟩, whereS † =
+{ ⟨ρ1, ρ2⟩ |ρ 1, ρ2 are probability distributions overS};
+s†
+0 =⟨ρ 1,0, ρ2,0⟩withρ 1,0(s0) = 1andρ 2,0(s0) = 1;
+A† =Cis the set of capabilities;T †(⟨ρ1, ρ2⟩, ci) =
+⟨τ
+h†
+1
+i (ρ1), τ
+h†
+2
+i (ρ2)⟩; andR †(⟨ρ1, ρ2⟩) = ˆδ(ρ1, ρ2).
+Solving a distinguishing MDP amounts to finding
+a policyπthat maximizes predicted disagreement:
+arg maxπ ˆδ(τ
+h†
+1
+π (ρ0), τ
+h†
+2
+π (ρ0)). To findπ, we use MCTS
+with UCT (Kocsis and Szepesv´ari 2006; ´Swiechowski et al.
+2023). LetQ(s †, c)denote the value for applying capabil-
+itycin states †, and letN(s †)andN(s †, c)denote node
+and edge visit counts. With exploration constantλ uct, we
+defineUCT(s †, c) =Q(s †, c) +λ uct
+p
+lnN(s †)/N(s†, c).
+During selection, expansion, and policy extraction, MCTS
+selectsarg max c∈C UCT(s†, c). Retaining the exploration
+bonus in the query encourages policies targeting rarely ex-
+plored branches. We develop two MCQS variants that differ
+in state-distribution representations and rewards.
+MCQS-Exact(MCQS-E, Fig. 3(a)) solves the distinguish-
+ing MDP directly by maintaining explicit predicted distri-
+butions over represented states, encoding each state as a
+bit-vector with one bit per literal and annotating it with
+its probability mass. Bit masks test whether a state satis-
+fies each condition in the conditional-effects rules and ap-
+ply the corresponding effects, yielding an exact but com-
+pact representation of the distribution pairs propagated by
+
+!!"""#
+"""#∩Δ∩Δ"""#∩Δ∩Δ
+"$
+Δ(!"",!"#)∩(!"",!"#) Δ(!#",!##)∩(!#",!##)
+⟨"!,"!⟩%"%#
+""",""#"#","##
+%$
+%"%$%#%"%$%#
+(a) (b) (c)
+{"!}$"$# $!$"%"00.6)#0.30.4)$0.70)%
+$!$"%&01)#10)$
+$.
+$!$"%!0.60.1)#0.40.9)$∅{""} {"!}$"$#$. $"$#$.
+∩(("",("#)∩((#",(##)∩((.",(.#)
+Figure 3:Overview of MCQS.ρ i
+j denotesτ Mi
+j (ρ0);∩()and∆()represent the intersection and the symmetric difference of sets of support
+(SoS) of their input distributions, respectively. (a) MCTS formulation of the Distinguishing MDP (Def.6); (b) an SoS based representation that
+replaces each pair of outcome distributions into the intersection and symmetric difference of their supports, and does not generate children
+for the symmetric difference as they are already distinguished. (c) a sample-based approximation of the SoS representation, where each node
+represents a sample from two distributions’ support sets. Tables on the right show outcome probabilities under the two models.
+MCTS (Appendix C). MCQS-E uses total variation dis-
+tanceδ TV for ˆδsince it is symmetric, bounded, and re-
+wards policies assigning probability mass to states likely
+under one model but unlikely under the other. For node
+nrepresenting distinguishing-MDP states †, backpropaga-
+tion uses the best expected disagreement along the path:
+Q(n, c) = max(δ TV(s†), V(T †(s†, c)))andV(n) =
+maxc∈C Q(n, c).
+MCQS with set-of-support (SoS) factorizationuses the
+observation that a state in the symmetric difference of the
+two models’ support sets, denoted by∆(·)in Fig. 3(b), is
+deterministically falsifying: observing such a state in the ex-
+ecution rules out the model whose support excludes it. Such
+states therefore need not be propagated through MCTS; only
+states in theintersectionof the two supports, denoted by
+∩(·), carry residual ambiguity. This observation motivates
+MCQS-S, which propagates only intersection states and ap-
+proximates them via sampling.
+MCQS-Sis sample-based MCQS (Fig. 3(c)). It builds on
+the SoS formulation by replacing nodes that represent in-
+tersections of support sets with state nodes sampled from
+those intersections. At each node with states∈S, MCQS-
+S selects a valid capability fromC s ={c∈C| ∃r∈
+cond effects(c), s|= cond(r)}. It then simulates the re-
+sult of executing capabilitycby sampling a successor state
+from the intersection of the two predicted support sets:s ′ ∼
+0.5 Prh1(s′ |s, c) + 0.5 Pr h2(s′ |s, c). We use∆(ρ 1, ρ2)
+to refer to the symmetric difference of the support sets ofρ 1
+andρ 2. Following intuition behind SoS factorization, we de-
+fine an approximation of TV distance that focuses on states
+in the symmetric difference: ˆδ(ρ1, ρ2) =δ SD(ρ1, ρ2) =
+E[I∆(ρ1,ρ2)] = P
+s∈∆(ρ1,ρ2) 0.5ρ1(s) + 0.5ρ2(s). This is
+used in sample basedQestimates as follows.
+During tree traversal,Qis computed asQ(s, c) =R(s)+P
+s′ Pr(s′ |s, c)V(s ′), whereV(s) = max c∈Cs Q(s, c).
+Letc i be the capability leading to nodenwith states, and let
+⟨ρ1, ρ2⟩be the distribution pair atn’s parent. ThenR(s) = 1
+ifs∈∆(τ hC,1
+i (ρ1), τ hC,2
+i (ρ2)), andR(s) = 0otherwise.
+When a state-capability sequences, c, s ′, c′ is observed dur-
+ing one traversal (including the rollout from a leaf),Qis
+updated using just the observed states ′ rather than the ex-
+pectation over all states.
+3.3 Robust Query Synthesis and Execution
+The distinguishing-MDP formulation specifies an ideal
+query-synthesis objective. We now describe the optimiza-
+tions MCQS uses to execute queries robustly, revisit in-
+formative state-capability pairs, and update the observation
+dataset. Both MCQS-E and MCQS-S allow query execution
+to adapt to observed outcomes (Appendix E.2). Addition-
+ally, to encourage exploration, we sample the initial state
+for query synthesis and execution based on frequency (Ap-
+pendix E.4).
+To encourage state-capability revisitation, MCQS uses a
+ξ-exploration bonus that assigns probability mass to po-
+tentially missing effects. LetD SC(s, c)denote the obser-
+vations collected for state-capability pair(s, c). We esti-
+mate the probability of a missing effect asPr m(s, c) =
+1/(1 +|D SC(s, c)|). When evaluating a query, MCQS as-
+signs probability1−ξPr m(s, c)to the observed effect distri-
+bution and probabilityξPr m(s, c)to unseen distinguishing
+effects. Thus, larger values ofξencourage revisiting previ-
+ously tried state-capability pairs, while smaller values prior-
+itize discovering new state-capability pairs.
+The datasetDis updated as follows. We define thetempo-
+ral lengthof an execution trajectory as the number of sym-
+bolic state changes and limit agent execution per capability
+using a boundΘon this temporal length. When executing a
+capabilitycresults in a trajectory x=⟨x 0, x1, . . . , xk⟩that
+abstracts into a represented state trajectorys 0, s1, . . . , sj
+(j <Θ) where all consecutive identical states are removed,
+⟨s0, c, sj⟩is added toD.
+4 Results
+4.1 Theoretical results
+We prove that under realizability and sufficient exploration,
+MCQS converges to the true capability model in the limit of
+
+infinite samples; proofs and results appear in Appendix A. If
+MCTS returns optimal policies, we can prove the following.
+Theorem 1.LetCbe a set of agent capabilities whose true
+modelh †⋆ is expressible over vocabularyV, and leth †
+i de-
+note the model learned by MCQS after iterationi. Ifξ >0,
+thenVD(h †
+i , h†⋆)
+a.s.
+− − − →
+i→∞
+0over all reachable transitions in-
+duced by capabilities inC.
+We additionally prove that there exists a finite set of tran-
+sitions whose observation is sufficient for the pessimistic
+and optimistic models to become equivalent.
+Theorem 2.LetDbe the transitions observed by MCQS. If
+the true agent modelh †⋆ is expressible over vocabularyV,
+then there exists a finite set of transitionsT δ such that the
+pessimistic and optimistic models computed fromD ⊎T δ,
+denoted byh †
+∧ andh †
+∨, respectively, satisfyh †
+∧ ≡h †
+∨.
+We prove thath†
+∧ is sound and complete with respect to its
+dataset, whileh †
+∨ is complete (Theorem 3). For a transition
+and effect complete dataset,h †
+∧ ≡h †
+∨ guarantees equiva-
+lence to the true model (Theorem 4) and structural equiva-
+lence of any complete and possibly sound model to the true
+model (Theorem 5). Proofs in Appendix A.
+4.2 Empirical Evaluation
+Our empirical evaluation addresses four questions:(E1)
+Does MCQS learn accurate capability models more effi-
+ciently than other approaches? (E2) Can MCQS reveal use-
+ful information about the limits and capabilities of SOTA
+BBAIs? (E3) Do the learned capability models accurately
+predict reachability?and(E4) Is maximizing disagreement
+alone sufficient for learning accurate capability models?
+Hyperparameter configurations and detailed results are pre-
+sented in Appendices E.5 and F.
+We assess §E1 by comparing models learned with MCQS-
+S, MCQS-E, the closest existing approach, and a random-
+querying ablation baseline across several agents and envi-
+ronments. For §E2, we inspect MCQS’s learned models for
+notable BBAI capabilities and limitations. For §E3, we eval-
+uate whether models learned by MCQS accurately predict
+outcomes of capability sequences. For §E4, we ablate the
+revisitation reward by settingξ= 0.
+AgentsWe evaluate six agents across several environ-
+ments. The HDDLGym (La, Mon-Williams, and Shah 2025)
+RL agent operates in the Overcooked domain (Carroll et al.
+2019). The ReAct agent uses GPT-5.4-nano (OpenAI 2026)
+in a MiniGrid environment (Chevalier-Boisvert et al. 2023).
+Both CSteve (Park, Cho, and Ahn 2025) and Qwen CSteve
+operate in a Crafter environment (Hafner 2022). Finally, the
+LAO* agent operates on PDDLGym domains (Silver and
+Chitnis 2020), including Blocksworld and First Responders.
+As an application, we also evaluate the LLM-based robotic
+agent SayCan (Ahn et al. 2022).
+BaselinesTo our knowledge, no prior method per-
+forms active capability discovery and learning for BBAIs,
+so we compare against the closest existing approach,
+QACE (Verma, Karia, and Srivastava 2023), for §E1, and
+two MCQS ablations for §E1 and §E4. QACE requires the
+agent’s capabilities and intents as input; we supplied those
+learned by MCQS. QACE learned an accurate model for
+LAO* on Blocksworld, but produced no model for the other
+problems within 50 hours due to the limited expressiveness
+of its model class. TheRandom Queryablation replaces
+MCTS query synthesis with a uniformly sampled capability
+sequenceπ= (c 1, c2, . . . , c30), wherec i ∼Uniform(C),
+leaving all other components unchanged and isolating the
+contribution of query synthesis. For §E4, we ablate MCQS
+by settingξ= 0.
+Evaluation metrics and methodologyWe evaluate how
+accurately a learned modelh †, constructed fromD h†, pre-
+dicts observed transition dynamics using weighted sam-
+pled variational distanceVDs(h †, h†⋆). To construct an
+independent evaluation datasetD ′, we execute the BBAI
+Ausing the same environment and representation func-
+tion, collecting 100,000 sequences of 10–30 capabilities
+(5,000 for MiniGrid). LetN e(s, c, s′ | D)denote the
+number of occurrences of transition⟨s, c, s ′⟩inDand
+Ne(s, c| D) = P
+s′ Ne(s, c, s′ | D). LetT D′ de-
+note the unique transitions observed inD ′, andc T =P
+⟨s,c,s′⟩∈TD
+Ne(s, c, s′ | D h†)be the number of tran-
+sitions observed inD h†. We defineVD s(h†, h†⋆)as
+VDs(h†, h†⋆) = 1
+cT
+P
+⟨s,c,s′⟩∈TD′ Ne(s, c, s′ | D h†)× Ne(s,c,s′|D′)
+Ne(s,c|D′) −Pr h†(s′ |s, c)
+ .
+We evaluate learned pessimistic models because they are
+safer for unseen states. To focus on achievable intents, we
+remove conditional-effect rules that fail to achieve their in-
+tent and discard capabilities never observed as achievable.
+We use temporal length∞for MiniGrid, SayCan, and Over-
+cooked, and1otherwise.
+We perform five independent model-learning runs per
+problem. MCQS stops after a timeout or 25 consecutive
+queries without a newly discovered transition or significant
+model change (an effect probability changing by more than
+5%). To balance revisitation with hard-to-reach capability
+discovery, we dynamically setξ(Sec. 3.3) based on the num-
+ber of queries since the last discovery, up to10−5. Timeouts
+are at most two days.
+Results and AnalysisWe now present our analysis of
+results addressing the evaluation questions E1–E4 listed
+above.
+§E1 (Learning efficiency)Fig. 4 compares model agree-
+ment (1 - weighted VD) over the number of simulator steps.
+On MiniGrid, MCQS-S reaches91%model agreement with
+18.6×fewer simulator steps than the random-query base-
+line. On First Responders, MCQS-S reaches over99%with
+18.1×fewer steps. On Overcooked, in 10,000 simulator
+steps, MCQS-E achieves nearly double the model agreement
+of the random-query baseline.
+Crafter’s coarse representation function aggregates
+grounded states sharing the same symbolic state, increasing
+VD and the simulator steps required to reduce it. This trend
+is consistent across both CSteve variants, so we report only
+one. Despite this challenge, MCQS-E reaches 50% model
+agreement with 10.5×fewer simulator steps than random
+
+Figure 4: Model agreement (1 - weighted VD) of MCQS-E and MCQS-S on four evaluation problems. Shaded regions indicate
+one standard deviation over multiple runs. Annotated arrows indicate the simulator step-count ratio between each MCQS
+approach and the Random Query ablation baseline.
+querying, suggesting that MCQS remains effective under
+imperfect representation functions.
+§E2 (Limits and capabilities of SOTA BBAIs)Fig. 1b high-
+lights unintuitive limitations discovered by MCQS-E that
+are readily interpretable and can inform BBAI development.
+GPT-5.4 reliably picks up a key when requested, but often
+unnecessarily traverses to and opens a door; moreover, ask-
+ing it to pick up the key and then unlock the door is less
+successful than directly requesting it to unlock the door. Say-
+Can is highly stochastic, with many desired effects occurring
+with low probability; for example, it stacks a green block on
+a yellow block only 6% of the time, often misidentifying the
+yellow block as green. Finally, LAO*’s place-block-A ca-
+pability reveals a preference likely induced by internal tie-
+breaking and stationary policies.
+These results also illustrate the challenges of lifting ac-
+curate capability models for BBAIs. We considered lifted
+models, but emergent agent capabilities often lack symme-
+tries under object substitution. For example, the LAO* agent
+prefers placing blocks on C rather than B to clear its hand,
+while the MiniGrid agent can retrieve a key from NW or
+SW, but not from other quadrants. Lifting loses such object-
+specific dependencies, producing exaggerated capabilities
+that misrepresent the agent’s true behavior.
+§E3 (Cross evaluation through reachability)We evaluated
+MCQS-S models on 100 predicted-reachable 5-capability
+sequences, executing each 100 times on the BBAI. Mod-
+els achieved81%±3.6%accuracy on MiniGrid,100%on
+First Responders, and78%±16%on Crafter. These re-
+sults demonstrate that learned capability models can predict
+downstream performance and support planning.
+§E4 (Ablation w.r.t. visitation parameter)Withξ= 0, the
+resulting models produced by MCQS achieved higher than
+98% model agreement across three PDDLGym problems:
+Blocksworld, Tireworld, and First Responders. This demon-
+strates the effectiveness of rewarding disagreement alone.
+The revisitation incentive had mixed effects on accuracy and
+efficiency, with MCQS-S being more sensitive toξ.
+5 Related Work
+Research on action model learning focuses on dynamic
+models of the environment rather than of the agent (Pa-
+sula, Zettlemoyer, and Kaelbling 2007; Juba and Stern 2022;
+G¨osgens, Jansen, and Geffner 2025; Verma, Marpally, and
+Srivastava 2021; Benyamin et al. 2025). This line of work
+does not address the problem of learning capability models
+that capture an agent’s decision making capabilities, which
+is the focus of this paper. Tantakoun, Muise, and Zhu (2025)
+present a survey of LLM-to-PDDL approaches for world
+model learning, and recent benchmarks (Hu et al. 2025; Zuo
+et al. 2025) evaluate model generation from LLMs. Recent
+work also addresses the problem of learning capability mod-
+els (Verma, Marpally, and Srivastava 2022; Shah, Nagpal,
+and Srivastava 2025) in the limited setting of deterministic
+models with add and delete effects. In contrast, our approach
+learns rich probabilistic capability models conditioned on ar-
+bitrary logical formulas in stochastic settings.
+Testing and verification approaches such as DeepX-
+plore (Pei et al. 2017), Metamorphic Testing (Chen et al.
+2018), safety verification (Tran et al. 2019; Dreossi et al.
+2019; Araujo, Mousavi, and Varshosaz 2023), etc. aim
+to find failures or verify properties, rather than discover
+what agents can do. Behavior modeling and inverse plan-
+ning (Baker, Saxe, and Tenenbaum 2009; Shvo and McIl-
+raith 2020) focus on inferring agent goals and strate-
+gies from observations, whereas specification and invariant
+learning (Leucker and Schallhart 2009; Neider et al. 2018;
+Bao et al. 2024) extract system constraints. While these ar-
+eas share the goal of understanding black-box systems, our
+approach differs by discovering and modeling the capabili-
+ties an agent can reliably execute under different conditions.
+6 Conclusions and Future Work
+We presented MCQS, an active query-synthesis approach
+for discovering and modeling BBAI capabilities in stochas-
+tic settings. Empirical and theoretical results show that
+MCQS efficiently learns useful, accurate capability models
+within a finite query budget. While effective, MCQS leaves
+open improvements to exploration efficiency and generaliza-
+tion. In particular, real-world BBAIs often exhibit implicit or
+context-dependent preferences among multiple valid plans.
+Distinguishing such preferences from structural constraints
+remains an open challenge for learning models that both
+generalize and accurately reflect an agent’s behavior.
+
+Acknowledgments
+This work was supported in part by the following grants:
+NSF IIS 2419809, ONR N00014-23-1-2416, and AFOSR
+FA9550-25-1-0320. We thank Ruthvick Suresh for contri-
+butions to the empirical evaluation in an earlier version of
+this work. We also thank Sai Saketh Reddy Kambalapally
+for contributing the Crafter agents evaluated in this paper.
+References
+Ahmetoglu, A.; Seker, M. Y .; Piater, J.; Oztop, E.; and Ugur,
+E. 2022. Deepsym: Deep symbol generation and rule learn-
+ing for planning from unsupervised robot interaction.Jour-
+nal of Artificial Intelligence Research, 75: 709–745.
+Ahn, M.; Brohan, A.; Brown, N.; and et al. 2022. Do As I
+Can, Not As I Say: Grounding Language in Robotic Affor-
+dances.arXiv preprint arXiv:2204.01691.
+AI, M. 2024. The Llama 3 Herd of Models. https://www.
+llama.com/. Includes Llama 3.1 model family. Accessed:
+2025-02-05.
+Araujo, H.; Mousavi, M. R.; and Varshosaz, M. 2023.
+Testing, Validation, and Verification of Robotic and Au-
+tonomous Systems: A Systematic Review.ACM Transac-
+tions on Software Engineering and Methodology, 32(2).
+Baker, C. L.; Saxe, R.; and Tenenbaum, J. B. 2009. Action
+Understanding as Inverse Planning.Cognition, 113(3): 329–
+349.
+Bao, J.; Trivedi, N.; Pathak, D.; Hsu, J.; and Roy, S. 2024.
+Data-Driven Invariant Learning for Probabilistic Programs.
+Formal Methods in System Design, 66(2): 278–306.
+Bell, J. S. 1964. On the einstein podolsky rosen paradox.
+Physics Physique Fizika, 1(3): 195.
+Benyamin, Y .; Mordoch, A.; Shperberg, S. S.; and Stern, R.
+2025. Integrating Reinforcement Learning, Action Model
+Learning, and Numeric Planning for Tackling Complex
+Tasks.arXiv preprint arXiv:2502.13006.
+Black, K.; Brown, N.; Darpinian, J.; Dhabalia, K.; Driess,
+D.; Esmail, A.; Equi, M. R.; Finn, C.; Fusai, N.; Galliker,
+M. Y .; et al. 2025.π 0.5: A Vision-Language-Action Model
+with Open-World Generalization. InProc. CoRL.
+Carroll, M.; Shah, R.; Ho, M. K.; Griffiths, T.; Seshia, S.;
+Abbeel, P.; and Dragan, A. 2019. On the Utility of Learn-
+ing about Humans for Human-AI Coordination. InProc.
+NeurIPS.
+Chen, T. Y .; Kuo, F.-C.; Liu, H.; Poon, P.-L.; Towey, D.;
+Tse, T. H.; and Zhou, Z. Q. 2018. Metamorphic Testing: A
+Review of Challenges and Opportunities.ACM Computing
+Surveys (CSUR), 51(1).
+Chevalier-Boisvert, M.; Dai, B.; Towers, M.; de Lazcano,
+R.; Willems, L.; Lahlou, S.; Pal, S.; Castro, P. S.; and Terry,
+J. 2023. Minigrid & Miniworld: Modular & Customizable
+Reinforcement Learning Environments for Goal-Oriented
+Tasks.arXiv preprint arXiv:2306.13831.
+Dreossi, T.; Fremont, D. J.; Ghosh, S.; Kim, E.; Ravan-
+bakhsh, H.; Vazquez-Chanlatte, M.; and Seshia, S. A. 2019.
+VerifAI: A A Toolkit for the Formal Design and Analysis of
+Artificial Intelligence-Based Systems. InProc. CAV.
+G¨osgens, J.; Jansen, N.; and Geffner, H. 2025. Learning
+Lifted STRIPS Models from Action Traces Alone: A Sim-
+ple, General, and Scalable Solution. InProc. ICAPS.
+Ha, T.; Lee, D.; Kwon, Y .; Park, M. S.; Lee, S.; Jang, J.;
+Choi, B.; Jeon, H.; Kim, J.; Choi, H.; et al. 2023. AI-
+driven Robotic Chemist for Autonomous Synthesis of Or-
+ganic Molecules.Science Advances, 9(44): eadj0461.
+Hafner, D. 2022. Benchmarking the Spectrum of Agent Ca-
+pabilities. InInternational Conference on Learning Repre-
+sentations.
+Hu, M.; Chen, T.; Zou, Y .; Lei, Y .; Chen, Q.; Li, M.; Mu,
+Y .; Zhang, H.; Shao, W.; and Luo, P. 2025. Text2World:
+Benchmarking Large Language Models for Symbolic World
+Model Generation. InProc. ACL (Findings).
+James, S.; Rosman, B.; and Konidaris, G. 2020. Learning
+Portable Representations for High-level Planning. InProc.
+ICML.
+Juba, B.; and Stern, R. 2022. Learning Probably Approx-
+imately Complete and Safe Action Models for Stochastic
+Worlds. InProc. AAAI.
+Khan, Z.; Prasad, A.; Stengel-Eskin, E.; Cho, J.; and Bansal,
+M. 2025. One life to learn: Inferring symbolic world mod-
+els for stochastic environments from unguided exploration.
+arXiv preprint arXiv:2510.12088.
+Kocsis, L.; and Szepesv ´ari, C. 2006. Bandit based Monte-
+Carlo Planning. InProc. ECML.
+Konidaris, G.; Kaelbling, L. P.; and Lozano-Perez, T. 2018.
+From skills to symbols: Learning symbolic representations
+for abstract high-level planning.Journal of Artificial Intelli-
+gence Research, 61: 215–289.
+La, N.; Mon-Williams, R.; and Shah, J. A. 2025. HDDL-
+Gym: A Tool for Studying Multi-Agent Hierarchical Prob-
+lems Defined in HDDL with OpenAI Gym. InProc. ICAPS.
+Leucker, M.; and Schallhart, C. 2009. A Brief Account of
+Runtime Verification.The Journal of Logic and Algebraic
+Programming, 78(5): 293–303.
+Liu, H.; Li, C.; Wu, Q.; and Lee, Y . J. 2023. Visual Instruc-
+tion Tuning. InProc. NeurIPS.
+Mordoch, A.; Scala, E.; Stern, R.; and Juba, B. 2024. Safe
+Learning of PDDL Domains with Conditional Effects. In
+Proc. ICAPS.
+Neider, D.; Garg, P.; Madhusudan, P.; Saha, S.; and Park, D.
+2018. Invariant Synthesis for Incomplete Verification En-
+gines. InProc. TACAS.
+OpenAI. 2026. GPT-.1-mini. https://platform.openai.com/
+docs/models/gpt-5.4-nano. Accessed: 2025-05-01.
+Park, J.; Cho, H.; and Ahn, S. 2025. CrafterDojo: A Suite
+of Foundation Models for Building Open-Ended Embodied
+Agents in Crafter.arXiv preprint arXiv:2508.13530.
+Pasula, H.; Zettlemoyer, L. S.; and Kaelbling, L. P. 2004.
+Learning Probabilistic Relational Planning Rules. InProc.
+ICAPS.
+Pasula, H. M.; Zettlemoyer, L. S.; and Kaelbling, L. P. 2007.
+Learning Symbolic Models of Stochastic Domains.Journal
+of Artificial Intelligence Research, 29: 309–352.
+
+Pei, K.; Cao, Y .; Yang, J.; and Jana, S. 2017. DeepXplore:
+Automated Whitebox Testing of Deep Learning Systems. In
+Proc. SOSP.
+Peng, A.; Bobu, A.; Li, B. Z.; Sumers, T. R.; Sucholutsky, I.;
+Kumar, N.; Griffiths, T. L.; and Shah, J. A. 2024. Preference-
+conditioned Language-guided Abstraction. InProc. HRI.
+Shah, N.; Nagpal, J.; and Srivastava, S. 2025. From Real
+World to Logic and Back: Learning Generalizable Rela-
+tional Concepts For Long Horizon Robot Planning. InProc.
+CoRL.
+Shvo, M.; and McIlraith, S. A. 2020. Active Goal Recogni-
+tion.Proc. AAAI.
+Silver, T.; and Chitnis, R. 2020. PDDLGym: Gym Environ-
+ments from PDDL Problems. InICAPS 2020 PRL Work-
+shop.
+Stern, R.; and Juba, B. 2017. Efficient, Safe, and Probably
+Approximately Complete Learning of Action Models. In
+Proceedings of the Twenty-Sixth International Joint Confer-
+ence on Artificial Intelligence, IJCAI-17, 4405–4411.
+Sutton, R. S.; Precup, D.; and Singh, S. 1999. Between
+MDPs and semi-MDPs: A framework for temporal abstrac-
+tion in reinforcement learning.Artificial intelligence, 112(1-
+2): 181–211.
+´Swiechowski, M.; Godlewski, K.; Sawicki, B.; and
+Ma´ndziuk, J. 2023. Monte Carlo Tree Search: A Review
+of Recent Modifications and Applications.Artificial Intelli-
+gence Review, 56(3): 2497–2562.
+Tantakoun, M.; Muise, C.; and Zhu, X. 2025. LLMs as Plan-
+ning Formalizers: A Survey for Leveraging Large Language
+Models to Construct Automated Planning Models. InProc.
+ACL (Findings).
+Team, Q. 2024. Qwen2.5: A Party of Foundation Models.
+Tran, H.-D.; Cai, F.; Diego, M. L.; Musau, P.; Johnson,
+T. T.; and Koutsoukos, X. 2019. Safety Verification of
+Cyber-Physical Systems with Reinforcement Learning Con-
+trol.ACM Transactions on Embedded Computing Systems
+(TECS), 18(5s).
+Verma, P.; Karia, R.; and Srivastava, S. 2023. Autonomous
+Capability Assessment of Sequential Decision-Making Sys-
+tems in Stochastic Settings. InProc. NeurIPS.
+Verma, P.; Marpally, S. R.; and Srivastava, S. 2021. Asking
+the Right Questions: Learning Interpretable Action Models
+Through Query Answering. InProc. AAAI.
+Verma, P.; Marpally, S. R.; and Srivastava, S. 2022. Discov-
+ering User-Interpretable Capabilities of Black-Box Planning
+Agents. InProc. KR.
+Zuo, M.; Velez, F. P.; Li, X.; Littman, M.; and Bach, S. 2025.
+Planetarium: A Rigorous Benchmark for Translating Text to
+Structured Planning Languages. InProc. NAACL.
+A Formal Proofs
+This appendix provides proofs of Lemma 1 (Sec. 3.1) and
+theorems presented in Sec.4.1, along with additional theo-
+retical results. As discussed in Sec. 4.1, the proof of Theo-
+rem 1 requires the assumptionA1: MCTS returns an optimal
+policy. This assumption is used only in the proofs of Lem-
+mas 3 and 5, which in turn are used exclusively to establish
+Theorem 1. All remaining lemmas and theorems are proved
+without relying on Assumption A1.
+We begin by proving that, with respect to the dataset from
+which they are constructed, the pessimistic model is sound
+and complete, while the optimistic model is complete.
+Theorem 3.LetDbe the observed transitions, and leth †
+∧
+andh †
+∨ be the pessimistic and optimistic models computed
+by MCQS, respectively. Thenh†
+∧ is sound and complete with
+respect toD, andh †
+∨ is complete with respect toD.
+Proof.Let⟨s, c, s ′⟩ ∈ D. By constructionh †
+∧ |=⟨s, c, s ′⟩,
+soh †
+∧ is complete w.r.t.D(Def. 4). Since every transition
+admitted byh †
+∧ lies inD, it is possibly sound, and ash †
+∨ is
+the join of all possibly sound hypotheses,h †
+∧ ⪯h †
+∨. Hence
+h†
+∨ |=⟨s, c, s′⟩andh †
+∨ is complete w.r.t.D(Def. 4).
+Conversely, ifh †
+∧ |=⟨s, c, s ′⟩then⟨s, c, s ′⟩ ∈ Dby con-
+struction, soh †
+∧ is sound w.r.t.D(Def. 4).
+A.1 Bounding the True Model
+LetT h†⋆ denote the set of transitions consistent with the
+true model. We first show thath †⋆ is bounded by the pes-
+simistic and optimistic hypotheses whenh †⋆ is expressible
+with the vocabulary andDis transition and effect complete
+(Sec. 3.1).
+Lemma 1.LetCbe a set of agent capabilities with true
+modelh †⋆ expressible over vocabularyV, and leth †
+∧ andh †
+∨
+be the pessimistic and optimistic models constructed from
+transition dataD. IfDis transition and effect complete, then
+h†
+∧ ⪯h †⋆ ⪯h †
+∨.
+Proof.By construction,h †
+∧ admits exactly the observed
+transitionsT D, soT h†
+∧
+=T D. Since observed transitions
+are consistent with the true model,T D ⊆T h†⋆, giving
+h†
+∧ ⪯h †⋆.
+For the upper bound, let⟨s, c, s ′⟩ ∈T h†⋆. If⟨s, c, s ′⟩ ∈
+TD, then⟨s, c, s ′⟩ ∈T h†
+∨
+by Theorem 3. Otherwise(s, c)
+is untried: were it tried, the premise ofDbeing transition
+complete means that effecth †⋆ produces at(s, c)was ob-
+served, i.e.⟨s, c, s ′⟩ ∈T D. Letηbe the effect realizings ′
+ats, soapply(s, η) =s ′. By the premise ofDbeing effect
+complete,ηhas been witnessed inD, soh †
+∨ contains a rule
+rwithη∈effects(r). By construction, the optimistic con-
+ditionocondexcludes a state only if that state is observed
+to be governed by a different rule; since(s, c)is untried, no
+observation assignssto a rule forc, sos|= ocond(r)and
+⟨s, c, s′⟩ ∈T h†
+∨
+.
+HenceT h†⋆ ⊆T h†
+∨
+, soh †⋆ ⪯h †
+∨ andh †
+∧ ⪯h †⋆ ⪯h †
+∨.
+A.2 MCQS Convergence to the True Model
+We now prove the main theoretical result from Sec. 4.1: the
+variational distance between a modelh† produced by MCQS
+and the true modelh †⋆ almost surely converges to zero on
+
+reachable transitions as the number of iterations of MCQS
+approaches infinity.
+We first characterize the reward when the distributionsρ0
+andρ 1 represented by a meta-states † are equal. Specifically,
+lettingρ 0 =ρ 1 =ρ, if capabilitychas previously been exe-
+cuted in every state insupp(ρ), we show that the reward of
+the resulting meta-states †
+1 is exactly the expected revisita-
+tion bonus over its constituent states.
+Lemma 2.Letc∈Cbe a capability ands † be a meta-
+state of the distinguishing MDPP(s 0, h†
+∧, h†
+∨)represent-
+ing distributionsρ 0 andρ 1. Ifρ 0 =ρ 1 =ρand, for
+everys∈supp(ρ), the transition datasetDcontains an
+observation of executingcfroms, then the reward of the
+resulting meta-state of executingcins †,s †
+1, isR(s †
+1) =P
+s∈supp(ρ)
+ρ(s)ξ
+DSC(s,c)+1.
+Proof.By the premises, for each states∈supp(ρ),Dcon-
+tains an observation of performingcins. By construction,
+the pessimistic and optimistic models therefore predict the
+same transitions from performingcinsand thus induce the
+same successor distribution. Sinceρ0 =ρ 1 =ρ, the two dis-
+tributionsρ ′
+0 andρ ′
+1 represented bys †
+1 are equal, and hence
+ˆδ(ρ′
+0, ρ′
+1) = 0.
+Thus, the only remaining reward for each statesis its
+revisit value, ξ
+DSC(s,c)+1. Weighting each revisit value by
+ρ(s), the reward from performingcins † isR(s †
+1) =P
+s∈supp(ρ)
+ρ(s)ξ
+DSC(s,c)+1.
+We define consistency in terms of variational dis-
+tance. Two models,h †
+1 andh †
+2, areconsistentw.r.t. state-
+capability pair(s, c)iff∀s ′,Pr h†
+1
+(s′|s, c) = Pr h†
+2
+(s′|s, c).
+Therefore,h †
+1 andh †
+2 are inconsistent w.r.t.(s, c)
+iff∃s ′,Pr h†
+1
+(s′|s, c)̸= Pr h†
+2
+(s′|s, c). The inconsis-
+tency withh †
+1 is reduced between modelsh †
+2 andh †
+3
+w.r.t.(s, c)iff P
+s′∈S |Pr h†
+3
+(s′|s, c)−Pr h†
+1
+(s′|s, c)|<P
+s′∈S |Pr h†
+2
+(s′|s, c)−Pr h†
+1
+(s′|s, c)|.
+We next show that any reachable state-capability pair
+(s, c)on which eitherh †
+∧ orh †
+∨ is inconsistent withh †⋆ is
+eventually queried with non-zero probability.
+Lemma 3.Leth †⋆ be the true model, expressible over vo-
+cabularyV, and leth †
+∧ andh †
+∨ be the pessimistic and opti-
+mistic models computed by MCQS, respectively. Ifξ >0and
+there exists a reachable state-capability pair(s, c)such that
+eitherh †
+∧ orh †
+∨ is inconsistent withh †⋆ w.r.t.(s, c), then,
+after finitely many iterations, MCQS produces a query with
+non-zero probability of executingcins.
+Proof.Since meta-states exactly represent the induced dis-
+tributions, any finite capability sequence deterministically
+induces a sequence of meta-states.
+Since(s, c)is reachable, there exists a capability sequence
+c⋆ = (c 1, . . . , cn, c)such that, afterc 1, . . . , cn, the result-
+ing meta-states † represents distributionsρ 0 andρ 1 with
+s∈supp(ρ 0)∪supp(ρ 1). Thus, executing c⋆ has non-zero
+probability of executingcins.
+Suppose, for contradiction, that after some iterationk,
+MCQS never again produces such a query. ThenD SC(s, c)
+remains finite. Letρ= (ρ 0 +ρ 1)/2. Sinceρ(s)>0and
+the disagreement reward is non-negative, the reward ofc⋆ is
+bounded below by its revisit reward,R( c⋆)≥ ξρ(s)
+DSC+1 =:
+β >0.
+Now consider the queries selected after iterationk. By as-
+sumption, all avoid executingcins. Repeated selection of
+any such query increases the visitation counts of its encoun-
+tered state-capability pairs, driving its revisitation reward
+to zero. Once all the finite combinations of state-capability
+pairs have been tried, its disagreement reward will also be
+zero by Lemma 2. Hence, its total reward converges to zero
+under repeated selection.
+BecausePandOare finite and queries have finite hori-
+zon, there are finitely many candidate queries. Therefore, af-
+ter finitely many iterations, every query avoiding(s, c)has
+reward less thanβ. However,R( c⋆)≥β, and, by Assump-
+tion A1, MCQS selects an optimal query. It must therefore
+select a query with non-zero probability of executingcins,
+contradicting the assumption.
+Thus, MCQS produces such a query after finitely many
+iterations.
+Now we show that any inconsistency at a state-capability
+pair(s, c)has a non-zero probability of being reduced after
+finitely many observations of performingcins.
+Lemma 4.Leth †⋆ be the true model, expressible over vo-
+cabularyV, and leth † be the pessimistic or optimistic model
+constructed fromD, respectively. Ifh † is inconsistent with
+h†⋆ w.r.t. state-capability pair(s, c), then there exists a finite
+ksuch thatkadditional executions ofcinshave non-zero
+probability of reducing the inconsistency.
+Proof.Observations from performingcinsare i.i.d. draws
+from the true effect distributionp ⋆ at(s, c). There are four
+possible causes for∃s ′,Pr h†(s′|s, c)̸= Pr h†⋆(s′|s, c).
+Case 1 (additional effect):Pr h†(s′ |s, c)>0and
+Prh†⋆(s′ |s, c) = 0.Then⟨s, c, s ′⟩/∈ D, since every ob-
+served transition is realizable underh †⋆. By construction,
+h†
+∧ classifies only transitions inDas consistent, so the in-
+consistency must occur inh †
+∨; thus, there exists a ruleras-
+signing non-zero probability toηwiths|= ocond(r). By
+construction of the optimistic conditionocond, this is pos-
+sible only ifshas not been partitioned into another rule for
+c, and hence(s, c)has not been observed inD. Therefore, a
+single execution ofcinsassignssto a partition, removing
+ηfrom the effects predicted at(s, c)and hence reducing the
+inconsistency.
+Case 2 (missing effect):Pr h†(s′ |s, c) = 0andp ⋆
+η =
+Prh†⋆(s′ |s, c)>0.A single additional execution ofcins
+observesηwith probabilityp ⋆
+η >0, after whichh † assigns
+ηpositive probability, reducing the inconsistency.
+Case 3 (incorrect condition).Ifsis assigned to a parti-
+tion whose effect set differs from that of(s, c), the resulting
+discrepancy is a set of effects predicted but not realizable
+(Case 1) or realizable but not predicted (Case 2) at(s, c).
+Therefore, the preceding cases apply.
+
+Case 4 (distributional error):Pr h†(s′ |s, c)and
+Prh†⋆(s′ |s, c)are both positive but unequal.Suppose in-
+steadh †’s error at(s, c)is a distributional error over then
+effects:e (s,c) =d VD(ˆpk0 , p⋆) 1
+n
+P
+η |ˆpk0,η −p ⋆
+η|>0, where
+ˆpk0 is the current MLE from thek 0 observations of(s, c)
+inD. Sinceh † is given,ˆpk0 and hencee (s,c) are fixed. Let
+ˆpk0+k denote the empirical MLE afterkadditional i.i.d. ex-
+ecutions ofcins. By the strong law of large numbers ap-
+plied to each of the finite effects,ˆp k0+k
+a.s.
+− − − − →
+k→∞
+p⋆, and
+sinced VD(·, p⋆)is continuous,d VD(ˆpk0+k, p⋆)→0al-
+most surely. Almost sure convergence implies convergence
+in probability, soq k := Pr
+ 
+dVD(ˆpk0+k, p⋆)< e (s,c)
+
+→
+1ask→ ∞. By the definition of convergence, taking
+δ= 1
+2, there exists a finiteKsuch thatq k > 1
+2 for all
+k≥K. Hence,k=Kadditional executions suffice for
+dVD(ˆpk0+k, p⋆)< d VD(ˆpk0 , p⋆)with strictly positive prob-
+ability
+In all cases, there is a finiteksuch thatkadditional exe-
+cutions ofcinshave non-zero probability of reducing the
+inconsistency inh † w.r.t(s, c)andh †⋆.
+Combining Lemmas 3 and 4, we show that any incon-
+sistency at a reachable state-capability pair has a non-zero
+probability of being reduced after finitely many iterations of
+MCQS.
+Lemma 5.Leth †⋆ be the true model, expressible over vo-
+cabularyV, and leth †
+∧ andh †
+∨ be the pessimistic and op-
+timistic models computed by MCQS fromD, respectively. If
+ξ >0and eitherh †
+∧ orh †
+∨ is inconsistent withh †⋆ w.r.t.
+a reachable state-capability pair(s, c), then there exists a
+finite number of iterations of MCQS after which this incon-
+sistency has a non-zero probability of being reduced.
+Proof.Suppose eitherh †
+∧ orh †
+∨ remains inconsistent with
+h†⋆ w.r.t.(s, c). By Lemma 4, some finitekadditional ob-
+servations ofcinshas a non-zero probability of reducing
+this inconsistency.
+By Lemma 3, each such observation occurs after a finite
+number of MCQS iterations with non-zero probability, and
+this continues to hold if the inconsistency persists. Apply-
+ing this at mostktimes, MCQS collects allkobservations
+within a finite number of iterations with non-zero probabil-
+ity.
+Since the probability of collecting thekobservations is
+non-zero and the probability that they reduce the incon-
+sistency is non-zero, the inconsistency at(s, c)has a non-
+zero probability of being reduced after finitely many itera-
+tions.
+Having established that any error has a non-zero probabil-
+ity of being reduced after finitely many iterations of MCQS,
+we now show that, in the limit, the learned model almost
+surely has variational distance 0 from the true model over
+reachable transitions.
+Theorem 1.LetCbe a set of agent capabilities whose true
+modelh †⋆ is expressible over vocabularyV, and leth †
+i de-
+note the model learned by MCQS after iterationi. Ifξ >0,
+thenVD(h †
+i , h†⋆)
+a.s.
+− − − →
+i→∞
+0over all reachable transitions in-
+duced by capabilities inC.
+Proof.SincePandOare finite, there are finitely many
+reachable state-capability pairs. Supposeh † remains incon-
+sistent withh †⋆ at state-capability pair(s, c). The hypothe-
+ses of Lemma 3 depend only onξ >0and the reachabil-
+ity of(s, c), not on|D SC(s, c)|, so it applies afresh at each
+stage: after finitely many further iterations MCQS almost
+surely selects a query with non-zero probability of execut-
+ingcins, and by Lemma 5, the resulting observations have
+non-zero probability of reducing the inconsistency. Apply-
+ing this successively yields|D SC(s, c)| → ∞unless(s, c)
+becomes consistent.
+For infinitely many observations of(s, c), the MLE ef-
+fect distribution converges almost surely top ⋆ by the strong
+law of large numbers, and by Lemma 4 each structural er-
+ror is corrected with fixed non-zero probability per obser-
+vation, hence almost surely after finitely many. The error
+at every reachable state-capability pair therefore converges
+almost surely to zero, and as there are finitely many such
+pairs this holds simultaneously for all of them almost surely.
+SinceVD(h †
+i , h†⋆)is the average of the absolute differences
+over the finitely many reachable transitions, each summand
+converging almost surely to zero givesVD(h †
+i , h†⋆)
+a.s.
+− − − →
+i→∞
+0.
+A.3 Finite Transitions to Structural Convergence
+We now prove Theorem 2 introduced in Section 4.1, which
+states that there exists a finite number of transitions that need
+to be collected to make the pessimistic and optimistic mod-
+els equivalent.
+Theorem 2.LetDbe the transitions observed by MCQS. If
+the true agent modelh †⋆ is expressible over vocabularyV,
+then there exists a finite set of transitionsT δ such that the
+pessimistic and optimistic models computed fromD ⊎T δ,
+denoted byh †
+∧ andh †
+∨, respectively, satisfyh †
+∧ ≡h †
+∨.
+Proof.SincePandOare finite, the set of states and capabil-
+ities are finite, and hence so is the set of state-capability-state
+transitions. Therefore,T h†⋆ is also finite.
+LetT D denote the unique set of transitions observed in
+D. Since every observed transition must be realizable by the
+true model,T D ⊆T h†⋆. BecauseT h†⋆ is finite, the set of
+unobserved transitionsT δ =T h†⋆ \T D is also finite.
+LetD ′ =D ⊎T δ denote the updated dataset with all tran-
+sitions inT δ observed. This results inD ′ having the same set
+of unique transitions as the true modelT D′ =T D ∪T δ =
+Th†⋆. Leth †
+∧ andh †
+∨ be the pessimistic and optimistic mod-
+els constructed fromD ′, respectively.
+By construction,h †
+∧ admits exactly the observed transi-
+tions soT h†
+∧
+=T D′ =T h†⋆. Sinceh †
+∧ is possibly sound
+andh †
+∨ is the join of all possibly sound hypotheses,T h†⋆ =
+Th†
+∧
+⊆T h†
+∨
+.
+Suppose, for contradiction, that there exists a transition
+⟨s, c, s′⟩ ∈T h†
+∨
+\T h†⋆. Sinceh †
+∨ is possibly sound, this can
+
+only occur when(s, c)is unobserved inD. However, it is
+always valid to ask an agent to achieve an intent, so every
+state–capability pair admits at least one transition inT h†⋆.
+SinceT D′ =T h†⋆, that transition is observed inD ′, contra-
+dicting the assumption that(s, c)is unobserved.
+Therefore,T h′
+∨ =T h†⋆ =T h′
+∧, and thush ′
+∧ ≡h ′
+∨.
+A.4 Convergence of Consistent Models
+We now prove that, whenDis transition and effect complete,
+ifh †
+∧ ≡h †
+∨ then (1) bothh †
+∧ andh †
+∨ are equivalent toh †⋆;
+(2) a modelh † that is complete and possibly sound w.r.t.D
+is also equivalent toh †⋆. We first prove that the pessimistic
+and optimistic models are equivalent to the true model when
+these conditions hold.
+Theorem 4.Leth †⋆ be the true agent capability model, and
+assumeh †⋆ is expressible over vocabularyV. LetDbe tran-
+sition and effect complete. Then, at any stage of MCQS, if
+h†
+∧ ≡h †
+∨, it follows thath ∧ ≡h †
+∨ ≡h †⋆.
+Proof.Sinceh †⋆ is expressible inV,T h†⋆ is the consistent.
+By the premises,h †
+∧ ≡h †
+∨ meaningT h†
+∧
+=T h†
+∨
+=T c.
+Suppose, for contradiction, thatTc ̸=T h†⋆. Then either there
+exists a transition⟨s, c, s ′⟩ ∈T h†⋆ \T c, or there exists a
+transition⟨s, c, s ′⟩ ∈T c \T h†⋆.
+First, consider⟨s, c, s ′⟩ ∈T h†⋆ \T c. If(s, c)had previ-
+ously been observed, then, by the premise thatDis transition
+complete, all possible effects of executingcinswould have
+been sampled. Since⟨s, c, s ′⟩ ∈T h†⋆, the transition would
+therefore have been observed, contradicting⟨s, c, s ′⟩/∈T c.
+Hence,(s, c)must be unobserved.
+By the premises thatDis effect complete, there exists
+a⟨s 1, c, s2⟩ ∈ Ds.t.η(s, s ′) =η(s 1, s2). By construc-
+tion of the optimistic model, there must exist a rulers.t.
+η(s, s′)∈effects(r). Since(s, c)is unobserved, it cannot
+be assigned to any rule in the optimistic model. Therefore,
+by the construction of the optimistic model,s1 |= ocond(r),
+whereocond(r)is the optimistic condition ofr. Therefore,
+⟨s, c, s′⟩is consistent underh †
+∨. In contrast,h †
+∧ classifies
+only observed transitions as consistent and therefore does
+not classify⟨s, c, s ′⟩as consistent. Thus,h †
+∧ ̸≡h †
+∨, yielding
+a contradiction.
+Now consider⟨s, c, s ′⟩ ∈T c \T h†⋆. By construction,h †
+∧
+classifies only observed transitions as consistent, so⟨s, c, s′⟩
+must have been observed. Every observed transition is real-
+izable under the true model, implying⟨s, c, s′⟩ ∈T h†⋆, again
+yielding a contradiction.
+Therefore,T c =T h†⋆, and henceh †
+∧ ≡h †
+∨ ≡h †⋆.
+Due to the pessimistic and optimistic models bounding
+the lattice of consistent hypotheses whenDis transition and
+effect complete, we can now prove that any other consistent
+hypothesis must also be equivalent to the true model when
+the pessimistic and optimistic models are equivalent.
+Theorem 5.Leth † be any model of the discovered capa-
+bilitiesCthat is complete and possibly sound with respect
+to the datasetD, collected during a run of MCQS, in which
+Dis transition and effect complete. If the true modelh †⋆
+is expressible over vocabularyV, and the pessimistic and
+optimistic modelsh †
+∧ andh †
+∨ learned fromDusing MCQS
+satisfyh †
+∧ ≡h †
+∨, thenh †
+∧ ≡h †
+∨ ≡h † ≡h †⋆.
+Proof.Sinceh † is complete with respect toD, andh ∧ is
+the meet of all complete hypotheses, we haveh ∧ ⪯h †.
+Additionally, sinceh † is possibly sound with respect toD,
+andh ∨ is the join of all possibly sound hypotheses, we have
+h† ⪯h ∨.
+Whenh ∧ ≡h ∨, these inequalities implyh ∧ ≡h † ≡h ∨.
+By Theorem 4, convergence of the pessimistic and op-
+timistic models whenDis transition and effect complete
+implies that both coincide with the true model. Therefore,
+h∧ ≡h ∨ ≡h † ≡h †⋆.
+B Comparison With Action Model Learning
+As discussed in the Introduction, action model learning and
+capability model learning differ in several key ways, sum-
+marized in Table 1. Action model learning assumes access
+to, or seeks to recover, a model of the agent’s primitive ac-
+tions. In contrast, capability model learning does not require
+knowing the agent’s action set, nor does it require observing
+and modeling the agent’s behavior in the environment’s vo-
+cabulary. Instead, it characterizes the long-horizon outcomes
+the agent can bring about through its planning and reason-
+ing. Thus, action model learning models the effects of ac-
+tions available in an environment, whereas capability model
+learning models what a particular agent is capable of achiev-
+ing.
+C Implementation of Compact Distributions
+Over States
+This section provides implementation details regarding our
+representation of a distribution over states. For illustration
+purposes, leth c be a hypothesis about capabilityc,r∈h c
+be a conditional effect rule, cond(r)be the well-formed for-
+mula corresponding to the condition forr, and effects(r) =
+{(pi, ηi)}be the set of probabilistic effects ofr.p i is the
+probability ofη i occurring, andη i is a conjunction of prob-
+lem literals.
+States as Bit VectorsWe represent a problem statexas
+a binary vector, where thej’th bit corresponds to the truth
+value of thej’th problem literal assignment ofxaccording
+to some fixed ordering. We represent a distribution over pos-
+sible statesSusing a hash mapS:x→logP(x): keys are
+statesxin bit vector form, and values are the log-probability
+mass associated with the statelogP(x). This representation
+is sparse; we only store states with probability mass greater
+than zero so as not to materialize the exponential state space
+when possible.
+Capability Conditions as DNFsWe represent a capa-
+bility condition cond(r)as either a Disjunctive Normal
+Form (DNF) formula or the negation of one. Each clause
+clausek ∈cond(r)is a conjunction of literals stored as a
+bit vector, similarly to how states are stored. This enables
+efficient checking of whether a state satisfies a capability
+condition via efficient bitwise operations.
+
+Action Model Learning Capability Learning
+Works without input action headers ✗ ✔
+Discovers and predicts agent capabilities ✗ ✔
+Models capture long-horizon execution ✗ ✔
+Observation and modeling over different vocabularies ✗ ✔
+Evaluates planning and reasoning capabilities ✗ ✔
+Models feature arbitrary condition-effect rules ✗ ✔
+Models primitive actions of agents ✔ ✗
+Table 1: Key differences between traditional action model learning and learning intent-driven capabilities.
+Effects as Bit VectorsSimilar to how we represent states,
+we represent probabilistic effect outcomesη i as bit vectors,
+with each bit corresponding to a literal truth value. Further-
+more, we store a binary mask mask i that is1in positionk
+whenη i affects literalkand0otherwise.
+State Distribution UpdatesLetx|=cond(r)denote that
+xis a model of cond(r), andS 1 +S 2 =Sdenote the dis-
+tribution obtained by taking the sum of distributionsS 1 and
+S2. Utilizing this efficient satisfiability check, we update a
+state distribution using the following algorithm:
+Algorithm 1: Update State Distribution
+1:Inputs:state distributionS, conditional effectr
+2:Output:new state distributionS ′
+3:S change ← {(x k →logP(x k))|xk |=cond(r)}
+4:S nochange ← {(x k →logP(x k))|xk ̸|=cond(r)}
+5:S ′ ←S nochange
+6:for(p i, ηi,mask i)∈effects(r)do
+7:S i ← {((x k ∧mask i)∨η i →log[P(x k)∗p i])|(xi →
+logP(x i))∈S change}
+8:S ′ ←S ′ +S i
+9:end for
+10:returnS ′
+D Additional Agent and Environment Details
+In this section, we go through each evaluated agent and en-
+vironment, and provide additional details on how they were
+implemented.
+D.1 MiniGrid
+Figure 5: Minigrid environment evaluated
+EnvironmentWe use a9×9MiniGrid (shown in Fig. 5)
+that contains walls, lava, a blue key, a locked green door,
+and a locked blue door. The grid is divided into 4 quadrants,
+with a single-tile path from each quadrant to each adjacent
+one. The blue door is between the northwest and northeast
+quadrants, and the green door is between the southwest and
+southeast quadrants. The blue key is located in the south-
+west quadrant near the lava. Finally, the agent starts in the
+northwest quadrant but cannot drop the key.
+Therefore, there are some interesting capabilities in this
+domain. The agent can traverse near the lava to pickup the
+blue key, use the blue key to unlock the blue door, open/close
+the blue door, and traverse to any of the locations.
+Symbolic RepresentationAs mentioned, instead of using
+(x,y) locations in the grid, the locations of the key and agent
+are tracked based on their quadrant. For capabilities, a loca-
+tion in the quadrant is sampled to give as the intent to the
+agent.
+Predicate Description
+agent-at(q)The agent is in quadrant q
+blue-key-at(q)The blue key is in quadrant
+q
+carrying-blue-key()The agent is carrying the
+blue key
+is-dead()The agent is dead
+green-door-open()The green door is open
+green-door-locked()The green door is locked
+green-door-closed()The green door is closed
+blue-door-open()The blue door is open
+blue-door-locked()The blue door is locked
+blue-door-closed()The blue door is closed
+Table 2: Predicate vocabulary used in MiniGrid.
+ReAct AgentThe ReAct agent is designed to describe the
+current state in text, prompt the agent to achieve the objec-
+tive, and re-plan if necessary.
+The base prompt given to the LLM uses the height, width,
+and action names, specifies the actions and rules, and gives
+a couple of examples.
+"You are navigating a {height}x{width}
+grid. Rows 1-{height} increase going
+south; columns 1-{width} increase going
+east. Coordinate format: (row, col).
+
+GRID LEGEND
+===========
+. = empty cell
+W = wall (impassable)
+L = lava (instant death -- NEVER step
+here)
+bK = blue key (first letter = color)
+bD = blue door (locked/closed)
+b= = blue door (open)
+gD = green door (locked/closed)
+g= = green door (open)
+A> = you, facing east (ˆ north,
+v south, < west, > east)
+ACTIONS
+=======
+{action_names}
+- face_north / face_south / face_east /
+face_west : rotate to face that
+compass direction (no movement).
+- move_forward : move one cell in the
+direction you face. Blocked by walls,
+closed/locked doors, objects, and lava.
+- pickup : pick up the object in the
+cell you face (you must be adjacent
+and facing it). You can carry only one
+object.
+- toggle : open or close the door in
+the cell you face. Locked doors
+require holding the matching color key.
+- done : signal that the goal is
+achieved or no further action is
+possible.
+RULES
+=====
+Movement:
+- move_forward moves you one cell in
+the direction you face.
+- You CANNOT move into walls (W),
+lava (L), closed/locked doors, or cells
+with objects.
+- Lava kills instantly -- NEVER step
+into a lava cell.
+- You cannot move into a cell occupied
+by an object; pick it up from an
+adjacent cell instead.
+Interaction:
+- You must be adjacent to and facing a
+cell to interact with it (pickup or
+toggle).
+- You can carry at most one object at a
+time.
+Doors and keys:
+- Doors block movement when closed or
+locked, just like walls.
+- A locked door is opened by holding
+the matching COLOR key and using
+toggle. A blue key opens a blue door,
+a green key opens a green door, etc.
+- Once opened, a door becomes a
+passable cell -- you can walk through
+it freely.
+- IMPORTANT: doors are the ONLY way
+to cross through wall barriers. Before
+concluding a goal is unreachable,
+check every door on the map and whether
+you have (or can get) the matching key.
+Planning:
+- Before acting, scan the grid for
+barriers (walls, lava) and identify a
+all possible paths including through
+doors.
+- For each move_forward in your plan,
+verify the target cell is empty or an
+open door.
+- When the goal is on the other side
+of a wall, find a door that crosses
+the barrier and plan how to unlock it.
+EX 1 -- Navigate and pick up an object
+======================================
+Observation:
+1 2 3 4 5
+1 . . . . .
+2 . Av . . .
+3 . . . bK .
+4 . . W W .
+5 . . . . .
+Agent: (2, 2) facing south
+Carrying: nothing
+Goal: Pick up the blue key.
+Thought:
+I am at (2, 2) facing south. The blue
+key is at (3, 4).
+Plan a path: go south one step to (3,
+2), then east toward column 4.
+- move_forward: I face south, so I
+move to (3, 2). Cell is empty -- safe.
+- face_east: I now face east at (3, 2).
+- move_forward: move to (3, 3). Cell is
+empty -- safe.
+- move_forward: (3, 4) has the blue key
+-- BLOCKED, I cannot move into an
+occupied cell.
+Instead I stay at (3, 3) facing east,
+and the key is in the cell I face.
+- pickup: pick up the blue key from
+(3, 4).
+Actions:
+
+move_forward
+face_east
+move_forward
+pickup
+EXAMPLE 2 -- Unlock a door
+===========================
+Observation:
+1 2 3 4 5
+1 . . . . .
+2 . . A> . .
+3 . . W bD .
+4 . . . . .
+5 . . . . .
+Agent: (2, 3) facing east
+Carrying: a blue key
+Goal: Open the blue door.
+Thought:
+I am at (2, 3) facing east, carrying
+the blue key. The blue door is at
+(3, 4).
+I need to be adjacent to the door and
+facing it. From (2, 4) I could face
+south toward (3, 4).
+- move_forward: move east to (2, 4).
+Cell is empty -- safe.
+- face_south: now I face south at
+(2, 4). The cell ahead is (3, 4) which
+is the blue door.
+- toggle: I hold the blue key so the
+locked blue door unlocks and opens.
+Actions:
+move_forward
+face_south
+toggle
+OUTPUT FORMAT
+=============
+Always output exactly:
+Thought: <your step-by-step reasoning
+-- trace each action, verify the
+target cell is safe>
+Actions:
+<one action per line from the action
+list above, max {max_plan_length}
+actions>
+"
+This prompt is used as the system prompt, followed by
+a description of the task and the state. It then parses out the
+actions to take. In the case of an invalid action, the following
+prompt is provided.
+"I could not parse your previous
+response. Please reply again using
+exactly the required format:
+Thought: <your reasoning>
+Actions:
+<one action per line>
+Valid actions: {action_names}
+Each line under Actions: must contain
+exactly one action name from the
+list above, nothing else. If the goal
+is already achieved or impossible,
+output a single action: done"
+Then the policy is executed until either the maximum
+number of actions is reached or the LLM returns the “done”
+action.
+D.2 Overcooked
+Figure 6: Overcooked environment evaluated.
+EnvironmentWe use Overcooked, a cooperative kitchen
+gridworld environment. At each timestep, the agent selects
+an action from a discrete action space, thereby updating the
+environment state and producing a new observation.
+The agent must navigate, collect ingredients, prepare
+dishes, and deliver them. The task involves a multi-step pro-
+cess: collect the onion, add it to the pot, wait for it to cook,
+retrieve the soup, and deliver. The environment includes
+stochastic elements, namely a 5-stage cooking process.
+We use a single predefined initial state (shown in Fig. 6)
+that specifies the kitchen layout, the agent’s position, the in-
+gredient pile locations, the pot placement, and the delivery
+counter.
+Attribute Description
+kitchen layout Fixed configuration of counters and
+tiles
+agent position Initial position of the agent in the grid
+ingredient piles Location of onion piles
+pot location Placement of cooking pot
+delivery counter Location of delivery area
+Table 3: Attributes defining the predefined initial state.
+Symbolic RepresentationWe construct a symbolic state
+representation that maps low-level environment states to a
+set of logical predicates. The representation operates on the
+
+structured state exposed by the Overcooked environment, in-
+cluding agent location, held items, pot state, and object po-
+sitions.
+Given a state, the symbolic representation provides a set
+of ground literals over a fixed predicate vocabulary. Objects
+are limited to the agent (chef1), items (onion, soup-dish),
+locations (onion-pile-1, onion-pile-2, pot, delivery), and pot
+cooking stages.
+Each predicate is computed directly from the underly-
+ing state. Position predicates (e.g.,at) are obtained by
+querying the agent’s location, while state predicates (e.g.,
+pot-state,holding) are determined from the environ-
+ment’s internal state representation.
+Predicate Description
+at(x, location)Entity x is at location
+holding(agent,
+x)
+Agent possesses item x
+in-pot(x)Item x is in the pot
+pot-state(state)Current cooking stage
+clean(dish,
+location)
+Clean dish at location
+at-pile(onion,
+pile)
+Onion at specified pile
+delivered(x)Item x has been delivered
+Table 4: Predicate vocabulary used in the symbolic represen-
+tation.
+HDDLGym AgentWe use an agent trained using hierar-
+chical reinforcement learning from HDDLGym (La, Mon-
+Williams, and Shah 2025). The agent operates in single-
+agent mode in the Overcooked environment.
+The agent receives high-level capability intents and exe-
+cutes learned low-level policies to achieve these intents. Our
+experiments show that spurious correlations in training data
+can induce unintended behaviors.
+MCQS discovered 5 capabilities: get onion (c-0), add
+onion to pot (c-1), cooking progression (c-2), retrieve soup
+(c-3), and deliver soup (c-4). These capabilities form a lin-
+ear dependency chain where each is the sole producer of
+its output state. The cooking capability (c-2) is the only
+temporal capability with length 5, modeling the stochastic
+multi-stage cooking process with probabilistic progression
+through cooking stages.
+D.3 Crafter
+Figure 7: Crafter environment evaluated.
+EnvironmentWe use Crafter, a grid-based survival and
+crafting environment. At each timestep, the agent selects an
+action from a discrete action space, thereby updating the en-
+vironment state and producing a new observation.
+The agent must collect resources, craft tools, and in-
+teract with terrain and objects. Reward is given based on
+the achievements unlocked by the agent; there are 22 such
+achievements in the Crafter world.
+We use a fixed9×9grid initial state (shown in Fig. 7)
+containing grass, tree, and water locations with fixed stats
+for the player. This state was specified using the structured
+state representation provided by Crafter-OO (Hafner 2022;
+Khan et al. 2025).
+Attribute Description
+areaSize of the environment grid
+player positionInitial position of the agent in the
+grid
+player facingInitial orientation of the agent
+terrain layoutFixed terrain configuration of the
+environment
+objectsInitial placement of objects in the
+environment
+Table 5: Attributes defining the predefined initial states.
+Symbolic RepresentationWe construct a symbolic state
+representation that maps low-level environment states to a
+set of logical predicates. The representation operates on the
+structured state exposed by Crafter-OO, including terrain,
+objects, player attributes, inventory, and achievements.
+Given a state, the symbolic representation provides a set
+of ground literals over a fixed predicate vocabulary. Objects
+are limited to a predefined set of obstacles, tools, structures,
+and achievements. This symbolic state is not a perfect rep-
+resentation of the underlying environment state, as it retains
+only the information necessary for decision-making and re-
+moves irrelevant details.
+Each predicate is computed directly from the underly-
+ing state. Some predicates are related to position (e.g.,
+next to,close to), which are obtained by calculat-
+ing the Manhattan distances between the agent and nearby
+
+objects, while other predicates (e.g.,has,can make,
+can build) are determined from inventory contents.
+We specify the goal as a symbolic literal conjunction over
+this set of predicates.
+Predicate Description
+next to(x)Agent is adjacent to objectx
+close to(x)Agent is within a Manhattan distance
+of 3 fromx
+exists(x)Objectxexists in the environment
+is sleeping()Agent is sleeping
+has(x)Agent possesses toolx
+can make(x)Agent has resources to craftx
+can build(x)Agent has resources to buildx
+achieved(x)Achievementxhas been completed
+Table 6: Predicate vocabulary used in the symbolic represen-
+tation.
+Qwen-Steve AgentWe use an agent that combines the
+Qwen2.5-7B-Instruct (Team 2024) model with Crafter
+Steve1 from CrafterDojo to execute skills. Steve-1 executes
+higher-level skills as sequences of low-level Crafter actions.
+The agent operates over a fixed subset of skills derived
+from the CrafterDojo skill set. CrafterDojo defines 61 skills;
+we use a subset of 16.
+•craft wood
+pickaxe
+•craft wood
+sword
+•dig a tunnel
+•go explore
+•go to sleep
+•move to east
+•move to north
+•move to south
+•move to west
+•obtain coal
+•obtain diamond
+•obtain tree
+•obtain water
+•place crafting
+table on grass
+•place crafting
+table to build
+shelter
+•stay
+The agent takes a symbolic goal and converts it into task
+text. At each step, the current environment state is mapped
+to a symbolic state representation and then converted into
+state text. The task text and state text are passed to the Qwen
+model to select a skill.
+Given the task text, state text, and candidate skills, the
+agent uses Qwen to select the next skill to execute. This
+selection is repeated after each skill attempt, allowing the
+agent to adapt based on the updated environment state.
+The selected skill is executed by CSteve1 for multiple
+timesteps. We use greedy action selection during skill exe-
+cution, making CSteve1’s behavior deterministic. After each
+environment step, the agent updates the symbolic state and
+checks whether the original symbolic goal is satisfied. If the
+goal is achieved, the agent returns success immediately. If
+not, CSteve1 continues executing the current skill until the
+fixed step limit for that skill is reached.
+After a skill attempt finishes, if the symbolic goal is still
+not achieved, the agent selects a skill again using the up-
+dated state and the same original goal. The number of skill
+selection attempts is fixed. If the goal is still not achieved
+after that limit, the agent terminates and returns failure.
+Skill SelectionWe score a set of candidate skills using
+the LLM to select the skill to be executed. We convert the
+goal and current-state representations into text, then evalu-
+ate each skill independently.
+For each skill, we prompt the Qwen model using the goal
+description and state text, along with the skill name, and ask
+whether the skill is the best to execute to achieve the goal
+from the current state. We calculate two log-probabilities:
+logP(yes)— the probability of the model answering yes for
+the prompt, andlogP(no)— the probability of the model
+answering no for the prompt. We calculate the difference
+betweenlogP(yes)andlogP(no)to score each individual
+skill. A high score means the model thinks the skill is more
+suitable for execution than not. We then pick the skill with
+the highest score.
+An example prompt used for scoring a candidate skill is:
+" Goal text: [goal description]
+Current state: [state description]
+Candidate skill: [skill name]
+Is this candidate the best skill to
+execute next for the goal?
+Answer yes or no."
+D.4 PDDLGym
+PDDLGym (Silver and Chitnis 2020) is a benchmark suite
+of planning environments based on the Planning Domain
+Definition Language (PDDL). In PDDLGym, each environ-
+ment is specified by a PDDL domain file and a PDDL prob-
+lem file. The domain file defines the predicate vocabulary
+and object types, while the problem file defines the objects,
+initial state, and goal condition. We use five PDDLGym
+environments: Blocksworld, Depot, First Responders, Tire-
+world, and Probabilistic Elevators.
+BlocksworldBlocksworld is a block-stacking environ-
+ment in which blocks are rearranged on a table using a robot
+hand.
+Predicate Meaning
+on(x, y)Blockxis on blocky.
+ontable(x)Blockxis on the table.
+clear(x)Blockxhas no block on top of it.
+handempty(r)Robotris not holding a block.
+handfull(r)Robotris holding a block.
+holding(x)Blockxis being held.
+Table 7: Predicates for Blocksworld.
+
+Component Specification
+Objectsa,b, andcof typeblock;robotof type
+robot.
+Initial stateclear(a),clear(b),clear(c),
+ontable(a),ontable(b),
+ontable(c), andhandempty(robot).
+Table 8: Problem instance used for Blocksworld.
+First RespondersFirst Responders is an emergency-
+response environment involving fire units, medical units,
+victims, fires, hospitals, and water sources.
+Predicate Meaning
+fire(l)Locationlhas a fire.
+nfire(l)Locationldoes not have a
+fire.
+victim-at(v, l)Victimvis at locationl.
+victim-healthy(v)Victimvis healthy.
+victim-hurt(v)Victimvis hurt.
+victim-dying(v)Victimvis dying.
+hospital(l)Locationlis a hospital.
+water-at(l)Water is available at location
+l.
+adjacent(l1, l2)Locationl1is adjacent to lo-
+cationl2.
+fire-unit-at(u, l)Fire unituis at locationl.
+medical-unit-at(u,
+l)
+Medical unituis at location
+l.
+have-water(u)Fire unituhas water.
+have-victim-in-unit(v,
+u)
+Victimvis inside medical
+unitu.
+Table 9: Predicates for First Responders.
+Component Specification
+Objectsl1andl2of typelocation;f1of type
+fire unit;m1of typemedical unit;
+z1andz2of typevictim.
+Initial statehospital(l2),water-at(l1),
+fire(l1),fire(l2),
+victim-at(z1, l2),
+victim-hurt(z1),victim-at(z2,
+l2),victim-dying(z2),
+adjacent(l1, l2),adjacent(l2,
+l1),fire-unit-at(f1, l1), and
+medical-unit-at(m1, l2).
+Table 10: Problem instance used for First Responders.
+TireworldTireworld is a navigation environment in which
+a vehicle moves between locations and may need to change
+a flat tire using spare tires.
+Predicate Meaning
+vehicle-at(loc)The vehicle is at locationloc.
+spare-in(loc)A spare tire is available at location
+loc.
+road(from, to)There is a road from locationfrom
+to locationto.
+not-flattire()The vehicle does not currently have a
+flat tire.
+Table 11: Predicates for Tireworld.
+Component Specification
+Objectsl-1-1,l-1-2,l-1-3,l-2-1,l-2-2,
+andl-3-1of typelocation.
+Initial statevehicle-at(l-2-1),road(l-1-1,
+l-1-2),road(l-1-2, l-1-3),
+road(l-1-1, l-2-1),road(l-1-2,
+l-2-2),road(l-2-1, l-1-2),
+road(l-2-2, l-1-3),road(l-2-1,
+l-3-1),road(l-3-1,
+l-2-2),spare-in(l-2-1),
+spare-in(l-2-2),
+spare-in(l-3-1), and
+not-flattire().
+Table 12: Problem instance used for Tireworld.
+Probabilistic ElevatorsProbabilistic Elevators is an
+elevator-navigation environment in which the agent moves
+across floors and positions, enters and exits elevators, and
+collects coins.
+Predicate Meaning
+dec f(f, g)Floorfis one step below floor
+g.
+dec p(p, q)Positionpis one step left of po-
+sitionq.
+in(e, f)Elevatoreis at floorf.
+at(f, p)The agent is at floorfand posi-
+tionp.
+shaft(e, p)Elevatoreis associated with
+shaft positionp.
+inside(e)The agent is inside elevatore.
+gate(f, p)There is a gate at floorfand po-
+sitionp.
+coin-at(c, f, p)Coincis at floorfand position
+p.
+have(c)The agent has collected coinc.
+underground()The agent is underground.
+is-first-floor(f)Floorfis the first floor.
+is-first-position(p)Positionpis the first position.
+Table 13: Predicates for Probabilistic Elevators.
+
+Component Specification
+Objectsf1,f2, andf3of typefloor;p1,p2,
+p3, andp4of typepos;e1ande2of type
+elevator;c1,c2, andc3of typecoin.
+Initial stateis-first-floor(f1),
+is-first-position(p1),
+underground(),dec f(f2,
+f1),dec f(f3, f2),dec p(p2,
+p1),dec p(p3, p2),dec p(p4,
+p3),shaft(e1, p3),in(e1,
+f1),shaft(e2, p3),in(e2,
+f1),coin-at(c1, f2, p3),
+coin-at(c2, f3, p3),
+coin-at(c3, f1, p1),gate(f2,
+p4),gate(f3, p3), andgate(f3,
+p4).
+Table 14: Problem instance used for Probabilistic Elevators.
+D.5 SayCan
+EnvironmentThe SayCan agent (Ahn et al. 2022) is a
+mobile manipulator in a PyBullet simulation environment.
+It interacts with four blocks and one cup on a tabletop. The
+agent is equipped with low-level skills (e.g., pick-and-place
+a yellow block). It uses a controlled based on Llama-3.1-8B-
+Instruct (AI 2024) to select a skill to execute based on its ab-
+stract description. MCQS uses the same abstraction function
+for learning the capability model.
+Predicate Meaning
+on(x, y)Blockxis on blocky.
+on-table(x)Blockxis on the table.
+clear(x)Blockxhas no block on top of it.
+Table 15: Predicates for SayCan.
+Symbolic RepresentationTable 15 shows the predicates
+used in Saycan. An important difference between Saycan
+and Blocksworld is that SayCan can push blocks off the ta-
+ble, causing them to disappear.
+Existing ResultsIn a previous version of MCQS, we eval-
+uated on SayCan. The capabilities learned in those runs are
+the ones reported in Fig. 1b. These models were learned us-
+ing the same capability-learning code as the current version
+of MCQS; however, both MCQS-E and MCQS-S have since
+been substantially improved. Therefore, we do not report
+variational distance results for the SayCan models. Instead,
+we include these learned capabilities only as examples of the
+types of capabilities that MCQS can learn.
+E Implementation Details and Setup
+In this section we discuss the implementation details and
+setup.
+E.1 MCQS Algorithm
+Algorithm 2:Monte Carlo Query Search (MCQS)
+1:Inputs:BBAIA, simulatorS E, representationα:X →
+S
+2:Output:pessimistic capability modelh †
+3:T 0 ←random walk(S E)
+4:C←discover capabilities(T0, α)
+5:D ←initialize dataset(C)
+6:h †
+∧, h†
+∨ ←construct models(C,D)
+7:x i ←reset(S E)
+8:whilenotstop condition()do
+9:ξ←set revisitation incentive()
+10:π←synthesize query(α(x i), h†
+∧, h†
+∨, ξ)
+11: x←execute query(A,S E , xi, π)
+12:D ←update dataset(C,D, x, α)
+13:C←update capabilities(C, x, α)
+14:h †
+∧, h†
+∨ ←update(h †
+∧, h†
+∨, C,D)
+15:x i ←sample initial state(x,S E)
+16:end while
+17:returnh †
+∧
+In this section, we provide the full MCQS algorithm,
+shown in Alg. 2. As mentioned in Section 2.1, MCQS takes
+as input only the BBAIA, the simulatorS E for environment
+E, and the representation functionα:X →S(line 1). It
+outputs a capability modelh † for the capabilities discovered
+and learned forAinE(line 2).
+As discussed in Sec. 3, MCQS begins by performing a
+random walk inS E to collect an initial set of low-level tran-
+sitionsT 0, which are used to discover an initial capability
+setC(lines 3–4). The process for constructing capabilities is
+described in Sec. 3. The algorithm then initializes the dataset
+of observed state-capability-state transitionsDfromCand
+constructs the initial pessimistic and optimistic capability
+models,h †
+∧ andh †
+∨, respectively (lines 5–6). The process
+for constructingh †
+∧ andh †
+∨ is described in Sec. 3.1.
+Until the stop condition is triggered (line 8), MCQS re-
+peatedly synthesizes a query, executes it, and updates both
+the dataset and the learned hypotheses. In the first itera-
+tion, the query starts from the initial state ofS E (line 7). In
+subsequent iterations, the initial statex i is chosen by sam-
+pling (line 15): if the previous query policy was predicted
+to be distinguishing and the maximum number of observed
+changes in the symbolic state space is less than 100, then
+a resulting state from the previous query is reused; other-
+wise, a non-sink state fromDis sampled with probability
+inversely weighted by the number of times it has been ob-
+served. Details on initial-state sampling are provided in Ap-
+pendix E.4.
+The state revisitation valueξis then dynamically set based
+on how recently new information has been collected (line
+9); details are provided in Appendix E.5. Given the initial
+symbolic states i =α(x i), and the current modelsh †
+∧ and
+h†
+∨, MCQS constructs a distinguishing MDPP †(si, h†
+∧, h†
+∨)
+(Def. 6). This MDP is solved withξby either MCQS-S or
+
+MCQS-E to produce a query policyπ:S→C(line 10).
+For the random-query ablation used to evaluate MCQS in
+Sec. 4.2, a sequence of 30 capabilities is sampled instead.
+The query policy is then executed 25 times from the initial
+low-level statex i by resettingS E tox i and havingAfollow
+the policy. At each symbolic states, the next capability is
+selected asc=π(s)and executed byA. A rollout termi-
+nates ifπdoes not specify a capability for the current state
+sor if more than 20 capabilities have been executed in the
+current query iteration. Thus, each query produces a set of
+trajectories, denoted x, for the capabilities executed during
+the query (line 11). This set is used to update bothDand
+C(lines 12–13). The process for converting trajectories into
+transitions is described in Sec. 3.3. After this update,h†
+∧ and
+h†
+∨ are updated (line 14).
+As mentioned in Sec. 4.2, we output the pessimistic model
+h†
+∧, since it provides a safer representation of the learned
+capabilities (line 16).
+E.2 Dynamic policy synthesis
+Both MCQS-E and MCQS-S synthesize non-stationary poli-
+cies rather than fixed capability sequences, allowing execu-
+tion to adapt to observed outcomes.
+In MCQS-E, the returned policy contains the MCTS tree
+and tracks the current node. After a capability is selected,
+the current node advances to the corresponding child. Once
+the resulting state is observed, the policy performs a forward
+update from that node along the maximum-UCB continua-
+tion. During this pass, predicted state distributions are up-
+dated and impossible capabilities are pruned. The affected
+MCTS node statistics are then updated in a backward pass.
+If the maximum-UCB capability changes during this update,
+the newly selected branch is forward-updated and included
+in the backward pass.
+MCQS-S represents states and capabilities separately and
+therefore constructs a bipartite policy graph⟨N, E⟩, where
+nodes correspond to capabilities and edges correspond to
+observed states. Letn 0 ∈Ndenote the initial node. Let
+f:N→Clabel each node with a capability, and let
+g:E→S×Z + label each edge with a state and its depth
+in the MCTS tree.
+For each state node in the MCTS tree produced by
+MCQS-S, letsbe the represented state at depthd, and let
+n0 be the graph node corresponding to the capability exe-
+cuted to reach this state. The UCB-maximizing capabilityc
+is selected and a new noden 1 is added toNtogether with
+edgee= (n 0, n1), wheref(n 1) =candg(e) = (s, d). The
+algorithm then recursively proceeds to the child correspond-
+ing toc, carrying forward noden 1.
+For a capability node, letn 0 denote the carried-forward
+node. All child state nodes are considered. For a state
+node labeled(s, d), if there exists an edge(n ′
+0, n′
+1)with
+g((n′
+0, n′
+1)) = (s, d), then edge(n 0, n′
+1)is added. Other-
+wise, the algorithm recursively proceeds to that child while
+carrying forwardn 0.
+Letnbe the current node in the graph. The next capa-
+bility selected by the policy isf(n). After observing the
+next states ′, if there exists an edgee= (n, n ′)such that
+g(e) = (s′, . . .), then the current node is updated ton ′.
+E.3 MCQS-E Implementation
+To improve the efficiency of MCQS-E, we introduce two op-
+timizations. First, to prevent the tree from containing redun-
+dant branches, we prune any newly generated node whose
+support set is identical to that of an existing node. This
+avoids exploring multiple nodes that are effectively equiv-
+alent. Second, to reduce the frequency of distribution expan-
+sions and total-variation distance computations, we limit ex-
+pansion to three child nodes when a node is first expanded,
+and again each time it is revisited. For rollout, we do 3 ran-
+dom policy rollouts.
+E.4 Initial State Sampling
+To encourage exploration of under-explored regions of the
+observed state spaceS o ⊆S, we sample the initial state
+for query synthesis and execution according to observa-
+tion counts inD. For each states∈S o, letN(s;D) =
+|{⟨s, c, s′⟩ ∈ D}|denote the number of observed tran-
+sitions froms. Letn max = max s∈S N(s;D). We as-
+sign each statessampling weightw s = (n max + 1−
+N(s;D))/ P
+˜s∈So(nmax + 1−N(˜s;D)).
+When we are sampling a new initial state from the out-
+come of the previous query, the process is in the same, but
+we use only the observed resulting states from each iteration
+of the query instead ofS o.
+E.5 Empirical Evaluation Information
+For running MCQS, we considered many hyperparameters.
+In Table 16 we list all the additional hyperparameters we
+used when designing MCQS.
+Forξ, we scale it according to the number of queries since
+the last significant update. Letnbe the number of queries
+since the last observed information and letξ m be the maxi-
+mum exploration constant. Thenξis set asξ= n
+25 ξm. Note
+25 is the number of queries before we early stop, meaningξ
+can never exceedξ m.
+Settingξis an exploration–exploitation trade-off: ifξis
+too large, hard-to-reach capabilities may be starved because
+reducing the missing-effect probability below a threshold
+may require exponentially many samples. In this work, we
+setξ m = 10−5.
+Finally, First responders contains many irreversible ac-
+tions requiring execution from the initial state to reach spe-
+cific states; therefore, for this domain, instead of initial-state
+sampling, we reset the simulator every 100 steps.
+F Additional Results
+As discussed in Sec. 4, we evaluated MCQS further by run-
+ning an ablation whereξ= 0on 3 PDDLGym domains. We
+also evaluated models produced by MCQS-S on there accu-
+racy on reachability.
+F.1 No Revisitation Incentive
+We evaluated three PDDLGym domains (Blocksworld, Tire-
+world, and First Responders) using MCQS-E and MCQS-S
+
+Description Value
+Number of runs per query 25
+Environment state horizon 100
+Warm Start Random Capability Walks 0
+Max Capability Sequence 20
+MCTS Exploration Constant
+√
+2
+MCTS Iteration Count 1000
+Random Policy if no distinguishing policy found True
+Early Stop Condition 25 Queries with no new information
+Table 16: Hyperparameters used for setting MCQS-E and MCQS-S
+Figure 8: Model agreement (1 - weighted VD) of MCQS-E and MCQS-S on three evaluation problems. Shaded regions indicate
+one standard deviation over multiple runs. Annotated arrows indicate the simulator step-count ratio between each MCQS
+approach and the Random Query ablation baseline.
+Figure 9: Times fewer simulator steps MCQS-S and MCQS-
+E had on three evaluation problems compared to random
+querying.
+with the parameters from the main paper and with the revis-
+itation incentive disabled (ξ= 0). We additionally evaluated
+Random Querying as a baseline. We report averages over
+five independent runs.
+Fig. 8 shows that MCQS learns accurate capability mod-
+els both with and without the revisitation incentive. In most
+settings, MCQS achieved at least 98% model agreement
+with a non-zeroξwith fewer simulator steps than with
+ξ= 0, suggesting that the revisitation incentive can im-
+prove the quality of the policies tried. However, the effect
+is not uniform: MCQS-S is more sensitive toξ, and in some
+domains a non-zeroξrequires substantially more simula-
+tor steps before stopping. Thus, whileξcan improve sam-
+ple quality, setting it too high may increase the total model
+learning cost.
+This trade-off is highlighted by Fig. 9, which shows the
+
+number of simulator steps until the stopping condition is
+triggered. For MCQS-E, using a non-zeroξrequired 20%
+to 40% more simulator steps thanξ= 0. For MCQS-S, the
+effect ranged from 10% fewer steps to 150% more steps,
+depending on the domain. Overall,ξcan lead to better inter-
+mediate policies and faster agreement, but may also increase
+the total simulator steps needed before termination.
+F.2 Reachability Methodology
+To evaluate the reachability predictions of a modelh †
+learned by MCQS-S, we uniformly sample an initial state
+si from the observed statesS observed. We then uniformly
+sample a capabilitycthath † predicts is achievable froms i
+and sample a possible successor state fromh †. From this
+predicted state, we repeat the process until constructing a
+sequence of five capabilities. We reject sequences for which
+no valid capability is available before reaching length five.
+We execute each sequence 100 times on the BBAIA, re-
+setting the simulator tos i before each execution. For each
+capabilitycin the sequence,Aattempts to achieve the intent
+associated withc. Execution continues until the sequence is
+completed orh † classifies an observed transition as incon-
+sistent with its prediction.
+For each sequence, we compute the fraction of the 100
+executions for whichh † remains consistent throughout the
+entire sequence. We report the mean and standard deviation
+of this accuracy across sampled sequences.
+In Crafter, due to CSteve1 being set to greedy and evalu-
+ating a temporal length of 1, most capabilities were invalid
+resulting in only a handfull of valid 5-capability sequence.
+Therefore, we ran MCQS on Crafter with a temporal length
+of 4 and set the agent to stochastic. While this creates more
+opportunities for the agent to achieve the intent, it also in-
+creases the difficulty of capability model learning due to a
+significant increase in stochasticity. However, as reported,
+MCQS-S was able to learn a model that had a reachability
+accuracy of78%±16%.
+G QACE Baseline
+In this section we describe how we ran QACE (Verma,
+Karia, and Srivastava 2023), the closest existing approach to
+the problem addressed in this paper. We describe the inputs
+we supplied, the compilation required to express our learn-
+ing targets in QACE’s model class, and the reasons QACE
+can be run only on symbolic agents.
+G.1 Inputs and setup
+QACE does not discover capabilities. It requires a predicate
+vocabularyVand a list of capabilities, each identified with
+an intent, and learns for each supplied capability a model
+with conjunctive preconditions and probabilistic effects. We
+supplied the predicate vocabulary induced by the represen-
+tation functionαused by MCQS, so that both methods op-
+erate over the same symbolic state space. We supplied the
+capabilities discovered by MCQS (Sec. 3) as the capability
+list. QACE therefore begins each run with the output of the
+discovery step, and the comparison in §E1 measures model-
+learning efficiency alone.
+G.2 Compiling disjunctive conditions
+MCQS represents a capability as a set of conditional-
+effect rules whose conditions are Boolean formulas overV
+(Def. 2), and the pessimistic and optimistic conditions con-
+structed are disjunctive. QACE supports only conjunctive
+preconditions, so such capabilities are not expressible in its
+model class.
+We therefore compile disjunctions away before passing
+capabilities to QACE. For each capabilitycand each rule
+r∈h c, we rewritecond(r)in disjunctive normal form asWm
+k=1 φk, where eachφ k is a conjunction of literals, and
+constructmcapabilitiesc (1), . . . , c(m). Eachc (k) retains the
+intent and effect distribution ofcand has preconditionφ k,
+and each is passed to QACE as a separate capability.
+This compilation affects the comparison in three ways.
+First, the number of capabilities QACE receives isP
+c
+P
+r∈hc mc,r rather than|C|, andm c,r grows with the
+number of condition blocks in the effect partitionΦ c. Sec-
+ond, QACE learns eachc(k) independently and does not rep-
+resent the fact that these branches describe a single capa-
+bility, so the sample cost of learningcis incurredmtimes.
+Third, the disjunctive normal form is derived from the model
+learned by MCQS, so the compilation supplies QACE with
+information about the structure of the conditions. We use it
+because without it QACE’s hypothesis class does not con-
+tain the true model.
+G.3 Query execution on symbolic and
+simulator-based agents
+QACE poses queries at a specified symbolic state: a query
+fixes an initial symbolic statesand asks the agent to execute
+a capability, or a short sequence of capabilities, froms. Exe-
+cuting such a query requires an inverse of the representation
+function, that is, a statex∈Xwithα(x) =sto which the
+simulator can be reset.
+For symbolic agents this requirement is satisfied directly.
+For the LAO* agent on PDDLGym domains,αis the iden-
+tity, every symbolic state named in a query is instantiable,
+and the simulator can be reset to it. All QACE runs reported
+in this paper use symbolic agents.
+For BBAIs operating in non-symbolic simulators, in-
+cluding MiniGrid, Overcooked, Crafter, and SayCan,αis
+many-to-one and has no inverse. A symbolic state such
+asagent-at(NW)∧ ¬carrying-blue-key()corresponds to a
+set of grid configurations, and the simulator functionality,
+namely resetting to an initial state, reverting to a previously
+encountered statex∈X, stepping with an action, and
+querying available actions, does not include constructing or
+sampling a state from that set. MCQS avoids this require-
+ment, since a query is⟨x 0, π, n⟩wherex 0 ∈Xis an envi-
+ronment state that has already been visited (Def. 5) and the
+policy is executed forward fromx 0.
+Executing a QACE query on such a simulator is possible
+in principle by searching for a reachablexwithα(x) =s.
+This requires solving a reachability problem inXfor every
+query, with no guarantee that the abstract state is reachable,
+and the cost of this search is charged to the same simulator-
+step budget used for evaluation. We therefore report QACE
+
+on symbolic agents only.
+G.4 Scaling
+The scaling of QACE on symbolic agents is limited by
+the grounded capability representation. Capabilities are
+grounded (Sec. 3), so MCQS constructs an intent for ev-
+ery type-consistent grounding of each predicate observed
+in an effect, and|C|grows asO(|O| k)for a predicate of
+arityk. The compilation in Appendix G.2 increases this
+count further. QACE generates queries over grounded state-
+capability pairs, so a grounded capability set combined with
+a grounded predicate vocabulary causes the per-query search
+space to grow rapidly with|O|.
+QACE learned an accurate model for LAO* on
+Blocksworld, where the object set is small enough that the
+grounded capability set remains small. For all other do-
+mains, including the remaining PDDLGym domains whose
+agents are symbolic and whose queries are therefore exe-
+cutable, QACE produced no model within 50 hours. Ta-
+ble 17 reports the configuration and outcome for each do-
+main.
+Domain Agent Outcome
+Blocksworld LAO* Model learned
+First Responders LAO* No model
+Tireworld LAO* No model
+Prob. Elevators LAO* No model
+Depot LAO* No model
+MiniGrid ReAct (GPT-5.4-nano) Not runnable
+Overcooked HDDLGym Not runnable
+Crafter CSteve1 Not runnable
+Crafter Qwen CSteve Not runnable
+SayCan SayCan Not runnable
+Table 17: configuration and outcome of QACE runs for each
+domain.|C|is the number of capabilities discovered by
+MCQS and supplied to QACE, and|C DNF|is the number
+after compiling disjunctive conditions into conjunctive ca-
+pabilities (Appendix G.2). Not runnable indicates thatαis
+not invertible for the agent’s simulator (Appendix G.3).
+H Limitations
+A key result of this work is that accurately modeling BBAI
+capabilities requires an expressive grounded representation;
+lifting and aggressive generalization can produce inaccu-
+rate capability models. The consequence is that MCQS must
+learn grounded capabilities directly from observed transi-
+tions, making model quality dependent on transition cov-
+erage. In practice, this requires tracking all observed tran-
+sitions between symbolic states and capabilities. Although
+this space is substantially smaller than the underlying en-
+vironment state space, for symbolic statesSand capabili-
+tiesC, the resulting worst-case space and time complexity
+isO(S 2C). While this level of expressivity is currently nec-
+essary for accurate capability learning, future work is needed
+to develop more efficient representations that preserve mod-
+eling fidelity while improving scalability.
+A related limitation is that BBAIs and their environments
+are often highly stochastic. This substantially increases sam-
+ple complexity because repeated policy executions are re-
+quired both to observe rare effects and to accurately estimate
+their probabilities.
+I Computational resources
+Experiments were conducted on two hardware configura-
+tions: (1) an Intel Core i9-9900 CPU @ 3.10GHz with an
+NVIDIA GeForce RTX 2080 and 64GB RAM, and (2) an
+AMD Ryzen Threadripper PRO 7975WX (32 cores) with an
+NVIDIA RTX 6000 Ada Generation GPU and 64GB RAM.
+MiniGrid, ReAct, Overcooked, and the PDDLGym do-
+mains were run on the i9 system using 15 parallel runs
+for MCQS-E, MCQS-S, and the Random Query baseline.
+Smaller PDDLGym domains, such as blocksworld and tire-
+world, required less than one hour each. First responders
+required approximately 3 hours, while probabilistic eleva-
+tors and ReAct each required approximately 24 hours. Con-
+structing the evaluation datasets required roughly one addi-
+tional day. In total, this portion of the experiments required
+approximately 60 GPU-hours on hardware comparable to
+the i9 setup.
+Both Crafter variants required approximately 24 hours
+each on the Threadripper system, with an additional 8 hours
+each for dataset construction. Running the SayCan exper-
+iments required approximately 72 hours per run, with only
+two runs executable in parallel, resulting in roughly 563 total
+hours. Overall, the Crafter and SayCan experiments required
+approximately 625 hours on the Threadripper system.
+J Broader impacts
+This work studies methods for learning interpretable capa-
+bility models of black-box AI agents. The primary goal is
+improving transparency, reliability, and safety assessment by
+identifying the conditions under which agents succeed, fail,
+or exhibit unintended side effects. Such capability models
+may help users deploy AI systems more safely and help de-
+velopers identify behavioral limitations.
+We do not foresee direct harmful applications of this
+work. However, like many evaluation and interpretabil-
+ity techniques, these methods could potentially be used to
+characterize weaknesses or behavioral patterns of deployed
+agents. Overall, we believe the primary impact of this work
+is enabling more reliable understanding and evaluation of
+increasingly complex AI systems.
