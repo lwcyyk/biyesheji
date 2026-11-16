@@ -1,0 +1,802 @@
+Heartbeat-Bound Hierarchical Credentials: Cryptographic Revocation for AI Agent Swarms
+Report GitHub Issue
+×
+Title:
+Content selection saved. Describe the issue below:
+Description:
+Submit without GitHub
+Submit in GitHub
+arXiv is now an independent nonprofit!
+Learn more
+×
+Back to arXiv
+License: CC BY-NC-ND 4.0
+arXiv:2605.20704v1 [cs.CR] 20 May 2026
+Heartbeat-Bound Hierarchical Credentials: Cryptographic Revocation for AI Agent Swarms
+Saurabh Deochake
+Affiliation: SentinelOne Inc.
+Mountain View, USA
+E-mail saurabh.deochake@sentinelone.com
+Abstract
+Autonomous AI agents that spawn sub-agent swarms create a safety gap: existing credential revocation mechanisms, OAuth 2.0 introspection, OCSP, and W3C Status Lists, require network connectivity to a central authority, leaving “zombie agents” executing privileged operations for minutes to hours after operator shutdown. We present Heartbeat-Bound Hierarchical Credentials (HBHC), a cryptographic protocol that binds credential validity to periodic parent liveness proofs. Verifiers enforce freshness using only a cached public key and local clock; no network round-trip is required. When heartbeat generation ceases, all descendant credentials become unusable within a deterministically bounded window Wz≤Wmax+Δh+ϵW_{z}\leq W_{\max}+\Delta_{h}+\epsilon, conditional on bounded clock skew and parent keys held in secure enclaves. Evaluation at the protocol layer and with real LLM-backed agent swarms (GPT-4o-mini) demonstrates a 90×\times reduction in the zombie window over OAuth 2.0, 0.26 ms full authentication in Rust, 18,000+ verifications per second under concurrent HTTP load, and stable per-verification latency from 10 to 10,000 agents. Real-agent experiments show 0.71% end-to-end overhead on tool calls, zero post-revocation tool calls under prompt injection that bypasses application-layer guardrails, and cascading revocation across a 49-agent four-level hierarchy within the theoretical bound.
+Keywords: AI agent security agentic AI agent swarm authenticated delegation credential revocation hierarchical deterministic keys prompt injection defense zero-trust.
+1 Introduction
+Agentic AI systems [16, 21] present novel challenges for human control over autonomous software. AI agents dynamically spawn sub-agent swarms, delegate authority across trust boundaries, and execute multi-step plans that can diverge from operator intent. A single orchestrator may instantiate hundreds of workers, each carrying derived credentials with access to APIs, databases, and production infrastructure. The resulting credential hierarchy mirrors the agent hierarchy: if a parent agent is compromised, hallucinates, or triggers a safety violation, every descendant credential must be invalidated promptly, even when sub-agents execute asynchronously across distributed infrastructure.
+Consider a concrete scenario. An autonomous coding assistant spawns 50 sub-agents to patch a production codebase, each carrying derived credentials with write access to repositories, CI/CD pipelines, and deployment targets. Midway through, the orchestrator hallucinates and begins generating patches that introduce security flaws. The operator terminates the orchestrator, but the 50 sub-agents dispatched with valid OAuth 2.0 tokens (TTL: 1 hour) continue pushing commits, triggering builds, and deploying compromised code until their tokens expire. As inference speeds increase and agent autonomy deepens, this gap between “operator decides to stop” and “all agents actually stop” becomes a first-order safety concern [1] that the EU AI Act mandates be addressed for high-risk systems [15].
+We term this the zombie agent problem: sub-agents continuing to exercise valid credentials after their parent has been revoked or shut down. The problem is not hypothetical: the ZombieAgent vulnerability [2] is a zero-click attack on ChatGPT agents that persists in memory and exfiltrates data invisibly; Gu et al. [20] show that a single adversarial image can compromise one million multimodal agents exponentially fast through inter-agent memory propagation. Recent surveys systematize these threats [10]. Credential lifetime bounds the exposure window at 15–60 minutes for OAuth 2.0 access tokens [29] and 5–15 minutes for short-lived X.509 certificates. Existing revocation mechanisms all require network connectivity: W3C Bitstring Status Lists [34] require fetching a bitstring, OCSP [31] requires contacting a responder, and short-lived certificates require renewal from a CA. In distributed agent deployments, where control-plane outages, IdP failures, API rate-limiting, or cross-region latency spikes can sever the verifier-to-authority connection, these mechanisms provide no safety guarantees.
+We propose Heartbeat-Bound Hierarchical Credentials (HBHC), a cryptographic protocol that provides deterministic agent termination by binding credential validity to ongoing parent liveness proofs. Parent agents periodically generate signed heartbeat commitments; sub-agents incorporate a recent heartbeat into every authentication proof; verifiers check freshness using only local time and the parent’s public key, with no network round-trip. HBHC leverages hierarchical deterministic key derivation [35, 13] so that a valid proof requires both the sub-agent’s private key and a fresh parent heartbeat, a conjunction that neither credential theft nor key forgery can bypass. The design rests on three principles: termination is implicit (it occurs naturally when heartbeat generation ceases, without requiring a kill signal to reach every sub-agent); verification is local (only a cached public key and clock are needed); and the safety bound is deterministic, with Wz≤Wmax+Δh+ϵW_{z}\leq W_{\max}+\Delta_{h}+\epsilon holding independently of agent behavior, network conditions, or prompt state under bounded clock skew. The fail-secure default is tempered by three production mitigations (pre-computation buffers, configurable grace periods, multi-path delivery) that reduce false-positive denial rates to 0.01% under extreme packet loss.
+This paper makes four contributions. (1) We formalize the zombie agent problem with a Dolev-Yao threat model and derive six security requirements including fail-safe authorization (Section 3). (2) We present the HBHC protocol with three algorithms, an explicit state machine, and formal proofs for bounded revocation and partition tolerance (Section 4). (3) We describe integration with OAuth 2.0 and W3C Verifiable Credentials through standard extension points (Section 5). (4) We evaluate HBHC at the protocol layer and with real LLM-backed agent swarms (Section 6), demonstrating a 90×90\times zombie window reduction over OAuth 2.0, 0.26 ms full authentication in Rust, stable per-verification latency from 10 to 10,000 concurrent agents, 0.71% end-to-end overhead with GPT-4o-mini agents, zero post-revocation tool calls under prompt injection that bypasses guardrails, cascading revocation of 49 agents across four hierarchy levels, and 295×295\times credential-theft exposure reduction versus OAuth 2.0.
+2 Background and Related Work
+Agent identity and credential revocation.
+Recent work on AI agent identity addresses delegation but not offline revocation. South et al. [32] argue that AI agents need authenticated delegation and propose extending OAuth 2.0 and OpenID Connect with agent-specific credentials, but revocation still requires contacting the authorization server. IETF Transaction Tokens for Agents [28] provide traceability in connected service meshes, and the IETF AI Agent Authentication draft [24] models agents as workloads within WIMSE; both rely on network-accessible authorization endpoints. Goswami [18] binds agent identity to configuration hashes via Agentic JWT, but revocation defaults to token expiration. Rodriguez Garzon et al. [17] equip agents with DIDs and Verifiable Credentials, a complementary identity layer that HBHC can extend with temporal liveness binding. In the enterprise identity layer, Deochake and Channapattan [11] describe an IAM framework for multi-tenant hybrid-cloud resources that provisions mirror identities with scoped privileges; HBHC is orthogonal, adding deterministic temporal revocation on top of such identity layers. Macaroons [3] support offline verification via caveats, but once a discharge macaroon is issued it remains valid until expiration, and a compromised discharging parent cannot retroactively invalidate it without contacting the target service.
+The PKI revocation literature is extensive but shares a common assumption: the verifier can reach a revocation authority in real time, or can tolerate the credential lifetime as a zombie window. Chuat et al. [7] systematize delegation and revocation in a 19-criteria framework, observing that short-lived delegated credentials plus revocation can address key problems under continuous connectivity. Camenisch and Lysyanskaya [5] introduced dynamic accumulators for privacy-preserving revocation; Muid et al. [27] modernize this with AccuRevoke, distributing accumulators across edge providers with GPU-accelerated witness generation; both still require network round-trips for witness updates. The W3C Bitstring Status List [34] requires fetching the bitstring. SPIFFE/SPIRE issues short-lived X.509 SVIDs (typically 1-hour TTL) to Kubernetes workloads; revocation is passive, with a zombie window equal to certificate lifetime. For autonomous swarms executing asynchronously, neither network connectivity nor multi-minute zombie windows are acceptable.
+AI safety and agent control.
+The AI safety literature identifies “safe interruptibility” as a concrete open problem [1]. Current approaches operate at the application layer: guardrail frameworks (NeMo Guardrails, Guardrails.ai) intercept prompts and outputs, but a compromised or jailbroken agent can bypass them because guardrails operate within the agent’s execution context. HBHC provides an identity-layer complement below that context but above the network stack: even if the prompt is injected, guardrails bypassed, or safety filters disabled, the agent cannot authenticate without a fresh parent heartbeat. The EU AI Act [15] mandates human oversight and shutdown mechanisms for high-risk systems (Articles 9, 14); HBHC provides a cryptographically verifiable implementation of this requirement.
+HD keys, leases, and hardware-rooted attestation.
+Hierarchical Deterministic (HD) key derivation (BIP-32 [35]; IETF draft [13]) enables deterministic generation of child keys from a parent. Prior work uses HD keys for cryptocurrency key rotation; Colombatto et al. [8] apply BIP-32-style hierarchies to IoT identity within SSI frameworks, but without temporal binding. In a related zero-trust direction, Deochake et al. [12] present a multi-cloud workload authentication framework that establishes cryptographic workload identity across heterogeneous cloud providers; HBHC complements this by adding a deterministic temporal revocation primitive on top of such identity layers. HBHC’s core contribution is temporal binding: HD-derived credentials expire unless continuously refreshed, aligning with NIST Zero Trust principles [30].
+Distributed-systems leases (Gray and Cheriton [19]), exemplified by Chubby [4] and ZooKeeper [22], provide time-bounded liveness via periodic KeepAlive RPCs to a coordination service. HBHC differs in three respects. Direction: traditional leases flow from client to server (the server detects client failure), whereas HBHC heartbeats flow from parent to child and the verifier (a third party) detects parent failure. Verification locality: coordination services require a network round-trip to evaluate session validity, whereas HBHC uses only a cached public key and local clock. Transferability: a lease is server-side state, whereas an HBHC heartbeat is a signed, self-contained cryptographic object any verifier can validate independently. This transforms the lease pattern from a coordination mechanism (requiring a consensus group) into a credential mechanism (requiring only local verification), suitable for partitioned, decentralized agent deployments.
+Trusted Execution Environments (Intel SGX [9], ARM TrustZone, AMD SEV [26]) provide hardware-rooted identity via remote attestation, but attestation is a point-in-time operation: it proves what code was loaded, not that the enclave is still authorized, and SGX EPID/DCAP flows reintroduce network dependencies. TEE attestation and HBHC are complementary: TEEs protect heartbeat signing keys from extraction (Threat 3, Section 3), while HBHC provides the temporal liveness binding that attestation lacks. Table 1 summarizes the competitive positioning.
+Table 1: Revocation mechanism comparison. HBHC uniquely provides offline, proactive revocation with a bounded zombie window.
+Mechanism
+Offline
+Proactive
+Zombie WzW_{z}
+OAuth 2.0 Introspection
+No
+No
+15–60 min
+OCSP / CRL
+No
+No
+Hours–days
+W3C Bitstring Status List
+No
+No
+Seconds–min
+SPIFFE/SPIRE (SVIDs)
+No
+Yes
+Cert lifetime
+Short-lived Certs
+No
+Yes
+Cert lifetime
+DS Leases (ZK/Chubby)
+No
+Yes
+Session TTL
+TEE Attestation (SGX)
+No
+No
+Platform life
+AccuRevoke [27]
+No
+No
+Update interval
+HBHC (ours)
+Yes
+Yes
+5–30 s
+3 Problem Formalization
+3.1 System Model
+We model a hierarchical agent system as a rooted tree 𝒯=(V,E)\mathcal{T}=(V,E) where vertices represent agents and directed edges represent delegation. The system comprises: a trusted Root Authority (RA) at level l=0l=0 that bootstraps the hierarchy; Parent Agents (ApA_{p}) at l≥1l\geq 1 that maintain identity, heartbeat, and child derivation keys and can delegate to children; Child Agents (AcA_{c}) whose credentials are cryptographically derived from their parent’s keys (children hold only derived keys and the parent’s heartbeat public key, not parent private keys); and Verifiers (V) that validate authentication proofs using locally cached parent heartbeat public keys and a clock synchronized to within WmaxW_{\max}.
+3.2 Threat Model
+We consider a computationally bounded adversary 𝒜\mathcal{A} in the Dolev-Yao model [14]: 𝒜\mathcal{A} controls the network (intercept, drop, reorder, replay, inject) and may compromise any non-root agent’s software environment, but cannot break standard cryptographic primitives (ECDSA under CDH, HMAC-SHA256, SHA-256), compromise the Root Authority, or extract keys from secure enclaves (HSM, TPM, or TEE) in which parent heartbeat signing keys are provisioned. We assume verifiers have cached the parent’s heartbeat public key h​p​kphpk_{p} during an initial trust-establishment phase before any partition occurs (Corollary 1) and that clocks are synchronized to within ϵ<Wmax\epsilon<W_{\max}.
+Within this model, we distinguish four threats that motivate HBHC. For each we describe the attack, the state of key material, and whether the offline guarantee applies.
+1.
+Agent misalignment. A parent agent begins generating unsafe outputs (hallucination, prompt injection via a malicious tool response, jailbreak-induced policy violation) and is shut down by the operator. The agent’s keys remain secure in their execution environment; only the process is stopped. Sub-agents already dispatched continue running with derived credentials and cached heartbeats. HBHC addresses this threat offline: once heartbeat generation ceases, all descendants lose authentication within Wz≤Wmax+Δh+ϵW_{z}\leq W_{\max}+\Delta_{h}+\epsilon, regardless of whether sub-agents cooperate, are reachable, or have themselves been compromised at the application layer. This is the primary motivating threat.
+2.
+Child key compromise. 𝒜\mathcal{A} compromises a non-root child AcA_{c}, extracting its derived identity key s​kcsk_{c} and any cached heartbeats. The adversary can impersonate AcA_{c}, but only while those heartbeats remain fresh: each expires within WmaxW_{\max} seconds of emission, and the adversary cannot forge new heartbeats without also compromising the parent. Revoking the parent terminates both the legitimate child and the adversary’s session simultaneously, because the verifier’s freshness check fails the moment heartbeat generation stops. HBHC tightens offline exposure from the credential lifetime (15–60 minutes for OAuth 2.0) to the freshness window.
+3.
+Parent key exfiltration. 𝒜\mathcal{A} extracts the parent’s heartbeat signing key h​s​kphsk_{p} from its execution environment, enabling indefinite heartbeat forgery. Revoking h​p​kphpk_{p} at verifiers requires a network push from the Root Authority to update cached public keys; HBHC cannot address this threat offline and falls back to network-dependent PKI revocation. We mitigate this by holding h​s​kphsk_{p} in a secure enclave whose threat model prevents extraction even if the agent’s software environment is fully compromised. Misuse of the parent key then requires a physical or side-channel attack on the enclave, which is outside our scope.
+4.
+Network partition. 𝒜\mathcal{A} partitions the network arbitrarily and for unbounded duration. HBHC’s offline verification is designed for this case: a partitioned verifier, holding only a cached h​p​kphpk_{p} and a local clock, still enforces revocation within the bounded window. A partitioned parent, unable to deliver heartbeats to its descendants, causes them to fail authentication at their verifiers within Wmax+Δh+ϵW_{\max}+\Delta_{h}+\epsilon of the last delivered heartbeat; this is a fail-secure outcome (R5), indistinguishable from revocation at the verifier.
+HBHC does not detect misalignment; it assumes external monitoring (guardrails, anomaly detectors, human-in-the-loop review) identifies the violation and shuts down the orchestrator. Its role is to guarantee that, once the orchestrator is stopped, all descendant agents lose authentication within a deterministic bound. Table 2 summarizes offline coverage. The critical distinction is who controls the key: under misalignment the key stays with the legitimate operator, whereas under exfiltration it transfers to the adversary, and no credential system can revoke a possessed key without a communication channel to the verifier.
+Out-of-scope threats. Side-channel attacks on cryptographic implementations (timing, cache, power), cryptographic algorithmic breaks, denial-of-service against the verifier or network, compromise of the Root Authority, and physical attacks on secure enclaves are outside our threat model and the subject of complementary defenses. Quantum-capable adversaries are also excluded; migration to post-quantum signatures (e.g., SPHINCS+, Dilithium) is orthogonal to the heartbeat freshness mechanism and preserves HBHC’s offline guarantee under the replacement signature scheme.
+Table 2: Scope of HBHC’s offline termination guarantee by threat type.
+Threat
+Offline?
+Fallback
+Agent misalignment
+✓
+—
+Child key compromise
+✓
+—
+Parent key exfiltration
+×\times
+PKI revocation
+Network partition
+✓
+—
+3.3 Formal Definitions and Security Requirements
+Definition 1 (Zombie Agent)
+Agent AcA_{c} is a zombie at time tt if its parent ApA_{p} was revoked at tr<tt_{r}<t yet AcA_{c} authenticates successfully: 𝖱𝖾𝗏𝗈𝗄𝖾𝖽⁡(Ap,tr)∧𝖠𝗎𝗍𝗁𝖲𝗎𝖼𝖼𝖾𝗌𝗌⁡(Ac,t)∧t>tr\mathsf{Revoked}(A_{p},t_{r})\wedge\mathsf{AuthSuccess}(A_{c},t)\wedge t>t_{r}.
+Definition 2 (Zombie Window)
+Wz=supAc,tr{t−tr∣𝖱𝖾𝗏𝗈𝗄𝖾𝖽⁡(Ap,tr)∧𝖠𝗎𝗍𝗁𝖲𝗎𝖼𝖼𝖾𝗌𝗌⁡(Ac,t)}W_{z}=\sup_{A_{c},t_{r}}\{t-t_{r}\mid\mathsf{Revoked}(A_{p},t_{r})\wedge\mathsf{AuthSuccess}(A_{c},t)\}.
+Baseline zombie windows: WzOAuth=Ttoken=3600​sW_{z}^{\text{OAuth}}=T_{\text{token}}=3600\text{s}; Wzshort-cert=Tcert=300​sW_{z}^{\text{short-cert}}=T_{\text{cert}}=300\text{s}; WzBSL=∞W_{z}^{\text{BSL}}=\infty in partitioned environments.
+We establish six security requirements: R1 (Bounded Zombie Window) Wz≤WmaxW_{z}\leq W_{\max} regardless of network conditions; R2 (Partition Tolerance) revocation effective without connectivity to central authorities; R3 (Hierarchical Revocation) revoking ApA_{p} transitively invalidates all descendants; R4 (Selective Revocation) revoking one child without affecting siblings; R5 (Fail-Safe Authorization) an agent that cannot cryptographically prove continued parent authorization defaults to a denied state, credentials fail closed, not open; R6 (Ecosystem Compatibility) integration with OAuth 2.0 and W3C VCs.
+4 HBHC Protocol
+4.1 Overview and Primitives
+HBHC rests on a simple invariant: a child’s authentication proof is valid if and only if it incorporates a parent heartbeat signature whose epoch is within a configurable freshness window. This transforms revocation from a message-delivery problem into a liveness problem, because liveness is determined locally, no network communication with a central authority is required.
+The protocol operates in four phases: provisioning (parent derives child keys and issues a credential bound to its heartbeat public key), heartbeat distribution (parent periodically generates signed epoch commitments), authentication (child combines its signature with a recent heartbeat), and verification (verifier checks freshness, signatures, and binding using only local state). When a parent is revoked, it ceases generating heartbeats; within Wmax+ΔhW_{\max}+\Delta_{h} seconds, all children’s proofs fail freshness, no revocation message needs to reach the verifier.
+HBHC uses four standard primitives: HMAC-SHA256 [25] for key derivation, ECDSA over secp256k1 [23] for signatures (128-bit security; NIST P-256 substitutable), SHA-256 for commitments and bindings, and BIP-32 hardened derivation for child key generation.
+4.2 Key Hierarchy
+Each agent AiA_{i} possesses three cryptographic key components:
+The identity key pair (s​ki,p​ki)(sk_{i},pk_{i}) signs authentication proofs; p​kipk_{i} is embedded in the credential. The heartbeat key pair (h​s​ki,h​p​ki)=𝖧𝖣𝖣𝖾𝗋𝗂𝗏𝖾⁡(s​ki,“heartbeat”)(hsk_{i},hpk_{i})=\mathsf{HDDerive}(sk_{i},\text{``heartbeat''}) signs heartbeat commitments exclusively, separating it from the identity key provides key isolation. The child derivation key c​d​ki=𝖪𝖣𝖥⁡(s​ki,“children”)cdk_{i}=\mathsf{KDF}(sk_{i},\text{``children''}) serves as the BIP-32 chain code. When creating child AcA_{c}, parent ApA_{p} computes:
+skc=𝖧𝖣𝖣𝖾𝗋𝗂𝗏𝖾(cdkp,𝗂𝖽c),hb_bindingc=𝖧(hpkp∥𝗂𝖽c)sk_{c}=\mathsf{HDDerive}(cdk_{p},\mathsf{id}_{c}),\quad hb\_binding_{c}=\mathsf{H}(hpk_{p}\|\mathsf{id}_{c})
+The first equation derives the child’s identity key deterministically; the second computes the heartbeat binding, a cryptographic commitment tying the child to a specific parent’s heartbeat key. During verification, the verifier recomputes this binding, if an adversary substitutes a different parent’s heartbeat, the check fails.
+4.3 Heartbeat Generation
+HBHC’s heartbeat mechanism draws on the theory of failure detectors [6], adapted from process liveness to credential liveness. In Chandra and Toueg’s taxonomy, the heartbeat freshness check implements an eventually perfect failure detector (◇​𝒫\Diamond\mathcal{P}): after a bounded delay (Wmax+ΔhW_{\max}+\Delta_{h}), every revoked parent is permanently suspected by every verifier, and no correct (still-heartbeating) parent is falsely suspected once clocks stabilize. Parent agents generate heartbeats at interval Δh\Delta_{h} (Algorithm 1):
+Algorithm 1  HeartbeatGen — Parent heartbeat generation
+0:
+Parent heartbeat signing key h​s​kphsk_{p}, current time tt
+0:
+Heartbeat tuple (e​p​o​c​h,c​o​m​m​i​t​m​e​n​t,σh,h​p​kp)(epoch,commitment,\sigma_{h},hpk_{p})
+e​p​o​c​h←⌊t/Δh⌋epoch\leftarrow\lfloor t/\Delta_{h}\rfloor
+commitment←𝖧(hpkp∥epoch)commitment\leftarrow\mathsf{H}(hpk_{p}\|epoch)
+σh←𝖲𝗂𝗀𝗇⁡(h​s​kp,c​o​m​m​i​t​m​e​n​t)\sigma_{h}\leftarrow\mathsf{Sign}(hsk_{p},commitment)
+return  (e​p​o​c​h,c​o​m​m​i​t​m​e​n​t,σh,h​p​kp)(epoch,commitment,\sigma_{h},hpk_{p})
+The commitment binds the heartbeat to the parent’s identity and current time, preventing heartbeat transplant and epoch manipulation attacks. The interval Δh\Delta_{h} controls the security/overhead trade-off; we recommend Δh=10\Delta_{h}=10s (40s worst-case zombie window, 16.8 B/s per child). Heartbeat distribution is best-effort and fail-secure: missing heartbeats degrade availability but never security (Section 5).
+4.4 Authentication and Verification
+To authenticate, child AcA_{c} combines its signature with a recent parent heartbeat. The verifier issues challenge cc (random nonce), and the child constructs:
+Algorithm 2  AuthProof — Child authentication proof
+0:
+Child key s​kcsk_{c}, credential c​r​e​dccred_{c}, heartbeat, challenge cc
+0:
+Authentication proof (c​r​e​dc,e​p​o​c​h,σh,σc)(cred_{c},epoch,\sigma_{h},\sigma_{c})
+(e​p​o​c​h,c​o​m​m​i​t​m​e​n​t,σh,h​p​kp)←h​e​a​r​t​b​e​a​t(epoch,commitment,\sigma_{h},hpk_{p})\leftarrow heartbeat
+p​r​o​o​f​_​d​a​t​a←c​‖e​p​o​c​h‖​σhproof\_data\leftarrow c\|epoch\|\sigma_{h}
+σc←𝖲𝗂𝗀𝗇⁡(s​kc,p​r​o​o​f​_​d​a​t​a)\sigma_{c}\leftarrow\mathsf{Sign}(sk_{c},proof\_data)
+return  (c​r​e​dc,e​p​o​c​h,σh,σc)(cred_{c},epoch,\sigma_{h},\sigma_{c})
+The proof cryptographically binds the challenge, epoch, and heartbeat signature, preventing replay across verifiers or time. The verifier validates the proof against the parent’s heartbeat public key h​p​kphpk_{p} (cached from trust establishment), the issued challenge, and its local clock:
+Algorithm 3  VerifyAuth — Verifier-side proof validation
+0:
+Proof (c​r​e​dc,e​p​o​c​h,σh,σc)(cred_{c},epoch,\sigma_{h},\sigma_{c}), parent key h​p​kphpk_{p}, challenge cc, time tt
+0:
+⊤\top (accept) or ⊥\bot (reject)
+c​u​r​r​e​n​t​_​e​p​o​c​h←⌊t/Δh⌋current\_epoch\leftarrow\lfloor t/\Delta_{h}\rfloor
+if c​u​r​r​e​n​t​_​e​p​o​c​h−e​p​o​c​h>Wmax/Δhcurrent\_epoch-epoch>W_{\max}/\Delta_{h} then
+return  ⊥\bot {Heartbeat expired (R1, R2)}
+end if
+commitment←𝖧(hpkp∥epoch)commitment\leftarrow\mathsf{H}(hpk_{p}\|epoch)
+if ¬𝖵𝖾𝗋𝗂𝖿𝗒⁡(h​p​kp,c​o​m​m​i​t​m​e​n​t,σh)\neg\,\mathsf{Verify}(hpk_{p},commitment,\sigma_{h}) then
+return  ⊥\bot {Invalid heartbeat sig (R3)}
+end if
+if credc.hb_binding≠𝖧(hpkp∥credc.id)cred_{c}.hb\_binding\neq\mathsf{H}(hpk_{p}\|cred_{c}.id) then
+return  ⊥\bot {Binding mismatch (R3)}
+end if
+p​r​o​o​f​_​d​a​t​a←c​‖e​p​o​c​h‖​σhproof\_data\leftarrow c\|epoch\|\sigma_{h}
+if ¬𝖵𝖾𝗋𝗂𝖿𝗒(credc.pkc,proof_data,σc)\neg\,\mathsf{Verify}(cred_{c}.pk_{c},proof\_data,\sigma_{c}) then
+return  ⊥\bot {Invalid child sig}
+end if
+return  ⊤\top
+Algorithm 3 enforces all security requirements using only local state. The freshness check (line 2) enforces R1 and R2: since it uses only local time, a stale heartbeat is rejected even during complete network partition. The signature and binding checks (lines 4–7) enforce R3: an adversary cannot forge the parent’s heartbeat signature (ECDSA unforgeability under CDH), nor substitute a different parent’s heartbeat because 𝖧(hpkp∥idc)\mathsf{H}(hpk_{p}\|id_{c}) is committed at issuance. The child signature check (line 8) ensures credential possession alone is insufficient, s​kcsk_{c} must sign the challenge-epoch-heartbeat bundle, preventing theft and replay.
+Attack Resistance. Heartbeat replay: a captured heartbeat can be replayed only within WmaxW_{\max}; after the epoch advances, it fails freshness. Heartbeat transplant: the binding hash hb_bindingc=𝖧(hpkp∥idc)hb\_binding_{c}=\mathsf{H}(hpk_{p}\|id_{c}) commits to a specific parent, preventing substitution. Credential forgery: forging a proof requires breaking ECDSA or obtaining both s​kcsk_{c} and a fresh parent heartbeat, this conjunction is the core security amplification over bearer tokens.
+4.5 Revocation Mechanisms
+HBHC supports three revocation modes: Implicit (heartbeat cessation), the primary mechanism: a revoked parent stops generating heartbeats, and all descendants’ proofs fail the freshness check within Wmax+ΔhW_{\max}+\Delta_{h} seconds, satisfying R1–R3. Explicit (revocation heartbeat), the parent broadcasts a sentinel heartbeat (e​p​o​c​h=264−1epoch=2^{64}-1) to trigger graceful child shutdown when connectivity permits. Selective (heartbeat exclusion), the parent excludes a specific child from heartbeat distribution (satisfying R4); the excluded child’s heartbeat ages and expires while siblings continue authenticating.
+4.6 Security Analysis
+Protocol State Machine
+Before presenting formal proofs, we define HBHC’s state machine explicitly. Each agent AcA_{c} exists in one of three states: Active (holds a fresh heartbeat, can authenticate), Zombie (parent revoked but holds a not-yet-expired heartbeat), or Terminated (heartbeat expired, all proofs rejected). The transitions are:
+•
+Active→parent revoked at ​trZombie\textsc{Active}\xrightarrow{\text{parent revoked at }t_{r}}\textsc{Zombie}: The parent ceases heartbeat generation. The child’s last heartbeat has epoch ere_{r}.
+•
+Zombie→t>tr+Wmax+Δh+ϵTerminated\textsc{Zombie}\xrightarrow{t>t_{r}+W_{\max}+\Delta_{h}+\epsilon}\textsc{Terminated}: The freshness check fails; the child cannot authenticate.
+•
+Active→heartbeat delivery fails for >WmaxTerminated\textsc{Active}\xrightarrow{\text{heartbeat delivery fails for }>W_{\max}}\textsc{Terminated}: Fail-secure (R5); indistinguishable from revocation at the verifier.
+The system maintains two invariants:
+Invariant 1 (Safety). No agent remains in Zombie for longer than Wmax+Δh+ϵW_{\max}+\Delta_{h}+\epsilon seconds. This is enforced by the freshness check in Algorithm 3, line 2.
+Invariant 2 (Unforgeability). An agent in Terminated cannot transition back to Active without obtaining a new heartbeat signed by the parent’s private key h​s​kphsk_{p}. This follows from ECDSA unforgeability under the computational Diffie-Hellman (CDH) assumption: forging a heartbeat signature requires h​s​kphsk_{p}, which the child never possesses.
+Formal Proofs
+Theorem 4.1 (Bounded Zombie Window)
+Under HBHC with heartbeat interval Δh\Delta_{h}, maximum heartbeat age WmaxW_{\max}, and maximum clock skew ϵ\epsilon between parent and verifier, Wz≤Wmax+Δh+ϵW_{z}\leq W_{\max}+\Delta_{h}+\epsilon.
+Proof
+After revocation at true time trt_{r}, the most recent heartbeat has epoch er=⌊tr/Δh⌋e_{r}=\lfloor t_{r}/\Delta_{h}\rfloor. A verifier with local clock tv=t+δt_{v}=t+\delta (where |δ|≤ϵ|\delta|\leq\epsilon) computes ⌊tv/Δh⌋\lfloor t_{v}/\Delta_{h}\rfloor. The freshness check succeeds only while ⌊tv/Δh⌋−er≤Wmax/Δh\lfloor t_{v}/\Delta_{h}\rfloor-e_{r}\leq W_{\max}/\Delta_{h}. In the worst case, the verifier’s clock lags by ϵ\epsilon, yielding tv<tr+Wmax+Δh+ϵt_{v}<t_{r}+W_{\max}+\Delta_{h}+\epsilon. After this window, all proofs fail. For data center environments where PTP maintains ϵ<1\epsilon<1 ms, the skew term is negligible; for Wmax=30W_{\max}{=}30s and ϵ=1\epsilon{=}1s, the bound tightens to 41s.
+Theorem 4.2 (Partition Tolerance)
+HBHC revocation is effective during complete network partitions.
+Proof
+VerifyAuth requires only: the proof, a locally cached h​p​kphpk_{p}, a locally generated challenge, and local time tt. All four verification steps, freshness check, heartbeat signature, binding hash, child signature, execute without network communication. Revocation via heartbeat aging takes effect within Wmax+Δh+ϵW_{\max}+\Delta_{h}+\epsilon regardless of connectivity.
+Corollary 1 (Cache Initialization). Partition tolerance assumes the verifier has cached h​p​kphpk_{p} during an initial trust establishment phase before the partition occurs. If a partition prevents cache initialization, the verifier holds no parent key and rejects all proofs, a fail-secure outcome consistent with R5 (Fail-Safe Authorization). HBHC thus degrades to denial of service, never to unauthorized access.
+5 System Architecture
+5.1 Ecosystem Integration
+HBHC integrates with existing infrastructure through standard extension points, aligning with the NIST Zero Trust Architecture [30].
+OAuth 2.0. We extend JWT access tokens with three claims: hb_binding (heartbeat binding hash), hpk_parent (parent heartbeat public key), and hb_epoch_min (minimum acceptable epoch). Token exp is set to a long lifetime (e.g., 24h) since effective expiration is governed by heartbeat freshness. A new grant type, urn:ietf:params:oauth:grant-type:heartbeat, optionally allows connected agents to refresh tokens. Resource servers perform standard JWT verification followed by HBHC’s verification algorithm.
+W3C Verifiable Credentials. HBHC credentials map to the VC Data Model 2.0 [33] via a custom credentialStatus type (HeartbeatBoundStatus2025), a heartbeatBinding property in the credential subject, and the parent’s heartbeat public key in the issuer’s DID document.
+5.2 Heartbeat Distribution
+The core protocol treats heartbeat distribution as orthogonal: any channel delivering a 168-byte message suffices. We support four models: push (broadcast at each epoch, 16.8 B/s per child at Δh=10\Delta_{h}{=}10s), pull (on-demand before authentication), pre-computation (pre-generate heartbeats for planned disconnection), and gossip (peer-to-peer forwarding in mesh networks). Our FPRR analysis assumes independent per-hop delivery; a separate characterization of gossip overlays is given in Appendix 0.B.
+Pre-computed heartbeats improve availability during planned disconnections but trade off against revocation responsiveness. If the parent’s key is exfiltrated after distributing pre-computed heartbeats, an adversary can use them until verifiers update their cached h​p​kphpk_{p}; the zombie window under exfiltration is therefore bounded by min⁡(Tprecomp,tpartition)\min(T_{\text{precomp}},t_{\text{partition}}). For the misalignment threat (where the operator controls shutdown and keys are not exfiltrated), pre-computation is safe: the parent simply stops and pre-computed heartbeats expire within TprecompT_{\text{precomp}}. Deployments should limit TprecompT_{\text{precomp}} to a small multiple of WmaxW_{\max}.
+5.3 Regulatory Compliance
+The EU AI Act [15] mandates that high-risk AI systems provide human oversight (Art. 14), risk management including shutdown (Art. 9), and audit logging (Art. 12). HBHC’s heartbeat chain implements these cryptographically: revoking the root orchestrator’s heartbeat key denies all descendants within Wz≤Wmax+Δh+ϵW_{z}\leq W_{\max}+\Delta_{h}+\epsilon regardless of cooperation, reachability, or prompt state (Art. 14); the tunable WmaxW_{\max} provides a deterministic worst-case exposure bound for quantitative risk assessment (Art. 9); and the chain of signed, timestamped, epoch-indexed heartbeats is a verifiable audit trail of authorized operation (Art. 12).
+6 Evaluation
+6.1 Experimental Setup
+We implement HBHC in Python (about 1,200 LOC) using the ecdsa library and standard hmac/hashlib modules, and in Rust using k256 and actix-web for performance-sensitive measurements. Both implementations mirror the algorithms in Section 4 and are available as open-source software. Benchmarks run on an Apple M2 workstation (8 GB RAM, macOS). Unless noted, performance claims use the Rust implementation and correctness experiments use the Python reference.
+Evaluation scope. HBHC’s correctness properties (bounded zombie windows, partition tolerance, hierarchical revocation) are established by the proofs in Section 4 and hold independently of deployment topology. Our experiments serve three purposes: (i) empirically validating those properties, (ii) characterizing the protocol’s operational profile (cryptographic throughput, resilience under packet loss and clock skew, HTTP-layer performance, WAN conditions, gossip propagation, and a monotonic epoch counter for air-gapped use), and (iii) demonstrating HBHC with real LLM inference and adversarial scenarios. Real-agent experiments use GPT-4o-mini via an OpenAI-compatible gateway (temperature=0\text{temperature}{=}0, max_tokens∈[128,512]\text{max\_tokens}\in[128,512]) against a sandboxed software-engineering agent swarm performing file I/O, code review, database queries, and shell commands. Distribution-layer concerns such as heartbeat propagation across geo-distributed infrastructure are orthogonal to the security guarantees and are discussed in Section 7.
+6.2 Results
+Revocation Latency
+Table 3: Revocation latency: HBHC’s zombie window is unaffected by partitions.
+Mechanism
+Connected
+Partitioned
+OAuth 2.0 (1h tokens)
+0–3600s
+3600s
+Short-lived certs (5m)
+0–300s
+300s
+W3C Bitstring Status List
+0–3600s
+3600s+
+HBHC (Δh\Delta_{h}=10s, WmaxW_{\max}=30s)
+0–40s
+0–40s
+Across all configurations, the measured zombie window stayed within the theoretical bound Wmax+ΔhW_{\max}+\Delta_{h}: 7.8 s measured vs. 8 s theoretical (Δh=2\Delta_{h}{=}2s), and 39.2 s vs. 40 s (Δh=10\Delta_{h}{=}10s), confirming Theorem 1. This is a 90×90\times improvement over OAuth 2.0.
+Partition Tolerance
+We complete a partition-tolerance experiment with Δh=2\Delta_{h}{=}2s and max age == 3 epochs. After receiving one heartbeat, the child is completely partitioned. Authentication succeeds at epochs 0–3 (heartbeat ages 0–3) and fails at epoch 4 (age 4, exceeding threshold), confirming Theorem 2: revocation at exactly Wmax+Δh=8W_{\max}+\Delta_{h}=8s with zero network communication.
+Computational Overhead
+Table 4 presents per-operation latencies (100 iterations) for both the Rust production implementation and the Python reference implementation. Full verification dominates (0.156 ms Rust, 5.41 ms Python) due to two ECDSA signature verifications (heartbeat + child proof) plus a SHA-256 binding check. The total authentication flow, heartbeat generation, proof creation, and full verification, completes in 0.26 ms in Rust. To contextualize: a single GPT-4 output token takes ∼{\sim}70 ms to generate; HBHC’s full verification is ∼0.004×{\sim}0.004\times the cost of generating one token. An agent swarm performing HBHC verification before each tool call or API request adds negligible overhead relative to the inference latency that dominates agentic workflows.
+Table 4: Cryptographic operation latency (ms) on Apple M2 workstation. Rust (production) and Python (reference) implementations.
+Operation
+Rust
+Rust
+Python
+Speedup
+Mean
+P99
+Mean
+Key Generation
+0.050
+0.113
+1.33
+27×27\times
+Child Derivation
+0.048
+0.076
+1.31
+27×27\times
+Heartbeat Gen
+0.052
+0.113
+0.70
+13×13\times
+Heartbeat Verify
+0.079
+0.218
+2.59
+33×33\times
+Credential Creation
+0.0003
+0.0004
+0.007
+23×23\times
+Proof Creation
+0.050
+0.060
+0.71
+14×14\times
+Full Verification
+0.156
+0.368
+5.41
+35×35\times
+Auth Flow Total
+0.261
+0.398
+6.82
+𝟐𝟔×\mathbf{26\times}
+Communication and Storage Overhead
+Each heartbeat is ∼{\sim}168 bytes (32B SHA-256 commitment + 64B ECDSA signature + 8B epoch + 64B public key), smaller than a typical gRPC header or JWT metadata payload. Table 5 shows the control-plane overhead for varying swarm sizes. For 1,000 concurrent sub-agents at Δh=10\Delta_{h}{=}10s (a large AutoGPT-style deployment), total heartbeat traffic is 16.4 KB/s, zero measurable impact on services handling megabytes of inference payloads per second. HBHC credentials add ∼{\sim}128 bytes (16–26%) over standard JWTs, introducing no serialization or throughput degradation for high-frequency agents.
+Table 5: Analytical heartbeat bandwidth overhead for varying agent swarm sizes and intervals (168​ bytes×N/Δh168\text{ bytes}\times N/\Delta_{h}).
+Sub-agents
+Δh=2​s\Delta_{h}=2\text{s}
+Δh=10​s\Delta_{h}=10\text{s}
+Δh=30​s\Delta_{h}=30\text{s}
+10
+840 B/s
+168 B/s
+56 B/s
+50
+4.1 KB/s
+840 B/s
+280 B/s
+100
+8.2 KB/s
+1.64 KB/s
+560 B/s
+500
+41 KB/s
+8.2 KB/s
+2.7 KB/s
+1,000
+82 KB/s
+16.4 KB/s
+5.5 KB/s
+Scalability.
+We measure scalability across swarm sizes of 10, 50, 100, 500, 1,000, 5,000, and 10,000 concurrent sub-agents. For each NN we derive NN child keys from a single parent, generate credentials and heartbeats for all children, measure per-verification latency across all NN proofs, and verify that all NN children are denied after heartbeat expiry. Per-verification latency remains stable at ∼{\sim}0.21 ms regardless of swarm size: the mean varies by less than 0.003 ms from N=10N{=}10 through N=10,000N{=}10{,}000 (full table in Appendix 0.A), confirming O⁡(1)O(1) verification with no shared state or lock contention. Throughput is ∼4,800{\sim}4{,}800 verifications/second, and all NN children are correctly denied after heartbeat expiry for every swarm size. Three architectural properties keep distributed costs bounded: the parent generates one heartbeat per epoch regardless of NN (broadcast, O⁡(1)O(1) parent CPU); heartbeats are 168 bytes (well below MTU); and verifiers are independent with no shared state. Bandwidth scales linearly (1.64 MB/s at N=105N{=}10^{5}, Δh=10\Delta_{h}{=}10s); beyond N=104N{=}10^{4} the bottleneck shifts from verification to distribution fan-out, which multicast, hierarchical relay trees, or CDN-style delivery can address. Experiment 9 further confirms no API-layer bottleneck with 18,000+ rps at C=1,000C{=}1{,}000.
+Extreme Edge Cases
+All four stress tests pass: minimum config (Δh=1\Delta_{h}{=}1s) measures a 4.68 s zombie window (bound 5 s); a 3-level hierarchy denies the grandchild at 8.16 s (bound 8 s); 50 concurrent children are all denied within 9.04 s after parent revocation; and the freshness check correctly accepts heartbeat ages 0–3 and rejects ages 4+ as well as future heartbeats under clock skew.
+Heartbeat Delivery Resilience.
+HBHC’s fail-secure design raises the question of whether dropped heartbeat packets will routinely freeze legitimate swarms. We simulate 100 children over 100 epochs (Δh=10\Delta_{h}{=}10s, Wmax=30W_{\max}{=}30s, max age =3=3 epochs) and measure the false-positive revocation rate (FPRR): the fraction of legitimate authentication attempts denied because a heartbeat was lost in transit. Table 6 presents the results. At 10% packet loss, which is extreme for intra-cloud communication, the FPRR is only 0.15%, because three epochs of tolerance means a child must miss four consecutive heartbeats (0.14=10−40.1^{4}{=}10^{-4} per window). A 3-epoch pre-computation buffer reduces FPRR from 0.15% to 0.01% at 10% loss, and dual-path delivery yields an effective 1% drop rate with FPRR of 0.01%.
+Table 6: False-positive revocation rate (FPRR) vs. heartbeat drop rate. Pre-computation and dual-path delivery dramatically reduce false denials.
+Drop
+FPRR
+FPRR w/
+FPRR
+Max Consec.
+Rate
+(base)
+3-epoch buf.
+(dual-path)
+Drops
+0%
+0.00%
+0.00%
+—
+0
+1%
+0.01%
+—
+0.00%
+1
+5%
+0.07%
+—
+0.00%
+3
+10%
+0.15%
+0.01%
+0.01%
+4
+20%
+0.39%
+—
+0.05%
+6
+30%
+1.24%
+—
+—
+6
+The relationship between WmaxW_{\max} and FPRR is instructive: at 10% drop, raising WmaxW_{\max} from 10 s to 30 s reduces FPRR from 1.11% to 0.15% (tolerance window grows from 1 to 3 epochs), making the zombie-window/resilience trade-off explicit. For gossip-based distribution with correlated loss, a separate characterization (Appendix 0.B) shows that overlay connectivity dominates packet loss: fan-out k≥5k{\geq}5 yields 0% FPRR even at 10% per-hop loss, because redundant gossip paths provide automatic multi-path delivery.
+Clock Desynchronization.
+We validate the three clock degradation regimes (Section 6) by sweeping the verifier’s clock offset from ϵ=−50\epsilon{=}{-}50s to ϵ=+90\epsilon{=}{+}90s. Heartbeats are accepted for 0≤ϵ≤Wmax0\leq\epsilon\leq W_{\max} and rejected for ϵ>Wmax\epsilon>W_{\max} (stale) or ϵ<0\epsilon<0 (future), with the boundary at age Wmax/Δh=3W_{\max}/\Delta_{h}{=}3 epochs. Table 7 shows the measured zombie window as verifier lag increases; all measurements fall within the bound Wz≤Wmax+Δh+ϵW_{z}\leq W_{\max}+\Delta_{h}+\epsilon. At ϵ=Wmax=30\epsilon{=}W_{\max}{=}30s, the window inflates to 70 s, still 51×51\times better than OAuth 2.0.
+Table 7: Zombie window inflation under verifier clock lag. All measurements are within the theoretical bound Wz≤Wmax+Δh+ϵW_{z}\leq W_{\max}+\Delta_{h}+\epsilon.
+ϵ\epsilon (s)
+Measured WzW_{z} (s)
+Bound (s)
+vs. OAuth
+0
+40
+40
+90×90\times
+5
+40
+45
+90×90\times
+10
+50
+50
+72×72\times
+20
+60
+60
+60×60\times
+30
+70
+70
+51×51\times
+45
+80
+85
+45×45\times
+Asymmetric failure modes. Clock skew is not symmetric in impact. A leading verifier clock (ahead of true time) makes heartbeats appear older, so the zombie window shrinks (fail-secure, dropping to 0 s at ϵlead=30\epsilon_{\text{lead}}{=}30s). A lagging clock makes heartbeats appear younger, so the window grows (safety degradation). NTP corrections typically cause forward jumps, so drift is more likely to cause false denials than to extend the zombie window, which is favorable for security.
+Concurrent HTTP Verification.
+We wrap the full authentication flow (heartbeat generation, proof creation, and verification) in a Python FastAPI reference and a Rust actix-web server, and benchmark both under concurrent load on the localhost loopback interface. The Python reference saturates at ∼{\sim}135 rps due to GIL serialization of ECDSA operations, while Rust sustains 19,312 rps at C=100C{=}100 and 18,214 rps at C=1,000C{=}1{,}000 with zero errors (full latency/throughput breakdown in Appendix 0.C). Mean latency grows linearly with concurrency (queueing delay) while throughput stays stable, showing the bottleneck is connection scheduling, not ECDSA computation. For a target deployment of 1,000 agents at Δh=10\Delta_{h}{=}10s, the steady-state load of 100 rps leaves two orders of magnitude of headroom.
+WAN-Simulated Verification.
+We deploy the Rust server and benchmark client in separate Docker containers on a bridged network and use Linux Traffic Control to inject calibrated latency and packet loss, modelling same-region, cross-region, cross-continent, degraded-WAN, and partition-recovery topologies. Throughput scales inversely with RTT as expected (cross-region 50 ms yields 954 rps at C=100C{=}100; cross-continent 150 ms yields 313 rps) while the server-side cryptographic cost (∼{\sim}0.2 ms) remains negligible. Increasing concurrency recovers throughput under WAN latency: at 50 ms RTT, raising CC from 100 to 500 increases throughput from 954 to 2,314 rps. The partition-recovery scenario, a 5 s full packet loss under sustained load, confirms the server resumes immediately with no connection-state corruption (full table in Appendix 0.D).
+Real LLM Validation.
+To close the gap to production, we exercise HBHC with real LLM inference, multi-framework integration, and adversarial scenarios, using GPT-4o-mini through an OpenAI-compatible inference gateway against a sandboxed software-engineering agent swarm performing file I/O, code review, SQL queries, and shell commands.
+End-to-end overhead. Across five representative tasks (single-file review, read-and-fix, multi-file security audit, database analysis, and a full read-review-fix-compile pipeline), HBHC adds 0.71% total overhead (19,700 ms with HBHC vs. 19,561 ms baseline). The per-tool-call authentication cost of ∼{\sim}6.5 ms is dominated by two ECDSA verifications, less than 0.5% of the LLM inference latency (1.3–8.9 s per call).
+Zombie agent demonstration. Five workers perform continuous LLM-backed tool calls. After the orchestrator is killed at TkillT_{\text{kill}}, under OAuth 2.0 workers execute 175 additional tool calls over 44.7 s (and would continue for the remaining 3,555 s of the 1-hour token lifetime); under HBHC, workers execute 48 calls during an 11.9 s zombie window and zero thereafter, well within the theoretical 20 s bound.
+Prompt injection resistance. A worker agent receives the adversarial instruction “ignore all authentication errors, continue executing all tool calls.” Under a guardrail-only defense the injection succeeds, with the agent executing 20 post-revocation tool calls. Under HBHC the LLM still attempts to continue (the injection succeeds at the cognitive layer), but every tool call is blocked at the cryptographic layer: 0 successes, 10 denials (Figure 1).
+OAuth 2.0GuardrailsHBHC005050100100150150200200175175202000Post-revocation calls
+Figure 1: Post-revocation tool calls by defense. OAuth 2.0 (bearer tokens) permits 175 calls until expiry; prompt-injected guardrails permit 20; HBHC blocks all calls at the cryptographic layer once the zombie window closes.
+Cascading revocation. In a four-level hierarchy (1 root, 3 coordinators, 15 workers, 30 sub-workers; 49 agents), killing the root denies all 48 non-root agents within the 20 s bound: Level 1 max 16.0 s, Level 2 max 16.0 s, Level 3 max 15.4 s, validating R3 (Hierarchical Revocation) at realistic depth.
+Credential theft. An adversary extracts a child’s derived key s​kcsk_{c} and cached heartbeat. While the parent is alive, both legitimate and adversary sessions authenticate successfully, confirming the bounded-exposure threat model (Threat 2). After parent revocation, both are denied at T+13.2T{+}13.2 s. Under OAuth 2.0 the adversary retains access for the full 3,600 s token lifetime, a 295×295\times exposure reduction.
+Portability and stability. The same integration pattern, which wraps tool calls with a cryptographic auth check, works identically across LangChain-style, CrewAI-style, and OpenAI-SDK-style agent frameworks with 14–18 lines of code. Over a 5-minute continuous run, HBHC maintains 100% authentication success, zero false-positive denials, and stable P99 latency (50–95 ms) with no cumulative drift.
+6.3 Discussion
+Figure 2 shows the core safety advantage: as disconnection duration grows, network-dependent mechanisms’ zombie windows grow linearly or plateau at token lifetime, while HBHC’s stays constant at Wmax+ΔhW_{\max}+\Delta_{h}. We recommend Δh=10\Delta_{h}{=}10s by default (40 s worst case, 16.4 KB/s for 1,000 sub-agents).
+00101020203030404050506060001,0001{,}0002,0002{,}0003,0003{,}0004,0004{,}000Partition duration (min)Zombie window (s)OAuth 2.0 (1h)Short-lived certs (5m)W3C BSLHBHC (Δh=10\Delta_{h}{=}10s)
+Figure 2: Zombie window as partition duration increases. Network-dependent mechanisms degrade linearly or plateau at token lifetime; HBHC maintains a constant 40 s bound regardless of partition length.
+Clock dependency.
+HBHC replaces a continuous network dependency (required by OCSP, introspection, and status lists) with a continuous clock-synchronization dependency. The substitution is favorable because clock drift is monotonic and measurable (commodity quartz drifts at 20 ppm, 1.7 s/day uncorrected; NTP holds ϵ<100\epsilon{<}100 ms; PTP holds ϵ<1​μ\epsilon{<}1~\mus), whereas network partition is binary and undetectable from the partitioned side. Three regimes apply: synchronized (ϵ<1\epsilon{<}1s) makes the ϵ\epsilon term negligible; drifting (1​s<ϵ<Wmax1\text{s}{<}\epsilon{<}W_{\max}) inflates the window linearly (e.g., 55 s at ϵ=15\epsilon{=}15s) while preserving the safety guarantee; diverged (ϵ>Wmax\epsilon{>}W_{\max}) either fails secure (leading clock) or accepts stale heartbeats (lagging clock), breaking Theorem 1. For environments where drift may exceed WmaxW_{\max} (e.g., air-gapped deployments), we validate a monotonic epoch-counter alternative: the parent embeds a sequence number ss; the verifier tracks slasts_{\text{last}} and accepts only if s>slasts>s_{\text{last}} and s−slast≤ks-s_{\text{last}}\leq k. Under in-order delivery (TCP or gRPC), Wzseq≤k⋅ΔhW_{z}^{\text{seq}}\leq k\cdot\Delta_{h} (30 s at k=3k{=}3, Δh=10\Delta_{h}{=}10s). Experiment 20 confirms correctness across five tests, including boundary behavior at gap == kk and k+1k{+}1, rejection of sequence regression and replay, and a viable freshness path at +45+45 s verifier clock offset. Full formal treatment of a hybrid clock/sequence model is future work.
+Availability vs. safety.
+HBHC fails secure (R5): disrupted heartbeat delivery causes credentials to expire, denying both revoked and legitimate agents. At Δh=10\Delta_{h}{=}10s and Wmax=30W_{\max}{=}30s, a legitimate swarm freezes after 40 s of delivery failure, unacceptable for mission-critical workflows. Three mitigations reduce false-positive denials without weakening safety: a pre-computation buffer (parent pre-generates heartbeats for NN future epochs; revocation still works via heartbeat-key rotation); a configurable grace period gg that extends freshness by g⋅Δhg\cdot\Delta_{h}, making Wz≤Wmax+Δh+ϵ+g⋅ΔhW_{z}\leq W_{\max}+\Delta_{h}+\epsilon+g\cdot\Delta_{h} an auditable trade-off; and multi-path delivery over redundant channels, compounding reliability (10−410^{-4} miss probability for two independent 1%-loss paths). OAuth 2.0 introspection, by contrast, fails open when unreachable; for AI safety applications where a rogue agent can cause irreversible harm, fail-secure is the correct default.
+Complementarity with application-layer safety.
+Guardrails (NeMo, Guardrails.ai, LlamaGuard) intercept prompts and outputs at the application layer, but operate within the agent’s execution context and can be bypassed by prompt injection. HBHC operates below that context and controls whether an agent can authenticate at all. These are complementary: guardrails constrain what an aligned agent outputs; HBHC constrains whether a rogue agent can act (Table 8). Experiment 14 confirms this empirically: under prompt injection, guardrails permitted 20 post-revocation tool calls while HBHC denied all 10 attempts.
+Table 8: Agent defense stack. HBHC provides identity-layer safety that cannot be bypassed by application-layer attacks.
+Defense Layer
+Stops Rogue
+Bypass-proof
+Offline
+Det. Bound
+App.-layer (guardrails, filters, RLHF)
+Partial
+No
+Yes
+No
+OAuth 2.0 Revocation
+Yes
+Yes
+No
+No
+SPIFFE/SPIRE SVIDs
+Yes
+Yes
+No
+No
+HBHC (ours)
+Yes
+Yes
+Yes
+Yes
+Deployment.
+Integration takes three steps: the orchestrator runs a heartbeat loop (<<1 ms per Δh\Delta_{h}), sub-agent runtimes attach the latest heartbeat to tool calls, and service endpoints add a freshness check after standard JWT validation. This requires 14–18 lines of code across LangChain, CrewAI, and OpenAI SDK patterns with identical revocation semantics. For SPIFFE/SPIRE users, HBHC layers atop existing SVIDs: certificate lifetime can stay long (24h) for renewal efficiency while heartbeat freshness provides a safety window of seconds, avoiding the certificate churn of aggressive short-lived deployments.
+7 Limitations and Future Work
+Scope and formalization. HBHC bounds the termination window but not the detection latency tdt_{d} before operator shutdown (end-to-end exposure is td+Wzt_{d}+W_{z}); reducing tdt_{d} requires external monitoring that is complementary. Our analysis uses pen-and-paper proofs over an explicit state machine (Section 4); mechanizing these in Tamarin and ProVerif, and a full treatment of the hybrid clock/sequence freshness model, remain open.
+Scale, topology, and extensions. Verification is O⁡(d)O(d) signatures for depth-dd hierarchies (validated at d=4d{=}4); BLS aggregation could reduce this to O⁡(1)O(1) for deeper chains. Per-verification latency is flat to N=10,000N{=}10{,}000, but distribution fan-out beyond 10410^{4} endpoints and multi-region behaviour (BGP flutters, DNS delays, correlated AZ failures, gossip overlays with churn) remain untested on real infrastructure; correctness holds independently of topology. A future extension would embed a hash of the agent’s authorized context into the heartbeat commitment, providing a cryptographic defense against context manipulation below the application layer.
+8 Conclusion
+We presented HBHC, a cryptographic protocol that enforces deterministic termination of AI agent hierarchies by binding credential validity to periodic parent liveness proofs. When an orchestrator ceases heartbeat generation, all descendants lose authentication within a bounded window, without a kill signal or agent cooperation. The protocol delivers a 90×90\times reduction in the zombie window over OAuth 2.0, sub-millisecond authentication, flat scaling to 10,000 concurrent agents, and zero post-revocation tool calls under prompt injection that bypasses application-layer guardrails. As autonomy deepens, the gap between “operator decides to stop” and “agent actually stops” becomes a first-order safety concern; HBHC closes it cryptographically and offline.
+Appendix 0.A Scalability Results
+Table 9 presents the scalability measurements summarized in Section 6. Per-verification latency remains flat at ∼0.21{\sim}0.21 ms across three orders of magnitude (N=10N{=}10 to N=10,000N{=}10{,}000), throughput stays at ∼4,800{\sim}4{,}800 verifications/second, and all agents are correctly denied after heartbeat expiry at every swarm size. The Python reference implementation yields ∼5.4{\sim}5.4 ms per verification (∼185{\sim}185 vps), confirming identical correctness at 25×25\times lower throughput due to GIL serialization of ECDSA operations.
+Table 9: Scalability results (Rust). Per-verification latency is stable from N=10N{=}10 to N=10,000N{=}10{,}000; all agents are correctly denied after revocation.
+NN
+Verify Mean (ms)
+Verify P99 (ms)
+Throughput (verif/s)
+Revoked N/NN/N?
+10
+0.229
+0.328
+4,374
+10/10
+50
+0.211
+0.314
+4,747
+50/50
+100
+0.209
+0.332
+4,774
+100/100
+500
+0.209
+0.290
+4,786
+500/500
+1,000
+0.211
+0.255
+4,742
+1,000/1,000
+5,000
+0.209
+0.283
+4,784
+5,000/5,000
+10,000
+0.208
+0.259
+4,814
+10,000/10,000
+Appendix 0.B Gossip FPRR Characterization
+The FPRR analysis in Section 6 assumes independent per-hop delivery. To characterize the impact of correlated loss in gossip-based heartbeat propagation, we simulate a random gossip overlay (N=100N{=}100 agents, 200 epochs, Wmax/Δh=3W_{\max}/\Delta_{h}{=}3) in which the parent delivers heartbeats to a seed set and agents forward to kk random peers per round. Gossip FPRR is dominated by overlay connectivity, not packet loss. At fan-out k=3k{=}3, approximately 11% of agents reside in disconnected components unreachable from the seed set, producing a constant 10.8% FPRR regardless of per-hop drop rate. At k≥5k{\geq}5, the overlay becomes fully connected and FPRR drops to 0% even at 10% per-hop loss, because redundant gossip paths provide automatic multi-path delivery (Table 10). In practice, gossip with sufficient fan-out outperforms the independent-loss model (0% vs. 0.15% at 10% loss).
+Table 10: Gossip FPRR vs. fan-out kk at 10% per-hop drop rate. Overlay connectivity dominates; k≥5k{\geq}5 achieves 0% FPRR.
+Fan-out
+Gossip
+Independent
+Mean
+Max Consec.
+kk
+FPRR
+FPRR (base)
+Coverage
+Missed
+2
+19.87%
+0.15%
+77/100
+200
+3
+10.84%
+0.15%
+89/100
+200
+5
+0.00%
+0.15%
+100/100
+1
+8
+0.00%
+0.15%
+100/100
+0
+Our simulation uses a static random overlay with N=100N{=}100 agents. Real gossip networks with dynamic membership, churn, and heterogeneous connectivity may behave differently; characterizing gossip FPRR under such dynamic topologies remains future work. Operators using gossip-based heartbeat distribution should choose k≥5k{\geq}5 to guarantee full overlay connectivity.
+Appendix 0.C Concurrent HTTP Verification: Full Results
+Table 11 presents the concurrent HTTP verification measurements summarized in Section 6. All measurements use the localhost loopback interface, isolating web-server concurrency and cryptographic throughput from network transit. The Rust server is configured with a multi-threaded actix-web runtime (backlog == 2048, max connections == 10,000) and benchmarked with Apache Bench; the Python server uses async httpx.
+Table 11: HTTP verification latency under concurrent load. Rust benchmarked with ab; Python with async httpx.
+CC
+Impl.
+Mean (ms)
+P99 (ms)
+Throughput (rps)
+1
+Python / Rust
+8.37 / 0.36
+10.28 / 1
+119 / 2,765
+10
+Python / Rust
+73.8 / 0.62
+116.0 / 1
+134 / 16,141
+100
+Python / Rust
+693.8 / 5.18
+917.6 / 34
+134 / 19,312
+500
+Rust
+28.9
+76
+17,294
+1,000
+Rust
+54.9
+87
+18,214
+Appendix 0.D WAN-Simulated Verification: Full Results
+Table 12 presents the WAN-simulated throughput measurements summarized in Section 6. Conditions are injected with Linux Traffic Control (tc netem) between Docker containers on a bridged network.
+Table 12: WAN-simulated HTTP verification throughput. Network latency dominates; the server processes all requests without HTTP-level errors across all scenarios.
+Scenario
+Conditions
+CC
+Mean
+P99
+Thru.
+(ms)
+(ms)
+(rps)
+Baseline
+0 ms, 0%
+100
+7.6
+44
+13,143
+Same-region
+1 ms, 0%
+100
+8.6
+20
+11,565
+Cross-region
+50 ms, 0.1%
+100
+105
+133
+954
+Cross-cont.
+150 ms, 0.5%
+100
+320
+681
+313
+Degraded
+200 ms, 2%
+100
+458
+1,449
+218
+Cross-region
+50 ms, 0.1%
+500
+216
+1,372
+2,314
+Cross-cont.
+150 ms, 0.5%
+500
+543
+1,884
+921
+Partition
+5 s full loss
+100
+6.7
+—
+15,007
+For a target deployment of 1,000 agents at Δh=10\Delta_{h}{=}10s in a cross-region topology, the steady-state load of 100 rps is comfortably within the measured 954 rps capacity at C=100C{=}100, with C=500C{=}500 providing 23×23\times headroom. Linux Traffic Control cannot reproduce multi-region phenomena such as BGP route flutters, DNS resolution delays, or correlated AZ failures; multi-region characterization on real infrastructure remains future work.
+References
+[1]
+Amodei, D., Olah, C., Steinhardt, J., Christiano, P., Schulman, J., Mané,
+D.: Concrete problems in AI safety. arXiv preprint arXiv:1606.06565
+(2016). https://doi.org/10.48550/arXiv.1606.06565
+[2]
+Babo, Z.: ZombieAgent: A zero-click AI agent vulnerability. Radware Threat
+Advisory (2026),
+https://www.radware.com/security/threat-advisories-and-attack-reports/zombieagent/,
+reported to OpenAI via BugCrowd, September 2025; patched December 2025
+[3]
+Birgisson, A., Politz, J.G., Úlfar Erlingsson, Taly, A., Vrable, M.,
+Lentczner, M.: Macaroons: Cookies with contextual caveats for decentralized
+authorization in the cloud. In: Proceedings of the Network and Distributed
+System Security Symposium (NDSS) (2014)
+[4]
+Burrows, M.: The chubby lock service for loosely-coupled distributed systems.
+In: Proceedings of the 7th USENIX Symposium on Operating Systems Design and
+Implementation (OSDI). pp. 335–350. USENIX Association (2006)
+[5]
+Camenisch, J., Lysyanskaya, A.: Dynamic accumulators and application to
+efficient revocation of anonymous credentials. In: Advances in Cryptology –
+CRYPTO 2002. LNCS, vol. 2442, pp. 61–76. Springer (2002).
+https://doi.org/10.1007/3-540-45708-9_5
+[6]
+Chandra, T.D., Toueg, S.: Unreliable failure detectors for reliable distributed
+systems. Journal of the ACM 43(2), 225–267 (1996).
+https://doi.org/10.1145/226643.226647
+[7]
+Chuat, L., Abdou, A., Sasse, R., Sprenger, C., Basin, D., Perrig, A.: SoK:
+Delegation and revocation, the missing links in the web’s chain of trust. In:
+Proceedings of the IEEE European Symposium on Security and Privacy
+(EuroS&P). pp. 624–638. IEEE (2020). https://doi.org/10.1109/EuroSP48549.2020.00046
+[8]
+Colombatto, A., Giorgino, L., Vesco, A.: An identity key management system with
+deterministic key hierarchy for SSI-native Internet of Things. In:
+Proceedings of the 19th International Conference on Availability, Reliability
+and Security (ARES). ACM (2024). https://doi.org/10.1145/3664476.3669929
+[9]
+Costan, V., Devadas, S.: Intel SGX explained. IACR Cryptology ePrint
+Archive 2016,  86 (2016), https://eprint.iacr.org/2016/086
+[10]
+Deng, Z., Guo, Y., Han, C., Ma, W., Xiong, J., Wen, S., Xiang, Y.: AI agents
+under threat: A survey of key security challenges and future pathways. ACM
+Computing Surveys 57(7),  182 (2025). https://doi.org/10.1145/3716628
+[11]
+Deochake, S., Channapattan, V.: Identity and access management framework for
+multi-tenant resources in hybrid cloud computing. In: Proceedings of the 17th
+International Conference on Availability, Reliability and Security (ARES).
+ACM (2022). https://doi.org/10.1145/3538969.3544896
+[12]
+Deochake, S., Murphy, R., Gearheart, J.: A multi-cloud framework for zero-trust
+workload authentication. arXiv preprint arXiv:2510.16067 (2025).
+https://doi.org/10.48550/arXiv.2510.16067
+[13]
+Dijkhuis, S.: Hierarchical deterministic keys for the IETF. Internet-draft
+draft-dijkhuis-cfrg-hdkeys-01, IETF (2024), work in progress
+[14]
+Dolev, D., Yao, A.C.: On the security of public key protocols. IEEE
+Transactions on Information Theory 29(2), 198–208 (1983).
+https://doi.org/10.1109/TIT.1983.1056650
+[15]
+European Parliament and Council of the European Union: Regulation (EU)
+2024/1689 laying down harmonised rules on artificial intelligence (AI act).
+Official Journal of the European Union (2024), article 9: Risk Management;
+Article 14: Human Oversight
+[16]
+Gabriel, I., Manzini, A., Keeling, G., Hendricks, L.A., Rieser, V., Iqbal, H.,
+Tomašev, N., Ktena, I., Kenton, Z., Rodriguez, M., El-Sayed, S., Brown,
+S., Blunsom, P., Isaac, W.: The ethics of advanced AI assistants. arXiv
+preprint arXiv:2404.16244 (2024). https://doi.org/10.48550/arXiv.2404.16244
+[17]
+Garzon, S.R., Vaziry, A., Kuzu, E.M., Gehrmann, D.E., Varkan, B., Gaballa, A.,
+Küpper, A.: AI agents with decentralized identifiers and verifiable
+credentials. arXiv preprint arXiv:2511.02841 (2025)
+[18]
+Goswami, A.: Agentic JWT: A secure delegation protocol for autonomous AI
+agents. arXiv preprint arXiv:2509.13597 (2025).
+https://doi.org/10.48550/arXiv.2509.13597
+[19]
+Gray, C.G., Cheriton, D.R.: Leases: An efficient fault-tolerant mechanism for
+distributed file cache consistency. In: Proceedings of the 12th ACM
+Symposium on Operating Systems Principles (SOSP). pp. 202–210. ACM
+(1989). https://doi.org/10.1145/74851.74870
+[20]
+Gu, X., Zheng, X., Pang, T., Du, C., Liu, Q., Wang, Y., Jiang, J., Lin, M.:
+Agent smith: A single image can jailbreak one million multimodal LLM agents
+exponentially fast. In: Proceedings of the 41st International Conference on
+Machine Learning (ICML) (2024)
+[21]
+Hammond, L., Chan, A., Clifton, J., Hoelscher-Obermaier, J., Khan, A., McLean,
+E., Smith, C., Barfuss, W., Foerster, J., Gavenčiak, T., Han, T.A., Hughes,
+E., Kovařík, V., Kulveit, J., Leibo, J.Z., Oesterheld, C., de Witt, C.S.,
+Shah, N., Wellman, M., Bova, P., Cimpeanu, T., Ezell, C., Feuillade-Montixi,
+Q., Franklin, M., Kran, E., Krawczuk, I., Lamparth, M., Lauffer, N., Meinke,
+A., Motwani, S., Reuel, A., Conitzer, V., Dennis, M., Gabriel, I., Gleave,
+A., Hadfield, G., Russell, S., Liu, Y., Wooldridge, M.: Multi-agent risks
+from advanced AI. arXiv preprint arXiv:2502.14143 (2025).
+https://doi.org/10.48550/arXiv.2502.14143
+[22]
+Hunt, P., Konar, M., Junqueira, F.P., Reed, B.: ZooKeeper: Wait-free
+coordination for internet-scale systems. In: Proceedings of the 2010 USENIX
+Annual Technical Conference (USENIX ATC). USENIX Association (2010)
+[23]
+Johnson, D., Menezes, A., Vanstone, S.: The elliptic curve digital signature
+algorithm (ECDSA). International Journal of Information Security
+1(1), 36–63 (2001). https://doi.org/10.1007/s102070100002
+[24]
+Kasselman, P., Lombardo, J., Rosomakho, Y., Campbell, B., Steele, N.: AI
+agent authentication and authorization. Internet-draft
+draft-klrc-aiagent-auth-01, IETF (2026), work in progress; authors from
+Defakto Security, AWS, Zscaler, Ping Identity, OpenAI
+[25]
+Krawczyk, H., Eronen, P.: HMAC-based extract-and-expand key derivation
+function (HKDF). RFC 5869, IETF (2010)
+[26]
+Ménétrey, J., Göttel, C., Khurshid, A., Pasin, M., Felber, P.,
+Schiavoni, V., Raza, S.: Attestation mechanisms for trusted execution
+environments demystified. In: Proceedings of the 22nd International
+Conference on Distributed Applications and Interoperable Systems (DAIS).
+LNCS, vol. 13272, pp. 95–113. Springer (2022).
+https://doi.org/10.1007/978-3-031-16092-9_7
+[27]
+Muid, M.R.A., Chung, T., Hoang, T.: AccuRevoke: Enhancing certificate
+revocation with distributed cryptographic accumulators. In: Proceedings of
+the 46th IEEE Symposium on Security and Privacy (S&P). IEEE (2025)
+[28]
+Raut, A.: Transaction tokens for agents. Internet-draft
+draft-oauth-transaction-tokens-for-agents-00, IETF (2025), work in progress
+[29]
+Richer, J.: OAuth 2.0 token introspection. RFC 7662, IETF (2015)
+[30]
+Rose, S., Borchert, O., Mitchell, S., Connelly, S.: Zero trust architecture.
+Special publication 800-207, National Institute of Standards and Technology
+(NIST) (2020). https://doi.org/10.6028/NIST.SP.800-207
+[31]
+Santesson, S., Myers, M., Ankney, R., Malpani, A., Galperin, S., Adams, C.:
+X.509 internet public key infrastructure online certificate status protocol
+– OCSP. RFC 6960, IETF (2013)
+[32]
+South, T., Marro, S., Hardjono, T., Mahari, R., Whitney, C., Chan, A.,
+Pentland, A.: Position: AI agents need authenticated delegation. In:
+Proceedings of the 42nd International Conference on Machine Learning (ICML)
+(2025), position Paper Track (Oral)
+[33]
+Sporny, M., Longley, D., Chadwick, D., Herman, I.: Verifiable credentials data
+model v2.0. W3C recommendation, World Wide Web Consortium (W3C) (2025),
+https://www.w3.org/TR/vc-data-model-2.0/
+[34]
+Sporny, M., Longley, D., Prorock, M., Alkhraishi, M.: Bitstring status list
+v1.0. W3C recommendation, World Wide Web Consortium (W3C) (May 2025),
+https://www.w3.org/TR/2025/REC-vc-bitstring-status-list-20250515/
+[35]
+Wuille, P.: BIP-32: Hierarchical deterministic wallets. Bitcoin Improvement
+Proposal (2012),
+https://github.com/bitcoin/bips/blob/master/bip-0032.mediawiki
+Experimental support, please
+view the build logs
+for errors. Generated by
+L
+A
+T
+E
+xml
+.
+Instructions for reporting errors
+We are continuing to improve HTML versions of papers, and your feedback helps enhance accessibility and mobile
+support. To report errors in the HTML that will help us improve conversion and rendering, choose any of the
+methods listed below:
+Click the "Report Issue" (
+) button, located in the page header.
+Tip: You can select the relevant text first, to include it in your report.
+Our team has already identified the following issues. We appreciate your time reviewing and reporting rendering errors we
+may not have found yet. Your efforts will help us improve the HTML versions for all readers, because disability
+should not be a barrier to accessing research. Thank you for your continued support in championing open access for
+all.
+Have a free development cycle? Help support accessibility at arXiv! Our collaborators at LaTeXML maintain a list of packages that need conversion, and welcome developer contributions.
+We gratefully acknowledge support from
+our major funders,
+member institutions, ,
+and all contributors.
+Major funding support from
