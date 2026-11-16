@@ -1,0 +1,1976 @@
+PDF PAGE 1
+Nonmalleable Information Flow Control: Technical Report
+Ethan Cecchetti
+Department of Computer Science
+Cornell University
+ethan@cs.cornell.edu
+Andrey C. Myers
+Department of Computer Science
+Cornell University
+andru@cs.cornell.edu
+Owen Arden
+Department of Computer Science
+University of California, Santa Cruz∗
+owen@soe.ucsc.edu
+Abstract
+Noninterference is a popular semantic security condition because it offers strong end-to-end guaran-
+tees, it is inherently compositional, and it can be enforced using a simple security type system. Unfor-
+tunately, it is too restrictive for real systems. Mechanisms for downgrading information are needed to
+capture real-world security requirements, but downgrading eliminates the strong compositional security
+guarantees of noninterference.
+We introduce nonmalleable information ﬂow, a new formal security condition that generalizes non-
+interference to permit controlled downgrading of both conﬁdentiality and integrity. While previous work
+on robust declassiﬁcation prevents adversaries from exploiting the downgrading of conﬁdentiality, our
+key insight is transparent endorsement, a mechanism for downgrading integrity while defending against
+adversarial exploitation. Robust declassiﬁcation appeared to break the duality of conﬁdentiality and
+integrity by making conﬁdentiality depend on integrity, but transparent endorsement makes integrity de-
+pend on conﬁdentiality, restoring this duality. We show how to extend a security-typed programming
+language with transparent endorsement and prove that this static type system enforces nonmalleable
+information ﬂow, a new security property that subsumes robust declassiﬁcation and transparent endorse-
+ment. Finally, we describe an implementation of this type system in the context of Flame, a ﬂow-limited
+authorization plugin for the Glasgow Haskell Compiler.
+1 Introduction
+An ongoing foundational challenge for computer security is to discover rigorous—yet sufﬁciently ﬂexible—
+ways to specify what it means for a computing system to be secure. Such security conditions should be
+extensional, meaning that they are based on the externally observable behavior of the system rather than
+on unobservable details of its implementation. To allow security enforcement mechanisms to scale to large
+systems, a security condition should also be compositional, so that secure subsystems remain secure when
+combined into a larger system.
+Noninterference, along with many variants [18, 34], has been a popular security condition precisely
+because it is both extensional and compositional. Noninterference forbids all ﬂows of information from
+“high” to “low”, or more generally, ﬂows of information that violate a lattice policy [13].
+∗Work done while at Harvard University
+1
+arXiv:1708.08596v2  [cs.CR]  31 Aug 2017
+
+PDF PAGE 2
+Unfortunately, noninterference is also known to be too restrictive for most real systems, which need
+ﬁne-grained control over when and how information ﬂows. Consequently, most implementations of infor-
+mation ﬂow control introduce downgrading mechanisms to allow information to ﬂow contrary to the lattice
+policy. Downgrading conﬁdentiality is called declassiﬁcation, and downgrading integrity—that is, treating
+information as more trustworthy than information that has inﬂuenced it—is known as endorsement [46].
+Once downgrading is permitted, noninterference is lost. The natural question is whether downgrading
+can nevertheless be constrained to guarantee that systems still satisfy some meaningful, extensional, and
+compositional security conditions. This paper shows how to constrain the use of both declassiﬁcation and
+endorsement in a way that ensures such a security condition holds.
+Starting with the work of Biba [7], integrity has often been viewed as dual to conﬁdentiality. Over
+time, that simple duality has eroded. In particular, work on robust declassiﬁcation [6, 10, 26, 45, 46] has
+shown that in the presence of declassiﬁcation, conﬁdentiality depends on integrity. It is dangerous to give
+the adversary the ability to inﬂuence declassiﬁcation, either by affecting the data that is declassiﬁed or by
+affecting the decision to perform declassiﬁcation. By preventing such inﬂuence, robust declassiﬁcation stops
+the adversary from laundering conﬁdential data through existing declassiﬁcation operations. Operationally,
+languages prevent laundering by restricting declassiﬁcation to high integrity program points. Robust declas-
+siﬁcation can be enforced using a modular type system and is therefore compositional.
+This paper introduces a new security condition, transparent endorsement, which is dual to robust de-
+classiﬁcation: it controls endorsement by using conﬁdentiality to limit the possible relaxations of integrity.
+Transparent endorsement prevents an agent from endorsing information that the provider of the information
+could not have seen. Such endorsement is dangerous because it permits the provider to affect ﬂows from
+the endorser’s own secret information into trusted information. This restriction on endorsement enforces an
+often-implicit justiﬁcation for endorsing untrusted inputs in high-integrity, conﬁdential computation (e.g.,
+a password checker): low-integrity inputs chosen by an attacker should be chosen without knowledge of
+secret information.
+A similar connection between the conﬁdentiality and integrity of information arises in cryptographic
+settings. A malleable encryption scheme is one where a ciphertext encrypting one value can be transformed
+into a ciphertext encrypting a related value. While sometimes malleability is intentional (e.g., homomor-
+phic encryption), an attacker’s ability to generate ciphertexts makes malleable encryption insufﬁcient to
+authenticate messages or validate integrity. Nonmalleable encryption schemes [14] prevent such attacks. In
+this paper, we combine robust declassiﬁcation and transparent endorsement into a new security condition,
+nonmalleable information ﬂow, which prevents analogous attacks in an information ﬂow control setting.
+The contributions of this paper are as follows:
+• We give example programs showing the need for a security condition that controls endorsement of
+secret information.
+• We generalize robust declassiﬁcation to programs including complex data structures with heteroge-
+neously labeled data.
+• We identify transparent endorsement and nonmalleable information ﬂow , new extensional security
+conditions for programs including declassiﬁcation and endorsement.
+• We present a core language, NMIFC, which provably enforces robust declassiﬁcation, transparent
+endorsement, and nonmalleable information ﬂow.
+• We present the ﬁrst formulation of robust declassiﬁcation as a4-safety hyperproperty, and deﬁne two
+2
+
+PDF PAGE 3
+new 4-safety hyperproperties for transparent endorsement and nonmalleable information ﬂow, the ﬁrst
+time information security conditions have been characterized ask-safety hyperproperties withką 2.
+• We describe our implementation of NMIFC using Flame, a ﬂow-limited authorization library for
+Haskell and adapt an example of the Servant web application framework, accessible online at http:
+//memo.flow.limited.
+We organize the paper as follows. Section 2 provides examples of vulnerabilities in prior work. Section 3
+reviews relevant background. Section 4 introduces our approach for controlling dangerous endorsements,
+and Section 5 presents a syntax, semantics, and type system for NMIFC. Section 6 formalizes our security
+conditions and Section 7 restates them as hyperproperties. Section 8 discusses our Haskell implementation,
+Section 9 compares our approach to related work, and Section 10 concludes.
+2 Motivation
+To motivate the need for an additional security condition and give some intuition about transparent endorse-
+ment, we give three short examples. Each example shows code that type-checks under existing information-
+ﬂow type systems even though it contains insecure information ﬂows, which we are able to characterize in
+a new way.
+These examples use the notation of the ﬂow-limited authorization model (FLAM) [4], which offers an
+expressive way to state both information ﬂow restrictions and authorization policies. However, the problems
+observed in these examples are not speciﬁc to FLAM; they arise in all previous information-ﬂow models
+that support downgrading (e.g., [8, 15, 21, 25, 32, 42, 47]). The approach in this paper can be applied
+straightforwardly to the decentralized label model (DLM) [25], and with more effort, to DIFC models that
+are less similar to FLAM. While some previous models lack a notion of integrity, from our perspective they
+are even worse off, because they effectively allowunrestricted endorsement.
+In FLAM, principals and information ﬂow labels occupy the same space. Given a principal (or label)
+p, the notationpÑ denotes the conﬁdentiality projection ofp, whereas the notationpÐ denotes its integrity
+projection. Intuitively, pÑ represents the authority to decide where p’s secrets may ﬂow to, whereas pÐ
+represents the authority to decide where information trusted by p may ﬂow from. Robust declassiﬁcation
+ensures that the label pÑ can be removed via declassiﬁcation only in code that is trusted byp; that is, with
+integritypÐ.
+Information ﬂow policies provide a means to specify security requirements for a program, but not an
+enforcement mechanism. For example, conﬁdentiality policies might be implemented using encryption and
+integrity policies using digital signatures. Alternatively, hardware security mechanisms such as memory
+protection might be used to prevent untrusted processes from reading conﬁdential data. The following
+examples illustrate issues that would arise in many information ﬂow control systems, regardless of the
+enforcement mechanism.
+2.1 Fooling a password checker
+Password checkers are frequently used as an example of necessary and justiﬁable downgrading. However,
+incorrect downgrading can allow an attacker who does not know the password to authenticate anyway.
+Suppose there are two principals, a fully trusted principal T and an untrusted principal U. The following
+information ﬂows are then secure: UÑ Ď TÑ andTÐ Ď UÐ. Figure 1 shows in pseudo-code how we
+3
+
+PDF PAGE 4
+1 StringT password;
+2
+3 booleanT Ð check_password(StringT Ñ guess) {
+4 booleanT endorsed_guess = endorse(guess, T );
+5 booleanT result = (endorsed_guess == password);
+6 return declassify(result, TÐ);
+7 }
+Figure 1: A password checker with malleable information ﬂow
+A
+a_bid
+b_bid
+b_bid
+T
+a_bid
+b_bid
+Bids
+B
+a_bid
+b_bid
+a_bid
+T
+AÐ^pA^BqÑ
+pA^BqpA^Bq
+BÐ^pA^BqÑ
+pA^Bq pA^Bq
+open b_bid
+pA^BqÐ^pA_BqÑ
+open a_bid
+pA^BqÐ^pA_BqÑ
+Figure 2: Cheating in a sealed-bid auction. Without knowing Alice’s bid, Bob can always win by setting b bid :=
+a bid + 1
+might erroneously implement a password checker in a security-typed language like Jif [24]. Because this
+pseudo-code would satisfy the type system, it might appear to be secure.
+The argument guess has no integrity because it is supplied by an untrusted, possibly adversarial source.
+It is necessary to declassify the result of the function (at line 6) because the result indeed leaks a little
+information about the password. Robust declassiﬁcation, as enforced in Jif, demands that the untrusted
+guess be endorsed before it can inﬂuence information released by declassiﬁcation.
+Unfortunately, the check_password policy does not prevent faulty or malicious (but well-typed) code
+from supplying password directly as the argument, thereby allowing an attacker with no knowledge of the
+correct password to “authenticate.” Because guess is labeled as secret (TÑ), a ﬂow of information from
+password to guess looks secure to the type system, so this severe vulnerability could remain undetected.
+To ﬁx this we would need to makeguess less secret, but no prior work has deﬁned rules that would require
+this change. The true insecurity, however, lies on line 4, which erroneously treats sensitive information as if
+the attacker had constructed it. We can prevent this insecurity by outlawing such endorsements.
+2.2 Cheating in a sealed-bid auction
+Imagine that two principalsA andB (Alice and Bob) are engaging in a two-party sealed-bid auction admin-
+istered by an auctioneerT whom they both trust. Such an auction might be implemented using cryptographic
+commitments and may even simulateT without need of an actual third party. However, we abstractly spec-
+ify the information security requirements that such a scheme would aim to satisfy. Consider the following
+sketch of an auction protocol, illustrated in Figure 2:
+1. A sends her bid a_bid toT with label AÐ^pA^BqÑ. This label means a_bid is trusted only by
+those who trustA and can be viewed only if bothA andB agree to release it.
+4
+
+PDF PAGE 5
+2. T accepts a_bid from A and uses his authority to endorse the bid to label pA^BqÐ^pA^BqÑ
+(identically,A^B). The endorsement prevents any further unilateral modiﬁcation to the bid by A. T
+then broadcasts this endorsed a_bid to A and B. This broadcast corresponds to an assumption that
+network messages can be seen by all parties.
+3. B constructs b_bid with labelBÐ^pA^BqÑ and sends it toT .
+4. T endorses b_bid toA^B and broadcasts the result.
+5. T now uses its authority to declassify both bids and send them to all parties. Since both bids have high
+integrity, this declassiﬁcation is legal according to existing typing rules introduced to enforce (qualiﬁed)
+robust declassiﬁcation [4, 10, 26].
+Unfortunately, this protocol is subject to attacks analogous tomauling in malleable cryptographic schemes [14]:
+B can always win the auction with the minimal winning bid. In Step 3 nothing preventsB from constructing
+b_bid by adding 1 to a_bid, yielding a new bid with labelBÐ^pA^BqÑ (to modify the value,B must
+lower the value’s integrity asA did not authorize the modiﬁcation).
+Again an insecurity stems from erroneously endorsing overly secret information. In step 4,T should not
+endorse b_bid since it could be based on conﬁdential information inaccessible toB—in particular, a_bid.
+The problem can be ﬁxed by givingA’s bid the labelAÑ^AÐ (identically, justA), but existing information
+ﬂow systems impose no such requirement.
+2.3 Laundering secrets
+Wittbold and Johnson [43] present an interesting but insecure program:
+1 while (true) do {
+2 x = 0 rs x = 1; // generate secret probabilistically
+3 output x to H;
+4 input y from H; // implicit endorsement
+5 output x ‘ (y mod 2) to L
+6 }
+In this code, there are two external agents, H and L. Agent H is intended to have access to secret
+information, whereasL is not. The code generates a secret by assigning to the variablex a nondeterministic,
+secret value that is either 0 or 1. The choice of x is assumed not to be affected by the adversary. Its value is
+used as a one-time pad to conceal the secret low bit of variable y.
+Wittbold and Johnson observe that this code permits an adversary to launder one bit of another secret
+variable z by sending z‘x as the value read into y. The low bit of z is then the output toL.
+Let us consider this classic example from the viewpoint of a modern information-ﬂow type system
+that enforces robust declassiﬁcation. In order for this code to type-check, it must declassify the value
+x‘(y mod 2) . Since the attack depends on y being affected by adversarial input from H, secret input
+fromH must be low-integrity (that is, its label must be HÑ). But if it is low-integrity, this input (or the
+variable y) must be endorsed to allow the declassiﬁcation it inﬂuences. As in the previous two examples,
+the endorsement of high-conﬁdentiality information enables exploits.
+5
+
+PDF PAGE 6
+3 Background
+We explore nonmalleable information ﬂow in the context of a simpliﬁed version of FLAM [4], so we ﬁrst
+present some background. FLAM provides a uniﬁed model for reasoning about both information ﬂow
+and authorization. Unlike in previous models, principals and information ﬂow labels in FLAM are drawn
+from the same set L. The interpretation of a label as a principal is the least powerful principal trusted to
+enforce that label. The interpretation of a principal as a label is the strongest information security policy
+that principal is trusted to enforce. We refer to elements of L as principals or labels depending on whether
+we are talking about authorization or information ﬂow.
+Labels (and principals) have both conﬁdentiality and integrity aspects. A label (or principal) ℓ can be
+projected to capture just its conﬁdentiality (ℓÑ) and integrity (ℓÐ) aspects.
+The information ﬂow ordering Ď on labels (and principals) describes information ﬂows that are secure,
+in the direction of increasing conﬁdentiality and decreasing integrity. The orthogonal trust ordering ě on
+principals (and labels) corresponds to increasing trustedness and privilege: toward increasing conﬁdentiality
+and increasing integrity. We readℓ Ďℓ1 as “ℓ ﬂows to ℓ1”, meaningℓ1 speciﬁes a policy at least as restrictive
+asℓ does. We readp ěq as “p acts forq”, meaning thatq delegates top.
+The information ﬂow and the trust orderings each deﬁne a lattice overL, and these lattices lie intuitively
+at right angles to one another. The least trusted and least powerful principal is K, (that is, p ě K for all
+principalsp), and the most trusted and powerful principal is J (whereJ ě p for all p). We also assume
+there is a set of atomic principals like alice and bob that deﬁne their own delegations.
+Since the trust ordering deﬁnes a lattice, it has meet and join operations. Principal p^q is the least
+powerful principal that can act for both p andq; conversely,p_q can act for all principals that both p and
+q can act for. The least element in the information ﬂow ordering is JÐ, representing maximal integrity
+and minimal conﬁdentiality, whereas the greatest element isJÑ, representing minimal integrity and max-
+imal conﬁdentiality. The join and meet operators in the information ﬂow lattice are the usual \ and[,
+respectively.
+Any principal (label) can be expressed in a normal formpÑ^qÐ wherep andq are CNF formulas over
+atomic principals [4]. This normal form allows us to decompose decisions about lattice ordering (in either
+lattice) into separate questions regarding the integrity component (p) and the conﬁdentiality component (q).
+Lattice operations can be similarly decomposed.
+FLAM also introduces the concept of the voice of a label (principal) ℓ, written∇pℓq. Formally, for a
+normal-form label ℓ “ pÑ^qÐ, we deﬁne voice as follows: ∇ppÑ^qÐq ﬁ pÐ.1 A label’s voice
+represents the minimum integrity needed to securely declassify data constrained by that label, a restriction
+designed to enforce robust declassiﬁcation.
+The Flow-Limited Authorization Calculus (FLAC) [5] previously embedded a simpliﬁed version of the
+FLAM proof system into a core language for enforcing secure authorization and information ﬂow. FLAC
+is an extension of the Dependency Core Calculus (DCC) [1, 3] whose types contain FLAM labels. A
+computation is additionally associated with a program-counter label pc which tracks the inﬂuences on the
+control ﬂow and values that are not explicitly labeled.
+In this paper we take a similar approach: NMIFC enforces security policies by performing computation
+in a monadic context. As in FLAC, NMIFC includes a pc label. For an ordinary valuev, the monadic term
+pηℓvq signiﬁes that value with the information ﬂow label ℓ. If value v has typeτ, the termpηℓvq has type
+ℓ saysτ, capturing the conﬁdentiality and integrity of the information.
+1FLAM deﬁnes∇ppÑ^qÐq“ pÐ^qÐ, but our simpliﬁed deﬁnition is sufﬁcient for NMIFC. For clarity, the operator∇ is
+always applied to a projected principal.
+6
+
+PDF PAGE 7
+Unlike FLAC, NMIFC has no special support for dynamic delegation of authority. Atomic principals
+deﬁneL by statically delegating their authority to arbitrary conjunctions and disjunctions of other principals,
+and we include traditional declassiﬁcation and endorsement operations, decl and endorse. We leave to
+future work the integration of nonmalleable information ﬂow with secure dynamic delegation.
+4 Enforcing nonmalleability
+Multiple prior security-typed languages—both functional [5] and imperative [6, 10, 26]—aim to allow some
+form of secure downgrading. These languages place no restriction whatsoever on the conﬁdentiality of
+endorsed data or the context in which an endorsement occurs. Because of this permissiveness, all three
+insecure examples from Section 2 type-check in these languages.
+4.1 Robust declassiﬁcation
+Robust declassiﬁcation prevents adversaries from using declassiﬁcations in the program to release informa-
+tion that was not intended to be released. The adversary is assumed to be able to observe some state of
+the system, whose conﬁdentiality label is sufﬁciently low, and to modify some state of the system, whose
+integrity label is sufﬁciently low. Semantically, robust declassiﬁcation says that if the attacker is unable to
+learn a secret with one attack, no other attack will cause it to be revealed [26, 45]. The attacker has no con-
+trol over information release because all attacks are equally good. When applied to a decentralized system,
+robust declassiﬁcation means that for any principalp, other principals thatp does not trust cannot inﬂuence
+declassiﬁcation ofp’s secrets [10].
+To enforce robust declassiﬁcation, prior security-typed languages place integrity constraints on declassi-
+ﬁcation. The original work on FLAM enforces robust declassiﬁcation using the voice operator∇. However,
+when declassiﬁcation is expressed as a programming-language operation, as is more typical, it is convenient
+to deﬁne a new operator on labels, one that maps in the other direction, from integrity to conﬁdentiality.
+We deﬁne theview of a principal as the upper bound on the conﬁdentiality a label or context can enforce to
+securely endorse that label:
+Deﬁnition 1 (Principal view). Letℓ“ pÑ^qÐ be a FLAM label (principal) expressed in normal form.
+The view ofℓ, written ∆pℓq, is deﬁned as∆ppÑ^qÐq ﬁ qÑ.
+When the conﬁdentiality of a label ℓ lies above the view of its own integrity, a declassiﬁcation of that
+label may give adversaries the opportunity to subvert the declassiﬁcation to release information. Without
+enough integrity, an adversary might, for example, replace the information that is intended to be released
+via declassiﬁcation with some other secret.
+Figure 3 illustrates this idea graphically. It depicts the lattice of FLAM labels, which is a product lattice
+with two axes, conﬁdentiality and integrity. A given label ℓ is a point in this diagram, whereas the set of
+labels sharing the same conﬁdentiality ℓÑ or integrity ℓÐ correspond to lines on the diagram. Given the
+integrityℓÐ of the labelℓ, the view of that integrity,∆pℓÐq, deﬁnes a region of information (shaded) that is
+too conﬁdential to be declassiﬁed.
+The view operator directly corresponds to the writers-to-readers operator that Chong and Myers [10]
+use to enforce robust declassiﬁcation in the DLM. We generalize the same idea here to the more expressive
+labels of FLAM.
+7
+
+PDF PAGE 8
+ℓ←
+C
+I
+⊥ ⊤
+⊤→
+⊤←
+Δ(ℓ←)
+nonrobust
+robust
+Figure 3: Robust declassiﬁcation says information at levelℓ can be declassiﬁed only if it has enough integrity. The
+gray shaded region represents information that ∆pℓÐq cannot read, so it is unsafe to declassify withℓ’s integrity.
+4.2 Transparent endorsement
+The key insight of this work is that endorsement should be restricted in a manner dual to robust declassi-
+ﬁcation; declassiﬁcation (reducing conﬁdentiality) requires a minimum integrity, so endorsement (raising
+integrity) should require a maximum conﬁdentiality. Intuitively, if a principal could have written data it can-
+not read, which we call an “opaque write,” it is unsafe to endorse that data. An endorsement is transparent
+if it endorses only information its authors could read.
+The voice operator sufﬁces to express this new restriction conveniently, as depicted in Figure 4. In
+the ﬁgure, we consider endorsing information with conﬁdentiality ℓÑ. This conﬁdentiality is mapped to
+a corresponding integrity level ∇pℓÑq, deﬁning a minimal integrity level that ℓ must have in order to be
+endorsed. If ℓ lies below this boundary, its endorsement is considered transparent; if it lies above the
+boundary, endorsement is opaque and hence insecure. The duality with robust declassiﬁcation is clear.
+5 A core language: NMIFC
+We now describe the NonMalleable Information Flow Calculus (NMIFC), a new core language, modeled
+on DCC and FLAC, that allows downgrading, but in a more constrained manner than FLAC so as to provide
+stronger semantic guarantees. NMIFC incorporates the program-counter label pc of FLAC, but eschews the
+more powerful assume mechanism of FLAC in favor of more traditional declassify and endorse operations.
+The full NMIFC is a small extension of Polymorphic DCC [1]. In Figure 5 we present the core syntax,
+leaving other features such as sums, pairs, and polymorphism to Appendix A. Unlike DCC, NMIFC sup-
+ports downgrading and models it as an effect. It is necessary to track what information inﬂuences control
+ﬂow so that these downgrading effects may be appropriately constrained. Therefore, like FLAC, NMIFC
+adds pc labels to lambda terms and types.
+Similarly to DCC, protected values have type ℓ saysτ whereℓ is the conﬁdentiality and integrity of a
+8
+
+PDF PAGE 9
+C
+I
+⊥ ⊤
+⊤→
+⊤←
+l
+→
+transparent
+opaque
+∇(ℓ→)
+ℓ→
+Figure 4: Transparent endorsement in NMIFC. The gray shaded region represents information that ∇pℓÑq does not
+trust and may have been created by an opaque write. It is thus unsafe to endorse withℓ’s conﬁdentiality.
+nPN (atomic principals)
+xPV (variable names)
+πPtÑ,Ðu (security aspects)
+p,ℓ, pc ::“ n
+ˇˇ J
+ˇˇ K
+ˇˇ pπ ˇˇ p^p
+ˇˇ p_p
+ˇˇ p\p
+ˇˇ p[p
+τ ::“ unit
+ˇˇ τ
+pc
+Ý Ñτ
+ˇˇ ℓ saysτ
+v ::“ pq
+ˇˇ λpx:τqrpcs.e
+ˇˇ pηℓvq
+e ::“ x
+ˇˇ v
+ˇˇ ee
+ˇˇ pηℓeq
+ˇˇ bindx“e ineˇˇ decle toℓ
+ˇˇ endorsee toℓ
+Figure 5: Core NMIFC syntax.
+value of typeτ. All computation on these values occurs in the says monad; protected values must be bound
+using the bind term before performing operations on them (e.g., applying them as functions). Results of
+such computations are protected with the monadic unit operator pηℓ eq, which protects the result of e with
+labelℓ.
+5.1 NMIFC operational semantics
+The core semantics of NMIFC are mostly standard, but to obtain our theoretical results we need additional
+information about evaluation. This information is necessary because we want to identify, for instance,
+whether information is ever available to an attacker during evaluation, even if it is discarded and does not
+inﬂuence the ﬁnal result. This approach gives an attacker more power; an attacker can see information at its
+level even if it is not output by the program.
+The NMIFC semantics, presented in Figure 6, maintain a trace t of events. An event is emitted into
+the trace whenever a new protected value is created and whenever a declassiﬁcation or endorsement occurs.
+9
+
+PDF PAGE 10
+eÝÑe1
+rE-A PPs pλpx:τqrpcs.eqvÝÑerxÞÑvs rE-B IND Ms bindx“pηℓvq ineÝÑerxÞÑvs
+(event) c ::“‚
+ˇˇ pηℓvq
+ˇˇ pÓπ
+ℓ1, ηℓvq
+(trace) t ::“ε
+ˇˇ c
+ˇˇ t;t
+xe, tyÝÑ Ñ
+@
+e1, t1D
+rE-S TEPs eÝÑe1
+xe, tyÝÑ Ñ
+@
+e1, t;‚
+D rE-U NIT Ms xpηℓvq, tyÝÑ Ñ xpηℓvq, t;pηℓvqy
+rE-D ECLs xdeclpηℓ1 vq toℓ, tyÝÑ Ñ xpηℓvq, t;pÓÑ
+ℓ1, ηℓvqy
+rE-E NDORSEs xendorsepηℓ1 vq toℓ, tyÝÑ Ñ xpηℓvq, t;pÓÐ
+ℓ1, ηℓvqy rE-E VALs xe, tyÝÑ Ñ
+@
+e1, t1D
+xEres, tyÝÑ Ñ
+@
+Ere1s, t1D
+Evaluation context
+E ::“ r¨s
+ˇˇ Ee
+ˇˇ vE
+ˇˇ pηℓEq
+ˇˇ bindx“E ineˇˇ declE toℓ
+ˇˇ endorseE toℓ
+Figure 6: Core NMIFC operational semantics.
+These events track the observations or inﬂuence an attacker may have during a run of an NMIFC program.
+Formally, a trace can be an empty trace ε, a single event c, or the concatenation of two traces with the
+associative operator “;” with identity ε.
+When a source-level unit termpηℓvq is evaluated (rule E-U NIT M), an eventpηℓvq is added to the trace
+indicating that the valuev became protected atℓ. When a protected value is declassiﬁed, a declassiﬁcation
+eventpÓÑ
+ℓ1, ηℓvq is emitted, indicating thatv was declassiﬁed fromℓ1 toℓ. Likewise, an endorsement event
+pÓÐ
+ℓ1, ηℓvq is emitted for an endorsement. Other evaluation steps (rule E-STEP) emit‚, for “no event.” Rule
+E-E VAL steps under the evaluation contexts [44] deﬁned at the bottom of Figure 6.
+Rather than being literal side effects of the program, these events track how observable information is
+as it is accessed, processed, and protected by the program. Because our semantics emits an event whenever
+information is protected (by evaluating anη term) or downgraded (by a decl or endorse term), our traces
+capture all information processed by a program, indexed by the policy protecting that information.
+By analogy, these events are similar to the typed and labeled mutable reference cells of languages like
+FlowCaml [30] and DynSec [48]. An eventpηℓvq is analogous to allocating a reference cell protected at ℓ,
+andpÓπ
+ℓ1, ηℓvq is analogous to copying the contents of a cell atℓ1 to a new cell atℓ.
+It is important for the semantics to keep track of these events so that our security conditions hold for
+programs containing data structures and higher-order functions. Previous language-based deﬁnitions of
+robust declassiﬁcation have only applied to simplewhile-languages [6, 10, 26] or to primitive types [5].
+10
+
+PDF PAGE 11
+$ℓ Ďτ
+rP-U NITs $ℓ Ď unit rP-L BLs ℓ1 Ďℓ
+$ℓ1 Ďℓ saysτ
+Figure 7: Type protection levels.
+Γ; pc$e :τ
+rVARs Γ,x :τ, Γ1; pc$x :τ rUNITs Γ; pc$pq : unit rLAMs Γ,x :τ1; pc1$e :τ2
+Γ; pc$λpx:τ1qrpc1s.e :τ1
+pc1
+ÝÑτ2
+rAPPs
+Γ; pc$e1 :τ1 pc1
+ÝÑτ
+Γ; pc$e2 :τ1 pc Ď pc1
+Γ; pc$e1e2 :τ rUNIT Ms Γ; pc$e :τ pc Ďℓ
+Γ; pc$pηℓeq :ℓ saysτ
+rVUNIT Ms Γ; pc$v :τ
+Γ; pc$pηℓvq :ℓ saysτ rBIND Ms
+Γ; pc$e :ℓ saysτ1 $ℓ Ďτ
+Γ,x :τ1; pc\ℓ$e1 :τ
+Γ; pc$ bindx“e ine1 :τ
+rDECLs
+Γ; pc$e :ℓ1 saysτ ℓ 1Ð“ℓÐ pc Ďℓ
+ℓ1Ñ ĎℓÑ\ ∆ppℓ1\ pcqÐq
+Γ; pc$ decle toℓ :ℓ saysτ
+rENDORSEs
+Γ; pc$e :ℓ1 saysτ ℓ 1Ñ“ℓÑ pc Ďℓ
+ℓ1Ð ĎℓÐ\∇ppℓ1\ pcqÑq
+Γ; pc$ endorsee toℓ :ℓ saysτ
+Figure 8: Typing rules for core NMIFC.
+5.2 NMIFC type system
+The NMIFC protection relation, presented in Figure 7, deﬁnes how types relate to information ﬂow poli-
+cies. A type τ protects the conﬁdentiality and integrity of ℓ if$ ℓ Ď τ. Unlike in DCC and FLAC, a
+label is protected by a type only if it ﬂows to the outermost says principal. In FLAC and DCC, the types
+ℓ1 saysℓ saysτ andℓ saysℓ1 saysτ protect the same set of principals; in other words, says is commu-
+tative. By distinguishing between these types, NMIFC does not provide the same commutativity.
+The commutativity of says is a design decision, offering a more permissive programming model at the
+cost of less precise tracking of dependencies. NMIFC takes advantage of this extra precision in the UNIT M
+typing rule so the label on every η term protects the information it contains, even if nested within other η
+terms. Abadi [2] similarly modiﬁes DCC’s protection relation to distinguish the protection level of terms
+with nested says types.
+The core type system presented in Figure 8 enforces nonmalleable information ﬂow for NMIFC pro-
+grams. Most of the typing rules are standard, and differ only superﬁcially from DCC and FLAC. Like in
+FLAC, NMIFC typing judgments include a program counter label, pc, that represents an upper bound on
+the conﬁdentiality and integrity of bound information that any computation may depend upon. For instance,
+rule B IND M requires the type of the body of a bind term to protect the unlabeled information of type τ1
+11
+
+PDF PAGE 12
+with at least ℓ, and to type-check under a raised program counter label pc\ℓ. Rule L AM ensures that
+function bodies type-check with respect to the function’s pc annotation, and rule APP ensures functions are
+only applied in contexts that ﬂow to these annotations.
+The NMIFC rule for U NIT M differs from FLAC and DCC in requiring the premise pc Ď ℓ for well-
+typedη terms. This premise ensures a more precise relationship between the pc andη terms. Intuitively this
+restriction makes sense. The pc is a bound on all unlabeled information in the context. Since an expression
+e protected withpηℓeq may depend on any of this information, it makes sense to require that pc ﬂow to ℓ.2
+By itself, this restrictive premise would prevent public data from ﬂowing through secret contexts and
+trusted data from ﬂowing through untrusted contexts. To allow such ﬂows, we distinguish source-levelpηℓeq
+terms from run-time values pηℓ vq, which have been fully evaluated. These terms are only created by the
+operational semantics during evaluation and no longer depend on the context in which they appear; they
+are closed terms. Thus it is appropriate to omit the new premise in VU NIT M. This approach allows us to
+require more precise ﬂow tracking for the explicit dependencies of protected expressions without restricting
+where these values ﬂow once they are fully evaluated.
+Rule DECL ensures a declassiﬁcation from labelℓ1 toℓ is robust. We ﬁrst requireℓ1Ð“ℓÐ to ensure that
+this does not perform endorsement. A more permissive premiseℓ1Ð ĎℓÐ is admissible, but requiring equal-
+ity simpliﬁes our proofs and does not reduce expressiveness since the declassiﬁcation can be followed by a
+subsequent relabeling. The premise pc Ď ℓ requires that declassiﬁcations occur in high-integrity contexts,
+and prevents declassiﬁcation events from creating implicit ﬂows. The premise ℓ1Ñ ĎℓÑ\ ∆ppℓ1\ pcqÐq
+ensures that the conﬁdentiality of the information declassiﬁed does not exceed the view of the integrity of
+the principals that may have inﬂuenced it. These inﬂuences can be either explicit (ℓ1Ð) or implicit (pcÐ), so
+we compare against the join of the two.3 This last premise effectively combines the two conditions identiﬁed
+by Chong and Myers [10] for enforcing robust declassiﬁcation in an imperativewhile-language.
+Rule E NDORSE enforces transparent endorsement. All but the last premise are straightforward: the
+expression does not declassify and pc Ďℓ requires a high-integrity context to endorse and prevents implicit
+ﬂows. Interestingly, the last premise is dual to that in D ECL. An endorsement cannot raise integrity above
+the voice of the conﬁdentiality of the data being endorsed (ℓ1Ñ) or the context performing the endorsement
+(pcÑ). For the same reasons as in D ECL, we compare against their join.
+5.3 Examples revisited
+We now reexamine the examples presented in Section 2 to see that the NMIFC type system prevents the
+vulnerabilities seen above.
+5.3.1 Password checker
+We saw above that when the password checker labels guess at TÑ, well-typed code can improperly set
+guess to the actual password. We noted that the endorsement enabled an insecure ﬂow of information.
+Looking at ENDORSE in NMIFC, we can attempt to type the equivalent expression: endorse guess toT .
+However, if guess has type TÑ says bool, the endorse does not type-check; it fails to satisfy the ﬁnal
+premise of ENDORSE :
+KÐ“pTÑqÐ­ĎTÐ\∇pTÑq“ TÐ.
+2The premise is not required in FLAC because protection is commutative. For example, in a FLAC term such as bindx “
+v inpηℓ1pηℓxqq,x may be protected byℓ orℓ1.
+3 The ﬁrst two premises—ℓ1Ð“ℓÐ and pc Ďℓ—make this join redundant. It would, however, be necessary if we replaced the
+equality premise with the more permissiveℓ1Ð ĎℓÐ version, so we include it for clarity.
+12
+
+PDF PAGE 13
+checkpwd“λpg :UÐ says String,p :T says StringqrTÐs.
+bind guess“p endorseg toTÐq in
+declpbind pwd“p inpηT pwd““ guessqq toTÐ
+Figure 9: A secure version of a password checker.
+If we instead give guess the labelUÐ, the endorsement type-checks, assuming a sufﬁciently trustedpc.
+This is as it should be. With the labelUÐ, the guesser must be able to read their own guess, guaranteeing
+that they cannot guess the correct password unless they in fact know the correct password. Figure 9 shows
+this secure version of the password checker.
+5.3.2 Sealed-bid auction
+In the insecure auction described in Section 2.2, we argued that an insecure ﬂow was created when T en-
+dorsed b_bid fromBÐ^pA^BqÑ toA^B. This endorsement requires a term of the formendorsev toA^B
+wherev types to BÐ^pA^BqÑ says int. Despite the trusted context, the last premise of E NDORSE
+again fails:
+BÐ­ĎpA^BqÐ\∇ppA^BqÑq“p A^BqÐ.
+If we instead label a bid : A says int and b bid : B says int, then the corresponding endorse state-
+ments type-check, assuming thatT is trusted:T ĎpA^BqÐ.
+5.3.3 Laundering secrets
+For the secret-laundering example in Section 2.3, we assume that neither H norL is trusted, but the output
+from the program is. This forces an implicit endorsement ofy, the input received fromH. But the condition
+needed to endorse fromHÑ^KÐ toHÑ^JÐ is false:
+KÐ ĎJÐ\∇pHÑq“ ∇pHÑq
+We have∇pLÑq ­Ď∇pHÑq and all integrity ﬂows to KÐ, so by transitivity the above condition cannot
+hold.
+6 Security conditions
+The NMIFC typing rules enforce several strong security conditions: multiple forms of conditional nonin-
+terference, robust declassiﬁcation, and our new transparent endorsement and nonmalleable information ﬂow
+conditions. We deﬁne these conditions formally but relegate proof details to Appendix D.
+6.1 Attackers
+Noninterference is frequently stated with respect to a speciﬁc but arbitrary label. Anything below that label
+in the lattice is “low” (public or trusted) and everything else is “high”. We broaden this deﬁnition slightly
+and designate high information using a set of labels H that is upward closed. That is, if ℓPH andℓ Ď ℓ1,
+thenℓ1PH. We refer to such upward closed sets as high sets.
+13
+
+PDF PAGE 14
+c«W c1 v«W v1
+These equivalence relations are the smallest congruences overc and overv extended with‚, containing the
+equivalences deﬁned by these rules:
+rEQ-UNIT Ms ℓRW
+pηℓvq« W‚ rEQ-D OWNs ℓRW
+pÓπ
+ℓ1, ηℓvq« W‚
+t«‹
+W t1
+The equivalence relationt«‹
+W t1 is the smallest congruence overt containing the equivalences deﬁned by these
+rules:
+rT-LIFTs c«W c1
+c«‹
+W c1 rT-BULLET Rs t;‚«‹
+W t rT-BULLET Ls ‚;t«‹
+W t
+Figure 10: Low equivalence and low trace equivalence.
+We say that a typeτ is a high type, written “$τ protH”, if all of the information in a value of typeτ is
+above some label in the high setH. The following rule deﬁnes high types:
+rP-S ETs HPH $H Ďτ
+$τ protH H is upward closed
+This formulation of adversarial power is adequate to express noninterference, in which conﬁdentiality
+and integrity do not interact. However, our more complex conditions relate conﬁdentiality to integrity and
+therefore require a way to relate the attacker’s power in the two domains.
+Intuitively, an attacker is an arbitrary set of colluding atomic principals. Speciﬁcally, ifn1,...,n kPN
+are those atomic principals, then the setA“tℓPL|n1^¨¨¨^nk ěℓu represents this attacker’s power.
+These principals may include principals mentioned in the program, and there may be delegations between
+attacker principals and program principals. While this deﬁnition of an attacker is intuitive, the results in this
+paper actually hold for a more general notion of attacker deﬁned in Appendix B.
+Attackers correspond to two high sets: an untrusted high setU “t ℓPL| ℓÐPAu and a secret high
+setS“tℓPL|ℓÑRAu. We say thatA inducesU andS.
+6.2 Equivalences
+All of our security conditions involve relations on traces. As is typically the case for information-ﬂow
+security conditions, we deﬁne a notion of “low equivalence” on traces, which ignores effects with high
+labels. We proceed by deﬁning low-equivalent expressions and then extending low-equivalence to traces.
+For expression equivalence, we examine precisely the values which are visible to a low observer deﬁned
+by a set of labels W: pηℓ vq andpÓπ
+ℓ1, ηℓ vq where ℓ PW. We formalize this idea in Figure 10, using
+‚ to represent values that are not visible. Beyond ignoring values unable to affect the output, we use a
+standard structural congruence (i.e., syntactic equivalence). This strict notion of equivalence is not entirely
+necessary; observational equivalence or any reﬁnement thereof would be sufﬁcient if augmented with the
+‚-equivalences in Figure 10.
+Figure 10 also extends the equivalence on emitted values to equivalence on entire traces of emitted
+values. Essentially, two traces are equivalent if there is a way to match up equivalent events in each trace,
+while ignoring high events equivalent to‚.
+14
+
+PDF PAGE 15
+6.3 Noninterference and downgrading
+An immediate consideration when formalizing information ﬂow is how to express interactions between an
+adversary and the system. One possibility is to limit interaction to inputs and outputs of the program. This is
+a common approach for functional languages. We take a stronger approach in which security is expressed in
+terms of execution traces. Note that traces contain all information necessary to ensure the security of input
+and output values.
+We begin with a statement of noninterference in the presence of downgrading. Theorem 1 states that,
+given two high inputs, a well-typed program produces two traces that are either low-equivalent or contain
+a downgrade event that distinguishes them. This implies that differences in traces distinguishable by an
+attacker are all attributable to downgrades of information derived from the high inputs. Furthermore, any
+program that performs no downgrades on secret or untrusted values (i.e., contain nodecl or endorse terms
+onH data) must be noninterfering.
+Theorem 1 (Noninterference modulo downgrading) . LetH be a high set and let W “LzH. Given an
+expressione such that Γ,x :τ1; pc$e :τ2 where$τ1 protH, for allv1,v 2 with Γ; pc$vi :τ1, if
+xerxÞÑvis, viyÝÑ Ñ˚ @
+v1
+i, tiD
+then either there is some eventpÓπ
+ℓ1, ηℓwqP ti whereℓ1PH andℓRH, ort1«‹
+W t2.
+The restrictions placed on downgrading operations mean that we can characterize the conditions under
+which no downgrading can occur. We add two further noninterference theorems that restrict downgrading in
+different ways. Theorem 2 states that if a program types without a public–trustedpc it must be noninterfering
+(with respect to that deﬁnition of “public–trusted”).
+Theorem 2 (Noninterference of high-pc programs). LetA be an attacker inducing high setsU andS. Let
+H be one of those high sets andW“LzH. Given somee such that Γ,x :τ1; pc$e :τ2 where$τ1 protH,
+for allv1,v 2 with Γ; pc$vi :τ1, ifxerxÞÑvis, viyÝÑ Ñ˚xv1
+i, tiy and pcPUYS, thent1«‹
+W t2.
+Rather than restrict the pc, Theorem 3 states that secret–untrusted information is always noninterfering.
+Previous work (e.g., [6, 26]) does not restrict endorsement of conﬁdential information, allowing any label
+to be downgraded to public–trusted (given a public–trustedpc). In NMIFC, however, secret–untrusted data
+must remain secret and untrusted.
+Theorem 3 (Noninterference of secret–untrusted data). LetA be an attacker inducing high setsU andS.
+LetH“UXS andW “LzH. Given some e such that Γ,x :τ1; pc$ e : τ2 where$ τ1 protH, for all
+v1,v 2 with Γ; pc$vi :τ1, ifxerxÞÑvis, viyÝÑ Ñ˚xv1
+i, tiy thent1«‹
+W t2.
+6.4 Robust declassiﬁcation and irrelevant inputs
+We now move to security conditions for programs that do not satisfy noninterference. Recall that robust
+declassiﬁcation informally means the attacker has no inﬂuence on what information is released by declassi-
+ﬁcation. Traditionally, it is stated in terms of attacker-provided code that is inserted into low-integrity holes
+in programs which differ only in their secret inputs. In NMIFC, the same attacker power can be obtained
+by substituting exactly two input values into the program, one secret and one untrusted. This simpliﬁcation
+is possible because NMIFC has ﬁrst-class functions that can model the substitution of low-integrity code.
+Appendix C shows that this simpler two-input deﬁnition is equivalent to the traditional hole-based approach
+in the full version of NMIFC (Appendix A).
+15
+
+PDF PAGE 16
+`
+λpx :pPÑ^UÐ saysτqˆp PÑ^UÐ saysτqqrPÑ^TÐs.
+decl
+`
+bindb“pηSÑ^T Ð secq in
+caseb of inj1 .pηSÑ^T Ðpproj1xqq
+| inj2 .pηSÑ^T Ðpproj2xqq
+˘
+toPÑ^TÐ˘ @
+atk 1, atk 2
+D
+Figure 11: A program that admits inept attacks. HereP ĎS andT ĎU, but not vice versa, sosec is a secret boolean
+andxatk 1, atk 2y form an untrusted pair of values. If atk 1 ‰ atk 2, then the attacker will learn the value of sec. If
+atk 1“ atk 2, however, then the attacker learns nothing due to its own ineptness.
+Prior work on while-based languages [10, 26] deﬁne robust declassiﬁcation in terms of four traces gen-
+erated by the combination of two variations: a secret input and some attacker-supplied code. For terminating
+traces, these deﬁnitions require any pair of secrets to produce public-equivalent traces under all attacks or
+otherwise to produce distinguishable traces regardless of the attacks chosen. This implies that an attacker
+cannot control the disclosure of secrets.
+We can attempt to capture this notion of robust declassifcation using the notation of NMIFC. For a
+programe with a secret inputx and untrusted inputy, we wish to saye robustly declassiﬁes if, for all secret
+valuesv1,v 2 and for all untrusted valuesw1,w 2, where
+xerxÞÑvisryÞÑwjs, vi;wjyÝÑ Ñ˚ @
+vij, tijD
+,
+thent11«‹
+P t21 ðñ t12«‹
+P t22.
+This condition is intuitive but, unfortunately, overly restrictive. It does not account for the possibility of
+an inept attack, in which an attacker causes a program to reveal less information than intended.
+Inept attacks are harder to characterize than in previous work because, unlike the previously usedwhile-
+languages, NMIFC supports data structures with heterogeneous labels. Using such data structures, we can
+build a program that implicitly declassiﬁes data by using a secret to inﬂuence the selection of an attacker-
+provided value and then declassifying that selection. Figure 11 provides an example of such a program,
+which uses sums and products from the full NMIFC language.
+While this program appears secure—the attacker has no control over what information is declassiﬁed
+or when a declassiﬁcation occurs—it violates the above condition. One attack can contain the same value
+twice—causing any two secrets to produce indistinguishable traces—while the other can contain different
+values. Intuitively, no vulnerability in the program is thereby revealed; the program was intended to release
+information, but the attacker failed to infer it due to a poor choice of attack. Such inputs result in less
+information leakage entirely due to the attacker’s ineptness, not an insecurity of the program. As a result,
+we consider inputs from inept attackers to be irrelevant to our security conditions.
+Dually to inept attackers, we can deﬁne uninteresting secret inputs. For example, if a program endorses
+an attacker’s selection of a secret value, an input where all secret options contain the same data is uninter-
+esting, so we also consider it irrelevant.
+Which inputs are irrelevant is speciﬁc to the program and to the choice of attacker. In Figure 11, if
+both execution paths usedpproj1xq, there would be no way for an attacker to learn any information, so all
+attacks are equally relevant. Similarly, ifSÑ is already considered public, then there is no secret information
+in the ﬁrst place, so again, all attacks are equally relevant.
+For an input to be irrelevant, it must have no inﬂuence over the outermost layer of the data structure—
+the label that is explicitly downgraded. If the input could inﬂuence that outer layer in any way, the internal
+data could be an integral part of an insecure execution. Conversely, when the selection of nested values
+16
+
+PDF PAGE 17
+is independent of any untrusted/secret information (though the content of the values may not be), it is
+reasonable to assume that the inputs will be selected so that different choices yield different results. An
+input which does not is either an inept attack—an attacker gaining less information than it could have—or
+an uninteresting secret—a choice between secrets that are actually the same. In either case, the input is
+irrelevant.
+To ensure that we only consider data structures with nested values that were selected independently
+of the values themselves, we leverage the noninterference theorems in Section 6.3. In particular, if the
+outermost label is trusted before a declassiﬁcation (or public prior to an endorsement), then any inﬂuence
+from untrusted (secret) data must be the result of a prior explicit downgrade. Thus we can identify irrelevant
+inputs by ﬁnding inputs that result in traces that are public-trusted equivalent, but can be made both public
+(trusted) equivalent and non-equivalent at the point of declassiﬁcation (endorsement).
+To deﬁne this formally, we begin by partitioning the principal lattice into four quadrants using the deﬁni-
+tion of an attacker from Section 6.1. We consider only ﬂows between quadrants and, as with noninterference,
+downgrades must result in public or trusted values. We additionally need to refer to individual elements and
+preﬁxes of traces. For a tracet, lettn denote thenth element oft, and lett..n denote the preﬁx oft containing
+its ﬁrstn elements.
+Deﬁnition 2 (Irrelevant inputs). Consider attackerA inducing high setsHÐ andHÑ. Let Wπ “LzHπ
+andW “WÐXWÑ. Given opposite projections π andπ1 a program e, and types τx andτy such that
+$ τx protHπ and$ τy protHπ1, we say an input v1 is an irrelevantπ1-input with respect toA and e if
+Γ; pc$v1 :τx and there exist valuesv2,w1, andw2 and four trace indices nij (fori,j Pt 1, 2u) such that
+the following conditions hold:
+1. Γ; pc$v2 :τx, Γ; pc$w1 :τy, and Γ; pc$w2 :τy
+2. xerxÞÑvisryÞÑwjs, vi;wjyÝÑ Ñ˚xvij, tijy
+3. tij
+nij ﬀW‚ for alli,j Pt 1, 2u
+4. tij
+..nij «‹
+W tkl
+..nkl for alli,j,k,l Pt 1, 2u
+5. t11
+..n11«‹
+Wπ t12
+..n12
+6. t21
+..n21ﬀ‹
+Wπ t22
+..n22
+Otherwise we say v1 is a relevantπ1-input with respect toA ande, denoted relπ1
+A,epv1q. Note that the four
+indicesnij identify corresponding preﬁxes of the four traces.
+As mentioned above, prior downgrades can allow secret/untrusted information to directly inﬂuence the
+outer later of the data structure, but Condition 4 requires that all four trace preﬁxes be public-trusted equiv-
+alent, so any such downgrades must have the same inﬂuence across all executions. Condition 5 requires that
+some inputs result in preﬁxes that are public equivalent (or trusted equivalent for endorsement), while Condi-
+tion 6 requires that other inputs result in preﬁxes that are distinguishable. Since all preﬁxes are public-trusted
+equivalent, this means there is an implicit downgrade inside a data structure, so the equivalent preﬁxes form
+an irrelevant input.
+We can now relax our deﬁnition of robust declassiﬁcation to only restrict the behavior ofrelevant inputs.
+17
+
+PDF PAGE 18
+Deﬁnition 3 (Robust declassiﬁcation). Lete be a program and let x andy be variables representing secret
+and untrusted inputs, respectively. We say that e robustly declassiﬁes if, for all attackersA inducing high
+setsU andS (andP“LzS) and all valuesv1,v 2,w 1,w 2, if
+xerxÞÑvisryÞÑwjs, vi;wjyÝÑ Ñ˚ @
+vij, tijD
+,
+then
+`
+relÐ
+A,epw1q andt11«‹
+P t21˘
+ùñ t12«‹
+P t22.
+As NMIFC only restricts declassiﬁcation of low-integrity data, endorsed data is free to inﬂuence future
+declassiﬁcations. As a result, we can only guarantee robust declassiﬁcation in the absence of endorsements.
+Theorem 4 (Robust declassiﬁcation). Given a program e, if Γ,x :τx,y :τy; pc $ e : τ ande contains no
+endorse expressions, thene robustly declassiﬁes as deﬁned in Deﬁnition 3.
+Note that prior deﬁnitions of robust declassiﬁcation [10, 26] similarly prohibit endorsement and ig-
+nore pathological inputs, speciﬁcally nonterminating traces. Our irrelevant inputs are very different since
+NMIFC is strongly normalizing but admits complex data structures, but the need for some restriction is not
+new.
+6.5 Transparent endorsement
+We described in Section 2 how endorsing opaque writes can create security vulnerabilities. To formalize
+this intuition, we presenttransparent endorsement, a security condition that is dual to robust declassiﬁcation.
+Instead of ensuring that untrusted information cannot meaningfully inﬂuence declassiﬁcation, transparent
+endorsement guarantees that secret information cannot meaningfully inﬂuence endorsement. This guarantee
+ensures that secrets cannot inﬂuence the endorsement of an attacker’s value—neither the value endorsed nor
+the existence of the endorsement itself.
+As it is completely dual to robust declassiﬁcation, we again appeal to the notion of irrelevant inputs, this
+time to rule out uninteresting secrets. The condition looks nearly identical, merely switching the roles of
+conﬁdentiality and integrity. It therefore ensures that any choice of interesting secret provides an attacker
+with the maximum possible ability to inﬂuence endorsed values; no interesting secrets provide more power
+to attackers than others.
+Deﬁnition 4 (Transparent endorsement). Lete be a program and letx andy be variables representing secret
+and untrusted inputs, respectively. We say thate transparently endorses if, for all attackersA inducing high
+setsU andS (andT “LzU) and all valuesv1,v 2,w 1,w 2, if
+xerxÞÑvisryÞÑwjs, vi;wjyÝÑ Ñ˚ @
+vij, tijD
+,
+then
+`
+relÑ
+A,epv1q andt11«‹
+T t12˘
+ùñ t21«‹
+T t22.
+As in robust declassiﬁcation, we can only guarantee transparent endorsement in the absence of declassi-
+ﬁcation.
+Theorem 5 (Transparent endorsement). Given a programe, if Γ,x :τx,y :τy; pc$e :τ ande contains no
+decl expressions, thene transparently endorses.
+18
+
+PDF PAGE 19
+6.6 Nonmalleable information ﬂow
+Robust declassiﬁcation and transparent endorsement each restrict one type of downgrading, but as struc-
+tured above, cannot be enforced in the presence of both declassiﬁcation and endorsement. The key difﬁculty
+stems from the fact that previously declassiﬁed and endorsed data should be able to inﬂuence future declas-
+siﬁcations and endorsements. However, any endorsement allows an attack to inﬂuence declassiﬁcation, so
+varying the secret input can cause the traces to deviate for one attack and not another. Similarly, once a
+declassiﬁcation has occurred, we can say little about the relation between trace pairs that ﬁx a secret and
+vary an attack.
+There is one condition that allows us to safely relate trace pairs even after a downgrade event: if the
+downgraded values are identical in both trace pairs. Even if a declassify or endorse could have caused
+the traces to deviate, if it did not, then this program is essentially the same as one that started with that
+value already downgraded and performed no downgrade. To capture this intuition, we deﬁne nonmalleable
+information ﬂow in terms of trace preﬁxes that either do not deviate in public values when varying only
+the secret input or do not deviate in trusted values when varying only the untrusted input. This assumption
+may seem strong at ﬁrst, but it exactly captures the intuition that downgraded data—but not secret/untrusted
+data—should be able to inﬂuence future downgrades. While two different endorsed attacks could inﬂuence
+a future declassiﬁcation, if the attacks are similar enough to result in the same value being endorsed, they
+must inﬂuence the declassiﬁcation in the same way.
+Deﬁnition 5 (Nonmalleable information ﬂow) . Lete be a program and letx andy be variables representing
+secret and untrusted inputs, respectively. We say that e enforces nonmalleable information ﬂow (NMIF)
+if the following holds for all attackers A inducing high sets U andS. Let T “ LzU,P “ LzS and
+W“T XS. For all valuesv1,v2,w1, andw2, let
+xerxÞÑvisryÞÑwjs, vi;wjyÝÑ Ñ˚ @
+vij, tijD
+.
+For all indicesnij such thattij
+nij ﬀW‚
+1. If ti1
+..ni1´1«‹
+T ti2
+..ni2´1 fori“ 1, 2, then
+`
+relÐ
+A,epw1q andt11
+..n11«‹
+P t21
+..n21
+˘
+ùñ t12
+..n12«‹
+P t22
+..n22.
+2. Similarly, if t1j
+..n1j´1«‹
+P t2j
+..n2j´1 forj“ 1, 2, then
+`
+relÑ
+A,epv1q andt11
+..n11«‹
+T t12
+..n12
+˘
+ùñ t21
+..n21«‹
+T t22
+..n22.
+Unlike the previous conditions, NMIFC enforces NMIF with no syntactic restrictions.
+Theorem 6 (Nonmalleable information ﬂow) . For any programe such that Γ,x :τx,y :τy; pc $ e : τ, e
+enforces NMIF .
+We note that both Theorems 4 and 5 are directly implied by Theorem 6. For robust declassiﬁcation, the
+syntactic prohibition on endorse directly enforcesti1«‹
+T ti2 (for the entire trace), and the rest of case 1 is
+exactly that of Theorem 4. Similarly, the syntactic prohibition on decl enforcest1j «‹
+P t2j, while the rest
+of case 2 is exactly Theorem 5.
+19
+
+PDF PAGE 20
+7 NMIF as 4-safety
+Clarkson and Schneider [12] deﬁne a hyperproperty as “a set of sets of inﬁnite traces,” and hypersafety to
+be a hyperproperty that can be characterized by a ﬁnite set of ﬁnite trace preﬁxes deﬁning some “bad thing.”
+That is, given any of these ﬁnite sets of trace preﬁxes it is impossible to extend those traces to satisfy the
+hyperproperty. It is therefore possible to show that a program satisﬁes a hypersafety property by proving
+that no set of ﬁnite trace preﬁxes emitted by the program fall into this set of “bad things.” They further
+deﬁne ak-safety hyperproperty (ork-safety) as a hypersafety property that limits the set of traces needed to
+identify a violation to sizek.
+Clarkson and Schneider note that noninterference provides an example of 2-safety. We demonstrate here
+that robust declassiﬁcation, transparent endorsement, and nonmalleable information ﬂow are all 4-safety
+properties.4
+For a condition to be 2-safety, it must be possible to demonstrate a violation using only two ﬁnite
+traces. With noninterference, this demonstration is simple: if two traces with low-equivalent inputs are
+distinguishable by a low observer, the program is interfering.
+Robust declassiﬁcation, however, cannot be represented this way. It says that the program’s conﬁdential-
+ity release events cannot be inﬂuence by untrusted inputs. If we could precisely identify the release events,
+this would allow us to specify robust declassiﬁcation as a 2-safety property on those release events. If every
+pair of untrusted inputs results in the same trace of conﬁdentiality release events, the program satisﬁes robust
+declassiﬁcation. However, to identify conﬁdentiality release events requires comparing traces with different
+secret inputs. A trace consists of a set of observable states, not a set of release events. Release events are
+identiﬁed by varying secrets; the robustness of releases is identiﬁed by varying untrusted input. Thus we
+need 4 traces to properly characterize robust declassiﬁcation.
+Both prior work [10] and our deﬁnition in Section 6.4 state robust declassiﬁcation in terms of four traces,
+making it easy to convert to a 4-hyperproperty. That formulation cannot, however, be directly translated to
+4-safety. It instead requires a statement about trace preﬁxes, which cannot be invalidated by extending
+traces.
+Instead of simply reformulating Deﬁnition 3 with trace preﬁxes, we modify it using insights gained from
+the deﬁnition of NMIF. In particular, instead of a strict requirement that if a relevant attack results in public-
+equivalent trace preﬁxes then other attacks must as well, we relax this requirement to apply only when the
+trace preﬁxes are trusted-equivalent. As noted in Section 6.6, if we syntactically prohibitendorse—the only
+case in which we could enforce the previous deﬁnition—this trivially reduces to that deﬁnition. Without the
+syntactic restriction, however, the new condition is still enforceable.
+For a given attackerA we can deﬁne a 4-safety property with respect toA (letU,S,T ,P, andW be as
+in Deﬁnition 5).
+RDA ﬁ
+!
+TĎ T| T“
+␣
+t11,t 12,t 21,t 22(
+^tij
+1 ‰‚ ^ tij
+2 ‰‚ ^ ti1
+1 “ti2
+1 ^ t1j
+2 “t2j
+2
+ùñ
+´
+@tnijuĎ N :
+`
+tij
+nij ﬀW‚ ^ti1
+..ni1´1«‹
+T ti2
+..ni2´1
+^ t11
+..n11«‹
+P t21
+..n21 ^ t12
+..n12ﬀ‹
+P t22
+..n22
+˘
+ùñt12
+..n12«W t22
+..n22
+¯)
+We then deﬁne robustness against all attackers as the intersection over all attackers:RD“ Ş
+A RDA.
+4While NMIFC produces ﬁnite traces and hyperproperties are deﬁned for inﬁnite traces, we can easily extend NMIFC traces
+by stuttering‚ inﬁnitely after termination.
+20
+
+PDF PAGE 21
+NMIF
+RD TENI
+Figure 12: Relating 4-safety hyperproperties and noninterference.
+The above deﬁnition structurally combines Deﬁnition 2 with the ﬁrst clause of Deﬁnition 5 to capture
+both the equivalence and the relevant-input statements of the original theorem. In the nested implication, if
+the ﬁrst two clauses hold (tij
+nij ﬀW ‚ andti1
+..ni1´1«‹
+T ti2
+..ni2´1), then one of three things must happen when
+ﬁxing the attack and varying the secret: both trace pairs are equivalent, both trace pairs are non-equivalent,
+or the postcondition of the implication holds (t12
+..n12 «W t22
+..n22). The ﬁrst two satisfy the equivalency impli-
+cation in Deﬁnition 5 while the third is exactly a demonstration that the ﬁrst input is irrelevant.
+Next we note that, while this does not strictly conform to the deﬁnition of robust declassiﬁcation in
+Deﬁnition 3 which cannot be stated as a hypersafety property,RD is equivalent to Deﬁnition 3 for programs
+that do not perform endorsement. This endorse-free condition means that the equivalence clauseti1
+..ni1´1«‹
+T
+ti2
+..ni2´1 will be true whenever the trace preﬁxes refer to the same point in execution. In particular, they can
+refer to the end of execution, which gives exactly the condition speciﬁed in the theorem.
+As with every other result so far, the dual construction results in a 4-safety property TE representing
+transparent endorsement. Since RD captures the ﬁrst clause of Deﬁnition 5,TE thus captures the second.
+This allows us to represent nonmalleable information ﬂow as a 4-safety property very simply: NMIF“
+RDX TE.
+Figure 12 illustrates the relation between these hyperproperty deﬁnitions. Observe that the 2-safety hy-
+perproperty NI for noninterference is contained in all three 4-safety hyperproperties. The insecure example
+programs of Section 2 are found in the left crescent, satisfying RD but not NMIF.
+8 Implementing NMIF
+We have implemented the rules for nonmalleable information ﬂow in context of Flame, a Haskell library
+and GHC [40] plugin. Flame provides data structures and compile-time checking of type-level acts-for
+constraints that are checked using a custom type-checker plugin. These constraints are used as the basis for
+encoding NMIFC as a shallowly-embedded domain-speciﬁc language (DSL). We have demonstrated that
+programs enforcing nonmalleable information ﬂow can be built using this new DSL.
+8.1 Information-ﬂow monads in Flame
+The DSL works by wrapping sensitive information in an abstract data type—a monad—that includes a
+principal type parameter representing the conﬁdentiality and integrity of the information.
+The Flame library tracks computation on protected information as a monadic effect and provides oper-
+ations that constrain such computations to enforce information security. This effect is modeled using the
+IFC type class deﬁned in Figure 13. The type class IFC is parameterized by two additional types, n in the
+Labeled type class and e in Monad. Instances of the Labeled type class enforce noninterference on pure
+computation—no downgrading or effects. The e parameter represents an effect we want to control. For
+21
+
+PDF PAGE 22
+class (Monad e, Labeled n) => IFC m e n where
+protect :: (pc Ď l) => a -> m e n pc l a
+use :: (l Ď l’, pc Ď pc’, l Ď pc’, pc Ď pc’’) =>
+m e n pc l a -> (a -> m e n pc’ l’ b)
+-> m e n pc’’ l’ b
+runIFC :: m e n pc l a -> e (n l a)
+Figure 13: Core information ﬂow control operations in Flame.
+class IFC m e n => NMIF m e n where
+declassify :: ( (C pc) Ď (C l)
+, (C l’) Ď (C l) \ ∆(I (l’ \ pc))
+, (I l’) === (I l)) =>
+m e n pc l’ a -> m e n pc l a
+endorse :: ( (I pc) Ď (I l)
+, (I l’) Ď (I l) \ ∇(C (l’ \ pc))
+, (C l’) === (C l)) =>
+m e n pc l’ a -> m e n pc l a
+Figure 14: Nonmalleable information ﬂow control in Flame.
+instance, many Flame libraries control effects in theIO monad, which is used for input, output, and mutable
+references.
+The type m e n pc l a in Figure 13 associates a label l with the result of a computation of type a,
+as well as a program counter label pc that bounds the conﬁdentiality and integrity of side effects for some
+effect e. Conﬁdentiality and integrity projections are represented by type constructorsC and I. The protect
+operator corresponds to monadic unitη (rule UNIT M). Given any term, protect labels the term and lifts it
+into an IFC type where pc Ď l.
+The use operation corresponds to a bind term in NMIFC. Its constraints implement the B IND M
+typing rule. Given a protected value of type m e n pc l a and a function on a value of type a with
+return type m e n pc’ l’ b , use returns the result of applying the function, provided that l Ď l’ and
+(pc \ l) Ď pc’. Finally, runIFC executes a protected computation, which results in a labeled value of
+type (n l a) in the desired effect e.
+We provide NMIF, which extends the IFC type class with endorse and declassify operations. The
+constraints on these operations implement the typing rules ENDORSE and DECL respectively.
+We implemented the secure and insecure sealed-bid auction examples from Section 2.2 using NMIF
+operations, shown in Figure 15. As expected, the insecure badrecv is rejected by the compiler while the
+secure recv type checks.
+8.2 Nonmalleable HTTP Basic Authentication
+To show the utility of NMIFC, we adapt a simple existing Haskell web application [20] based on the
+Servant [36] framework to run in Flame. The application allows users to create, fetch, and delete shared
+memos. Our version uses HTTP Basic Authentication and Flame’s security mechanisms to restrict access to
+authorized users. We have deployed this application online at http://memo.flow.limited.
+Figure 16 contains the function authCheck, which checks passwords in this application using the NM
+data type, which is an instance of the NMIF type class. The function takes a value containing the username
+22
+
+PDF PAGE 23
+recv :: (NMIF m e n, (I p) Ď ∇(C p)) =>
+n p a
+-> m e n (I (p ^ q)) (p ^ (I q)) a
+recv v = endorse $ lift v
+badrecv :: (NMIF m e n, (I p) Ď ∇(C p)) =>
+n (p ^ C q) a
+-> m e n (I (p ^ q)) (p ^ q) a
+badrecv v = endorse $ lift v {-REJECTED-}
+Figure 15: Receive operations in NMIF. The secure recv is accepted, but the insecure badrecv is rejected.
+authCheck :: Lbl MemoClient BasicAuthData
+-> NM IO (I MemoServer) (I MemoServer)
+(BasicAuthResult Prin)
+authCheck lauth =
+let lauth’ = endorse $ lift lauth
+res = use lauth’ $ \(BasicAuthData user guess) ->
+ebind user_db $ \db ->
+case Map.lookup user db of
+Nothing -> protect Unauthorized
+Just pwd ->
+if guess == pwd then
+protect $ Authorized (Name user)
+else
+protect Unauthorized
+in declassify res
+Figure 16: A nonmalleable password checker in Servant.
+and password guess of the authentication attempt, labeled with the conﬁdentiality and integrity of an unau-
+thenticated client, MemoClient. This value is endorsed to have the integrity of the server, MemoServer.
+This operation is safe since it only endorses information visible to the client. Next, the username is used to
+look up the correct password and compare it to the client’s guess. If they match, then the user is authorized.
+The result of this comparison is secret, so before returning the result, it must be declassiﬁed.
+Enforcing any form of information ﬂow control on authentication mechanisms likeauthCheck provides
+more information security guarantees than traditional approaches. Unlike other approaches, nonmalleable
+information ﬂow offers strong guarantees even when a computation endorses untrusted information. This
+example shows it is possible to construct applications that offer these guarantees.
+9 Related work
+Our efforts belong both within a signiﬁcant body of work attempting to develop semantic security conditions
+that are more nuanced than noninterference, and within an overlapping body of work aiming to create
+expressive practical enforcement mechanisms for information ﬂow control. Most prior work focuses on
+relaxing conﬁdentiality restrictions; work permitting downgrading of integrity imposes relatively simple
+controls and lacks semantic security conditions that capture the concerns exempliﬁed in Section 2.
+Intransitive noninterference [28, 31, 33, 41] is an information ﬂow condition that permits information
+to ﬂow only between security levels (or domains) according to some (possibly intransitive) relation. It does
+not address the concerns of nonmalleability.
+Decentralized information ﬂow control (DIFC) [25] introduces the idea of mediating downgrading using
+23
+
+PDF PAGE 24
+access control [29]. However, the lack of robustness and transparency means downgrading can still be
+exploited in these systems (e.g., [15, 21, 24, 47]).
+Robust declassiﬁcation and qualiﬁed robustness have been explored in DIFC systems as a way to con-
+strain the adversary’s inﬂuence on declassiﬁcation [4–6, 11, 26, 45, 46]. While transparent endorsement can
+be viewed as an integrity counterpart to robust declassiﬁcation, this idea is not present in prior work.
+Sabelfeld and Sands provide a clarifying taxonomy for much prior work on declassiﬁcation [35], in-
+troducing various dimensions along which declassiﬁcation mechanisms operate. They categorize robust
+declassiﬁcation as lying on the “who” dimension. However, they do not explicitly consider endorsement
+mechanisms. Regardless of the taxonomic category, transparent endorsement and nonmalleable informa-
+tion ﬂow also seem to lie on the same dimension as robust declassiﬁcation, since they take into account
+inﬂuences on the information that is downgraded.
+Label algebras [23] provide an abstract characterization of several DIFC systems. However, they do not
+address the restrictions on downgrading imposed by nonmalleable information ﬂow.
+The Aura language [19] uses information ﬂow policies to constrain authorization and endorsement.
+However, it does not address the malleability of endorsement. Rx [39] represents information ﬂow control
+policies in terms of dynamic roles [17]. Adding new principals to these roles corresponds to declassiﬁcation
+and endorsement since new ﬂows may occur. Rx constrains updates to roles similarly to previous type sys-
+tems that enforce robust declassiﬁcation and qualiﬁed robustness but does not prevent opaque endorsements.
+Relational Hoare Type Theory [27] (RHTT) offers a powerful and precise way to specify security condi-
+tions that are 2-hyperproperties, such as noninterference. Cartesian Hoare logic [37] (CHL) extends standard
+Hoare logic to reason about k-safety properties of relational traces (the input/output pairs of a program).
+Since nonmalleable information ﬂow, robust declassiﬁcation, and transparent endorsement are all 4-safety
+properties that cannot be fully expressed with relational traces, neither RHTT nor CHL can characterize
+them properly.
+Haskell’s type system has been attractive target for embedding information ﬂow checking [9, 22, 38].
+Much prior work has focused on dynamic information ﬂow control. LIO [38] requires computation on pro-
+tected information to occur in the LIO monad, which tracks the conﬁdentiality and integrity of information
+accessed (“unlabeled”) by the computation. HLIO [9] explores hybrid static and dynamic enforcement.
+Flame enforces information ﬂow control statically, and the NMIF type class enforces nonmalleable IFC stat-
+ically as well. The static component of HLIO enforces solely via the Haskell type system (and existing
+general-purpose extensions), but Flame—and by extension, NMIF—uses custom constraints based on the
+FLAM algebra which are processed by a GHC type checker plugin. Extending the type checker to reason
+about FLAM constraints signiﬁcantly improves programmability over pure-Haskell approaches like HLIO.
+10 Conclusion
+Downgrading mechanisms like declassiﬁcation and endorsement make information ﬂow mechanisms suf-
+ﬁciently ﬂexible and expressive for real programs. However, we have shown that previous notions of
+information-ﬂow security missed the dangers endorsing conﬁdential information. We therefore introduced
+transparent endorsement as a security property that rules out such inﬂuences and showed that it is dual to
+robust declassiﬁcation. Robust declassiﬁcation and transparent endorsement are both consequences of a
+stronger property, nonmalleable information ﬂow, and we have formulated all three as 4-safety properties.
+We have shown how to provably enforce these security properties in an efﬁcient, compositional way using
+a security type system. Based on our Haskell implementation, these security conditions and enforcement
+mechanism appear to be practical, supporting the secure construction of programs with complex security
+24
+
+PDF PAGE 25
+requirements.
+While security-typed languages are not yet mainstream, information ﬂow control, sometimes in the
+guise of taint tracking, has become popular as a way to detect and control real-world vulnerabilities (e.g.,
+[16]). Just as the program analyses used are approximations of previous security type systems targeting
+noninterference, it is reasonable to expect the NMIFC type system to be a useful guide for other analyses
+and enforcement mechanisms.
+Acknowledgments
+Many people helped us with this work. Mart ´ın Abadi posed a provocative question about dualities. Pablo
+Buiras helped develop the memo example. David Naumann pointed out work on k-safety. Tom Magrino,
+Yizhou Zhang, and the anonymous reviewers gave us useful feedback on the paper.
+Funding for this work was provided by NSF grants 1513797 and 1524052, and by a gift from Google.
+Any opinions, ﬁndings, conclusions, or recommendations expressed here are those of the author(s) and do
+not necessarily reﬂect those of these sponsors.
+References
+[1] Mart ´ın Abadi. 2006. Access Control in a Core Calculus of Dependency. In 11th ACM SIGPLAN Int’l
+Conf. on Functional Programming. ACM, New York, NY , USA, 263–273.
+[2] Mart ´ın Abadi. 2008. Variations in Access Control Logic. In Deontic Logic in Computer Science, Ron
+van der Meyden and Leendert van der Torre (Eds.). Lecture Notes in Computer Science, V ol. 5076.
+Springer Berlin Heidelberg, 96–109.
+[3] Mart ´ın Abadi, Anindya Banerjee, Nevin Heintze, and Jon Riecke. 1999. A Core Calculus of Depen-
+dency. In 26th ACM Symp. on Principles of Programming Languages (POPL). 147–160.
+[4] Owen Arden, Jed Liu, and Andrew C. Myers. 2015. Flow-Limited Authorization. In 28th IEEE
+Symp. on Computer Security Foundations (CSF). 569–583.
+[5] Owen Arden and Andrew C. Myers. 2016. A Calculus for Flow-Limited Authorization. In 29th IEEE
+Symp. on Computer Security Foundations (CSF). 135–147.
+[6] Aslan Askarov and Andrew C. Myers. 2011. Attacker Control and Impact for Conﬁdentiality and
+Integrity. Logical Methods in Computer Science 7, 3 (Sept. 2011).
+[7] K. J. Biba. 1977. Integrity Considerations for Secure Computer Systems. Technical Report ESD-TR-
+76-372. USAF Electronic Systems Division, Bedford, MA. (Also available through National Technical
+Information Service, Springﬁeld Va., NTIS AD-A039324.).
+[8] Niklas Broberg and David Sands. 2010. Paralocks—Role-Based Information Flow Control and Be-
+yond. In 37th ACM Symp. on Principles of Programming Languages (POPL).
+[9] Pablo Buiras, Dimitrios Vytiniotis, and Alejandro Russo. 2015. HLIO: Mixing Static and Dynamic
+Typing for Information-Flow Control in Haskell. In 20th ACM SIGPLAN Int’l Conf. on Functional
+Programming. ACM, 289–301.
+25
+
+PDF PAGE 26
+[10] Stephen Chong and Andrew C. Myers. 2006. Decentralized Robustness. In 19th IEEE Computer Se-
+curity Foundations Workshop (CSFW). 242–253.
+[11] Stephen Chong and Andrew C. Myers. 2008. End-to-End Enforcement of Erasure and Declassiﬁcation.
+In IEEE Symp. on Computer Security Foundations (CSF). 98–111.
+[12] Michael R. Clarkson and Fred B. Schneider. 2008. Hyperproperties. In IEEE Symp. on Computer
+Security Foundations (CSF). 51–65.
+[13] Dorothy E. Denning. 1976. A Lattice Model of Secure Information Flow. Comm. of the ACM 19, 5
+(1976), 236–243.
+[14] Danny Dolev, Cynthia Dwork, and Moni Naor. 2003. Nonmalleable Cryptography. SIAM Rev. 45, 4
+(2003), 727–784.
+[15] Petros Efstathopoulos, Maxwell Krohn, Steve VanDeBogart, Cliff Frey, David Ziegler, Eddie Kohler,
+David Mazi`eres, Frans Kaashoek, and Robert Morris. 2005. Labels and Event Processes in the As-
+bestos Operating System. In 20th ACM Symp. on Operating System Principles (SOSP).
+[16] Michael D. Ernst, Ren ´e Just, Suzanne Millstein, Werner Dietl, Stuart Pernsteiner, Franziska Roesner,
+Karl Koscher, Paulo Barros, Ravi Bhoraskar, Seungyeop Han, Paul Vines, and Edward X. Wu. 2014.
+Collaborative Veriﬁcation of Information Flow for a High-Assurance App Store. In21st ACM Conf. on
+Computer and Communications Security (CCS). 1092–1104.
+[17] David Ferraiolo and Richard Kuhn. 1992. Role-Based Access Controls. In 15th National Computer
+Security Conference.
+[18] Joseph A. Goguen and Jose Meseguer. 1982. Security Policies and Security Models. In IEEE Symp. on
+Security and Privacy. 11–20.
+[19] Limin Jia, Jeffrey A. Vaughan, Karl Mazurak, Jianzhou Zhao, Luke Zarko, Joseph Schorr, and Steve
+Zdancewic. 2008. Aura: A Programming Language for Authorization and Audit. In 13th ACM SIG-
+PLAN Int’l Conf. on Functional Programming.
+[20] krdlab. 2014. Haskell Servant Example. https://github.com/krdlab/examples. (Dec. 2014).
+[21] Maxwell Krohn, Alexander Yip, Micah Brodsky, Natan Cliffer, M. Frans Kaashoek, Eddie Kohler, and
+Robert Morris. 2007. Information Flow Control for Standard OS Abstractions. In 21st ACM Symp. on
+Operating System Principles (SOSP).
+[22] Peng Li and Steve Zdancewic. 2006. Encoding information ﬂow in Haskell. In 19th IEEE Computer
+Security Foundations Workshop (CSFW).
+[23] Beno ˆıt Montagu, Benjamin C. Pierce, and Randy Pollack. 2013. A Theory of Information-Flow Labels.
+In 26th IEEE Symp. on Computer Security Foundations (CSF). 3–17.
+[24] Andrew C. Myers. 1999. JFlow: Practical Mostly-Static Information Flow Control. In26th ACM Symp.
+on Principles of Programming Languages (POPL). 228–241.
+[25] Andrew C. Myers and Barbara Liskov. 2000. Protecting Privacy using the Decentralized Label Model.
+ACM Transactions on Software Engineering and Methodology9, 4 (Oct. 2000), 410–442.
+26
+
+PDF PAGE 27
+[26] Andrew C. Myers, Andrei Sabelfeld, and Steve Zdancewic. 2006. Enforcing Robust Declassiﬁcation
+and Qualiﬁed Robustness. Journal of Computer Security 14, 2 (2006), 157–196.
+[27] Aleksandar Nanevski, Anindya Banerjee, and Deepak Garg. 2011. Veriﬁcation of Information Flow
+and Access Control Policies with Dependent Types. InIEEE Symp. on Security and Privacy. 165–179.
+[28] Sylvan Pinsky. 1995. Absorbing Covers and Intransitive Non-Interference. In IEEE Symp. on Security
+and Privacy. 102–113.
+[29] Franc ¸ois Pottier and Sylvain Conchon. 2000. Information Flow Inference for Free. In 5th ACM SIG-
+PLAN Int’l Conf. on Functional Programming (ICFP ’00). 46–57.
+[30] Franc ¸ois Pottier and Vincent Simonet. 2003. Information Flow Inference for ML. ACM Trans. on
+Programming Languages and Systems 25, 1 (Jan. 2003).
+[31] A. W. Roscoe and M. H. Goldsmith. 1999. What is Intransitive Noninterference?. In 12th IEEE Com-
+puter Security Foundations Workshop (CSFW). 228–238.
+[32] Indrajit Roy, Donald E. Porter, Michael D. Bond, Kathryn S. McKinley, and Emmett Witchel. 2009.
+Laminar: Practical Fine-Grained Decentralized Information Flow Control. InACM SIGPLAN Conf. on
+Programming Language Design and Implementation (PLDI).
+[33] John Rushby. 1992. Noninterference, transitivity and channel-control security policies . Technical
+Report CSL-92-02. SRI.
+[34] Andrei Sabelfeld and Andrew C. Myers. 2003. Language-Based Information-Flow Security. IEEE
+Journal on Selected Areas in Communications 21, 1 (Jan. 2003), 5–19.
+[35] Andrei Sabelfeld and David Sands. 2005. Dimensions and Principles of Declassiﬁcation. In 18th IEEE
+Computer Security Foundations Workshop (CSFW). 255–269.
+[36] Servant Contributors. 2016. Servant – A Type-Level Web DSL. http://haskell-servant.
+readthedocs.io/. (2016).
+[37] Marcelo Sousa and Isil Dillig. 2016. Cartesian Hoare logic for verifying k-safety properties. In SIG-
+PLAN Notices, V ol. 51. ACM, 57–69.
+[38] Deian Stefan, Amit Levy, Alejandro Russo, and David Mazi`eres. 2014. Building Secure Systems with
+LIO. In Haskell Symposium. ACM SIGPLAN.
+[39] Nikhil Swamy, Michael Hicks, Stephen Tse, and Steve Zdancewic. 2006. Managing Policy Updates
+in Security-Typed Languages. In 19th IEEE Computer Security Foundations Workshop (CSFW). 202–
+216.
+[40] The Glasgow Haskell Compiler 2016. The Glasgow Haskell Compiler. (2016). https://www.
+haskell.org/ghc/.
+[41] Ron van der Meyden. 2007. What, Indeed, Is Intransitive Noninterference?. In 12th European Sympo-
+sium on Research in Computer Security (ESORICS). 235–250.
+27
+
+PDF PAGE 28
+nPN (atomic principals)
+xPV (variable names)
+p,ℓ, pc ::“ n
+ˇˇ J
+ˇˇ K
+ˇˇ pπ ˇˇ p^p
+ˇˇ p_p
+ˇˇ p\p
+ˇˇ p[p
+τ ::“ unit
+ˇˇ X
+ˇˇ pτ`τq
+ˇˇ pτˆτq
+ˇˇ τ
+pc
+Ý Ñτ
+ˇˇ @Xrpcs.τ
+ˇˇ ℓ saysτ
+v ::“ pq
+ˇˇ injiv
+ˇˇ xv,vy
+ˇˇ pηℓvqˇˇ λpx:τqrpcs.e
+ˇˇ ΛXrpcs.e
+e ::“ x
+ˇˇ v
+ˇˇ ee
+ˇˇ eτ
+ˇˇ xe,ey
+ˇˇ pηℓeqˇˇ projie
+ˇˇ injie
+ˇˇ bindx“e ineˇˇ casee of inj1pxq.e| inj2pxq.eˇˇ decle toℓ
+ˇˇ endorsee toℓ
+Figure 17: Full NMIFC syntax.
+[42] Lucas Waye, Pablo Buiras, Dan King, Stephen Chong, and Alejandro Russo. 2015. It’s My Privi-
+lege: Controlling Downgrading in DC-Labels. In Proceedings of the 11th International Workshop on
+Security and Trust Management.
+[43] J. Todd Wittbold and Dale M. Johnson. 1990. Information Flow in Nondeterministic Systems. InIEEE
+Symp. on Security and Privacy. 144–161.
+[44] Andrew K. Wright and Matthias Felleisen. 1994. A Syntactic Approach to Type Soundness. Informa-
+tion and Computation 115, 1 (1994), 38–94.
+[45] Steve Zdancewic and Andrew C. Myers. 2001. Robust Declassiﬁcation. In 14th IEEE Computer Secu-
+rity Foundations Workshop (CSFW). 15–23.
+[46] Steve Zdancewic, Lantian Zheng, Nathaniel Nystrom, and Andrew C. Myers. 2002. Secure Program
+Partitioning. ACM Trans. on Computer Systems 20, 3 (Aug. 2002), 283–328.
+[47] Nickolai Zeldovich, Silas Boyd-Wickizer, Eddie Kohler, and David Mazi`eres. 2006. Making Informa-
+tion Flow Explicit in HiStar. In 7th USENIX Symp. on Operating Systems Design and Implementation
+(OSDI). 263–278.
+[48] Lantian Zheng and Andrew C. Myers. 2007. Dynamic Security Labels and Static Information Flow
+Control. International Journal of Information Security 6, 2–3 (March 2007).
+A Full NMIFC
+We present the full syntax, semantics, and typing rules for NMIFC in Figures 17, 18, and 20, respectively.
+This is a straightforward extension of the core language presented in Section 5. We note that polymorphic
+terms specify a pc just asλ terms. This is because they contain arbitrary expressions which could produce
+arbitrary effects, so we must constrain the context that can execute those effects.
+Figure 21 presents the full set of derivation rules for the acts-for (delegation) relationp ěq.
+28
+
+PDF PAGE 29
+eÝÑe1
+rE-A PPs pλpx:τqrpcs.eqvÝÑerxÞÑvs rE-TA PPs pΛXrpcs.eqτ ÝÑerXÞÑτs
+rE-U NPAIRs projixv1,v 2yÝÑ vi rE-C ASEs pcasepinjivq of inj1pxq.e1| inj2pxq.e2qÝÑ eirxÞÑvs
+rE-B IND Ms bindx“pηℓvq ineÝÑerxÞÑvs
+xe, tyÝÑ Ñ
+@
+e1, t1D
+rE-S TEPs eÝÑe1
+xe, tyÝÑ Ñ
+@
+e1, t;‚
+D rE-U NIT Ms xpηℓvq, tyÝÑ Ñ xpηℓvq, t;pηℓvqy
+rE-D ECLs xdeclpηℓ1 vq toℓ, tyÝÑ Ñ xpηℓvq, t;pÓÑ
+ℓ1, ηℓvqy
+rE-E NDORSEs xendorsepηℓ1 vq toℓ, tyÝÑ Ñ xpηℓvq, t;pÓÐ
+ℓ1, ηℓvqy rE-E VALs xe, tyÝÑ Ñ
+@
+e1, t1D
+xEres, tyÝÑ Ñ
+@
+Ere1s, t1D
+Evaluation context
+E ::“ r¨s
+ˇˇ Ee
+ˇˇ vE
+ˇˇ Eτ
+ˇˇ xE,ey
+ˇˇ xv,Ey
+ˇˇ pηℓEqˇˇ projiE
+ˇˇ injiE
+ˇˇ bindx“E ineˇˇ caseE of inj1pxq.e| inj2pxq.eˇˇ declE toℓ
+ˇˇ endorseE toℓ
+Figure 18: Full NMIFC operational semantics.
+A.1 Label tracking with brackets
+In order to simply proofs of hyperproperties requiring 2 and 4 traces, we introduce a new bracket syntax to
+track secret and untrusted data. These brackets are inspired by those used by Pottier and Simonet [30] to
+prove their FlowCaml type system enforced noninterference. Their brackets served two purposes simulta-
+neously. First they allow a single execution of a bracketed program to faithfully model two executions of
+a non-bracketed program. Second, the brackets track secret/untrusted information through execution of the
+program, thereby making it easy to verify that it did not interfere with public/trusted information simply by
+proving that brackets could not be syntactically present in such values. Since noninterference only requires
+examining pairs of traces, these purposes complement each other well; if the two executions vary only on
+high inputs, then low outputs cannot contain brackets.
+While this technique is very effective to prove noninterference, nonmalleable information ﬂow provides
+security guarantees even in the presence of both declassiﬁcation and endorsement. As a result, we need
+to track secret/untrusted information even through downgrading events that can cause traces to differ arbi-
+trarily. To accomplish this goal, we use brackets that serve only the second purpose: they track restricted
+information but not multiple executions.
+As in previous formalizations, NMIFC’s brackets are deﬁned with respect to a notion of “high” labels,
+in this case a high set. The high set restricts the type of the expression inside the bracket as well as the
+pc at which it must type, thereby restricting the effects it can create. For the more complex theorems we
+29
+
+PDF PAGE 30
+$ℓ Ďτ
+rP-U NITs $ℓ Ď unit rP-L BLs ℓ1 Ďℓ
+$ℓ1 Ďℓ saysτ rP-PAIRs $ℓ Ďτ1 $ℓ Ďτ2
+$ℓ Ďpτ1ˆτ2q
+$τ ĎH
+rP-S ETs HPH $H Ďτ
+$τ protH H is upward closed
+Figure 19: Type protection levels.
+must track data with multiple different high labels within the same program execution, so we parameterize
+the brackets themselves with the high set. We present the extended syntax, semantics, and typing rules in
+Figure 22.
+B Attacker properties
+Recall that we deﬁned an attacker as a set of principals A “ tℓ P L | n1^¨¨¨^nk ě ℓu for some
+non-empty ﬁnite set of atomic principalstn1,...,n kuĎ N .
+Deﬁnition 6 (Attacker properties). LetA be an attacker and letAπ“tpPL|DqPL such thatpπ^qπ1
+P
+Au. The following properties hold:
+1. for all a1,a 2PAπ,a1^a2PAπ (Attacking principals may collude)
+2. for all aPAπ andbPL,a_bPAπ (Attackers may attenuate their power)
+3. for all b1,b 2 RAπ, b1_b2 RAπ (Combining public information in a public context yields public
+information and combining trusted information in a trusted context yields trusted information)
+4. for all aPL andbRAπ,a^bRAπ (Attackers cannot compromise policies requiring permission
+from non-attacking principals)
+5. for all aPA,∇paÑq^ ∆paÐqP A. (Attackers have the same power in conﬁdentiality and integrity)
+The theorems proved in this paper hold for any attacker satisfying these properties, so for generality we
+can take the properties in Deﬁnition 6 as deﬁning an attacker.
+We now prove that our original deﬁnition of an attacker satisﬁes Deﬁnition 6.
+Proof. Conditions 1 and 2 of Deﬁnition 6 follow directly from the deﬁnition ofA and C ONJ R and D ISR,
+respectively. Condition 5 holds by the symmetry of the lattice.
+Since we are only examining one of conﬁdentiality and integrity at a time, for the following conditions
+we assume without loss of generality that all principals in each expression have only the π projection and
+the other component is K. In particular, this means we can assume P ROJ and P ROJR are not used in any
+derivation, and any application of the conjunction or disjunction derivation rules split in a meaningful way
+with respect to theπ projection (i.e., neither principal in the side being divided isJ orK).
+We now show Condition 4 holds by contradiction. Assume a P L and b R Aπ, but a^b P Aπ.
+This means pn1^¨¨¨^nkqπ ě a^b. We prove by induction on k that a,b PAπ. If k “ 1, then the
+30
+
+PDF PAGE 31
+Γ; pc$e :τ
+rVARs Γ,x :τ, Γ1; pc$x :τ rUNITs Γ; pc$pq : unit rLAMs Γ,x :τ1; pc1$e :τ2
+Γ; pc$λpx:τ1qrpc1s.e :τ1
+pc1
+ÝÑτ2
+rAPPs
+Γ; pc$e1 :τ1 pc1
+ÝÑτ
+Γ; pc$e2 :τ1 pc Ď pc1
+Γ; pc$e1e2 :τ rTLAMs Γ,X ; pc1$e :τ
+Γ; pc$ ΛXrpc1s.e :@Xrpc1s.τ
+rTAPPs
+Γ; pc$e :@Xrpc1s.τ
+pc Ď pc1
+Γ; pc$peτ 1q :τrXÞÑτ1s τ1 is well-formed in Γ rPAIRs Γ; pc$e1 :τ1 Γ; pc$e2 :τ2
+Γ; pc$xe1,e 2y :pτ1ˆτ2q
+rUNPAIRs Γ; pc$e :pτ1ˆτ2q
+Γ; pc$ projie :τi
+rINJs Γ; pc$e :τi
+Γ; pc$ injie :pτ1`τ2q
+rCASEs
+Γ; pc$e :pτ1`τ2q $ pc Ďτ
+Γ,x :τ1; pc$e1 :τ Γ,x :τ2; pc$e2 :τ
+Γ; pc$ casee of inj1pxq.e1| inj2pxq.e2 :τ rUNIT Ms Γ; pc$e :τ pc Ďℓ
+Γ; pc$pηℓeq :ℓ saysτ
+rVUNIT Ms Γ; pc$v :τ
+Γ; pc$pηℓvq :ℓ saysτ rBIND Ms
+Γ; pc$e :ℓ saysτ1 $ℓ Ďτ
+Γ,x :τ1; pc\ℓ$e1 :τ
+Γ; pc$ bindx“e ine1 :τ
+rDECLs
+Γ; pc$e :ℓ1 saysτ ℓ 1Ð“ℓÐ pc Ďℓ
+ℓ1Ñ ĎℓÑ\ ∆ppℓ1\ pcqÐq
+Γ; pc$ decle toℓ :ℓ saysτ
+rENDORSEs
+Γ; pc$e :ℓ1 saysτ ℓ 1Ñ“ℓÑ pc Ďℓ
+ℓ1Ð ĎℓÐ\∇ppℓ1\ pcqÑq
+Γ; pc$ endorsee toℓ :ℓ saysτ
+Figure 20: Typing rules for full NMIFC language.
+only possible rule to derive this result is C ONJ L and we are ﬁnished. If k ą 1, then the derivation of this
+relation must be due to either CONJ L or C ONJ R. If it is due to C ONJ R, then this again achieves the desired
+contradiction. If it is due to C ONJ L, then the same statement holds for a subset of the atomic principals
+n1
+1,...,n 1
+k1, wherek1ăk, so by induction,pn1
+1^¨¨¨^n1
+k1qπ ěbπ, and by TRANS ,pn1^... ^nkqπ ěbπ
+which also contradicts our assumption.
+Finally, we also show Condition 3 holds by contradiction. We assumeb1,b 2RAπ butb1_b2PAπ and
+again prove a contradiction by induction onk. If k“ 1, then the derivation showingnπ
+1 ěpb1_b2qπ must
+end with DISR which contradicts the assumption that b1,b 2RAπ. If ką 1, the derivation either ends with
+DISR, resulting in the same contradiction, or with CONJ L. In this second case, the same argument as above
+holds: there is a strict subset of the principals n1,...,n k that act for eitherb1 orb2 and thus by T RANS we
+acquire the desired contradiction.
+31
+
+PDF PAGE 32
+p ěq
+rBOTs p ěK rTOPs J ěp rREFLs p ěp rPROJs p ěq
+pπ ěqπ rPROJRs p ěpπ
+rCONJ Ls
+pi ěq
+iPt 1, 2u
+p1^p2 ěq rCONJ Rs
+p ěq1
+p ěq2
+p ěq1^q2
+rDISLs
+p1 ěq
+p2 ěq
+p1_p2 ěq rDISRs
+p ěqi
+iPt 1, 2u
+p ěq1_q2
+rTRANSs p ěq q ěr
+p ěr
+Figure 21: Principal lattice rules
+C Generalization
+Deﬁnition 5 (and correspondingly Theorem 6) might appear relatively narrow; they only speak directly to
+programs with a single untrusted value and a single secret value. However, because the language has ﬁrst-
+class functions and pair types, the theorem as stated is equivalent to one that allows insertion of secret and
+untrusted code into multiple points in the program, as long as that code types in an appropriately restrictive
+pc.
+To deﬁne this formally, we ﬁrst need a means to allow for insertion of arbitrary code. We follow previous
+work [26] by extending the language to include holes. A program expression may contain an ordered set of
+holes. These holes may be replaced with arbitrary expressions, under restrictions requiring that the holes be
+treated as sufﬁciently secret or untrusted. Speciﬁcally, the type system is extended with the following rule:
+rHOLEs pcPH $τ protH
+Γ; pc$r‚s H :τ H is a high set
+Using this deﬁnition, we can state NMIF in a more traditional form.
+Deﬁnition 7 (General NMIF). We say that a programer⃗‚sH enforces general NMIF if the following holds
+for all attackersA inducing high setsU andS. LetT “LzU,P“LzS andW“T XS. IfHĎU, then
+for all valuesv1,v2 and all attacks⃗ a1 and⃗ a2, let
+xer⃗ aisHr⃗ xÞÑ⃗ vis,⃗ viyÝÑ Ñ˚ @
+vij, tijD
+.
+For all indicesnij such thattij
+nij ﬀW‚
+1. If ti1
+..ni1´1«‹
+T ti2
+..ni2´1 fori“ 1, 2, then
+`
+relÐ
+A,epw1q andt11
+..n11«‹
+P t21
+..n21
+˘
+ùñ t12
+..n12«‹
+P t22
+..n22.
+2. Similarly, if t1j
+..n1j´1«‹
+P t2j
+..n2j´1 forj“ 1, 2, then
+`
+relÑ
+A,epv1q andt11
+..n11«‹
+T t12
+..n12
+˘
+ùñ t21
+..n21«‹
+T t22
+..n22.
+32
+
+PDF PAGE 33
+Syntax extensions
+v ::“ ¨¨¨
+ˇˇ Lv MH
+e ::“ ¨¨¨
+ˇˇ Le MH
+New contexts
+E ::“ ¨¨¨
+ˇˇ LE MH
+B ::“ projir¨s
+ˇˇ bindx“r¨sine
+Evaluation extensions
+rB-E XPANDs BrLv MHsÝÑ LBrvs MH rB-D ECL Ls ℓRH
+decl Lv MH toℓÝÑ declv toℓ
+rB-D ECL Hs ℓPH
+decl Lv MH toℓÝÑ L declv toℓ MH
+rB-E NDORSE Ls ℓRH
+endorse Lv MH toℓÝÑ endorsev toℓ
+rB-E NDORSE Hs ℓPH
+endorse Lv MH toℓÝÑ L endorsev toℓ MH
+Typing extensions
+rBRACKETs
+Γ; pc1$e :τ pc Ď pc1
+pc1PH $τ protH
+Γ; pc$ Le MH :τ H is upward closed
+Bracket projection
+teu“
+#
+te1u ife“ Le1 MH
+recursively project all sub-expressions otherwise
+Figure 22: NMIFC language extensions.
+For NMIFC, this deﬁnition is equivalent to Deﬁnition 5. We prove this fact to prove the following
+theorem.
+Theorem 7 (General NMIF). Given a programer⃗‚sH such thatΓ,⃗ x:⃗ τ; pc$er⃗‚sH :τ1, thener⃗‚sH enforces
+general NMIF .
+Proof. We prove this by reducing Deﬁnition 7 to Deﬁnition 5 in two steps. We assume that no two variables
+in the original expressioner⃗‚sH have the same name as this can be enforced byα-renaming.
+The ﬁrst step handles expressions that only substitute values (and have no holes), but allow any number
+of both secret and untrusted values. An expression of the form in this corollary is easily rewritten as such
+a substitution as follows. For each hole r‚sH, we note that Γ1; pc1 $ r‚sH : τ2 where Γ,⃗ x:⃗ τĎ Γ1 and
+pc1PH. We replace the hole with a function application inside a bind. Speciﬁcally, the hole becomes
+bindy1“y in
+`
+y1z1 ¨¨¨zk
+˘
+33
+
+PDF PAGE 34
+wherey andy1 are fresh variables and thezis are every variable in Γ1zΓ (including every element of⃗ x). Let
+τy“ pc1 says
+ˆ
+τz1
+pc1
+ÝÑ¨¨¨
+pc1
+ÝÑτzk
+pc1
+ÝÑτ2
+˙
+and includey :τy as the type of an untrusted value to substitute in.
+Instead of inserting the expressiona into that hole, we substitute in fory the value
+w“ηpc1
+`
+λpz1 :τz1qrpc1s. ¨¨¨λpzk :τzkqrpc1s.a
+˘
+.
+By HOLE we know that pc1PH and$τ2 protH, so the type has the proper protection, and by construction
+Γ; pc$w :τy. Moreover, while it has an extra value at the beginning of the trace (the function), the rest of
+the traces are necessarily the same.
+As a second step, we reduce the rest of the way to the expressions used in Deﬁnition 5. To get from our
+intermediate step to these single-value expressions, if we wish to substituteks secret values andku untrusted
+values, we instead substitute a single list of ks secret values and a single list of ku untrusted values. These
+lists are constructed in the usual way out of pairs, meaning the protection relations continue to hold as
+required. Finally, whenever a variable is referenced in the unsubstituted expression, we instead select the
+appropriate element out of the substituted list using nested projections.
+We also note that the same result holds if we allow for insertion of secret code and untrusted values, as
+the argument is exactly dual. Such a situation, however, makes less sense, so we do not present it explicitly.
+D Proofs
+We now prove a variety of properties about NMIFC.
+D.1 Language results
+We begin with the core results about the language itself.
+Lemma 1 (Values). For any valuev such that Γ; pc$v :τ, Γ; pc1$v :τ for any pc1.
+Proof. This follows by induction on the typing derivation for values.
+Lemma 2 (Substitution). If Γ,x :τ1; pc$e :τ and Γ; pc$v :τ1, then Γ; pc$erxÞÑvs :τ.
+Proof. By induction on the derivation of Γ,x :τ1; pc$e :τ using Lemma 1.
+Lemma 3 (pc reduction). If Γ; pc$e :τ and pc1 Ď pc, then Γ; pc1$e :τ.
+Proof. By induction on the derivation of Γ; pc$e :τ.
+Theorem 8 (Subject reduction). If Γ; pc$e :τ andxe, tyÝÑ Ñ xe1, t1y then Γ; pc$e1 :τ.
+Proof. This proof follows by an inductive case analysis on the operational semantics in Figures 18 and 22.
+There are a few interesting cases.
+Case B-E XPAND : This case handles a context (B), we will do a sub-case analysis on each such expression
+type.
+34
+
+PDF PAGE 35
+• e“p proji Lv MHq: U NPAIR allows the expression to type-check in any pc in which its argument type-
+checks. Since B RACKET says Γ; pc1$v :pτ1ˆτ2q for some pc1PH, we get that Γ; pc1$ projiv :τi.
+Moreover B RACKET and P-S ET also require $ H Ď pτ1ˆτ2q which, by P-P AIR can only happen if
+$ H Ď τi for i “ 1, 2. Together these satisfy the requirements for B RACKET and give us Γ; pc1 $
+L projiv MH :τi.
+• e “ pbindx“ Lv MH ine1q: By B IND M, Γ; pc $ Lv MH : ℓ saysτ1 and by B RACKET and inversion
+on the protection rules, H Ď ℓ for some H PH and thus ℓ PH. Let pc1 “ pc2[p pc\ℓq where
+pc2 is the higher pc used in B RACKET . Since H is upward closed and pc2,ℓ PH,ppc\ℓq PH and
+thus pc1 PH. Moreover, pc1\ℓ ” pc\ℓ, so by B IND M Γ,x :τ1; pc1\ℓ $ e1 : τ and by Lemma 1
+Γ; pc1$v :ℓ saysτ1. This means that Γ; pc1$ bindx“v ine1 :τ. Also by BIND M we have$ℓ Ďτ
+so sinceℓPH we have now satisﬁed the conditions on BRACKET and Γ; pc$ L bindx“v ine1 MH :τ.
+Case B-D ECL H: By D ECL Γ; pc $ Lv MH : ℓ1 saysτ1 and by inspection on the protection rules and
+BRACKET , it must be the case thatH Ďℓ1 for someHPH and thusℓ1PH.
+By assumption ℓ PH, so the ﬁnal protection requirement of B RACKET on the stepped expression is
+satisﬁed. We now claim that if pc1“ pc\ℓ then Γ; pc1$ declv toℓ :τ. D ECL gives us that pc Ďℓ, so
+clearly pc1“ pc\ℓ Ďℓ.
+DECL also gives usℓ1Ñ ĎℓÑ\ ∆ppℓ1\ pcqÐq. Sinceℓ1Ð“ℓÐ, we note that
+pℓ1\ pcqÐ“pℓ\ pcqÐ“ pc1Ð.
+Thereforepℓ1\ pc1qÐ“pℓ1\ pcqÐ and the premise still holds.
+Since the other premises D ECL are trivially still satisﬁed in a higher pc (using Lemma 1 for v to type),
+we see that Γ; pc1$ declv toℓ :τ. Thus since pc1PH andℓPH, we get Γ; pc$ L declv toℓ MH :τ.
+Case B-E NDORSE H: We omit the details of this case as they are identical to the previous case, but with
+projection arrows reversed and ∆ replaced by∇.
+All other cases follow trivially from inspection on the typing derivations in Figure 8 and applications of
+Lemmas 2 and 3. Rule E-E VAL also requires an inductive application.
+Lemma 4 (Bracket Soundness). Ifxe, ϵyÝÑ Ñ˚xe1, ty thenxteu, ϵyÝÑ Ñ˚xte1u, ttuy.
+Proof. This result follows by inspection on the operational semantics in Figures 18 and 22. Note that
+every step the non-projected expression takes is mirrored exactly by a step the projected value takes except
+applications of B-E XPAND , B-D ECL L, B-D ECL H, B-E NDORSE L, and B-E NDORSE H. Those applications
+are simply dropped and since they emit no values to the trace, the traces remain the same.
+Lemma 5 (Bracket Completeness). Ifxteu, ϵyÝÑ Ñ˚xe1, ty and Γ; pc$e :τ, then there is somee2,t1 such
+thatxe, ϵyÝÑ Ñ˚xe2, t1y.
+Proof. Assumexteu, ϵy ÝÑ Ñ˚ xe1, ty and consider the operational semantics in Figures 18 and 22. We
+consider a single step in the projected expression which gives us two cases.
+If the step happens either entirely within a bracket or entirely outside brackets, then the same step
+must be possible in the original expression. If the step in the original expression is not possible because
+of brackets, then there must be brackets around a term other than an arbitrary expression or value in the
+semantic rule employed. Since the expression type-checks and by Theorem 8, each intermediate expression
+also type-checks, the protection clause on BRACKET and inversion on the protection rules in Figure 7 give us
+35
+
+PDF PAGE 36
+four possible options for the semantic rule employed: E-U NPAIR, E-B IND M, E-D ECL, and E-E NDORSE .
+For the ﬁrst two, we can ﬁrst step using B-EXPAND one or more times before applying the original rule. For
+the second two, we can apply B-D ECL L, B-D ECL H, B-E NDORSE L, or B-E NDORSE H one or more times
+again before applying the original rule.
+In all cases we see that if the projected term steps and equivalent step is possible in the original expres-
+sion, though possibly after applying one or more other steps ﬁrst. This proves the desired result.
+D.2 Security results
+We now prove the various security results stated throughout the paper.
+Lemma 6 (Release on downgrade) . LetH be a high set and W “LzH. Given a program e such that
+Γ,x :τ1; pc$e :τ2 with$τ1 protH, for allv1,v 2 with Γ; pc$vi :τ1, let
+xerxÞÑ Lvi MHs, viyÝÑ Ñ˚ @
+v1
+i, ti
+D
+.
+Ifn1 andn2 are such thatti
+niﬀW‚ andt1
+..n1´1«‹
+W t2
+..n2´1, then eitherti
+ni“pÓ π
+ℓ1, ηℓwiq withℓ1PH and
+ℓRH for bothi“ 1, 2, ort1
+n1«W t2
+n2.
+Proof. We refer to elements of the formpÓπ
+ℓ1, ηℓwq withℓ1PH andℓRH as relevant downgrade elements.
+This is a proof by induction on the number of relevant downgrade elements int1
+..n1´1 andt2
+..n2´1. Note that
+while the preﬁxes can contain any number of relevant downgrade elements, the preﬁxes areW-equivalent,
+so the downgraded values must also beW-equivalent. In particular, there must be the same number in each
+trace preﬁx.
+As the base case, assume there are no such values in the trace preﬁxes. We ﬁrst claim that there can be
+no application of B-D ECL L or B-E NDORSE L prior to the current step.
+By the typing rules D ECL and E NDORSE , that would require the value inside the bracket to have type
+ℓ1 saysτ for some typeτ. The protection clause on B RACKET and the protection rules in Figure 19 would
+thus require there to be some H PH such thatH Ďℓ1, which in turn means ℓ1PH. However, application
+of B-D ECL L or B-E NDORSE L requiresℓRH. Therefore if either rule is applied, the next value emitted to
+the trace must bepÓπ
+ℓ1, ηℓwq whereℓ1PH andℓRH. While ti
+ni may be of that form, we assumed that no
+prior values are.
+Next we claim that any differences between the two preﬁxes must be emitted from within brackets.
+The initial expression in each case differs only in the substituted value, which is inside brackets. If we
+syntactically examine the expression at every step of evaluation, we notice that no semantic rules allow
+anything inside brackets to affect anything outside brackets except through the B-DECL L and B-ENDORSE L
+rules, which remove brackets. Since those rules are never applied, all differences must be contained within
+brackets. This means that all differences within the preﬁxes must have been emitted from inside brackets.
+Finally, we claim that if a trace elementc is emitted from within a bracket, thenc«W‚. The only three
+rules that emit trace elements are E-U NIT M, E-D ECL, and E-E NDORSE . By Theorem 8, the expression
+stepping must type check, and each of the corresponding typing rules (U NIT M, D ECL, and E NDORSE )
+contain the condition pc Ďℓ. By B RACKET , if the expression is inside a bracket then pcPH and sinceH
+is upward closed, this meansℓPH. Thus by E Q-UNIT M or EQ-DOWN,c«W‚.
+Coupled with the above logic about applications of B-D ECL L and B-E NDORSE L and the fact that
+ti
+ni ﬀW ‚, either t1
+n1 «W t2
+n2, or both are the result of downgrades that resulted in applications of either
+B-D ECL L or B-E NDORSE L. In the latter case both are of the form pÓπ
+ℓ1, ηℓwq whereℓ1PH andℓRH, as
+desired.
+36
+
+PDF PAGE 37
+Now we assume that there is at least one such expression in the trace preﬁxes, but those preﬁxes are
+stillW-equivalent. Take the ﬁrst such trace element. This element must appear in both trace preﬁxes. Let
+e1 ande2 be the top-level expressions that stepped in each trace to emit the downgrade element. The two
+expressions can differ inside brackets, and can differ inside the downgraded value (that was previously inside
+brackets). Because the downgraded values areW-equivalent, any such differences must be contained inside
+terms of the form pηℓ wq whereℓPH. We can replace any such terms by Lηℓw MH in the expression and
+it will still type-check since ℓPH andw type-checks in any pc. This results in a new pair of expressions
+that areW-equivalent except inside brackets. By Lemmas 4 and 5 these expression generate traces that are
+equivalent to the original up to brackets and bullets. By construction, these new expressions generate trace
+preﬁxes with one lesspÓπ
+ℓ1, ηℓwq element than the original expressions, so by the inductive hypothesis, the
+result holds.
+Since the same brackets were necessarily added in both expressions, the new expressions will thus
+generate equivalent traces if and only if the old expressions did. Since the trace preﬁxes prior to this modiﬁ-
+cation were equivalent, if the new expressions generate equivalent traces, the original expressions must also
+generate equivalent traces. Thus the result holds for the original traces as well.
+Theorem 1 (Noninterference of non-downgrading programs). LetH be a high set and letW“LzH. Given
+an expressione such that Γ,x :τ1; pc$e :τ2 where$τ1 protH, for allv1,v 2 with Γ; pc$vi :τ1, if
+xerxÞÑvis, viyÝÑ Ñ˚ @
+v1
+i, tiD
+then either there is somepÓπ
+ℓ1, ηℓwqP ti whereℓ1PH andℓRH, ort1«‹
+W t2.
+Proof. Since Γ; pc$ vi : τ1 and$ τ1 protH, B RACKET says Γ; pc$ Lvi MH : τ1. Lemmas 4 and 5 tell
+us that the result holds as stated above if and only if it holds when substituting Lvi MH instead ofvi. From
+there we can apply Lemma 6. If there are no pÓπ
+ℓ1, ηℓwq events in either trace withℓ1PH andℓRH, then
+eachW-visible term in each trace must be equivalent to each other by induction on the number of elements
+(empty traces are equivalent).
+Theorem 2 (Noninterference of high-pc programs). LetA be an attacker inducing high setsU andS. Let
+H be one of those high sets and W “LzH. Given an expression e such that Γ,x :τ1; pc$ e : τ2 where
+$ τ1 protH, for all v1,v 2 with Γ; pc $ vi : τ1, if xerxÞÑvis, viy ÝÑ Ñ˚ xv1
+i, tiy and pc PUYS, then
+t1«‹
+W t2.
+Proof. We claim that neither trace contains anypÓπ
+ℓ1, ηℓwq elements whereℓ1PH andℓRH, thus reducing
+this to Theorem 1. There are three cases to consider here: pcPH, pcPU andH “S, and pcPS and
+H“U.
+Case pcPH: Both D ECL and ENDORSE require pc Ďℓ, so by upward-closure ofH,ℓPH.
+Case pcPU andH“S: D ECL contains the condition ℓ1Ñ Ď ℓÑ\ ∆ppℓ1\ pcqÐq. Converting into the
+authority lattice, this gives us ℓÑ^ ∆ppℓ1_ pcqÐq ě ℓ1Ñ. Since U “AÐ, Condition 2 of Deﬁnition 6
+meanspℓ1_ pcqÐ PAÐ and thus Condition 5 means that ∆ppℓ1_ pcqÐq PAÑ, so by Condition 1 of
+Deﬁnition 6, ifℓÑPAÑ, then by transitivityℓ1ÑPAÑ. SinceH“S“LzpAÑq, this meansℓRH only
+ifℓ1RH.
+Case pcPS andH“U: This argument is nearly identical to the previous case. E NDORSE meansℓ1Ð Ď
+ℓÐ\∇ppℓ1\ pcqÑq which, in the authority lattice, means ℓ1Ð ě ℓÐ_∇ppℓ1^ pcqÑq. Since pcPS “
+LzpAÑq, Condition 4 of Deﬁnition 6 ensurespℓ1^ pcqÑ PS. Thus Condition 5 means ∇ppℓ1^ pcqÑqR
+AÐ“H, so Condition 3 and transitivity mean thatℓÐRH only ifℓ1ÐRH.
+37
+
+PDF PAGE 38
+Theorem 3 (Noninterference of secret–untrusted data). LetA be an attacker inducing high setsU andS.
+LetH“UXS andW “LzH. Given an expression e such that Γ,x :τ1; pc$e :τ2 where$τ1 protH,
+for allv1,v 2 with Γ; pc$vi :τ1, ifxerxÞÑvis, viyÝÑ Ñ˚xv1
+i, tiy thent1«‹
+W t2.
+Proof. First we note thatH is a high set as the intersection of two upward closed sets is also upward closed.
+We claim that neither trace contains anypÓπ
+ℓ1, ηℓwq elements whereℓ1PH andℓRH, thus reducing this to
+Theorem 1. We will cover the two cases ofπ separately despite their similarities.
+Case π “ Ñ: The only way to emit pÓÑ
+ℓ1, ηℓ wq is through E-D ECL. By Theorem 8, each intermediate
+expression type-checks under the same initial context. This is a sub-expression, meaning there is some Γ1,
+pc1, andτ such that
+Γ1; pc1$ declpηℓ1 vq toℓ :ℓ saysτ.
+Therefore DECL tells us thatℓ1Ñ ĎℓÑ\ ∆ppℓ1\ pc1qÐq. Every typing rule either moves pc up the lattice
+(by joining it with another label) or leaves it unchanged, so pc Ď pc1 and therefore ∆ppc1Ðq Ď ∆ppcÐq,
+meaningℓ1Ñ Ď ℓÑ\ ∆ppℓ1\ pcqÐq. Converting to the authority lattice gives us ℓÑ^ ∆ppℓ1_ pcqÐq ě
+ℓ1Ñ.
+Ifℓ1 PH, then ℓ1Ð PU “AÐ, so by the same argument as in the proof of Theorem 2, Deﬁnition 6
+gives us that ∆ppℓ1_ pcqÐq PAÑ. Thus by Condition 1 of Deﬁnition 6 and transitivity, if ℓÑ PAÑ it
+must also be the case that ℓ1ÑPAÑ. However,ℓ1PH, soℓ1ÑPS “LzpAÑq. Therefore ℓÑPS. Since
+ℓ1PH andℓ1Ð“ℓÐ, this meansℓPH.
+Caseπ“Ð : Dual to the above case, pÓÐ
+ℓ1, ηℓ wq must be emitted from E-E NDORSE , so Theorem 8 now
+implies that there is some Γ1, pc1, andτ such that
+Γ1; pc1$ endorsepηℓ1 vq toℓ :τ.
+Since pc Ď pc1 by the same logic as above, E NDORSE tells usℓ1Ð ĎℓÐ\∇ppℓ1\ pcqÑq. If ℓ1PH, then
+ℓÐ\∇ppℓ1\ pcqÑqP H. Since ℓ1ÑPHÑ“LzpAÑq, we know that∇ppℓ1\ pcqÑqR AÐ by the same
+argument as in the proof of Theorem 2. SinceℓÐ\∇ppℓ1\ pcqÑq“ ℓÐ_∇ppℓ1^ pcqÑq, Condition 3 of
+Deﬁnition 6 requires thatℓÐPAÐ“U. SinceℓÑ“ℓ1ÑPS, we see thatℓPH.
+Thus we see that for any trace element pÓπ
+ℓ1, ηℓ wq, if ℓ1 PH, then ℓPH, so by Theorem 1 the result
+holds.
+Theorem 6 (Nonmalleable information ﬂow) . For any programe such that Γ,x :τx,y :τy; pc $ e : τ, e
+enforces NMIF .
+Proof. We provide here only a proof of case 1 of Deﬁnition 5. All statements in case 2 are exactly dual so a
+precisely dual argument holds.
+LetA be an attacker inducing high setsU andS and letT “LzU,P“LzS, andW“TXP. To prove
+case 1 we prove a contrapositive of the stated implication. Speciﬁcally, if t12
+..n12 ﬀ‹
+P t22
+..n22 but relÐ
+A,epw1q,
+thent11
+..n11ﬀ‹
+P t21
+..n21.
+First we note that the theorem is uninteresting unless $ τx protS and$ τy protU. Since vi and wj
+are both present in trace tij, if v1 ﬀP v2 orw1 ﬀT w2, the theorem is trivially true. In the former case,
+varying the ﬁrst input clearly results in non-equivalent traces for both attacks. In the latter case, the result
+holds for nij “ 1 and the precondition is clearly false otherwise. Now consider the case where v1 «P v2
+andw1 «T w2. If $ τx protS and$ τy protU, then these are trivially true—the interesting case we will
+handle below. Otherwise the equivalences require the contents of the value to be identical (except for nested
+secret/untrusted values). Any identical values clearly cannot result in distinguishable traces. We can handle
+38
+
+PDF PAGE 39
+nested secret/untrusted values by ﬁxing the public/trusted parts of the inputs and viewing those values as the
+inputs instead, thus reducing to the case where$τx protS and$τy protU.5 The rest of the proof assumes
+we are in this case.
+By assumptiont12
+..n12ﬀ‹
+P t22
+..n22, there is some point at which the traces become distinguishable. This can
+happen for one of two reasons: one trace is a preﬁx of the other (up to extra‚-equivalent terms), or there are
+two non-‚ terms that are non-equivalent.
+In the ﬁrst case, without loss of generality assumet12
+..n12 is a preﬁx oft22
+..n22. We claim thatt11
+..n11 is a preﬁx
+oft21
+..n21. Lemma 6 ensures that any difference must come from a downgrade, which must be a declassiﬁca-
+tion because E NDORSE prohibits changing the conﬁdentiality andP allows labels of any integrity. By the
+argument in Theorem 3 this declassiﬁcation event must be on trusted data, thus producing a public–trusted
+output. Thus the condition that ti1
+..ni1´1«‹
+T ti2
+..ni2´1 ensures that any declassiﬁcations appearing int21
+..n21´1
+appear identically int11
+..n11´1, and similarly fort22
+..n22´1 andt12
+..n12´1. Sincetij
+nij ﬀW‚, any public–untrusted
+events appearing int2j
+..n2j must also appear int1j
+..n1j, and thust11
+..n11 must be a preﬁx oft21
+..n21.
+For the second case—two non-‚ terms are non-equivalent—letn1
+i2 be the indices of the ﬁrst such terms
+in each trace. That is, ti2
+n1
+i2
+ﬀP ‚ andt12
+n1
+12
+ﬀP t22
+n1
+22
+, butt12
+..n1
+12´1«‹
+P t22
+..n1
+22´1. Again Lemma 6 ensures that
+the ﬁrst non-equivalence must be the result of a declassiﬁcation that exists in both traces.
+By constructionn1
+ijďnij and we have thatt12
+..n1
+12´1«‹
+P t22
+..n1
+22´1 by the deﬁnition ofn1
+ij andti1
+..ni1´1«‹
+T
+ti2
+..ni2´1 by assumption. Consequently, for alli,j,k,l Pt 1, 2u, we have
+tij
+..n1
+ij´1«‹
+W tkl
+..n1
+kl´1.
+In particular, this is true fort11 andt21. We also know that for alli,j Pt 1, 2utij
+n1
+ij
+“pÓÑ
+ℓ1, ηℓwijq for some
+valuewij.
+We know that w12 ﬀP w22, and we now claim that w11 ﬀP w21. To emit this value, E-D ECL must
+have been applied, meaning there must have been a term pηℓ1 wijq in the preceding expression. Since such
+expressions are not in the source language—they can only be created by applications of E-U NIT M, E-
+DECL, and E-E NDORSE —this expression must appear previously in each trace. We know that ℓPPXT
+and D ECL requires that ℓ1Ð “ ℓÐ, so therefore ℓ1 PT . Since the preﬁxes prior to this event are trusted-
+equivalent when varying only attacks, wi1 «T wi2 fori “ 1, 2. By assumption w12 ﬀP w22 and this is
+the ﬁrst difference in those traces. This means that if w11 «P w21 thenw12 andw22 must have differed
+only in untrusted public values nested inside the original declassiﬁcation (i.e.,w12«‚Ñ
+A w22). Therefore if
+w11«P w21, thenv1,v2, andw2 are exactly the inputs needed in Deﬁnition 2 to demonstrate thatw1 is an
+irrelevant attack. We assumed that relÐ
+A,epw1q, so w11 ﬀP w21 and therefore t11
+..n11 ﬀ‹
+P t21
+..n21, proving our
+desired result.
+5This technically reduces to the many-input version of the theorem that we prove is equivalent in Appendix C.
+39
