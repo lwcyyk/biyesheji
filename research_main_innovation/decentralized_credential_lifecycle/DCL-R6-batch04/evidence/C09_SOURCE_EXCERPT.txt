@@ -1,0 +1,41 @@
+651: def external_stop():
+652:     if os.geteuid()!=0: raise AdmissionBlocked('TRUSTED_LAUNCHER_ONLY')
+653:     authorization(); s=state(); monitored=None; fd=None
+654:     _root_write(ROOT/'inputs/STOP_ARMED.json',{'identity':identity(),'stop_at':s['stop_at'],'boot_id':boot_id()})
+655:     while True:
+656:         s=trusted(ROOT/'inputs/batch_state.json')
+657:         if (ROOT/'inputs/CLOSED.json').exists():
+658:             stop_tree('CLOSED_BATCH_CLEANUP',False); return 0
+659:         if s['boot_id']!=boot_id() or now()>=s['stop_at'] or (OUT/'STOP_REQUEST.json').exists():
+660:             stop_tree('ABSOLUTE_STOP_OR_REQUEST'); return 124
+661:         target=s.get('launcher_identity')
+662:         if target and target!=monitored:
+663:             if fd is not None: os.close(fd)
+664:             try: valid=identity(target['pid'])==target
+665:             except OSError: valid=False
+666:             if not valid: stop_tree('LAUNCHER_IDENTITY_CHANGED'); return 125
+667:             try:
+668:                 fd=os.pidfd_open(target['pid'])
+669:                 if identity(target['pid'])!=target: raise ProcessLookupError('PID_REUSED')
+670:             except OSError:
+671:                 stop_tree('LAUNCHER_PIDFD_NOT_STABLE'); return 125
+672:             monitored=target
+673:         if fd is not None and select.select([fd],[],[],.1)[0]:
+674:             if s.get('expected_launcher_exit')=='C09' and s.get('resume_count',0)==0:
+675:                 cleanup=stop_tree('EXPECTED_C09',False)
+676:                 marker=read(OUT/'C09.ready.json')
+677:                 if marker['case']!='C09' or marker['counter']!=count() or marker['identity']!=ticket('C09')['main_identity']:
+678:                     stop_tree('C09_LEDGER_OR_MARKER_MISMATCH'); return 125
+679:                 _root_write(ROOT/'inputs/result_C09.json',{'case':'C09','status':'PASS',
+680:                     'actual':{'launcher_exit_observed':True,'cleanup':cleanup,'marker':marker},'sample':stamp()})
+681:                 s['status']='AWAIT_EXPECTED_RESUME';s['launcher_identity']=None;s['expected_launcher_exit']=None
+682:                 _root_write(ROOT/'inputs/batch_state.json',s)
+683:                 os.close(fd);fd=None;monitored=None
+684:             else: stop_tree('UNEXPECTED_LAUNCHER_EXIT'); return 125
+685:         else: time.sleep(.05)
+
+778:     if case=='C09':
+779:         while not (OUT/'C09.ready.json').exists() and now()<limit: time.sleep(.05)
+780:         if not (OUT/'C09.ready.json').exists(): raise AdmissionBlocked('C09_NOT_READY')
+781:         s=state();s['expected_launcher_exit']='C09';_root_write(ROOT/'inputs/batch_state.json',s)
+782:         os._exit(23)  # one predeclared crash; resume retains T0/deadline/ledger

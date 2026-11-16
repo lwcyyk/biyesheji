@@ -1,0 +1,194 @@
+"""Host administrative read/hash/AST audit; target modules are never imported."""
+import ast
+import collections
+import hashlib
+import io
+import json
+from pathlib import Path
+import shutil
+import sys
+import time
+import zipfile
+from datetime import datetime, timezone
+
+BASE=Path(r'D:\毕业设计\research_main_innovation\decentralized_credential_lifecycle')
+ISO=Path(r'D:\毕业设计\DCL-R6-isolated-verification')
+WORK=ISO/'cr01'
+OUT=BASE/'DCL-R6-batch09'
+EV=OUT/'evidence'
+EV.mkdir(parents=True,exist_ok=True)
+begun=datetime.now(timezone.utc).isoformat()
+tick=time.perf_counter()
+def sha(raw):return hashlib.sha256(raw).hexdigest()
+def load(p):return json.loads(Path(p).read_bytes())
+def save(name,d):
+    p=EV/name
+    if p.exists():raise RuntimeError('ADMIN_OUTPUT_ALREADY_EXISTS:'+name)
+    p.write_text(json.dumps(d,ensure_ascii=False,indent=2)+'\n',encoding='utf-8')
+def row(p):return {'host':str(p),'bytes':p.stat().st_size,'sha256':sha(p.read_bytes())}
+
+# Preserve all historical files and all isolated host workspaces. Four navigation
+# files are separately snapshotted before their explicitly requested updates.
+nav=['CURRENT_VERDICT.md','NEXT_ACTION.md','README.md','DECISION_HISTORY.md']
+history=[]
+for root in [BASE,ISO]:
+    for p in sorted(root.rglob('*')):
+        if not p.is_file() or p.is_symlink() or p.is_relative_to(OUT):continue
+        if p.parent==BASE and p.name in nav:continue
+        history.append(row(p))
+(EV/'navigation_before').mkdir()
+navrows=[]
+for name in nav:
+    p=BASE/name
+    shutil.copyfile(p,EV/'navigation_before'/name)
+    navrows.append(row(p))
+save('BASELINE_LOCK.json',{'schema':'D09-admin-history/1','created_utc':begun,
+    'files':history,'navigation':navrows,'runtime_batch09_host_existed':(ISO/'batch09').exists(),
+    'runtime_linux_queried':False,'target_execution_started':False})
+
+request=Path(r'C:\Users\a1887\.codex\attachments\bf51de0a-c665-4af4-bb5b-06d26653e362\已粘贴的文本.txt')
+shutil.copyfile(request,EV/'TASK_REQUEST.txt')
+save('AUTHORIZATION_RECEIVED.json',{'schema':'D09-user-instruction/1','actual_user_request_sha256':sha(request.read_bytes()),
+    'status':'RECEIVED_CONDITIONAL_EXECUTION_AUTHORIZATION','requested_batch':'batch09',
+    'requested_version':'C00Ready-static-1/r2','full_chain_authorized_conditionally':True,
+    'F1_then_F4_authorized_after_resource_gate':True,'static_read_and_lock_authorized':True,
+    'source_modification_authorized':False,'matching_executable_lock_established':False,
+    'execution_authorization_receipt_minted':False,'T0':None,'visits':None,
+    'not_a_runtime_receipt':True})
+
+frozen=load(BASE/'DCL-R6-C00Ready-Fix/evidence/STATIC_WORKSPACE_LOCK.json')
+bad=[];source_rows=[]
+snapshot=EV/'FROZEN_C00READY_REFERENCE'
+for r in frozen['files']:
+    p=WORK/r['relative'];actual=row(p)
+    if actual['sha256']!=r['sha256'] or actual['bytes']!=r['bytes']:bad.append(r['relative'])
+    dst=snapshot/r['relative'];dst.parent.mkdir(parents=True,exist_ok=True);shutil.copyfile(p,dst)
+    source_rows.append({**actual,'relative':r['relative'],'expected_sha256':r['sha256']})
+m=load(WORK/'inputs/static_manifest.json');lock=load(WORK/'inputs/execution_lock.json')
+binding_errors=[]
+for name,h in m['source_hashes'].items():
+    if sha((WORK/'src'/name).read_bytes())!=h:binding_errors.append('source:'+name)
+for rel,h in m['bound_inputs'].items():
+    if sha((WORK/rel).read_bytes())!=h:binding_errors.append('input:'+rel)
+if sha((WORK/'inputs/static_manifest.json').read_bytes())!=lock['static_manifest_sha256']:binding_errors.append('manifest_to_execution_lock')
+if sha((WORK/'host/windows_entry.py').read_bytes())!=lock['windows_entry_sha256']:binding_errors.append('windows_entry_to_lock')
+save('FROZEN_HASH_CHECK.json',{'schema':'D09-static-hash/1','status':'PASS_ADMIN_ONLY' if not bad+binding_errors else 'FAIL',
+    'rows':source_rows,'file_count':len(source_rows),'Linux_sources':23,'Windows_sources':1,'inputs':12,
+    'mismatches':bad,'binding_errors':binding_errors,'target_imports':0,
+    'manifest_sha256':sha((WORK/'inputs/static_manifest.json').read_bytes()),
+    'execution_lock_sha256':sha((WORK/'inputs/execution_lock.json').read_bytes())})
+
+# Check batch08's delivery package and each declared member directly. Private
+# member contents are hashed in memory and are never printed or copied to reports.
+previous=BASE/'DCL-R6-batch08-Diag'
+delivery=load(previous/'evidence/DELIVERY_CHECK.json')
+manifest=load(previous/'OUTPUT_MANIFEST.json')
+zip_errors=[];host_errors=[];members=[];embedded=[]
+with zipfile.ZipFile(previous/'BATCH08_DIAG_EVIDENCE.zip') as z:
+    names=z.namelist()
+    for r in manifest['files']:
+        p=Path(r['host'])
+        if not p.is_file() or sha(p.read_bytes())!=r['sha256']:host_errors.append(r['archive_path'])
+        try:raw=z.read(r['archive_path'])
+        except Exception as e:zip_errors.append({'member':r['archive_path'],'error':type(e).__name__});continue
+        if sha(raw)!=r['sha256'] or len(raw)!=r['bytes']:zip_errors.append({'member':r['archive_path'],'error':'SHA_OR_SIZE'})
+        members.append({'name':r['archive_path'],'bytes':len(raw),'sha256':sha(raw)})
+    for name in names:
+        if name.endswith('/EVIDENCE.zip'):
+            raw=z.read(name)
+            with zipfile.ZipFile(io.BytesIO(raw)) as inner:
+                for n in inner.namelist():inner.read(n)
+                embedded.append({'archive_member':name,'sha256':sha(raw),'members':len(inner.namelist()),'CRC_errors':0})
+actual_archive=sha((previous/'BATCH08_DIAG_EVIDENCE.zip').read_bytes())
+actual_manifest=sha((previous/'OUTPUT_MANIFEST.json').read_bytes())
+if actual_archive!=delivery['ZIP_sha256']:zip_errors.append({'error':'OUTER_SHA'})
+if actual_manifest!=delivery['manifest_sha256']:zip_errors.append({'error':'MANIFEST_SHA'})
+save('BATCH08_ARCHIVE_CHECK.json',{'schema':'D09-previous-evidence/1','status':'PASS_ADMIN_ONLY' if not zip_errors+host_errors else 'FAIL',
+    'declared_files':len(manifest['files']),'archive_entries':len(names),'ZIP_sha256':actual_archive,
+    'manifest_sha256':actual_manifest,'zip_errors':zip_errors,'host_errors':host_errors,
+    'members':members,'embedded_archives':embedded,'private_contents_disclosed':False,
+    'scope':'Integrity of historical batch08 only; no batch09 dynamic eligibility'})
+
+contracts={name:load(WORK/'inputs'/name) for name in ['readiness_contract.json','boot_contract.json','root_ipc_contract.json','c09_contract.json','safety_contract.json']}
+counts={}
+for name,cfg in contracts.items():
+    ids=[r['case_id'] for r in cfg['jobs']]
+    counts[name]={'jobs':len(ids),'unique_ids':len(set(ids)),'safe':sum(r.get('variant')=='safe' for r in cfg['jobs']),
+        'mutant':sum(r.get('variant')=='mutant' for r in cfg['jobs']),'case_ids':ids,'future_batch_id':cfg['future_batch_id']}
+counts['gate17']={'jobs':len(contracts['safety_contract.json']['gate_negative_cases']),
+    'case_ids':[r['case_id'] for r in contracts['safety_contract.json']['gate_negative_cases']]}
+save('FROZEN_TEST_INVENTORY.json',{'schema':'D09-static-inventory/1','counts':counts,
+    'all_dynamic_status':'UNRUN_STATIC_ADMISSION','calibration_schedule':lock['calibration_schedule'],
+    'frozen_dependency_schedule':lock['readiness_schedule'],
+    'payload_commands':lock['payload_commands'],'safety_worker_commands':lock['safety_worker_commands'],
+    'windows_single_call':lock['windows_single_call'],'launch_command':lock['launch_command'],
+    'formal_entry':'run_batch.py, within FORMAL controller after all mandatory gates',
+    'target_commands_executed':[]})
+
+namespace_hits=[]
+for p in sorted(WORK.rglob('*')):
+    if p.is_file() and p.suffix in ('.py','.json','.slice'):
+        for n,line in enumerate(p.read_text(encoding='utf-8').splitlines(),1):
+            if 'batch08' in line or 'BATCH08' in line:
+                namespace_hits.append({'relative':p.relative_to(WORK).as_posix(),'line':n,'text':line})
+save('NAMESPACE_BINDING_AUDIT.json',{'schema':'D09-namespace/1','result':'BLOCKED_STATIC_NAMESPACE_BINDING',
+    'requested_batch':'batch09','executable_batch':'batch08','hit_count':len(namespace_hits),
+    'files_with_hits':len({x['relative'] for x in namespace_hits}),'hits':namespace_hits,
+    'runtime_argument_override_available':False,'mount_or_alias_workaround_authorized':False,
+    'historical_control_logs_would_be_written_by_old_entry':True,'actual_old_entry_calls':0})
+
+# AST parsing only: no import, interpretation, test execution, or model enumeration.
+asts={p.name:ast.parse(p.read_bytes(),filename=str(p)) for p in (WORK/'src').glob('*.py')}
+asts['host/windows_entry.py']=ast.parse((WORK/'host/windows_entry.py').read_bytes())
+save('AST_SOURCE_INDEX.json',{'schema':'D09-AST-only/1','parsed_files':len(asts),
+    'sources':{name:[{'name':node.name,'line':node.lineno,'end_line':node.end_lineno}
+        for node in tree.body if isinstance(node,(ast.FunctionDef,ast.ClassDef))] for name,tree in asts.items()},
+    'target_imports':0,'target_compilation_in_Linux':False,'interpreter':'Host '+sys.version})
+
+ready=contracts['readiness_contract.json'];bc=contracts['boot_contract.json'];ipc=contracts['root_ipc_contract.json'];h=contracts['c09_contract.json']
+cparts={'C00_C12_entry':13,'C02':128*(1+1048576//4096),'C03':16777216//4096,'C04':1,'C05':18,'C11':4,'C12':6}
+c_total=sum(cparts.values())
+recalc={'C00Ready_completed':1+len(ready['jobs'])*(ready['driver_prepay']+1),
+    'BootContinuity_completed':1+len(bc['jobs'])*(bc['driver_prepay']+1),
+    'RootIPC_completed':1+sum(j['driver_charge_bound'] for j in ipc['jobs'])+len(ipc['jobs']),
+    'C09H_exact_frozen_event_charge':1+sum(len(j['events'])+1 for j in h['jobs'])+len(h['jobs']),
+    'C09H_conservative':1+len(h['jobs'])*(h['max_events_per_job']+2)}
+hard=c_total+20000+5000+512
+save('RESOURCE_BOUND_RECALCULATION.json',{'schema':'D09-static-resource/1','page_size_condition':4096,
+    'C00_C12_parts':cparts,'C00_C12_sum':c_total,'derived_suite_completed_charges':recalc,
+    'C09H_IPC_BC_conservative':recalc['C09H_conservative']+recalc['RootIPC_completed']+recalc['BootContinuity_completed'],
+    'C09H_IPC_BC_frozen_event_charge':recalc['C09H_exact_frozen_event_charge']+recalc['RootIPC_completed']+recalc['BootContinuity_completed'],
+    'hard_components':{'C00_C12':c_total,'RANGE_including_raw_and_gate17':20000,'joint_handoff_regressions':5000,'readiness_regressions':512},
+    'hard_total':hard,'calibration_soft_cap':100000,'visit_capacity_check':'PASS_STATIC',
+    'max_unused_calibration_soft_capacity':100000-hard,'conditional_formal_remaining_from_hard_calibration':1000000-hard,
+    'FORMAL_entrance_additional_charge':1,'remaining_after_first_formal_entrance':1000000-hard-1,
+    'formal_completion_visit_bound_proved':False,'calibration_300s_completion_proved':False,
+    'blocking_time_reason':'No complete frozen chain dynamic duration or bounded storage/scheduling latency; individual timeouts are failure controls',
+    'model_time_after_full_300s_calibration_before_1740s_stop':1440,
+    'wall_seconds':1800,'calibration_seconds':300,'stop_at_relative':1740,
+    'runtime_actual':{'T0':None,'deadline':None,'stop_at':None,'visits':None,'memory_peak':None,'runtime_elapsed':None},
+    'all_values_above_are_static_bounds_not_execution_results':True})
+
+save('STATIC_EXECUTION_LOCK.json',{'schema':'D09-static-admission-lock/1','status':'BLOCKED_STATIC_ADMISSION',
+    'runnable':False,'authorization_received':True,'requested_batch_id':'batch09','frozen_executable_batch_id':'batch08',
+    'requested_version':'C00Ready-static-1/r2','source_lock_sha256':sha((EV/'FROZEN_HASH_CHECK.json').read_bytes()),
+    'inherited_execution_lock_sha256':sha((WORK/'inputs/execution_lock.json').read_bytes()),
+    'inherited_commands_role':'READ_ONLY_REFERENCE_BATCH08; DO_NOT_EXECUTE_AS_BATCH09',
+    'actual_target_argv':[],'new_batch09_authorization_receipt':None,'current_boot_id':None,
+    'runtime':{'host_directory_created':False,'Linux_directory_created_by_this_task':False,'T0':None,'R':None,'CLOSED_receipt':None},
+    'first_admission_blocker':'D09-A01_NAMESPACE_VERSION_BINDING',
+    'other_admission_blocker':'D09-A02_CALIBRATION_COMPLETION_300S_UNPROVED',
+    'pidfd_observability_gap':'PRESERVED_ADDITIONAL_REVIEW_EVIDENCE; not a new mandatory field in frozen formal gate',
+    'RESOURCE_GATE_PASS':'NOT_OBTAINED','F1':'UNRUN_RESOURCE_GATE','F4':'UNRUN_RESOURCE_GATE',
+    'PASS_BOUNDED':[],'strict_separation_instances':0,'IMPLEMENTATION_GATE':'CLOSED'})
+save('ADMIN_OPERATIONS.json',{'schema':'D09-admin-operations/1','start_utc':begun,
+    'end_utc':datetime.now(timezone.utc).isoformat(),'elapsed_seconds':time.perf_counter()-tick,
+    'argv':['python','-X','utf8','-'],'stdin_source':'ADMIN_ADMISSION_AUDIT.txt',
+    'source_sha256':sha((EV/'ADMIN_ADMISSION_AUDIT.txt').read_bytes()),'host_python_executable':sys.executable,
+    'host_python_version':sys.version,'scope':'Host hash/read/AST/ZIP audit and administrative evidence writing',
+    'target_imports':0,'target_tests':0,'WSL_calls':0,'systemd_calls':0,'runtime_source_changes':0,
+    'administrative_analysis_excluded_from_target_visits':True})
+print(json.dumps({'status':'STATIC_ADMISSION_BLOCKED','history_files':len(history),'frozen_files':len(source_rows),
+    'source_errors':bad+binding_errors,'batch08_manifest_rows':len(manifest['files']),'batch08_zip_entries':len(names),
+    'zip_errors':zip_errors,'host_errors':host_errors,'namespace_hits':len(namespace_hits),
+    'visit_hard_bound':hard,'executed_target_commands':0,'T0':None,'R':None},ensure_ascii=False))

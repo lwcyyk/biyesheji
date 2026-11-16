@@ -1,0 +1,85 @@
+src/guard.py
+830:             'scope':'bounded in-memory aggregates; this final write is outside the snapshot; abrupt exit may lose telemetry',
+831:             'sample':stamp()})
+832: def launch_one(case):
+833:     root_checkpoint()
+834:     argv=service_argv(case)
+835:     lock=trusted(SOURCE.parent/'inputs/execution_lock.json')
+836:     if argv!=lock['payload_commands'][case]: raise AdmissionBlocked('PAYLOAD_ARGV_DRIFT')
+837:     _run(argv)
+838:     unit='dclr6batch07-'+case.lower()+'.service'; until=now()+14
+839:     info={}
+840:     while now()<until:
+841:         root_checkpoint()
+842:         info=unit_show(unit); pid=int(info.get('MainPID','0'))
+843:         if pid: break
+844:         time.sleep(.02)
+845:     else: raise AdmissionBlocked('NO_CONTROLLER_PID')
+846:     s=state()
+847:     limit=s['stop_at'] if case=='FORMAL' else min(s['stop_at'],s['T0']+300,now()+(2 if case=='C06' else 300))
+848:     t={'case':case,'unit':unit,'main_identity':identity(pid),'boot_id':boot_id(),
+849:        'source_manifest':digest(SOURCE.parent/'inputs/static_manifest.json'),'case_deadline':limit,
+850:        'unit_before_ticket':info,'argv':argv}
+851:     t['execution_lock_sha256']=digest(SOURCE.parent/'inputs/execution_lock.json')
+852:     if case=='RANGE':t['safety_visit_ceiling']=min(100000,count()+20000)
+853:     if case=='C09H':t['c09h_visit_ceiling']=min(100000,count()+5000)
+854:     boot_continuity().service_confirmed(sys.modules[__name__],t)
+855:     _root_write(ROOT/('inputs/ticket_'+case+'.json'),t)
+856:     if case=='C09':
+857:         import c09_handoff as H
+858:         def c09_live():
+859:             return H.alive(sys.modules[__name__],t['main_identity']) and H.alive(
+860:                 sys.modules[__name__],trusted(ROOT/'inputs/STOP_ARMED.json')['identity'])
+861:         root_ipc().wait_ready(sys.modules[__name__],OUT/'C09.ready.json',limit,c09_live)
+862:         root_checkpoint()
+863:         H.sender_prepare(sys.modules[__name__],_COORDINATOR_ID)
+864:         root_checkpoint()
+865:         os._exit(23)  # one predeclared crash; resume retains T0/deadline/ledger
+866:     while now()<limit+5:
+
+src/guard.py
+668:     return dict(line.split('=',1) for line in text.splitlines() if '=' in line)
+669: def service_argv(case):
+670:     unit='dclr6batch07-'+case.lower()+'.service'
+671:     props={'User':'dcl-r6','Group':'dcl-r6','Type':'exec','Slice':PARENT,
+672:            'LimitAS':str(AS_CAP)+':'+str(AS_CAP),'TasksMax':'4','TasksAccounting':'yes',
+673:            'MemoryAccounting':'yes','MemoryMax':str(4*AS_CAP),'MemorySwapMax':'0',
+674:            'OOMPolicy':'kill','OOMScoreAdjust':'0','LimitCORE':'0','Restart':'no',
+675:            'Delegate':'no','NoNewPrivileges':'yes','KillMode':'control-group',
+676:            'KillSignal':'SIGKILL','SendSIGKILL':'yes','TimeoutStartSec':'15','TimeoutStopSec':'5',
+677:            'RuntimeMaxSec':'1740','CapabilityBoundingSet':'','AmbientCapabilities':'',
+678:            'ProtectSystem':'strict','ProtectHome':'yes','ProtectControlGroups':'yes',
+679:            'PrivateDevices':'yes','PrivateTmp':'yes','PrivateNetwork':'yes',
+680:            'RestrictNamespaces':'yes','RestrictAddressFamilies':'AF_UNIX',
+681:            'ReadWritePaths':str(OUT),'WorkingDirectory':str(ROOT),
+682:            'UnsetEnvironment':'LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT PYTHONPATH PYTHONHOME',
+683:            'InaccessiblePaths':'/mnt /init /dev/hugepages /usr/lib/wsl /run/systemd/private /run/dbus /run/user'}
+684:     return ['/usr/bin/systemd-run','--no-block','--unit='+unit,
+685:             *['--property='+k+'='+v for k,v in props.items()],PYTHON,'-I','-S','-B',str(SOURCE/'guard.py'),
+686:             '--role','controller','--batch-root',str(ROOT),'--case',case]
+687: def _root_write(path,data): atomic(path,data,True)
+688: def _empty():
+
+src/boot_continuity.py
+330: def service_confirmed(G,t):
+331:     if t['case'] not in ('C00','C10'):return
+332:     if _SESSION is None:raise Rejected('BC_CHILD_SESSION_MISSING')
+333:     info=G.unit_show(t['unit']);s=G.state();owner=_SESSION['ticket']['owner']
+334:     status=G._status(t['main_identity']['pid'])
+335:     if (set(map(int,status['Uid'].split()))!={999} or set(map(int,status['Gid'].split()))!={989} or
+336:         set(map(int,status['Groups'].split()))!={989} or int(status['CapEff'],16)!=0 or int(status['NoNewPrivs'])!=1 or
+337:         info.get('LimitAS')!=str(G.AS_CAP) or info.get('LimitASSoft')!=str(G.AS_CAP) or
+338:         info.get('ControlGroup')!='/'+G.PARENT+'/'+t['unit']):raise Rejected('BC_SERVICE_IDENTITY_OR_LIMITS')
+339:     service_policy({'process_alive':G.identity(owner['pid'])==owner,'same_boot':s['boot_id']==owner['boot_id'],
+340:                     'service_active':info.get('ActiveState')=='active','stable_main_pid':int(info.get('MainPID','0'))==t['main_identity']['pid'] and G.identity(t['main_identity']['pid'])==t['main_identity'],
+341:                     'closed':G.stopped(),'stop':False})
+342:     record={'schema':PROFILE,'status':'ACTUAL_SERVICE_CONFIRMED','owner':owner,'boot_id':boot(),
+343:             'activation_sha256':hashlib.sha256(canon(_SESSION['ticket'])).hexdigest(),
+344:             'binding':_SESSION['ticket']['binding'],'window':{k:s[k] for k in ['T0','deadline','stop_at','execution_mode']},
+345:             'unit':info,'main_identity':t['main_identity'],'counter_snapshot':G.count(),'sample':stamp()}
+346:     with Store() as store:store.put('BOOT_START.json' if t['case']=='C00' else 'BOOT_RESUME.json',record,exclusive=True,public=True)
+347:     emit('ACTUAL_SERVICE_CONFIRMED',case=t['case'],main_identity=t['main_identity'],launcher_started=True,resource_gate='NOT_OBTAINED')
+348: 
+349: 
+350: def formal_gate(G):
+351:     verify_regression(G)

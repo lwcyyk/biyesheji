@@ -1,0 +1,1073 @@
+[PDF_PAGE 1]
+                  CoordinationAvoidanceinDatabaseSystems
+                                                       (ExtendedVersion)
+
+   Peter Bailis, Alan Fekete†, Michael J. Franklin, Ali Ghodsi, Joseph M. Hellerstein, Ion Stoica
+                                                     UC Berkeley and †University of Sydney
+
+ABSTRACT                                                                                Unfortunately,coordination-freeexecutionisnotalwayssafe. Un-
+Minimizing coordination,or blockingcommunication between con-                        inhibitedcoordination-freeexecutioncancompromiseapplication-
+currently executing operations, is key to maximizing scalability,                    level correctness, or consistency.1  In canonical banking applica-
+availability, and high performance in database systems. However,                     tionexamples,concurrent,coordination-freewithdrawaloperations
+uninhibited coordination-free execution can compromise applica-                      can result in undesirable and “inconsistent” outcomes like negative
+tioncorrectness,orconsistency. Wheniscoordinationnecessaryfor                        account balances—application-level anomalies that the database
+correctness? The classic use of serializable transactions is sufﬁcient               should prevent. To ensure correct behavior, a database system must
+to maintain correctness but is not necessary for all applications,                   coordinatetheexecutionoftheseoperationsthat,ifotherwiseexe-
+sacriﬁcingpotentialscalability. Inthispaper,wedevelopaformal                         cuted concurrently, could result in inconsistent application state.
+framework,invariantconﬂuence,that determineswhetheran appli-                            Thistensionbetweencoordinationandcorrectnessisevidenced
+cation requires coordination for correct execution.  By operating                    by the range of database concurrency control policies.  In tradi-
+on application-level invariants over database states (e.g., integrity                tional database systems, serializable isolation provides concurrent
+constraints), invariant conﬂuence analysis provides a necessary and                  operations (transactions) with the illusion of executing in some se-
+sufﬁcient condition for safe, coordination-free execution.  When                     rialorder[16]. Aslongasindividualtransactionsmaintaincorrect
+programmers specify their application invariants, this analysis al-                  application state, serializability guarantees correctness [31]. How-
+lowsdatabasestocoordinateonlywhenanomaliesthatmightviolate                           ever, each pair of concurrent operations (at least one of which is
+invariantsare possible. Weanalyze theinvariantconﬂuence ofcom-                       a write) can potentially compromise serializability and therefore
+mon invariants and operations from real-world database systems                       will require coordination to execute [9,22]. By isolating users at
+(i.e.,integrityconstraints)andapplicationsandshowthatmanyare                         the level of reads and writes, serializability can be overly conser-
+invariantconﬂuentandthereforeachievablewithoutcoordination.                          vative and may in turn coordinate more than is strictly necessary
+Weapply theseresults toa proof-of-conceptcoordination-avoiding                       for consistency [30,40,56,61].  For example, hundreds of users
+databaseprototypeanddemonstratesizableperformancegainscom-                           can safely and simultaneously retweet Barack Obama on Twitter
+pared to serializable execution, notably a 25-fold improvement over                  withoutobservingaserialorderingofupdatestotheretweetcounter.
+prior TPC-C New-Order performance on a 200 server cluster.                           In contrast, a range of widely-deployed weaker models require less
+                                                                                     coordinationtoexecutebutsurfacereadandwritebehaviorthatmay
+                                                                                     inturn compromiseconsistency[2,9,23,50]. Withthesealternative
+                                                                                     models, it is up to users to decide when weakened guarantees are
+1.   INTRODUCTION                                                                    acceptablefortheir applications [6],leadingtoconfusionregarding
+   Minimizing coordination is key in high-performance, scalable                      (and substantial interest in) the relationship between consistency,
+database design. Coordination—informally, the requirement that                       scalability, and availability [1,9,12,19,22,23,29,41].
+concurrentlyexecutingoperationssynchronouslycommunicateor                               Inthispaper,weaddressthecentralquestioninherentinthistrade-
+otherwise stall in order to complete—is expensive: it limits con-                    off: wheniscoordinationstrictlynecessarytomaintainapplication-
+currency between operations and undermines the effectiveness of                      level consistency? To do so, we enlist the aid of application pro-
+scale-out across servers.  In the presence of partial system fail-                   grammerstospecify theircorrectnesscriteriainthe formofinvari-
+ures, coordinating operations may be forced to stall indeﬁnitely,                    ants. For example, our banking application writer would specify
+and, in the failure-free case, communication delays can increase                     that account balances should be positive (e.g., by schema annota-
+latency [9,29]. In contrast, coordination-free operations allow ag-                  tions),similartoconstraintsinmoderndatabasestoday. Usingthese
+gressivescale-out,availability[29],andlowlatencyexecution[1].                        invariants, we formalize a necessary and sufﬁcient condition for
+Ifoperationsarecoordination-free,thenaddingmorecapacity(e.g.,                        invariant-preserving and coordination-free execution of an appli-
+servers, processors) will result in additional throughput; operations                cation’soperations—theﬁrstsuchconditionwehaveencountered.
+can execute on the new resources without affecting the old set of                    Thisproperty—invariantconﬂuence( I-conﬂuence)—capturesthe
+resources. Partialfailures willnot affectnon-failed operations,and                   potentialscalabilityand availabilityofanapplication,independent
+latencybetweenanydatabasereplicascanbehiddenfromend-users.                           ofanyparticulardatabaseimplementation: ifanapplication’sopera-
+                                                                                     tionsareI-conﬂuent,adatabasecancorrectlyexecutethemwithout
+                                                                                     coordination.  If operations are not I-conﬂuent, coordination is
+                                                                                     required to guarantee correctness. This provides a basis for coordi-
+                                                                                     nation avoidance: the use of coordination only when necessary.
+This work is an extended version of a paper appearing inPVLDB, Vol. 8,
+No. 3. Articles from this volume were invited to present their results at the         1Ouruseoftheterm“consistency”inthispaperrefersto  application-level
+41st International Conference on Very Large Data Bases, Aug. 31st - Sept.            correctness, as is traditional in the databaseliterature [16,22,26,31,59]. As
+4th, 2015, Kohala Coast, Hawaii.                                                     we discuss in Section 5, replicated data consistency (and isolation [2,9])
+Extends work from Proceedings of the VLDB Endowment, Vol. 8, No. 3                   modelslikelinearizability[29]canbecastasapplicationcriteriaifdesired.
+.
+[PDF_PAGE 2]
+    While coordination-free execution is powerful, are any useful                       theoretical result. Readers may skip to Section 5 for practical ap-
+ operations safely executable without coordination? I-conﬂuence                         plications ofI-conﬂuence to real-world invariant-operation com-
+ analysis determines when concurrent execution of speciﬁc opera-                        binations.  Section 6 subsequently applies these combinations to
+ tions can be “merged” into valid database state; we accordingly                        real applications and presents an experimental case study of TPC-C.
+ analyze invariants and operations from several real-world databases                    Section7describesrelatedwork,whileSection8discussespossible
+ and applications. Many production databases today already support                      extensions and Section 9 concludes.
+ invariantsintheformofprimarykey,uniqueness,foreignkey,and
+ row-level check constraints [9,43].  We analyze these and show
+ many areI-conﬂuent, including forms of foreign key constraints,                        2.   CONFLICTS AND COORDINATION
+ unique value generation, and check constraints, while others, like                        As repositories for application state, databases are traditionally
+ primary key constraints are, in general, not. We also consider entire                  tasked with maintaining correct data on behalf of users.  During
+ applicationsandapply ouranalysis tothe workloadsof theOLTP-                            concurrent access to data, a database ensuring correctness must
+ Benchmark suite [24]. Many of the operations and invariants are                        thereforedecidewhichuseroperationscanexecutesimultaneously
+ I-conﬂuent. As an extended case study, we examine the TPC-C                            and which,if any,must coordinate,or block. In thissection, weex-
+ benchmark[58],thepreferredstandardforevaluatingnewconcur-                              ploretherelationshipbetweenthecorrectnesscriteriathatadatabase
+ rency control algorithms [24,36,48,55,57]. We show that ten of                         attempts to maintain and the coordination costs of doing so.
+ twelve of TPC-C’s invariants areI-conﬂuent under the workload                          Byexample.  Asarunningexample,weconsideradatabase-backed
+ transactions and, more importantly, compliant TPC-C can be im-                         payrollapplicationthat maintainsinformationaboutemployeesand
+ plemented without any synchronous coordination across servers.                         departments within a small business. In the application, a.) each
+ Wesubsequentlyscaleacoordination-avoidingdatabaseprototype                             employee is assigned a unique ID number and b.) each employee
+ linearly,toover12.7MTPC-CNew-Ordertransactionspersecond                                belongstoexactlyonedepartment. Adatabaseensuringcorrectness
+ on 200 servers, a 25-fold improvement over prior results.                              must maintain these application-level properties, or invariants on
+    Overall,I-conﬂuenceoffersaconcretegrasponthechallengeof                             behalfoftheapplication(i.e.,withoutapplication-levelintervention).
+ minimizing coordination while ensuring application-level correct-                      In our payroll application, this is non-trivial: for example, if the
+ ness. Inseeking anecessaryand sufﬁcient(i.e.,“tight”) condition                        application attempts to simultaneously create two employees, then
+ for safe,coordination-free execution, we requirethe programmerto                       the database must ensure the employees are assigned distinct IDs.
+ specifyher correctness criteria. Ifeitherthesecriteria orapplication
+ operations are unavailable for inspection, users must fall back to                     Serializability and conﬂicts.      The classic answer to maintain-
+ usingserializabletransactionsor,alternatively,performthesamead-                        ing application-level invariants is to use serializable isolation: ex-
+ hocanalysestheyusetoday[12]. Moreover,itisalreadywellknown                             ecute each user’s ordered sequence of operations, or transactions,
+ that coordination is required to prevent several read/write isolation                  such that the end result is equivalent to some sequential execu-
+ anomalies like non-linearizable operations [9,29]. However, when                       tion [16,31,56]. Ifeach transaction preserves correctness in isola-
+ users cancorrectlyspecify their applicationcorrectnesscriteriaand                      tion,compositionviaserializableexecutionensurescorrectness. In
+ operations, theycan maximize scalabilitywithout requiringexper-                        our payroll example, the database would execute the two employee
+ tiseinthemilieuofweakread/writeisolationmodels[2,9]. Wehave                            creation transactions such that one transaction appears to execute
+ also found thatI-conﬂuence to be a useful design tool: studying                        after the other, avoiding duplicate ID assignment.
+ speciﬁc combinations of invariants and operations can indicate the                        While serializability is a powerful abstraction, it comes with a
+ existence of more scalable algorithms [19].                                            cost: for arbitrary transactions (and for all implementations of se-
+    Insummary,thispaperoffersthefollowinghigh-leveltakeaways:                           rializability’s more conservative variant—conﬂict serializability),
+                                                                                        any two operations to the same item—at least one of which is a
+1.  Serializable transactions preserve application correctness at the                   write—will result in a  read/write conﬂict.  Under serializability,
+    costofalwayscoordinatingbetweenconﬂictingreadsandwrites.                            these conﬂicts require coordination or, informally, blocking com-
+2.  Givenknowledgeofapplicationtransactionsandcorrectnesscrite-                         munication between concurrent transactions:  to provide a serial
+    ria (e.g., invariants), it is often possible to avoid this coordination             ordering, conﬂicts must be totally ordered acrosstransactions [16].
+    (by executing some transactions without coordination, thus pro-                     Forexample,givendatabasestate{x=⊥,y=⊥},iftransactionT1
+    viding availability, low latency, and excellent scalability) while                  writes x=1 and readsfrom y and T2 writes y=1 and reads from x,
+    still preserving those correctness criteria.                                        a database cannot both execute T1 and T2 entirely concurrently and
+                                                                                        maintain serializability [9,22].
+3.  Invariant conﬂuence offers a necessary and sufﬁcient condition                      The costs of coordination.    The coordination overheads above
+    for this correctness-preserving, coordination-free execution.                       incurthreeprimarypenalties: increasedlatency(duetostalledexe-
+4.  Many common integrity constraints found in SQL and stan-                            cution),decreasedthroughput,and, intheeventofpartialfailures,
+    dardizedbenchmarksare invariantconﬂuent,allowingorder-of-                           unavailability. If a transaction takes d seconds to execute, the maxi-
+    magnitude performance gains over coordinated execution.                             mum throughput of conﬂicting transactions operating on the same
+                                                                                        itemsunderageneral-purpose(i.e.,interactive,non-batched)trans-
+ Whilecoordinationcannotalwaysbeavoided,thisworkevidences                               actionmodelislimitedby 1d,whilecoordinatingoperationswillalso
+ the power of application invariants in scalable and correct execu-                     have to wait. On a single system, delays can be small, permitting
+ tionofmodernapplicationsonmodernhardware. Applicationcor-                              tens to hundreds of thousands of conﬂicting transactions per item
+ rectness does not always require coordination, andI-conﬂuence                          persecond. Inapartitioneddatabasesystem,wheredifferentitems
+ analysis can explain both when and why this is the case.                               arelocatedondifferentservers,orinareplicateddatabasesystem,
+                                                                                        wherethesameitemislocated(andisavailableforoperations)on
+ Overview.  The remainder of this paper proceeds as follows: Sec-                       multipleservers,the costincreases: delay islower-boundedbynet-
+ tion2describesandquantiﬁesthecostsofcoordination. Section3                             work latency. On a local area network, delay may vary from several
+ introduces our system model and Section 4 contains our primary                         microseconds (e.g., via Inﬁniband or RDMA) to several millisec-
+[PDF_PAGE 3]
+                                                                                            a.) Maximum transaction throughput over local-area network in [64]
+Figure 1:  Microbenchmark performance of coordinated and
+coordination-freeexecutionoftransactionsofvaryingsizewrit-
+ing to eight items located on eight separate multi-core servers.
+
+onds on today’s cloud infrastructure, permitting anywhere from a
+few hundred transactions to a few hundred thousand transactions
+per second. On a wide-area network, delay is lower-bounded by
+the speed of light (worst-case on Earth, around 75ms, or about 13
+operationspersecond[9]). Undernetworkpartitions[13],asdelay
+tends towardsinﬁnity, thesepenalties leadto unavailability [9,29].
+In contrast, operations executing without coordinationcan proceed                     b.) Maximum throughput over wide-area network in [9] with transactions origi-
+concurrently and will not incur these penalties.                                      nating from a coordinator in Virginia (VA; OR: Oregon, CA: California, IR: Ire-
+Quantifying coordination overheads.  To further understand the                        land, SP: São Paulo, TO: Tokyo, SI: Singapore, SY: Sydney)
+costsofcoordination,weperformedtwosetsofmeasurements—one                              Figure 2: Atomic commitment latency as an upper bound on
+using a database prototype and one using traces from prior studies.                   throughput over LAN and WAN networks.
+   We ﬁrst compared the throughput of a set of coordinated and
+coordination-free transaction execution.  We partitioned a set of                     EC2availability zones,throughputdrops toslightly over2transac-
+eightdata itemsacross eightserversand ranone setof transactions                       tions/s in both algorithms. (Appendix A provides more details.)
+with an optimized variant of two-phase locking (providing serializ-                      Theseresultsshouldbeunsurprising: coordinating—especially
+ability)[16]andrananothersetoftransactionswithoutcoordination                         over the network—can incur serious performance penalties.  In
+(Figure 1; see Appendix A for more details).  With single-item,                       contrast,coordination-free operationscanexecutewithoutincurring
+non-distributed transactions, the coordination-free implementation                    thesecosts. Thecostsofactualworkloadscanvary: ifcoordinating
+achieves, in aggregate, over 12M transactions per second and bot-                     operations are rare, concurrency control will not be a bottleneck.
+tlenecks on physical resources—namely, CPU cycles. In contrast,                       For example, a serializable database executing transactions with
+thelock-basedimplementationachievesapproximately1.1Mtrans-                            disjointreadandwritesetscanperformaswellasanon-serializable
+actions per second: it is unable to fully utilize all multi-core pro-                 databasewithoutcompromisingcorrectness[35]. However,asthese
+cessorcontextsduetolockcontention. Fordistributedtransactions,                        results demonstrate, minimizing the amount of coordination and
+coordination-free throughput decreases linearly (as an N-item trans-                  its degree of distribution can therefore have a tangible impact on
+action performs N writes), while the throughput of coordinating                       performance,latency,andavailability[1,9,29]. Whilewestudyreal
+transactions drops by over three orders of magnitude.                                 applicationsinSection6,thesemeasurementshighlightthe worst
+   While the above microbenchmark demonstrates the costs of a                         of coordination costs on modern hardware.
+particular implementation of coordination, we also studied the ef-
+fect of more fundamental, implementation-independent overheads                        Our goal: Minimize coordination.  Inthispaper,weseektomin-
+(i.e., also applicable to optimistic and scheduling-based concur-                     imizetheamountofcoordinationrequiredtocorrectlyexecutean
+rencycontrolmechanisms). Wedeterminedthemaximumattainable                             application’stransactions. AsdiscussedinSection1,serializability
+throughput for coordinated execution within a single datacenter                       issufﬁcient tomaintaincorrectnessbutisnotalwaysnecessary;that
+(basedondatafrom[64])andacrossmultipledatacenters(basedon                             is, many—but not all—transactions can be executed concurrently
+datafrom[9]) duetoblockingcoordinationduringatomic commit-                            without necessarily compromising application correctness. In the
+ment [16]. For an N-server transaction, classic two-phasecommit                       remainder of this paper, we identify when safe, coordination-free
+(C-2PC)requiresN (parallel)coordinatortoserverRTTs,whilede-                           execution is possible.  If serializability requires coordinating be-
+centralized two-phase commit (D-2PC) requires N (parallel) server                     tween each possible pair of conﬂicting reads and writes, we will
+to server broadcasts, or N2 messages. Figure 2 shows that, in the                     onlycoordinatebetweenpairsofoperationsthatmightcompromise
+local area, with only two servers (e.g., two replicas or two coordi-                  application-level correctness.  To do so, we must both raise the
+natingoperationsonitemsresidingondifferentservers),throughput                         speciﬁcation of correctness beyond the level of reads and writes
+is bounded by 1125 transactions/s (viaD-2PC; 668/s viaC-2PC).                         and directly account for the process of reconciling the effects of
+Acrosseightservers,D-2PCthroughputdropsto173transactions/s                            concurrent transaction execution at the application level.
+(resp. 321 forC-2PC) due to long-tailed latency distributions. In
+the widearea, theeffects aremore stark: if coordinatingfrom Vir-
+ginia to Oregon, D-2PC message delays are 83 ms per commit,                           3.   SYSTEM MODEL
+allowing12operationspersecond. Ifcoordinatingbetweenalleight                             To characterize coordination avoidance, we ﬁrst present a sys-
+
+                                                                                      tem model.  We begin with an informal overview.  In our model,
+[PDF_PAGE 4]
+    Property                                                         Effect
+    Global validity                Invariants hold over committed states
+    Transactional availability           Non-trivial response guaranteed
+    Convergence                      Updates are reﬂected in shared state
+    Coordination-freedom                    No synchronous coordination
+
+Table 1: Key properties of the system model and their effects.
+
+transactions operate over independent (logical) “snapshots” of da-
+tabase state. Transaction writes are applied at one or more snap-
+shots initially when the transaction commits and then are integrated
+into other snapshots asynchronously via a “merge” operator that                          Figure3: Anexamplecoordination-freeexecutionoftwotrans-
+incorporates those changes into the snapshot’s state. Given a set                        actions, T1 and T2, on two servers.  Each transaction writes to
+of invariants describing valid database states, as Table 1 outlines,                     itslocalreplica,then,aftercommit,theserversasynchronously
+we seek to understand when it is possible to ensure invariants are                       exchange state and converge to a common state (D3).
+always satisﬁed (global validity) while guaranteeing a response
+(transactionalavailability)andtheexistenceofacommonstate(con-                               In effect, each transaction can modify its replica state without
+vergence), all withoutcommunication during transaction execution                         modifying any other concurrently executing transactions’ replica
+(coordination-freedom). Thismodelneednotdirectlycorrespondto                             state.  Replicas therefore provide transactions with partial “snap-
+a given implementation(e.g., seethe databasearchitecture inSec-                          shot” views of global state (that we will use to simulate concurrent
+tion 6)—rather, it servesas a usefulabstraction. The remainderof                         executions, similar to revision diagrams [18]).  Importantly, two
+thissection furtherdeﬁnes theseconcepts; readersmoreinterested                           transactions’ replicas do not necessarily correspond to two phys-
+in theirapplication shouldproceed to Section4. We providegreater                         ically separate servers; rather, a replica is simply a partial “view”
+detail and additional discussion in [10].                                                over the global state of the database system. For now, we assume
+Databases.   We represent a state of the shared database as a set                        transactions are known in advance (see also Section 8).
+D of unique versions of data items located on an arbitrary set of                        Invariants.    To determine whether a database state is valid ac-
+database servers, andeach version is locatedon at leastone server.                       cording to application correctness criteria, we use invariants, or
+WeuseD todenotethesetofpossibledatabasestates—thatis,the                                 predicates over replica state: I :D→{true, false} [26].  In our
+set of sets of versions.  The database is initially populated by an                      payroll example, we could specify an invariant that only one user
+initial stateD0 (typically but not necessarily empty).                                   in a database has a given ID. This invariant—as well as almost
+Transactions,Replicas,andMerging.  Applicationclientssubmit                              all invariants we consider—is naturally expressed as a part of the
+requests to the database in the form of transactions, or ordered                         database schema (e.g., viaDDL); however, our approach allows us
+groups ofoperations ondata itemsthat shouldbe executed together.                         toreasonaboutinvariantseveniftheyareknowntothedeveloper
+Each transaction operates on a logical replica, or set of versions                       butnotdeclaredtothesystem. Invariantsdirectlycapturethenotion
+of the items mentioned in the transaction.  At the beginning of                          of ACID Consistency [16,31], and we say that a database state is
+the transaction, the replica contains a subset of the database state                     valid under an invariantI (or I-valid) if it satisﬁes the predicate:
+and is formed from all of the versions of the relevant items that                        Deﬁnition 1. A replica stateR∈D isI-valid iff I(R)=true.
+can be found at one or more physical servers that are contacted
+during transaction execution. As the transaction executes, it may                           WerequirethatD0 bevalidunderinvariants. Section4.3provides
+add versions (of itemsin its writeset)to its replica. Thus, wedeﬁne                      additional discussion regarding our use of invariants.
+a transaction T as a transformation on a replica: T :D→D. We                            Availability.     To ensure each transaction receives a non-trivial
+treattransactionsasopaquetransformationsthatcancontainwrites                             response, we adopt the following deﬁnition ofavailability[9]:
+(which add new versions to the replica’s set of versions) or reads
+(whichreturnaspeciﬁcsetofversionsfromthereplica). (Later,we                              Deﬁnition 2. A system provides transactionally available execu-
+will discuss transactions operating on data types such as counters.)                     tion iff, whenever a client executing a transaction T can access
+   Uponcompletion,eachtransactioncancommit,signalingsuccess,                             servers containing one or more versions of each item in T, then
+or abort, signalingfailure. Upon commit, thereplica stateis subse-                       T eventuallycommitsorabortsitselfeitherdue toanabort opera-
+quentlymerged (⊔:D×D→D)intothesetofversionsatleastone                                    tion in T or ifcommitting thetransaction would violatea declared
+server. Werequirethatthemergedeffectsofacommittedtransac-                                invariant overT’s replica state. T will commit in all other cases.
+tion will eventually become visible to other transactions that later                        Under the above deﬁnition, a transaction can only abort if it
+beginexecutiononthesameserver.2 Overtime,effectspropagateto                              explicitly chooses to abort itself or if committing would violate
+other servers, again through the useof the merge operator. Though                        invariants over the transaction’s replica state.3
+notstrictly necessary,weassume thismerge operator iscommuta-
+tive, associative, and idempotent [5,52] and that, for all states Di,                    Convergence.  Transactional availability allows replicas to main-
+D0⊔Di =Di. In our initial model, we deﬁne merge as set union                             tainvalidstateindependently,butitisvacuouslypossibletomaintain
+oftheversionscontainedatdifferentservers. (Section5 discusses                           “consistent” database states by letting replicas diverge (contain dif-
+additional implementations.) For example, if server Rx={v} and                           ferent state) forever. This guarantees safety (nothing bad happens)
+Ry={w}, then Rx⊔Ry={v,w}.
+                                                                                         3Thisbasicdeﬁnitionprecludesfaulttolerance(i.e.,durability)guarantees
+2This implicitly disallowsservers from always returning the initial database             beyondasingleserver failure[9]. Wecanrelaxthis requirementandallow
+state when they have newer writes on hand. This is a relatively pragmatic                communicationwithaﬁxednumberofservers(e.g.,F+1serversforF-fault
+assumption but also simpliﬁes our later reasoning aboutadmissible execu-                 tolerance; F is often small [23]) without affecting our results. This does not
+tions. This assumption could possibly be relaxed by adapting Newman’s                    affect scalability because, as more replicas are added, the communication
+lemma [25], but we do not consider the possibility here.                                 overhead required for durability remains constant.
+[PDF_PAGE 5]
+but not liveness (something good happens) [51]. To enforce state                      4.   CONSISTENCYSANSCOORDINATION
+sharing, we adopt the following deﬁnition:                                               With a system model and goals in hand, we now address the
+Deﬁnition 3. A system is convergent iff, for each pair of servers,                    question: whendoapplicationsrequirecoordinationforcorrectness?
+in the absence of new writes to the servers and in the absence of                     The answer depends not just on an application’s transactions or
+indeﬁnite communication delays between the servers, the servers                       on an application’s invariants. Rather, the answer depends on the
+eventually contain the same versions for any item they both store.                    combination of the two under consideration. Our contribution in
+   To capture the process of reconciling divergent states, we use the                 thissectionistoformulateacriterionthatwillanswerthisquestion
+previouslyintroducedmergeoperator: giventwodivergentserver                            for speciﬁc combinations in an implementation-agnostic manner.
+states,weapplythemergeoperatortoproduceconvergentstate. We                               Inthissection,wefocusalmostexclusivelyonprovidingaformal
+assumethe effects ofmergeareatomicallyvisible: either alleffects                      answer to this question. The remaining sections of this paper are
+of a merge are visible or none are. This assumption is not always                     devoted to practical interpretation and application of these results.
+necessarybutitsimpliﬁesourdiscussionand,aswelaterdiscuss,is                           4.1   I-conﬂuence: Criteria Deﬁned
+maintainable without coordination [9,11].                                                To begin, we introduce the central property (adapted from the
+Maintaining validity.  To make sure that both divergent and con-                      constraint programming literature [25]) in our main result: invariant
+vergent database states are valid and, therefore, that transactions                   conﬂuence (hereafter, I-conﬂuence).  Applied in a transactional
+never observe invalid states, we introduce the following property:                    context,theI-conﬂuencepropertyinformallyensuresthatdivergent
+Deﬁnition 4. A system is globally I-valid iff all replicas always                     butI-validdatabasestatescanbemergedintoavaliddatabasestate—
+contain I-valid state.                                                                that is, the set of valid states reachable by executing transactions
+                                                                                      and merging theirresults is closed (w.r.t. validity) undermerge. In
+Coordination.  Our system model is missing one ﬁnal constraint                        the next sub-section, we show thatI-conﬂuence analysis directly
+on coordination between concurrent transaction execution:                             determines the potential for safe, coordination-free execution.
+Deﬁnition5. Asystemprovidescoordination-freeexecutionfora                                We say that Si is a I-T-reachable state if, given an invariant
+set of transactions T iff the progress of executing eacht∈T is only                   I and set of transactions T (with merge function⊔), there exists
+dependenton theversionsofthe itemst reads(i.e.,t’sreplica state).                     a (partially ordered) sequence of transaction and merge function
+                                                                                      invocationsthatyieldsSi,andeachintermediatestateproducedby
+Thatis,inacoordination-freeexecution,eachtransaction’sprogress                        transaction execution or merge invocation is also I-valid. We call
+towardscommit/abortisindependentofotheroperations(e.g.,writes,                        these previous states ancestor states. Note that each ancestor state
+locking, validations) being performed on behalf of other transac-                     is eitherI-T-reachable or is instead the initial state (D0).
+tions. Thisprecludesblockingsynchronizationorcommunication                               We can now formalize theI-conﬂuence property:
+across concurrently executing transactions.                                           Deﬁnition 6(I-conﬂuence).  A set of transactions T isI-conﬂuent
+By example.  Figure 3illustrates a coordination-freeexecutionof                       withrespecttoinvariantI if,forallI-T-reachablestatesDi,Dj with
+twotransactionsT1 andT2 ontwoseparate,fully-replicatedphysical                        a common ancestor state,Di⊔Dj isI-valid.
+servers. Eachtransactioncommitsonitslocalreplica,andtheresult                            Figure4depictsanI-conﬂuentmergeoftwo I-T-reachablestates,
+ofeachtransactionisreﬂectedinthetransaction’slocalserverstate.                        each starting froma shared, I-T-reachable stateDs. Two sequences
+After the transactions have completed, the servers exchange state                     oftransactionstin...ti1 andtjm...tj1 eachindependentlymodifyDs.
+and, after applying themergeoperator, converge tothe same state.                      UnderI-conﬂuence, the states produced by these sequences (Din
+Anytransactionsexecutinglateroneitherserverwillobtainareplica                         and Djm) must be valid under merge.4
+that includes the effects of both transactions.                                          I-conﬂuence holds for speciﬁc combinations of invariants and
+                                                                                      transactions. In our payroll database example from Section 2, re-
+3.1   Extended Notes                                                                  moving auser fromthe databaseisI-conﬂuentwith respect tothe
+   Our treatment of convergence uses a pair-wise deﬁnition (i.e.,                     invariant thatuser IDs areunique. However,twotransactions that
+each pair converges) rather than a system-wide deﬁnition (i.e., all                   remove two different users from the database are notI-conﬂuent
+nodes converge).  This is more restrictive than system-wide con-                      withrespect tothe invariantthat thereexists atleast oneuser inthe
+vergence but allows us to make guarantees on progress despite                         database at all times. Section 5 discusses additional combinations
+partitions between subsets of the servers (notably, precludes the                     of invariants (with greater precision).
+use of protocols such as background consensus, which can stall                        4.2   I-conﬂuence and Coordination
+indeﬁnitely in the presence of partitions). Like many of the other
+decisionsin our model, this toocould likelybe relaxedat thecost                          We can now applyI-conﬂuence to our goals from Section 3:
+of a less friendly presentation of the concepts below.                                Theorem 1.  A globallyI-validsystem can execute aset of transac-
+   The above decisions (including those footnoted in the primary                      tionsT withcoordination-freedom,transactionalavailability,con-
+text) were made tostrikea balance between generality andease of                       vergence if and only ifT isI-conﬂuent with respect to I.
+presentationinlaterapplicationsoftheseconcepts. Inpractice,every                         We provide a full proof of Theorem 1 in Appendix B (which is
+non-I-conﬂuent set of transactions and invariants we encountered                      straightforward)butprovideasketchhere. Thebackwardsdirection
+(seeSections 4,5)hada counter-exampleconsistingofa divergent                          is by construction: ifI-conﬂuence holds, each replica can check
+execution consisting ofasinglepairoftransactions. However,we                          each transaction’s modiﬁcations locally and replicas can merge
+admit the possiblity that more exotic transactions and merge func-                    independentmodiﬁcationstoguaranteeconvergencetoavalidstate.
+tions might require in more complicated histories, so we consider
+arbitrary histories below. Precisely characterizing the expressive                    4Werequirethesestatestohaveacommonancestortoruleoutthepossibility
+power of executions (in terms ofadmissible output states) undera                      ofmergingstatesthatcouldnothavearisenfromtransactionexecution(e.g.,
+single-transactiondivergence versusmulti-transactiondivergence is                     evenifnotransactionassignsIDs,mergingtwostatesthateachhaveunique
+a fairly interesting question for future work.                                        but overlapping sets of IDs could be invalid).
+[PDF_PAGE 6]
+                                                                                     of their invariants and operations, they should opt for a more con-
+                                                                                     servative analysis or mechanism such as employing serializable
+                                                                                     transactions. Accordingly,ourdevelopmentofI-conﬂuenceanal-
+                                                                                     ysis provides developers with a powerful option—but only if used
+                                                                                     correctly. If used incorrectly,I-conﬂuence allowsincorrect results,
+                                                                                     or, if not used at all, developers must resort to existing alternatives.
+                                                                                        Thisﬁnalpointraisesseveralquestions: canwespecifyinvariants
+                                                                                     in real-world use cases? Classicdatabase concurrencycontrol mod-
+                                                                                     elsassumethat“the[setofapplicationinvariants]isgenerallynot
+                                                                                     known to the system but is embodied in the structure of the transac-
+                                                                                     tion”[26,59]. Nevertheless,since1976,databaseshaveintroduced
+Figure 4: AnI-conﬂuent execution illustrated via a diamond                           supportforaﬁnitesetofinvariants[15,27,30,33,38]intheformof
+diagram. If a set of transactions T isI-conﬂuent, then all data-                     primary key, foreign key, uniqueness, and row-level “check” con-
+basestatesreachablebyexecutingandmergingtransactionsin                               straints[43]. Wecan(and,inthispaper,do)analyzetheseinvariants,
+T startingwithacommonancestor(Ds)mustbemergeable(⊔)                                  whichcan—likemanyprogramanalyses[19]—leadtonewinsights
+into an I-valid database state.                                                      about execution strategies. We have found the process of invariant
+                                                                                     speciﬁcation to be non-trivial but feasible in practice; Section 6
+Theforwardsdirectionusesapartitioningargument[29]toderivea                           describes some of our experiences.
+contradiction: weconstruct a scenario under which a system cannot                    (Non-)determinism.  I-conﬂuence analysis effectively captures
+determine whether a non-I-conﬂuent transaction should commit                         pointsof unsafenon-determinism [6]in transaction execution. As
+withoutviolatingoneofourdesiredproperties(eithercompromising                         wehaveseeninmanyofourexamplesthusfar,totalnon-determinism
+validity or availability, diverging forever, or coordinating).                       under concurrent execution can compromise application-level con-
+   Theorem1establishesI-conﬂuenceasanecessaryandsufﬁcient                            sistency [5,37]. But not all non-determinism isbad: many desirable
+conditionfor invariant-preserving,coordination-freeexecution. If                     properties (e.g., classical distributed consensus among processes)
+I-conﬂuence holds, there exists a correct, coordination-free execu-                  involve forms of acceptable non-determinism (e.g., any proposed
+tionstrategyforthetransactions;ifnot,nopossibleimplementation                        outcome isacceptable as longas all processesagree) [32]. In many
+can guarantee theseproperties for the providedinvariantsand trans-                   cases, maximizing safe concurrency requires non-determinism.
+actions. Thatis,ifI-conﬂuencedoesnothold,thereexistsatleast                             I-conﬂuenceanalysisallowsthisnon-deterministicdivergenceof
+one execution of transactions on separate replicas that will violate                 database states but makes two useful guarantees about those states.
+thegiveninvariantswhenserversconverge. Topreventinvalidstates                        First, the requirement for global validity ensures safety (in the form
+fromoccurring,atleast oneofthetransactionsequenceswillhave                           of invariants).  Second, the requirement for convergence ensures
+to forego availability or coordination-freedom, or the system will                   liveness (in the form of convergence). Accordingly, via its use of
+havetoforegoconvergence.I-conﬂuenceanalysisisindependentof                           invariants, I-conﬂuence allows users to scope non-determinism
+any given implementation, and effectively “lifts” prior discussions                  while permitting only those states that are acceptable.
+ofscalability,availability,andlowlatency[1,9,29]tothelevelof
+application(i.e., not“I/O” [6])correctness. This providesa useful                    5.   APPLYINGINVARIANTCONFLUENCE
+handleon theimplicationsof coordination-freeexecution without                           As a test for coordination requirements,I-conﬂuence exposes
+requiring reasoningabout low-levelproperties such as physical data                   a trade-off between the operations a user wishes to perform and
+location and the number of servers.                                                  thepropertiesshewishesto guarantee. Atoneextreme, ifauser’s
+                                                                                     transactions do not modify database state, she can guarantee any
+4.3   Discussion and Limitations                                                     satisﬁable invariant. At the other extreme, with no invariants, a user
+   I-conﬂuencecapturesasimple(informal)rule:  coordinationcan                        can safely perform any operations she likes. The space in-between
+only be avoided if all local commit decisions are globally valid.                    contains a spectrum of interesting and useful combinations.
+(Alternatively,commitdecisionsarecomposable.) Iftwoindepen-                             Until now, we have been largely concerned with formalizing
+dent decisions to commit can result in invalid converged state, then                 I-conﬂuence for abstract operations; in this section, we begin to
+replicasmustcoordinateinordertoensurethatonlyoneofthedeci-                           leveragethis property. Weexaminea seriesof practicalinvariants
+sions is to commit. Given the existence of an unsafe execution and                   by considering several features of SQL, ending with abstract data
+theinabilitytodistinguishbetweensafeandinvalidexecutionsusing                        types and revisiting our payroll example along the way. We will
+only local information, a globally valid system must coordinate in                   apply these results to full applications in Section 6.
+order to prevent the invalid execution from arising.                                    In this section, we focus on providing intuition and informal
+Use of invariants.  Our use of invariants inI-conﬂuence is key to                    explanations of ourI-conﬂuence analysis. Interested readers can
+achieving a necessary and not simply sufﬁcient condition. By di-                     ﬁnd a more formal analysis in Appendix C, including discussion
+rectly capturing application-level correctness criteria via invariants,              of invariants not presented here.  For convenience, we reference
+I-conﬂuenceanalysisonlyidentiﬁes“true”conﬂicts. Thisallows                           speciﬁc proofs from Appendix C inline.
+I-conﬂuence analysis to perform a more accurate assessment of                        5.1   I-conﬂuence for Relations
+whethercoordinationisneededcomparedtorelatedconditionssuch                              We begin by considering several constraints found in SQL.
+as commutativity (Section 7).
+   However, the reliance on invariants also has drawbacks.  I-                       Equality.  As a warm-up, what if an application wants to prevent
+conﬂuenceanalysis onlyguards againstviolationsof anyprovided                         aparticularvalue from appearinginadatabase? Forexample,our
+invariants. If invariants areincorrectly or incompletely speciﬁed, an                payrollapplicationfromSection2mightrequirethateveryuserhave
+I-conﬂuentdatabasesystemmayviolateapplication-levelcorrect-                          alastname,markingtheLNAMEcolumnwithaNOTNULLcon-
+ness. If users cannot guarantee the correctness and completeness                     straint. Whilenotparticularlyexciting,wecanapplyI-conﬂuence
+[PDF_PAGE 7]
+ Invariant                       Operation                     I-C?     Proof #     valid,thenr mustappearinS1,S2,orboth. But,sinceS1 andS2 are
+ Attribute Equality              Any                           Yes         1         both valid, r must have a corresponding foreign key record (f) that
+ Attribute Inequality            Any                           Yes         2        “disappeared” during merge. Merge (in the current model)does not
+ Uniqueness                      Choose speciﬁc value           No         3         remove versions, so this is impossible.
+ Uniqueness                      Choose some value             Yes         4
+ AUTO_INCREMENT                  Insert                         No         5           FromtheperspectiveofI-conﬂuenceanalysis,foreignkeycon-
+ Foreign Key                     Insert                        Yes         6         straints concern the visibility of related updates: if individual data-
+ Foreign Key                     Delete                         No         7         base states maintain referential integrity, a non-destructive merge
+ Foreign Key                     Cascading Delete              Yes         8         function such as set union cannot cause tuples to “disappear” and
+ Secondary Indexing              Update                        Yes         9         compromisetheconstraint. Thisalsoexplainswhymodelssuchas
+ Materialized Views              Update                        Yes        10         readcommitted[2]andreadatomic[2]isolationaswellascausal
+ >                               Increment [Counter]           Yes        11         consistency [9] are also achievable without coordination: simply
+ <                               Increment [Counter]            No        12         restricting the visibility of updates in a given transaction’s read set
+ >                               Decrement [Counter]            No        13
+ <                               Decrement [Counter]           Yes        14         does not require coordination between concurrent operations.
+ [NOT]CONTAINS                   Any [Set, List, Map]          Yes      15, 16         Deletions and modiﬁcations under foreign key constraints are
+ SIZE=                           Mutation [Set, List, Map]      No        17         more challenging. Arbitrary deletion of records is unsafe: a user
+                                                                                     mightbeaddedtoadepartmentthatwasconcurrentlydeleted(Claim
+Table 2: Example SQL (top) and ADT invariantI-conﬂuence                             7). However, performingcascading deletions(e.g., SQLDELETE
+along with references to formal proofs in Appendix C.                                CASCADE), where the deletion of a record also deletes all match-
+                                                                                     ing records on the opposite end of the association, isI-conﬂuent
+analysis to insertions and updates of databases with (in-)equality                   under foreign key constraints (Claim 8).  We can generalize this
+constraints(Claims1,2inAppendixC).Per-recordinequalityinvari-                        discussion to updates (and cascading updates).
+ants areI-conﬂuent, which we can show by contradiction: assume                       Materialized Views.   Applications often pre-compute results to
+two database states S1 and S2 are each I-T-reachable under per-                      speed query performance via a materialized view [56] (e.g., UN-
+record in-equality invariant Ie but that Ie(S1⊔S2) is false.  Then                   READ_CNTasSELECTCOUNT(*)FROMemailsWHERE
+there must be ar∈S1⊔S2 that violatesIe (i.e.,r has the forbidden                     read_date = NULL). We can consider a class of invariants that
+value). r must appear in S1, S2, or both. But, that would imply that                 specify that materialized views reﬂect primary data; when a transac-
+one of S1 orS2 is not I-valid underIe, a contradiction.                              tion(ormergeinvocation)modiﬁesdata,anyrelevantmaterialized
+Uniqueness.  We can also consider common uniqueness invariants                      views should be updated as well. This requires installing updates at
+(e.g.,PRIMARY KEY andUNIQUE constraints). For example,                               thesametimeasthechangestotheprimarydataareinstalled(aprob-
+inourpayrollexample,wewanteduserIDstobeunique. Infact,our                            lemrelatedtomaintainingforeignkeyconstraints). However,given
+earlier discussion in Section 2 already provided acounterexample                     thataviewonlyreﬂectsprimarydata,thereareno“conﬂicts.” Thus,
+showing that arbitrary insertion of users is notI-conﬂuent under                     materializedviewmaintenanceupdatesareI-conﬂuent(Claim10).
+these invariants: {Stan:5} and{Mary:5} are both I-T-reachable                        5.2   I-conﬂuence for Data Types
+statesthatcanbecreatedbyasequenceofinsertions(startingatS0=                            So far, we have considered databases that store growing sets of
+{}), buttheir merge—{Stan:5, Mary:5}—is not  I-valid. Therefore,                     immutable versions. We have used this model to analyze several
+uniqueness is notI-conﬂuent for inserts of uniquevalues (Claim 3).                   usefulconstraints,but,inpractice,databasesdonot(often)provide
+However,readsanddeletionsarebothI-conﬂuentunderuniqueness                            thesesemantics,leadingtoavarietyofinterestinganomalies. Forex-
+invariants: readingandremovingitemscannotintroduceduplicates.                        ample,ifweimplementauser’saccountbalanceusinga“lastwriter
+  Can the database safely choose unique values on behalf of users                   wins” merge policy [52], then performing two concurrent with-
+(e.g.,assign anewuser anID)? Inthiscase, wecan achieve unique-                       drawal transactions might result in a database state reﬂecting only
+ness without coordination—as long as we have a notion of replica                     onetransaction(aclassicexampleoftheLostUpdateanomaly)[2,9].
+membership (e.g., server or replica IDs).  The difference is sub-                   Toavoidvariantsoftheseanomalies,manyoptimistic,coordination-
+tle (“grant this record this speciﬁc, unique ID” versus “grant this                  freedatabasedesignshave proposedtheuseofabstractdatatypes
+recordsomeuniqueID”),but,inasystemmodelwithmembership                               (ADTs), providing merge functions for a variety of uses such as
+(as is practical in many contexts), is powerful. If replicas assign                  counters, sets, and maps [20,45,52,61] that ensure that all updates
+uniqueIDswithintheirrespectiveportionoftheIDnamespace,then                           arereﬂectedinﬁnaldatabasestate. Forexample,adatabasecanrep-
+merging locally valid states will also be globally valid (Claim 4).                  resentasimplecounterADTbyrecordingthenumberoftimeseach
+Foreign Keys.   We can consider more complex invariants, such                        transaction performs anincrement operation on the counter [52].
+asforeignkeyconstraints. Inourpayrollexample,eachemployee                              I-conﬂuenceanalysisisalsoapplicabletotheseADTsandtheir
+belongs to a department, so the application could specify a con-                     associated invariants. For example, a row-level “greater-than” ( >)
+straint via a schema declaration to capture this relationship (e.g.,                 thresholdinvariantisI-conﬂuentforcounter incrementandassign
+EMP.D_ID FOREIGN KEY REFERENCES DEPT.ID).                                           (←) but not decrement (Claims 11, 13), while a row-level “less-
+  Areforeignkeyconstraintsmaintainablewithoutcoordination?                           than”(<)thresholdinvariant isI-conﬂuentforcounter decrement
+Again,theanswerdependsontheactionsoftransactionsmodifying                            andassignbutnotincrement(Claims12,14). Thismeansthat,in
+the data governed by the invariant.  Insertions under foreign key                    ourpayrollexample,wecanprovidecoordination-freesupportfor
+constraints are I-conﬂuent (Claim 6).  To show this, we again                        concurrent salary increments but not concurrent salary decrements.
+attempt toﬁnd twoI-T-reachable states that, whenmerged, result                      ADTs (including lists, sets, and maps) can be combined with stan-
+in invalid state. Under foreign key constraints, an invalid state will               dard relational constraints like materialized view maintenance (e.g.,
+contain a record with a “dangling pointer”—a record missing a                        the“totalsalary”rowshouldcontainthesumofemployeesalariesin
+corresponding record on the opposite side of the association. If we                  theemployeetable). Thisanalysispresumesuserprogramexplicitly
+assume there exists some invalid state S1⊔S2 containing a record                     use ADTs, and, as with our generic set-union merge,I-conﬂuence
+r with an invalid foreign key to record f, but S1 and S2 are both                   ADTanalysisrequiresaspeciﬁcationoftheADTmergebehavior
+[PDF_PAGE 8]
+(Appendix C provides several examples).                                              replicas to reason about concurrent transaction execution. However,
+                                                                                     as previously noted, our use of replicas is simply a formal device
+5.3   Discussion and Limitations                                                     andisindependent oftheactualconcurrencycontrolmechanismsat
+   We have analyzed a number of combinations of invariants and                       work. Speciﬁcally,reasoningaboutreplicasallowsustoseparatethe
+operations (shownin Table 2). These results areby nomeans com-                       analysis oftransactionsfromtheir implementation: justbecausea
+prehensive,buttheyareexpressiveformanyapplications(Section6).                        transactionisexecutedwith(orwithout)coordinationdoesnotmean
+In this section, we discuss lessons from this classiﬁcation process.                 that all queryplans or implementations require(or do not require)
+Analysis mechanisms.   Here (and in Appendix C), we manually                         coordination [9]. However, in deciding on an implementation, there
+analyzed particular invariant and operation combinations, demon-                     is a range of design decisions yielding a variety of performance
+strating each to beI-conﬂuent or not. To study actual applications,                  trade-offs. Simply because an application isI-conﬂuent does not
+we can apply these labels via simple static analysis. Speciﬁcally,                   mean that all implementations will perform equally well. Rather,
+giveninvariants(e.g.,capturedviaSQLDDL)andtransactions(e.g.,                         I-conﬂuenceensuresthatacoordination-freeimplementationexists.
+expressedasstored procedures),we can examineeachinvariantand                         Requirements and restrictions.   Our techniques are predicated
+each operation within each transaction and identify pairs that we                    on the ability to correctly and completely specify invariants and
+havelabeledasI-conﬂuentornon-I-conﬂuent. Anypairslabeled                             inspect user transactions; without such a correctness speciﬁcation,
+asI-conﬂuent can be marked as safe, while, for soundness (but                        forarbitrarytransactionschedules,serializabilityis—inasense—
+not completeness), any unrecognized operations or invariants can                     the “optimal” strategy [39].  By casting correctness in terms of
+be ﬂagged as potentially non-I-conﬂuent.  Despite its simplicity                     admissible application states rather than as a property of read-write
+(bothconceptuallyandintermsofimplementation),thistechnique—                          schedules, we achieve a more precise statement of coordination
+coupled with the results of Table 2—is sufﬁciently powerful to                       overheads. However, as we have noted, this does not obviate the
+automaticallycharacterize theI-conﬂuenceof theapplications we                        needfor coordinationin allcases. Finally,when fullapplicationin-
+consider in Section 6 when expressed in SQL (with support for                        variantsareunavailable,individual,high-valuetransactionsmaybe
+multi-row aggregates like Invariant 8 in Table 3).                                   amenable to optimization viaI-conﬂuence coordination analysis.
+   By growing our recognized list ofI-conﬂuent pairs on an as-
+needed basis(via manualanalysis of thepair), the abovetechnique
+has proven useful—due in large part to the common re-use of in-                      6.   EXPERIENCESWITHCOORDINATION
+variants likeforeign keyconstraints. However, onecould use more                         When achievable, coordination-free execution enables scalabil-
+complex forms of program analysis. For example, one might an-                        ity limited to that of available hardware. This is powerful: anI-
+alyze theI-conﬂuence of arbitrary invariants, leaving the task of                    conﬂuentapplicationcanscaleoutwithoutsacriﬁcingcorrectness,
+provingordisprovingI-conﬂuencetoanautomatedmodelchecker                              latency, or availability. In Section 5, we saw combinations of invari-
+orSMTsolver. WhileI-conﬂuence—likemonotonicityandcommu-                              antsand transactionsthatwereI-conﬂuentand othersthatwere not.
+tativity(Section7)—isundecidableforarbitraryprograms,others                          Inthissection, weapplythesecombinationstothe workloads ofthe
+haverecentlyshownthisalternativeapproach(e.g.,incommutativ-                          OLTP-Benchsuite[24],withafocusontheTPC-Cbenchmark. Our
+ityanalysis[19,41]andininvariantgenerationfor viewserializable                       focus is on the coordinaton required in order to correctly execute
+transactions [49]) to be fruitful for restricted languages. We view                  each and the resulting, coordination-related performance costs.
+languagedesignandmoreautomatedanalysisasaninterestingarea
+for more speculative research.                                                       6.1   TPC-C Invariants and Execution
+Recencyandsessionsupport.  Ourproposedinvariantsaredeclar-                              The TPC-C benchmark is the gold standard for database concur-
+ative, but a class of useful semantics—recency, or real-time guar-                   rencycontrol[24]bothinresearchandinindustry[58],andinrecent
+antees on reads and writes—are operational (i.e., they pertain to                    yearshasbeenusedasayardstickfordistributeddatabaseconcur-
+transaction execution rather than the state(s) of the database). For                 rency control performance [55,57,60].  How much coordination
+example,usersoftenwishtoreaddatathatisup-to-dateasofagiven                           does TPC-C actually require a compliant execution?
+pointin time(e.g., “readlatest” [21]or linearizable[29]semantics).                      TheTPC-Cworkloadisdesignedtoberepresentativeofawhole-
+While traditional isolation models do not directly address these                     sale supplier’s transactionprocessing requirements. The workload
+recency guarantees [2], they are often important to programmers.                     has a numberof application-levelcorrectness criteria that represent
+ArethesemodelsI-conﬂuent? Wecanattempttosimulaterecency                              basicbusinessneeds(e.g.,orderIDsmustbeunique)asformulated
+guarantees in I-conﬂuence analysis by logging the result of all                      bytheTPC-CCouncilandwhichmustbemaintainedinacompliant
+reads and any writes with a timestamp and requiring that all logged                  run. We can interpret these well-deﬁned “consistency criteria” as
+timestampsrespecttheirrecencyguarantees(thustreatingrecency                          invariants and subsequently useI-conﬂuence analysis to determine
+guarantees as invariants over recorded read/write execution traces).                 which transactions require coordination and which do not.
+However, this is a somewhat pointless exercise: it is well known                        Table3summarizesthetwelveinvariantsfoundinTPC-Caswell
+that recency guarantees are unachievable with transactional avail-                   as theirI-conﬂuence analysisresults as determined byTable 2. We
+ability[9,22,29]. Thus,ifapplicationreadsfacetheserequirements,                      classifytheinvariantsintothreebroadcategories: materializedview
+coordination is required. Indeed, when application ”consistency”                     maintenance,foreignkeyconstraintmaintenance,anduniqueIDas-
+means“recency,” systemscannot circumvent speed-of-lightdelays.                       signment. AswediscussedinSection5,theﬁrsttwocategoriesare
+   If users wish to “read their writes” or desire stronger “session”                 I-conﬂuent (and therefore maintainable without coordination) be-
+guarantees [47] (e.g., maintaining recency on a per-user or per-                     causetheyonlyregulatethevisibilityofupdatestomultiplerecords.
+sessionbasis),theymustmaintainafﬁnityor“stickiness”[9]with                           Becausethese(10of12)invariantsareI-conﬂuentunderthework-
+a given (set of) replicas. These guarantees are also expressible in                  load transactions, there exists some execution strategy that does
+theI-conﬂuence model and do not require coordination between                         not use coordination. However, simply because these invariants are
+different users’ or sessions’ transactions.                                          I-conﬂuent does not mean that  all execution strategies will scale
+Physical and logical replication.    We have used the concept of                     well: for example, using locking wouldnot be coordination-free.
+[PDF_PAGE 9]
+ #      Informal Invariant Description            Type        Txns     I-C
+ 1      YTD wh sales = sum(YTD district sales)    MV          P        Yes
+ 2      Per-district order IDs are sequential     SID+FK      N, D     No
+ 3      New order IDs are sequentially assigned   SID         N, D     No
+ 4      Per-district, item order count = roll-up  MV          N        Yes
+ 5      Order carrier is set iff order is pending FK          N, D     Yes
+ 6      Per-order item count = line item roll-up  MV          N        Yes
+ 7      Delivery date set iff carrier ID set      FK          D        Yes
+ 8      YTD wh = sum(historical wh)               MV          D        Yes
+ 9      YTD district = sum(historical district)   MV          P        Yes
+ 10     Customer balance matches expenditures     MV          P, D     Yes
+ 11     Orders reference New-Orders table         FK          N        Yes
+ 12     Per-customer balance = cust. expenditures MV          P, D     Yes
+
+Table 3:  TPC-C Declared “Consistency Conditions” (3.3.2.x)
+and I-conﬂuence analysis results (Invariant type:  MV: mate-
+rialized view, SID: sequential ID assignment, FK: foreign key;
+Transactions: N: New-Order, P: Payment, D: Delivery).
+
+   Asonecoordination-freeexecutionstrategy(whichweimplement
+inSection6.2)thatrespectstheforeignkeyandmaterializedview
+invariants, we can use RAMP transactions, which provide atomi-
+cally visible transactional updates across servers without relying
+oncoordination forcorrectness[11]. Inbrief,RAMP transactions
+employlimitedmulti-versioningandmetadatatoensurethatread-
+ers and writerscan always proceed concurrently: any client whose
+readsoverlapwithanotherclient’swritestothesameitem(s)canuse
+metadatastoredin theitemsto fetch any“missing”writesfrom the
+respective servers. A standard RAMP transaction over data items
+sufﬁces to enforce foreign key constraints, while a RAMP transac-
+tionovercommutativecountersasdescribedin[11]issufﬁcientto                             Figure 5: TPC-C New-Order throughput across eight servers.
+enforce the TPC-C materialized view constraints.
+   TwoofTPC-C’sinvariantsarenotI-conﬂuentwithrespecttothe                            rection. New-Ordertransactionscangenerateatemporary,unique,
+workloadtransactions andthereforedorequirecoordination. Ona                          but non-sequential ID (tmpID) and perform updates using this ID
+per-district basis, order IDs should be assigned sequentially (both                  using aRAMP transaction(which, inturn, handles theforeign key
+uniquelyandsequentially,intheNew-Ordertransaction)andorders                          constraints) [11].  Immediately prior to transaction commit, the
+shouldbeprocessedsequentially(intheDeliverytransaction). Ifthe                       New-Order transactioncan assigna“real” IDby atomicallyincre-
+databaseispartitionedbywarehouse(asisstandard[55,57,60]),the                         mentingthecurrentdistrict’s“nextID”record(yielding realID)and
+formerisadistributedtransaction(bydefault,10%ofNew-Order                             recording the[tmpID, realID] mapping ina special ID lookup ta-
+transactions span multiple warehouses). The benchmark speciﬁca-                      ble. Anyreadrequestsfor theIDcolumnof theOrder,New-Order,
+tionallowsthelattertoberunasynchronouslyandinbatchmodeon                             orOrder-Linetables canbesafely satisﬁed(transparentlyto theend
+aper-warehouse (non-distributed)basis, sowe,like others[57,60],                      user) by joining with the ID lookup table ontmpID. In effect, the
+focusonNew-Order. Includingadditionaltransactionsliketheread-                        New-Order ID assignment can use a nested atomic transaction [45]
+only Order-Status in the workload mix would increase performance                     uponcommit,andallcoordinationbetweenanytwotransactionsis
+due to the transactions’lack of distributed coordination and (often                  conﬁned to a single server.
+considerably) smaller read/write footprints.
+AvoidingNew-OrderCoordination.  New-OrderisnotI-conﬂuent                             6.2   Evaluating TPC-C New-Order
+withrespecttotheTPC-Cinvariants,sowecanalwaysfallbackto                                 We subsequently implemented the above execution strategy in a
+usingserializableisolation. However,theper-districtIDassignment                      distributeddatabaseprototypetoquantifytheoverheadsassociated
+records(10perwarehouse)wouldbecomeapointofcontention,lim-                            with coordination in TPC-C New-Order. In brief, the coordination-
+iting ourthroughput to effectively 100WRTT  for aW-warehouseTPC-C                    avoiding query plan scaleslinearly to over 12.7M transactions per
+benchmark with the expected 10% distributed transactions.  Oth-                      secondon200serverswhilesubstantiallyoutperformingdistributed
+ers[60](includingus,inpriorwork[9])havesuggesteddisregarding                         two-phase locking. Our goal here is to demonstrate—beyond the
+consistency criteria 3.3.2.3 and 3.3.2.4, instead opting for unique                  microbenchmarksofSection2—thatsafebutjudicioususeofcoor-
+but non-sequential ID assignment: this allows inconsistency and                      dination can have meaningful positive effect on performance.
+violates the benchmark compliance criteria.
+   Duringa compliantrun, New-Ordertransactions must coordinate.                      Implementation andDeployment.  We employ a multi-versioned
+However, asdiscussedabove,onlytheIDassignmentoperationis                             storage manager, with RAMP-Fast transactions for snapshot reads
+non-I-conﬂuent;theremainderoftheoperationsinthetransaction                           and atomicallyvisible writes/“merge” (providinga variant ofregu-
+canexecutecoordination-free. Withsomeeffort,wecanavoiddis-                           lar register semantics, with writes visibleto later transactions after
+tributed coordination. A naïve implementation might grab a lock                      commit) [11] and implement the nested atomic transaction for ID
+on the appropriate district’s “next ID” record, perform (possibly                    assignmentasasub-procedureinsideRAMP-Fast’sserver-sidecom-
+remote) remaining reads and writes, then release the lock at commit                  mit procedure (using spinlocks).  We implement transactions as
+time. Instead, as a more efﬁcient solution, New-Order can defer                      stored procedures and fulﬁll the TPC-C “Isolation Requirements”
+ID assignment until commit time by introducing a layer of indi-                      by using read and write buffering as proposed in [9]. As is com-
+[PDF_PAGE 10]
+mon [36,48,55,57], we disregard per-warehouse client limits and
+“thinktime”toincreaseloadperwarehouse. Inall,ourbaseproto-
+typearchitectureis similartothatof[11]: aJVM-basedpartitioned,
+main-memory, mastered database.
+   Foranapples-to-applescomparisonwithacoordination-intensive
+techniquewithinthesamesystem,we alsoimplementedtextbook
+two-phaselocking(2PL)[16],whichprovidesserializabilitybutalso
+requires distributed coordination.  We totally order lock requests
+across servers to avoid deadlock, batching lock requests to each
+server and piggybacking read and write requests on lock request
+RPC. As a validation of our implementation, our 2PL prototype
+achieves per-warehouse (and sometimes aggregate) throughput sim-
+ilarto (andoften inexcessof)several recentserializabledatabase
+implementations(ofboth2PLandotherapproaches)[36,48,55,57].
+   Bydefault,wedeployourprototypeoneightEC2cr1.8xlargein-
+stancesinthe AmazonEC2us-west-2 region(withnon-co-located
+clients) with one warehouse per server (recall there are 10 “hot”
+district ID records per warehouse) and report the average of three                         Figure 6: Coordination-avoiding New-Order scalability.
+120 second runs.
+Basic behavior.   Figure 5 shows performance across a variety of                       increased GC pressure). The coordination-avoiding query plan is
+conﬁgurations, which we detail below. Overall, the coordination-                       effectively agnostic to read/write contention.
+avoidingqueryplanfaroutperformstheserializableexecution. The                           Varying distribution.  Wealso variedthepercentage ofdistributed
+coordination-avoiding query plan performs some coordination, but,                      transactions. Thecoordination-avoiding queryplan incurreda 29%
+becausecoordinationpointsarenotdistributed(unlike2PL),physi-                           overheadmoving fromnodistributedtransactions toalldistributed
+cal resources (and not coordination) are the bottleneck.                               transactions due to increased serialization overheads and less ef-
+Varyingload.  Asweincreasethenumberofclients,thecoordination-                          ﬁcient batching of RPCs.  However, the 2PL implementation de-
+avoidingqueryplanthroughputincreaseslinearly,while2PLthrough-                          creasedinthroughputbyover90%(inlinewithpriorresults[48,57],
+putincreasesto40Ktransactionspersecond,thenlevelsoff. Asin                             albeitexaggeratedhereduetohighercontention)asmorerequests
+ourmicrobenchmarksinSection2,theformerutilizesavailablehard-                           stalled due to coordination with remote servers.
+wareresources(bottleneckingonCPUcyclesat640Ktransactions                               Scalingout.  Finally,weexaminedourprototype’sscalability,again
+per second), while the latter bottlenecks on logical contention.                       deployingonewarehouseperserver. AsFigure6demonstrates,our
+Physical resource consumption.     To understand the overheads                         prototypescaleslinearly,toover12.74milliontransactionspersec-
+of each component in the coordination-avoiding query plan, we                          ond on 200 servers (in light of our earlier results, and, for economic
+usedJVMproﬁlingtoolstosamplethreadexecutionwhilerunning                                reasons,wedonot run2PLatthisscale). Per-serverthroughputis
+at peak throughput, attributing time spent in functions to relevant                    largely constant after 100 servers, at which point our deployment
+modules within the database implementation (where possible):                           spanned all three us-west-2 datacenters and experienced slightly
+                                                                                       degradedper-serverperformance. Whilewemakeuseofapplication
+      Code Path                                                                          Cyclessemantics,weareunawareofanyothercompliantmulti-serverTPC-
+      Storage Manager (Insert, Update, Read)                            45.3%          Cimplementationthathasachievedgreaterthan500KNew-Order
+      Stored Procedure Execution                                                14.4%  transactions per second [36,48,55,57].
+      RPC and Networking                                                          13.2%Summary.    We present these quantitative results as a proof of
+      Serialization                                                                        12.6%concept thatexecuting even challenging workloadslike TPC-C that
+      ID Assignment Synchronization (spinlock contention)      0.19%                   contain complex integrity constraints are not necessarily at odds
+      Other                                                                                   14.3%
+                                                                                       withscalabilityifimplementedinacoordination-avoidingmanner.
+   Thecoordination-avoidingprototypespendsalargeportionofex-                           Distributed coordination need not be a bottleneck for all applica-
+ecutioninthestoragemanager,performingB-treemodiﬁcationsand                             tions, even if conﬂict serializable execution indicates otherwise.
+lookupsandresultsetcreation,andinRPC/serialization. Incontrast                         Coordination avoidance ensures that physical resources—and not
+to 2PL, the prototype spends less than 0.2% of time coordinating,                      logical contention—are the system bottleneck whenever possible.
+in the form of waiting for locks in the New-Order ID assignment;
+the(single-site)assignmentisfast(alinearizableintegerincrement                         6.3   Analyzing Additional Applications
+andstore,followedbyawriteandfenceinstructiononthespinlock),                               Theseresultsbegintoquantifytheeffectsofcoordination-avoiding
+so this should not be surprising.  We observed large throughput                        concurrency control.  If considering application-level invariants,
+penaltiesduetogarbagecollection(GC)overheads(upto40%)—an                               databasesonlyhavetopaythepriceofcoordinationwhennecessary.
+unfortunate cost of our highly compact (several thousand lines of                      We were surprised that the “current industry standard for evaluat-
+Scala), JVM-based implementation. However, even in this current                        ing the performance of OLTP systems” [24] was so amenable to
+prototype,physicalresourcesarethebottleneck—notcoordination.                           coordination-avoiding execution—at least for compliant execution
+Varying contention.  Wesubsequently varied thenumber of“hot,”                          as deﬁned by the ofﬁcial TPC-C speciﬁcation.
+orcontendeditemsbyincreasingthenumberofwarehousesoneach                                   For greater variety, we also studied the workloads of the recently
+server. Unsurprisingly, 2PL beneﬁts from a decreased contention,                       assembled OLTP-Bench suite [24], performing a similar analysis
+rising to over 87K transactions per second with 64 warehouses.                         to that of Section 6.1.  We found (and conﬁrmed with an author
+In contrast, our coordination-avoiding implementation is largely                       of [24]) that for nine of fourteen remaining (non-TPC-C) OLTP-
+unaffected(and,at64warehouses,isevennegativelyimpactedby                               Bench applications, the workload transactions did not involve in-
+[PDF_PAGE 11]
+tegrityconstraints(e.g.,didnotmodifyprimarykeycolumns),one                           betweenI-conﬂuenceandCALMisaninterestingareaforfurther
+(CH-benCHmark)matchedTPC-C,andtwospeciﬁcationsimplied                                exploration(e.g.,asI-conﬂuenceaddssafetytoconﬂuence,isthere
+(but did not explicitly state) a requirement for unique ID assign-                   a natural extension of monotone logic that incorporatesI-conﬂuent
+ment(AuctionMark’snew-purchaseordercompletion,SEATS’s                                invariants—say, via an “invariant-scoped” form of monotonicity?).
+NewReservation seat booking; achievable like TPC-C order IDs).                       UseofInvariants.  Alargenumberofdatabasedesigns—including,
+The remaining two benchmarks, sibench and smallbank were                             in restricted forms, many commercial databases today—use vari-
+speciﬁcallydesigned(byanauthorofthispaper)asresearchbench-                           ous forms of application-supplied invariants, constraints, or other
+marks for serializable isolation.  Finally, the three “consistency                   semanticdescriptions ofvalid databasestates asaspeciﬁcation for
+conditions”requiredbythenewerTPC-Ebenchmarkareaproper                                applicationcorrectness(e.g., [15,22,27,30,33,34,38,41–43,49]).
+subset of the twelve conditions from TPC-C considered here (and                      We draw inspiration and, in particular, our use of invariants from
+are all materializedcounters). It is possible(evenlikely) that these                 thispriorwork. However,wearenotawareofrelatedworkthatdis-
+benchmarks are underspeciﬁed, but according to ofﬁcial speciﬁca-                     cusseswhencoordinationisstrictlyrequiredtoenforceagivensetof
+tions, TPC-C contains the most coordination-intensive invariants                     invariants. Moreover, our practical focus hereis primarily oriented
+among all but two of the OLTP-Bench workloads.                                       towards invariants found in SQL and from modern applications.
+   Anecdotally,ourconversationsandexperienceswithreal-world                             In this work, we provide a necessary and sufﬁcient condition
+applicationprogrammersanddatabasedevelopershavenotidenti-                            for safe,coordination-free execution. Incontrast withmany of the
+ﬁedinvariantsthatareradicallydifferentthanthosewehavestudied                         conditionsabove(esp. commutativityandmonotonicity),weexplic-
+here.  A simple thought experiment identifying the invariants re-                    itly require more information from the application in the form of
+quired for a social networking site yields a number of invariants                    invariants (Kung and Papadimitriou [39] suggest this is information
+but none that are particularly exotic (e.g., username uniqueness,                    is required for general-purpose non-serializable yet safe execution.)
+foreignkeyconstraintsbetweenupdates,privacysettings[11,21]).                         Wheninvariantsare unavailable, manyof these moreconservative
+Nonetheless,weviewthefurtherstudyofreal-worldinvariantstobe                          approachesmaystillbeapplicable. Ouruseofanalysis-as-design-
+anecessaryareaforfutureinvestigation. Intheinterim,theseprelim-                      tool is inspired by this literature—in particular, [19].
+inaryresultshintatwhatispossiblewithcoordination-avoidanceas                         Coordinationcosts.  Inthiswork,wedeterminewhentransactions
+well asthe costsof coordinationif applications arenotI-conﬂuent.                     canrunentirelyconcurrentlyandwithout coordination. Incontrast,
+7.   RELATED WORK                                                                    a large numberof alternative models (e.g.,[4,8,27,34,38,43,44])
+                                                                                     assumeserializableorlinearizable(andthereforecoordinated)up-
+   Database system designers have longsought to manage the trade-                    dates to shared state.  These assumptions are standard (but not
+offbetweenconsistencyandcoordination. Aswehavediscussed,se-                          universal[18])intheconcurrentprogrammingliterature[8,51]. (Ad-
+rializabilityanditsmanyimplementations(includinglock-based,op-                       ditionally,unlikemuchofthisliterature,weonlyconsiderasingle
+timistic, and pre-scheduling mechanisms) [16,17,26,31,55–57,60]                      setofinvariantsperdatabaseratherthanper-operationinvariants.)
+are sufﬁcient for maintaining application correctness.  However,                     For example, transaction chopping [53] and later application-aware
+serializabilityisnotalwaysnecessary: asdiscussedinSection1,se-                       extensions[3,15]decomposetransactionsintoasetofsmallertrans-
+rializabledatabases donot allowcertain executionsthatare correct                     actions, providing increased concurrency, but in turn require that
+accordingtoapplicationsemantics. Thishasledtoalargeclassof                           individual transactions execute in a serializable (or strict serializ-
+application-level—orsemantic—concurrencycontrol modelsand                            able)manner. Thisrelianceoncoordinatedupdatesisatoddswith
+mechanismsthatadmitgreaterconcurrency. Thereareseveralsur-                           ourgoalofcoordination-freeexecution. However,thesealternative
+veysonthistopic,suchas[30,56],and,inoursolution,weintegrate                          techniques are useful in reducing the duration and distribution of
+many concepts from this literature.                                                  coordination once it is established that coordination is required.
+Commutativity.  One of the most popular alternatives to serializ-                    Term rewriting.  In termrewritingsystems,I-conﬂuence guaran-
+ability is to exploit commutativity: if transaction return values (e.g.,             tees that arbitrary rule application will not violate a given invari-
+ofreads)and/orﬁnaldatabasestatesareequivalentdespitereorder-                         ant[25],generalizingChurch-Rosserconﬂuence[37]. Weadaptthis
+ing,theycanbeexecutedsimultaneously[19,42,61]. Commutativity                         conceptandeffectivelytreattransactionsasrewriterules,database
+isoftensufﬁcientfor correctnessbutisnotnecessary. Forexample,                        states as constraint states, and the database merge operator as a
+ifananalystatawholesalercreatesareportondailycashﬂows,any                            special join operator (in the term-rewriting sense) deﬁned for all
+concurrentsale transactionswill not commutewith thereport(the                        states. Rewritingsystemconcepts—includingconﬂuence[4]—have
+resultswillchangedependingonwhetherthesalecompletesbefore                            previously been integrated into active database systems [62] (e.g.,
+oraftertheanalystrunsherqueries). However,thereportcreation                          in triggers, rule processing), but we are not familiar with a concept
+isI-conﬂuent with respect to, say, the invariant that every sale in                  analogous toI-conﬂuence in the existing database literature.
+thereportreferencesacustomerfromthecustomerstable. [19,40]                           Coordination-free algorithms and semantics.  Our work is inﬂu-
+provide additional examples of safe non-commutativity.                               encedbythedistributedsystemsliterature,wherecoordination-free
+Monotonicityand Convergence.  TheCALM Theorem[7]shows                                execution across replicas of a given data item has been captured
+thatmonotoneprogramsexhibitdeterministicoutcomesdespitere-                           as “availability” [12,29]. A large class of systems provides avail-
+ordering. CRDT objects [52] similarly ensure convergent outcomes                     ability via “optimisticreplication” (i.e., perform operations locally,
+thatreﬂectallupdatesmadetoeachobject. Theseoutcomedetermin-                          then replicate) [50].  We—like others [18]—adopt the use of the
+ism and convergence guarantees areuseful liveness properties [51]                    mergeoperatortoreconciledivergentdatabasestates[47]fromthis
+(e.g., a converged CRDT OR-Set reﬂects all concurrent additions                      literature. Both traditional database systems [2] and more recent
+andremovals)butdonotpreventusersfromobservinginconsistent                            proposals[41,42]allowthesimultaneoususeof“weak”and“strong”
+data [41], or safety (e.g., the CRDT OR-Set does not—by itself—                      isolation;weseektounderstandwhenstrongmechanismsareneeded
+enforce invariants, such as ensuring that no employee belongs to                     ratherthan anoptimalimplementation ofeither. Unlike“tentative
+twodepartments), andarethereforenotsufﬁcient toguaranteecor-                         update” models [28], we do not require programmers to specify
+rectness for all applications. Further understanding the relationship
+[PDF_PAGE 12]
+compensatory actions (beyond merge, which we expect to typically                      branching factor of the execution trace to a ﬁnite factor. Adapting
+begeneric and/orsystem-supplied)and donotreversetransaction                           Escrowandalternativetime-,versioned-,andnumerical-drift-based
+commitdecisions. Compensatoryactionscouldbecapturedunder                              models [63] is a promising area for future work.
+I-conﬂuence as a specialized merge procedure.                                         System design.  The design of full coordination-avoiding database
+   The CAP Theorem [1,29] recently popularized the tension be-                        systemsraisesseveralinterestingquestions. Forexample,givenaset
+tween strongsemantics andcoordination andpertains toa speciﬁc                         ofI-conﬂuenceresultsasinTable2,doesacoordination-avoiding
+model(linearizability). Therelationshipbetweenserializabilityand                      systemhavetoknowallqueriesinadvance,orcanitdynamically
+coordination requirements has also been well documented in the                        employ concurrency primitives as queries are submitted?  (Early
+databaseliterature[22]. Werecentlyclassiﬁedarangeofweakeriso-                         experiencessuggestthelatter.) Revisitingheuristics-andstatistics-
+lationmodelsbyavailability,labelingsemanticsachievablewithout                         based query planning, speciﬁcally targeting physical layout, choice
+coordinationas“HighlyAvailableTransactions”[9]. Ourresearch                           of concurrency control, and recovery mechanisms appears worth-
+here addresses when particularapplicationsrequire coordination.                       while. How should a system handle invariants that may change over
+   Inourevaluation,wemakeuseofourrecentRAMPtransactional-                             time? IsSQLtherighttargetforlanguageanalysis? Weviewthese
+gorithms[11],whichguaranteecoordination-free,atomicallyvisible                        pragmatic questions as exciting areas for future work.
+updates. RAMP transactions are an implementation ofI-conﬂuent
+semantics(i.e.,ReadAtomicisolation,usedinourimplementation
+for foreign key constraint maintenance). Our focus in this paper                      9.   CONCLUSION
+is when RAMP transactions (and any other coordination-free or                            ACID transactions and associated strong isolation levels domi-
+I-conﬂuent semantics) are appropriate for applications.                               natedtheﬁeldofdatabaseconcurrencycontrolfordecades,duein
+Summary.  TheI-conﬂuencepropertyisanecessaryandsufﬁcient                              largeparttotheireaseofuseandabilitytoautomaticallyguarantee
+condition for safe, coordination-free execution. Sufﬁcient condi-                     application correctness criteria. However, this powerful abstraction
+tionssuchascommutativityandmonotonicityareusefulinreducing                            comes with a hefty cost: concurrent transactions must coordinate in
+coordination overheads but are not always necessary.  Here, we                        order to prevent read/write conﬂicts that could compromise equiv-
+explorethefundamentallimitsofcoordination-freeexecution. To                           alence to a serial execution.  At large scale and, increasingly, in
+do so, we explicitly consider a model without synchronous commu-                      geo-replicated system deployments, the coordination costs neces-
+nication. This is key to scalability: if, by default, operations must                 sarily associated with these implementations produce signiﬁcant
+contact a centralized validation service, perform atomic updates                      overheadsin the formof penaltiesto throughput,latency,and avail-
+tosharedstate,orotherwisecommunicate,thenscalabilitywillbe                            ability. In lightof these trends,we developed aformal framework,
+compromised. Finally, we only consider a single set of invariants                     called invariant conﬂuence, in which application invariants are used
+for the entire application, reducing programmer overhead without                      as abasis for determiningif and whencoordination is strictlyneces-
+affecting ourI-conﬂuence results.                                                     sarytomaintaincorrectness. Withthisframework,wedemonstrated
+                                                                                      that,infact,many—butnotall—commondatabaseinvariantsandin-
+                                                                                      tegrityconstraints areactuallyachievablewithout coordination. By
+8.   DISCUSSION AND FUTURE WORK                                                       applyingtheseresultstoa rangeofactualtransactionalworkloads,
+   In this paper, we have focused on the problem of recognizing                       we demonstrated an opportunity to avoid coordination in many
+when it is possible to avoid coordination. Here, we discuss exten-                    cases that traditional serializable mechanisms would otherwise co-
+sions to our approaches and outline areas for future work.                            ordinate. The order-of-magnitude performance improvements we
+                                                                                      demonstratedviacoordination-avoidingconcurrencycontrolstrate-
+I-conﬂuence as design tool.     As we have discussed, if a trans-                     gies provide compelling evidence that invariant-based coordination
+action is I-conﬂuent with respect to an invariant, there exists a                     avoidanceis a promisingapproach to meaningfullyscaling future
+coordination-freealgorithmforsafelyexecutingit. Forexample,we                         data management systems.
+usedanearlyversionofI-conﬂuenceanalysisinthedevelopmentof                             Acknowledgments.  TheauthorswouldliketothankPeterAlvaro,
+ourRAMPtransactions: coordination-free,atomicallyvisibletrans-                        NeilConway,ShelFinkelstein,andJoshRosenforhelpfulfeedback
+actionsacrossmultiplepartitionsthatareusefulinseveralotheruse                         on earlier versions of this work, Dan Crankshaw, Joey Gonzalez,
+caseslikeforeignkeyconstraintmaintenance[11]. Asweshowedin                            NickLanham,andGenePangforvariousengineeringcontributions,
+Section5,insertionandcascadingdeletesareI-conﬂuentunderfor-                           and Yunjing Yu for sharing the Bobtail dataset.  This research is
+eignkeyconstraints,so,whenseekingahighlyconcurrentalgorithm                           supportedinpartbyNSFCISEExpeditionsAwardCCF-1139158,
+forthisusecase,weknewthesearchwasnotinvain:I-conﬂuence                                LBNL Award 7076018,DARPAXData Award FA8750-12-2-0331,
+analysisindicatedthereexistedatleastonesafe,coordination-free                         the NSF Graduate Research Fellowship (grant DGE-1106400), and
+mechanism for the task. We see (and have continued to use) the                        gifts from Amazon Web Services, Google, SAP, the Thomas and
+I-conﬂuence property as a useful tool in designing new algorithms,                    Stacey Siebel Foundation, Adobe, Apple, Inc., Bosch, C3Energy,
+particularly in existing, well-speciﬁed applications and use cases                    Cisco, Cloudera, EMC, Ericsson, Facebook, GameOnTalis, Guavus,
+(e.g., B-tree internals, secondary indexes).                                          HP, Huawei, Intel, Microsoft, NetApp, Pivotal, Splunk, Virdata,
+Amortizing coordination.   We have analyzed conﬂicts on a per-                        VMware, and Yahoo!.
+transaction basis, but it is possible to amortize the overhead of
+coordination across multiple transactions.  For example, the Es-                      10.   REFERENCES
+crowtransactionmethod[46]reducescoordinationbyallocatinga                              [1]D. J. Abadi. Consistency tradeoffs in modern distributed database system
+“share” of non-I-conﬂuent operations between multiple processes.                           design: CAP is only part of the story. IEEE Computer, 45(2):37–42, 2012.
+For example, in a bank application, a balance of $100 might be                         [2]A. Adya.     Weak consistency: a generalized theory and optimistic
+dividedbetweenﬁveservers,suchthateachservercandispense$20                                  implementations for distributed transactions. PhD thesis, MIT, 1999.
+without requiring coordination to enforce a non-negative balance                       [3]D. Agrawal et al. Consistency and orderability: semantics-based correctness
+invariant(serverscancoordinateto“refresh”supply). Inthecontext                             criteria for databases. ACM TODS, 18(3):460–486, Sept. 1993.
+                                                                                       [4]A. Aiken, J. Widom, and J. M. Hellerstein. Behavior of database production
+of our coordination-freedom analysis, this is similar to limiting the                      rules: Termination, conﬂuence, and observable determinism. In SIGMOD 1992.
+[PDF_PAGE 13]
+ [5]P. Alvaro, N. Conway, J. M. Hellerstein, and W. Marczak. Consistency analysis                          [47]K. Petersen, M. J. Spreitzer, D. B. Terry, M. M. Theimer, and A. J. Demers.
+      in Bloom: a CALM and collected approach. In CIDR 2011.                                                      Flexible update propagation for weakly consistent replication. In SOSP 1997.
+ [6]P. Alvaro et al. Consistency without borders. In     SoCC 2013.                                        [48]K. Ren, A. Thomson, and D. J. Abadi. Lightweight locking for main memory
+ [7]T. J. Ameloot, F. Neven, and J. Van Den Bussche. Relational transducers for                                   database systems. VLDB 2013.
+      declarative networking. J. ACM, 60(2):15:1–15:38, May 2013.                                          [49]S. Roy, L. Kot, et al. Writes that fall in the forest and make no sound:
+ [8]H. Attiya, R. Guerraoui, D. Hendler, et al. Laws of order: Expensive                                          Semantics-based adaptive data consistency, 2014.arXiv:1403.2307.
+      synchronization in concurrent algorithms cannot be eliminated. InPOPL 2011.                          [50]Y. Saito and M. Shapiro. Optimistic replication.       ACM CSUR, 37(1), Mar. 2005.
+ [9]P. Bailis, A. Davidson, A. Fekete, A. Ghodsi, J. M. Hellerstein, and I. Stoica.                        [51]F. B. Schneider.       On concurrent programming. Springer, 1997.
+      Highly Available Transactions: Virtues and limitations. InVLDB 2014.                                 [52]M. Shapiro et al. A comprehensive study of convergent and commutative
+[10]P. Bailis, A. Fekete, M. J. Franklin, A. Ghodsi, et al. Coordination avoidance in                             replicated data types. Technical Report 7506, INRIA, 2011.
+      database systems (Extended version). 2014.arXiv:1402.2237.                                           [53]D. Shasha, F. Llirbat, E. Simon, and P. Valduriez. Transaction chopping:
+[11]P. Bailis, A. Fekete, A. Ghodsi, J. M. Hellerstein, and I. Stoica. Scalable atomic                            algorithms and performance studies.ACM TODS, 20(3):325–363, Sept. 1995.
+      visibility with RAMP transactions. InSIGMOD 2014.                                                    [54]J. Shute et al. F1: A distributed SQL database that scales. In       VLDB 2013.
+[12]P. Bailis and A. Ghodsi. Eventual Consistency today: Limitations, extensions,                          [55]M. Stonebraker, S. Madden, D. J. Abadi, S. Harizopoulos, et al. The end of an
+      and beyond. ACM Queue, 11(3), 2013.                                                                         architectural era: (it’s time for a complete rewrite). InVLDB 2007.
+[13]P. Bailis and K. Kingsbury. The network is reliable: An informal survey of                             [56]M. Tamer Özsu and P. Valduriez.       Principles of distributed database systems.
+      real-world communications failures. ACM Queue, 12(7):20, 2014.                                              Springer, 2011.
+[14]J. Baker et al. Megastore: Providing scalable, highly available storage for                            [57]A.Thomson,T.Diamond,S.Weng,K.Ren,P.Shao,andD.Abadi.Calvin: Fast
+      interactive services. InCIDR 2011.                                                                          distributed transactions for partitioned database systems. InSIGMOD 2012.
+[15]A. J. Bernstein and P. M. Lewis. Transaction decomposition using transaction                           [58]TPC Council. TPC Benchmark C revision 5.11, 2010.
+      semantics. Distributed and Parallel Databases, 4(1):25–47, 1996.                                     [59]I. L. Traiger, J. Gray, C. A. Galtieri, and B. G. Lindsay. Transactions and
+[16]P. Bernstein, V. Hadzilacos, and N. Goodman.       Concurrency control and                                    consistency in distributed database systems. ACM TODS, 7(3):323–342, 1982.
+      recovery in database systems. Addison-wesley New York, 1987.                                         [60]S. Tu, W. Zheng, E. Kohler, B. Liskov, and S. Madden. Speedy transactions in
+[17]P. A. Bernstein, D. W. Shipman, and J. B. Rothnie, Jr. Concurrency control in a                               multicore in-memory databases. InSOSP 2013.
+      system for distributed databases (SDD-1). ACM TODS, 5(1):18–51, Mar. 1980.                           [61]W. Weihl.       Speciﬁcation and implementation of atomic data types. PhD thesis,
+[18]S. Burckhardt, D. Leijen, M. Fähndrich, and M. Sagiv. Eventually consistent                                   Massachusetts Institute of Technology, 1984.
+      transactions. In ESOP. 2012.                                                                         [62]J. Widom and S. Ceri.       Active database systems: Triggers and rules for
+[19]A. T. Clements et al. The scalable commutativity rule: designing scalable                                     advanced database processing. Morgan Kaufmann, 1996.
+      software for multicore processors. In SOSP 2013.                                                     [63]K.-L. Wu et al. Divergence control for epsilon-serializability. In       ICDE 1992.
+[20]N. Conway et al. Logic and lattices for distributed programming. In       SoCC 2012.                   [64]Y. Xu et al. Bobtail: avoiding long tails in the cloud. In       NSDI 2013.
+[21]B. F. Cooper, R. Ramakrishnan, U. Srivastava, A. Silberstein, P. Bohannon,
+      et al. PNUTS: Yahoo!’s hosted data serving platform. In VLDB 2008.
+[22]S. Davidson, H. Garcia-Molina, and D. Skeen. Consistency in partitioned
+      networks. ACM Computing Surveys, 17(3):341–370, 1985.                                                APPENDIX A: Experimental Details
+[23]G. DeCandia, D. Hastorun, M. Jampani, G. Kakulapati, A. Lakshman, et al.
+      Dynamo: Amazon’s highly available key-value store. In SOSP 2007.                                     Microbenchmark experiment description.     We implemented
+[24]D. E. Difallah, A. Pavlo, C. Curino, and P. Cudre-Mauroux. OLTP-Bench: An
+      extensible testbed for benchmarking relational databases. In VLDB 2014.                              traditionaltwo-phaselockingandanoptimizedvariantoftwo-phase
+[25]G. Duck, P. Stuckey, and M. Sulzmann. Observable conﬂuence for constraint                              locking on the experimental prototype described in Section 6.
+      handling rules. In ICLP 2007.                                                                            In two-phase locking, each client acquires locks one at a time,
+[26]K. P. Eswaran et al. The notions of consistency and predicate locks in a                               requiring a full round trip time (RTT) for every lock request. For
+      database system. Commun. ACM, 19(11):624–633, 1976.
+[27]H. Garcia-Molina. Using semantic knowledge for transaction processing in a                             an N item transaction, locks are held for 2N+1 message delays
+      distributed database. ACM TODS, 8(2):186–213, June 1983.                                             (the+1 is due to broadcasting the unlock/commit command to the
+[28]H. Garcia-Molina and K. Salem. Sagas. In       SIGMOD 1987.                                            participating servers).
+[29]S. Gilbert and N. Lynch. Brewer’s conjecture and the feasibility of consistent,                            Our optimized two-phase locking only uses one message delay
+      available, partition-tolerant web services. SIGACT News, 33(2):51–59, 2002.
+[30]P.Godfreyetal.       Logicsfordatabasesandinformationsystems,chapterIntegrity                          (half RTT) to perform each lock request: the client speciﬁes the
+      constraints: Semantics and applications, pages 265–306. Springer, 1998.                              entiresetofitemsit wishes tomodifyatthestartofthetransaction
+[31]J. Gray. The transaction concept: Virtues and limitations. In       VLDB 1981.                         (in ourimplementation, thenumber of items in thetransaction and
+[32]J. Gray and L. Lamport. Consensus on transaction commit.       ACM TODS,                               thestartingitemID),and,onceaserverhasupdateditsrespective
+      31(1):133–160, Mar. 2006.
+[33]P. W. Grefen and P. M. Apers. Integrity control in relational database                                 item, the server forwards the remainder of the transaction to the
+      systems–an overview.Data & Knowledge Engineering, 10(2):187–223, 1993.                               server responsible for the next write in the transaction. For an N-
+[34]A. Gupta and J. Widom. Local veriﬁcation of global integrity constraints in                            itemtransaction,locksareonlyheldforN messagedelays(theﬁnal
+      distributed databases. In SIGMOD 1993, pages 49–58.
+[35]R. Johnson, I. Pandis, and A. Ailamaki. Eliminating unscalable communication                           server both broadcasts the unlock request to all other servers and
+      in transaction processing. The VLDB Journal, pages 1–23, 2013.                                       alsonotiﬁesthe client),whilea1-itemtransactiondoes notrequire
+[36]E. P. Jones, D. J. Abadi, and S. Madden. Low overhead concurrency control for                          distributed locking.
+      partitioned main memory databases. In SIGMOD 2010.                                                       To avoid deadlock (which was otherwise common in this high-
+[37]J. W. Klop.       Term rewriting systems. Stichting Mathematisch Centrum                               contention microbenchmark), our implementation totally orders
+      Amsterdam, 1990.
+[38]H. K. Korth and G. Speegle. Formal model of correctness without serializabilty.                        any lock requests according to item and executes them sequen-
+      In SIGMOD 1988.                                                                                      tially (e.g., lock server 1 then lock server 2). Our implementation
+[39]H.-T. Kung and C. H. Papadimitriou. An optimality theory of concurrency                                alsopiggybackswritecommandsalongwithlockrequests,further
+      control for databases. In SIGMOD, 1979.
+[40]L. Lamport. Towards a theory of correctness for multi-user database systems.                           avoiding message delays. Unlike the locking implementation used
+      Technical report, CCA, 1976. Described in  [3,51].                                                   in Section 6, since we are only locking one item per server, our
+[41]C. Li, J. Leitao, A. Clement, N. Preguiça, R. Rodrigues, et al. Automating the                         microbenchmark code does not use a dynamic lock manager and
+      choice of consistency levels in replicated systems. In USENIX ATC 2014.                              instead associates a single lock with each item; this should further
+[42]C. Li, D. Porto, A. Clement, J. Gehrke, et al. Making geo-replicated systems
+      fast as possible, consistent when necessary. In OSDI 2012.                                           lower locking overheads.
+[43]Y. Lin, B. Kemme, R. Jiménez-Peris, et al. Snapshot isolation and integrity                                On each server, our lock implementation uses JavaReentrant-
+      constraints in replicated databases. ACM TODS, 34(2), July 2009.                                     Lock,whichunfortunatelymeansthat,forallbut1-itemoptimized
+[44]S. Lu, A. Bernstein, and P. Lewis. Correct execution of transactions at different                      2PL, our implementation was unable to used ﬁxed-size thread pools
+      isolation levels. IEEE TKDE, 16(9), 2004.
+[45]N. A. Lynch, M. Merritt, W. Weihl, and A. Fekete.       Atomic Transactions: In                        (incontrastwithourScalaFuture-basedcoordination-freeruntime).
+      Concurrent and Distributed Systems. Morgan Kaufmann Publishers Inc., 1993.                           Nevertheless,wedonotbelievethatourlockingimplementationis
+[46]P. E. O’Neil. The escrow transactional method.       TODS, 11(4):405–430, 1986.                        the actual bottleneck in the distributed setting: coordination is.
+[PDF_PAGE 14]
+                                                                                      merge each replica’s modiﬁcations into a separate server. (Recall
+                                                                                      that,becauseSi isI-T-reachable,eachtransactioninαi isanI-valid
+                                                                                      transformationandmusteithereventuallycommitorabortitselfto
+                                                                                      preservetransactionalavailability,and,duetocoordination-freedom,
+                                                                                      the resultof theexecution is dependentsolely onits input—inthis
+                                                                                      case, S0.)  We subsequently mark each t∈ Ti as done in α0 and
+                                                                                      denote the resulting server asst.5
+                                                                                         Next,we repeatedlyselect anoperation oi fromαi that ismarked
+                                                                                      asnotdone butwhoseprecedingoperationsare allmarkedasdone.
+                                                                                         Ifoi isatransactionwithprecedingoperationoj oncorresponding
+                                                                                      serversj,wepartitionsj andsi andanotherservercontainingstate
+                                                                                      S0 suchthatsj andsi cancommunicatewitheachother butcannot
+                                                                                      communicate with any other server. Under convergent execution,
+                                                                                      sj and si must eventually contain the same state, merged to sj
+                                                                                      (given that sj⊔S0 is deﬁned in our model to besj).  Following
+Figure 7: Additional performance details for microbenchmark                           convergence, we partition sj and si so they cannot communicate.
+performance of conﬂicting and non-conﬂicting transactions.                            Wesubsequentlyexecuteoi onsj. Again, oi musteithercommitor
+                                                                                      abort itself topreserve transactional availability,and its behavior is
+   We partitioned eight in-memory items (integers) across eight                       solely dependent on its input due to coordination-freedom.
+cr1.8xlarge Amazon EC2 instances with clients located on a sep-                          If oi is a merge procedure with preceding operations oj and ok
+arate set ofcr1.8xlarge instances. Figure 1 reported in Section 2                     on corresponding servers sj and sk, we produce servers sj′ and sk′
+depicts results for the coordination-free implementation and the                      as above, by partitioning sj′ and sj and, respectively, sk and sk′,
+optimized two-phase locking case. Figure 7 in this second depicts                     waitinguntilconvergence,thenrepartitioningeach. Subsequently,
+all three algorithms. Unsurprisingly, two-phase locking performs                      weplacesj′ andsk′ inthesamepartition,forcingthemerge(oi)of
+worse than optimized two-phase locking, but both incur substantial                    these states via the convergence requirement.
+penalties due to coordination delay over the network.                                    When all operations inαi are marked as done, the ﬁnal operation
+Trace-basedsimulationdescription.  Wesimulatetraditionaltwo-                          we have performed will produce server containing state Si.  We
+phasecommitanddecentralizedtwo-phasecommit, usingnetwork                              have effectively (serially) traversed the history, inducing the series
+models derived from existing studies.  Our simulation is rather                       of transactions by triggering partitions while requiring commits
+straightforward,butwemakeseveraloptimizationstoimprovethe                             due to transactional availability and merges due to our pair-wise
+throughput of each algorithm. First, we assume that transactions                      convergence.
+are pipelined, so that each server can prepare immediately after                         We proceed to prove Theorem 1 from Section 4.2.
+it hascommitted the prior transaction. Second, our pipelines are
+ideal in that we do not consider deadlock:  only one transaction                      Proof. Theorem 1 (⇐) We begin with the simpler proof, which is
+preparesatagiventime. Third,wedonotconsiderthecostoflocal                             byconstruction. AssumeasetoftransactionsT areI-conﬂuentwith
+processingofeachtransaction: throughputisdeterminedentirelyby                         respect to an invariant I. Consider a system in which each server
+communication delay.                                                                  executes thetransactions itreceivesagainst areplica ofits current
+   Whilethisstudyisbasedsolelyonreportedlatencies,deployment                          stateandcheckswhetherornottheresultingstateisI-valid. Ifthe
+reports corroborate our ﬁndings. For example, Google’s F1 uses                        resulting state is I-valid, the replica commits the transaction and
+optimisticconcurrencycontrolviaWANwithcommitlatenciesof50                             its mutations to the state. If not, the replica aborts the transaction.
+to150ms. Astheauthorsdiscuss,thislimitsthroughputtobetween                            Serversopportunistically exchangecopiesof theirlocalstatesand
+6 to 20 transactions per second per data item [54].  Megastore’s                      merge them. No individual replica will install an invalid state upon
+averagewritelatenciesof100to400mssuggestsimilarthroughputs                            executing transactions, and, because T isI-conﬂuent under I, the
+to those that we have predicted [14]. Again, aggregate throughput                     mergeof anytwoI-validreplica states fromindividualservers (i.e.,
+maybegreaterasmultiple2PCroundsfordisjointsetsofdataitems                             I-T-reachable states) as constructed above is I-valid.  Therefore,
+maysafelyproceedinparallel. However,worst-caseaccesspatterns                          the converged database state will be I-valid. Transactional avail-
+will indeed greatly limit scalability.                                                ability, convergence, and global I-validity are all maintained via
+                                                                                      coordination-free execution.
+APPENDIX B:I-conﬂuence proof                                                             (⇒) Assume a system M guarantees globally I-valid operation
+Lemma1.  GivenasetoftransactionsT andinvariantsI,aglobally                            for set of transactions T and invariantI with coordination-freedom,
+I-valid,coordination-free,transactionallyavailable,andconvergent                      transactional availability, and convergence, but T is not I-conﬂuent.
+system is able to produce anyI-T-reachable stateSi.                                   Then there exist two I-T-reachable states S1 and S2 with common
+                                                                                      ancestor I-T-reachable state Sa such that, by deﬁnition,I(S1) and
+Proof. Lemma 1 Let αi represent a partially ordered sequence of                       I(S2)are true, but I(S1⊔S2) is false. 6
+transactions Ti and merge procedure invocations Mi (call this a                          Consider twoexecutions ofsystem M,ε1 andε2. In eachexecu-
+history) starting fromS0 that producesSi,                                             tion,we beginby forcing M toproduce aservercontaining Sc (via
+   We REPLAY the historyαi on a set of servers as follows. Starting                   REPLAY inLemma1). Inε1,wesubsequently REPLAY thehistory
+from the initial state S0, we traverse the partial order according to                 5RecallfromSection3thatweconsiderarbitrarysetsofservers. Wecould
+whatamountstoatopologicalsort. Initially,wemarkalloperations                          likely(atleastincertaincases)bemoreparsimoniuswithouruseofservers
+(transactions ormerges)inαi asnot done. We begin byexecuting                          in this proof at some cost to complexity.
+all transactions Ti inαi that have no predeceding operations inαi.                    6We may be able to apply Newman’s lemma and only consider single-
+Foreachtransactiont∈Ti,weexecutet onaserverthatisunableto                             transactiondivergence(inthecaseofconvergentandtherefore“terminating”
+communicate with any other server. Upon transaction commit, we                        executions) [25,37], but this is not necessary for our results.
+[PDF_PAGE 15]
+α1 startingfromSc. Inε2,wesubsequently REPLAY thehistoryα2                             We introduce additional formalism as necessary. To start, unless
+startingfromSc. CallTf1 andTf2 theﬁnal(setof)transactionsthat                       otherwisespeciﬁed,weusethesetunionmergeoperator. Wedenote
+producedeachofS1 andS2 (thatis,thesetoftransactionsineach                           version i of item x as xi and a write of version xi with value v as
+executionthatarenotfollowedbyanyothertransaction). Underα1                          w(xi=v).
+andα2, all transactionsin each of Tf1 and Tf2 will have committed
+to maintain transactional availability, their end result will be equiv-             Claim 1 (Writes areI-conﬂuent with respect to per-item equality
+alent to the result in α1 and α2 due to the coordination-freedom                    constraints).   Assume writes are notI-conﬂuent with respect to
+property, and S1 and S2 are bothI-valid, by assumption.                             some per-item equality constraint i= c, where i is an item and c
+  Wenowconsiderathird execution,α3. α3 proceedstoindepen-                           is a constant.  By deﬁnition, there must exist twoI-T-reachable
+dently REPLAYα1 andα2 butdoesnotexecuteorproceedfurtherin                           statesS1 andS2 withcommonancestorstatesuchthatI(S1)→true
+thepartialorderthananyelementof Tf1 or Tf2;weconsiderthese                          and I(S2)→true but I(S1)⊔S2)→ false; therefore,there exists a
+specially:                                                                          version in inS1⊔S2 such thatin̸=c, and,under set union,in∈S1,
+  Onceα3 has forcedM to REPLAY other operations,we force itto                       in∈S2,orboth. However,thiswouldimplythatI(S1)→ falseor
+REPLAY these ﬁnal operations beginning fromTf1 and Tf2. If we                       I(S2)→ false(or both), a contradiction.
+REPLAY these transactions andM commits them, we can REPLAY
+the remainder of the operations in α1 and α2. In this case, due to                  Claim2(WritesareI-conﬂuentwithrespecttoper-iteminequality
+the coordination-freedom property, M will produce two servers si                    constraints).   The proof followsalmost identically to theproof of
+andsj containingstatesS1 andS2. Whenwepartitionsi andsj such                        Claim, but for an invariant of the formi̸=c 1.
+thattheycancommunicatewitheachotherbutcannotcommunicate
+withanyotherservers,si andsj musteventuallyconverge,violating                       Claim3(WritingarbitraryvaluesisnotI-conﬂuentwithrespectto
+global I-validity. On the other hand, if M aborts one or more of the                multi-item uniqueness constraints).   Consider the following trans-
+transactionsinTf1 andTf2,M willnotproducesi⊔sj,but,fromthe                          actions:
+perspective of each server sp1 executing a transaction in Tf1, this                                         T1u :=w(xa=v); commit
+execution is indistinguishable fromα1, and, from the perspective of                                         T2u :=w(xb=v); commit
+each server sp2 executing a transaction in Tf2, is indistinguishable
+fromα2, a contradiction.                                                            and uniqueness constraint on records:
+  Therefore, to preserve transactional availability, M must sacriﬁce                                   Iu(D)={values in D are unique}
+oneofglobal validity (byallowingtheinvalidmerge),convergence                        Now, an empty database trivially does not violate uniqueness con-
+(bynevermerging),orcoordination-freedom(byrequiringchanges                          straints(Iu(Ds={})→true),andaddingindividualversionstothe
+to transaction behavior).                                                           separate empty databases is also valid:
+APPENDIX C:I-conﬂuence Analysis                                                                   T1u({})={xa=v}, Iu({xa=v})→true
+In this section, we more formally demonstrate the I-conﬂuence                                     T2u({})={xb=v}, Iu({xb=v})→true
+of invariants and operations discussed in Section 5. Our goals in                   However, merging these states results in invalid state:
+this section are two-fold. First, we have found the experience of                           Iu({xa=v}⊔{xb=v}={xa=v,xb=v})→ false
+formally provingI-conﬂuence to be instructive in understanding
+thesecombinations(beyondlessformalargumentsmadeinthebody                            Therefore,{T1u,T2u} is notI-conﬂuent under Is.
+textfor brevityand intuition). Second, we have foundI-conﬂuence
+proofs to take on two general structures that, via repetition and in                   Forthenextproof,weconsideramodelassuggestedinSection5
+andvariationsbelow,mayproveusefultothereader. Inparticular,                         where replicas are able to generate unique (but not arbitrary (!))
+the structure of ourI-conﬂuence proofs takes one of two forms:                      IDs (in the main text, we suggested the use of a replica ID and
+   • ToshowasetoftransactionsarenotI-conﬂuentwithrespect                            sequencenumber). Inthefollowingproof,toaccountforthisnon-
+      toan invariantI,we useproof bycounterexample: wepresent                       deterministic choice of unique ID, we introduce a special nonce()
+      two I-T-reachable states with a common ancestor that, when                    function and require that, nonce() return unique values for each
+      merged, are notI-valid.                                                       replica;thatis,⊔isnotdeﬁnedforreplicasonwhichindependent
+   • To show a set of transactions areI-conﬂuent with respect to                    invocations ofnonce() return the same value.
+      aninvariantI,weuseproof bycontradiction: weshowthat,if                        Claim 4(Assigningvaluesby nonce() isI-conﬂuentwithrespect
+      a state S is not I-valid, merging two I-T-reachable states with               tomulti-itemuniquenessconstraints).   Assumethatassigningval-
+      a common ancestor state to produce S implies either one or                    uesbynonce() isnotI-conﬂuentwithrespecttosomemulti-item
+      both of S1 or S2 must not beI-valid.                                          uniqueness invariant:
+  These results are not exhaustive, and there are literally inﬁnite                             I(D)=∀c∈dom(D),{|{x∈D|x=c}|≤1}
+combinationsof invariantsand operationsto consider. Rather,the                      By deﬁnition, there must exist twoI-T-reachable states with a
+seventeenexamples below serveas ademonstrationof whatcan be
+accomplished viaI-conﬂuence analysis.                                               common ancestor reached by executing nonce-generating trans-
+  Notably,thenegativeresultsbelowusefairlysimplehistoriescon-                       actions (of the form Ti =[w(xi = nonce())]), S1 and S2 such that
+sisting of a single transaction divergence. As we hint in Footnote 6,               I(S1)→trueand I(S2)→truebutI(S1⊔S2)→ false.
+it is possible that a large class of relevant invariant-operation pairs                Therefore, there exist two versions ia,ib in S1⊔S2 such that ia
+only depend on single-transaction divergence.  Nevertheless, we                     and ib (both generated by nonce()) are equal in value. Under set
+decided topreserve the moregeneral formulation ofI-conﬂuence                        union,thismeansia∈S1 andib∈S2 (ia andib bothcannotappear
+(accounting forarbitrary I-T-reachable states)to accountfor more                    inS1 orS2 sinceitwouldviolatethosestates’I-validity). Because
+pathological(perhaps lessrealistic,or,if theseresultsare anyindi-                   replica states grow monotonically under set merge and S1 and S2
+cation,lesscommonlyencountered)behaviorsthatonlyariseduring
+more complex divergence patterns.
+[PDF_PAGE 16]
+differ, they must be different replicas. But nonce() cannot generate               Therefore,{T1f,T2f} is notI-conﬂuent under If.
+the same values on different replicas, a contradiction.
+                                                                                      Wedenoteacasadingdeleteofallrecordsthatreferenceﬁeldf
+Claim 5 (Writing arbitrary values are notI-conﬂuent with respect                   with valuev (va constant) ascascade(f =v).
+to sequentiality constraints).   Consider the followingtransactions:
+                       T1s :=w(xa=1); commit                                        Claim 8 (Cascading deletion and insertion are I-conﬂuent with
+                       T2s :=w(xb=3); commit                                        respecttoforeignkeyconstraints).   Assumethatcacadingdeletion
+                                                                                    and insertion of new records are notI-conﬂuent with respect to
+and the sequentiality constraint on records:                                        someforeignkeyconstraintI(D)={∀rf ∈Dsuchthatrf.g̸=null,
+    Is(D)={max(r∈D)−min(r∈D)=|D|+1}∨{|D|=0}                                         ∃rt∈Dsuchthatrf.g=rt.hifcascade(h=rf.g̸=v)}(thereexists
+                                                                                    aforeignkeyreferencebetweenﬁeldsgandhandthecorresponding
+Now,Is holdsovertheemptydatabase(Is({})→true),whileinsert-                          value for ﬁeldh has not been deleted-by-cascade). By deﬁnition,
+ingsequentialnewrecordsintoindependent,emptyreplicasisalso                          there must exist two I-T-reachable states S1 and S2 with common
+valid:                                                                              ancestor reachable by performing insertions such that I(S1)→true
+              T1s({})={xa=1}, Iu({xa=1}→true                                        and I(S2)→ true but I(S1⊔S2)→ false; therefore, there exists
+              T2s({})={xb=3}, Iu({xb=3}→true                                        some version r1∈S1⊔S2 such that r1.f ̸=null but ∄r2∈S1⊔S2
+                                                                                    such that r1.g= r2.h.  From the proof of Claim 6, we know that
+However, merging these states results in invalid state:                             insertion isI-conﬂuent, so the absence of r2 must be due to some
+        Is({xa=1}⊔{xb=3}={xa=1,xb=3})→ false                                        cascadingdeletion. Undersetunion,r1 mustappearinexactlyone
+Therefore,{T1s,T2s} is notI-conﬂuent under Is.                                      of S1 or S2 (if r1 appeared in both, there would be no deletion, a
+                                                                                    contradiction since we know insertion isI-conﬂuent). For the state
+  To discuss foreign key constraints, we need some way to refer to                  Sj in which r1 does not appear (either S1 or S2), Sj must include
+other records within the database. There are a number of ways of                    cascade(h= r1.g).  But, if cascade(h= r1.g)∈ Sj, cascade(h=
+formalizingthis;wearenotpickyand,here,refertoaﬁeldf within                          r1.g)mustalsobeinSi⊔Sj,acontradictionandsoSi⊔Sj→true,
+a given versionxi as xi.f.                                                          a contradiction.
+
+Claim 6 (Insertion isI-conﬂuent with respect to foreign key con-                      We deﬁne a “consistent” secondary index invariant as requiring
+straints).   Assume that inserting new records is notI-conﬂuent                     that, when a record is visible, its secondary index entry should
+withrespecttosomeforeignkeyconstraintI(D)={∀rf ∈Dsuch                               also bevisible. This is similarto theguarantees provided byRead
+that rf.g̸=null,∃rt∈D such that rf.g=rt.h} (there exists a for-                    Atomic isolation [11]. For simplicity, in the following proof, we
+eignkeyreferencebetweenﬁeldsgandh). Bydeﬁnition,theremust                           only consider updates to a single indexed attribute attr, but the
+exist two I-T-reachable states S1 and S2 with a common ancestor                     proof is easily generalizable to multiple index entries, insertions,
+reachable by executing transactions performing insertions such that                 and deletion via tombstones.  We use last-writer wins for index
+I(S1)→true and I(S2)→true but I(S1⊔S2)→ false; therefore,                           entries.
+there exists some version r1∈ S1⊔S2 such that r1.f ̸= null but                      Claim 9 (Updates areI-conﬂuent with respect to consistent sec-
+∄r2∈S1⊔S2 suchthatr1.g=r2.h. Undersetunion,r1 mustappear                            ondaryindexing).   AssumethatupdatestorecordsarenotI-conﬂuent
+in either S1 or S2 (or both), and, for each set of versions in which it            with respect a secondary index constraint on attributeattr:
+appears,becauseS1 andS2 arebothI-valid,theymustcontainanr3                          I(D)={∀rf ∈D such that rf.attr̸=null and f is the highest ver-
+suchthat r1.f =r3.h. But,under setunion, r3.h shouldalso appear                     sionofr∈D,∃ridx∈Dsuchthatrf ∈ridx.entries(allentrieswith
+in S1⊔S2, a contradiction.                                                          non-nullattr are reﬂected in the secondary index entry for attr)
+
+  For simplicity, in the following proof, we assume that deleted                      Represent anupdate to recordrx as{w(rx) and, if rx.attr̸=null,
+elements remain deleted under merge. In practice, this can be ac-                   alsoridx.entries.add(rx), elseridx.entries.delete(rx)}.
+complishedbytombstoningrecordsand,ifrequired,usingcounters                            Bydeﬁnition,theremustexisttwoI-T-reachablestatesS1 andS2
+to record the number of deletions and additions [52]. We represent                 with common ancestors reachable by performing insertions S1 and
+a deleted versionxd by¬xb.                                                          S2 suchthatI(S1)→trueandI(S2)→truebutI(S1⊔S2)→ false;
+
+Claim 7(Concurrentdeletionand insertionisnotI-conﬂuentwith                          therefore,thereexistssomeversionr1∈S1⊔S2 suchthatr1.attr̸=
+respecttoforeignkeyconstraints).   Considerthefollowingtrans-                       nullbut∄ridx∈S1⊔S2 or∃ridx∈S1⊔S2 butr1 /∈ridx.entries. Inthe
+actions:                                                                            formercase, ridx /∈S1 or S2,but r1∈S1 or r1∈S2,acontradiction.
+                      T1f :=w(xa.g=1); commit                                      The latter case also produces a contradiction: if r1∈S1 or r1∈S2,
+                                                                                    it must appear inridx, a contradiction.
+                      T2f :=delete(xb); commit
+and the foreign key constraint:                                                       In our formalism, we can treat materialized views as functions
+If(D)={∀rf∈D,rf.g̸=null,∃rt∈Ds.t.¬rt /∈D and rf.g=rt.h}                             over database state f(D)→c.
+
+ForeignkeyconstraintsholdovertheinitialdatabaseSi={xb.h=1}                          Claim10(UpdatesareI-conﬂuentwithrespecttomaterializedview
+(Iu(Si)→true) and on independent execution ofTa and Tb:                             maintenance).   The proof is relatively straightforward if we treat
+ T1f({xb.h=1})={xa.g=1,xb.h=1}, If({xa=1})→true                                     thematerializedviewrecord(s)rashavingaforeignkeyrelationship
+                                                                                    to any records in the domain of the function (as in the proof of
+ T2f({xb.h=1})={xb.h=1,¬xb} If({xb.h=1,¬xb})→true                                   Claim 8 and recompute the function on update, cascading delete,
+However, merging these states results in invalid state:                             and⊔.
+              If({xa.g=1}⊔{xb.h=1,¬xb})→ false
+[PDF_PAGE 17]
+  ForourproofsovercounterADTs,werepresentincrementsofa                              databaseDviasize(l)=|{k|add(k,l)∈D}|−|{m|del(m,l)∈D}|
+countercbyinci(c),where iisa distinctinvocation,decrements of                       (note thatsizeof a non-existent list is zero).
+c by deci(c), and the value of c in database D as val(c,D)=|{j|
+incj(c)∈D}|−|{k|deck(c)∈D}|.                                                        Claim 15 (Modifying a list ADT is I-conﬂuent with respect to
+                                                                                    containment constraints).   Assume ADT list modiﬁcations are
+Claim11(CounterADTincrementsareI-conﬂuentwithrespectto                              notI-conﬂuent with respect to some equality constraint  I(D)=
+greater-than constraints).   Assume increments are notI-conﬂuent                    {add(k,l)∈D∧del(k,l) /∈D}forsomeconstant k. By deﬁnition,
+with respect to some per-counter greater-than constraint I(D)=                      there must exist two I-T-reachable states S1 and S2 with common
+val(c,D) < k, where k is a constant.  By deﬁnition, there must                      ancestor reachable by list modiﬁcations such thatI(S1)→ true
+exist two I-T-reachable states S1 and S2 with common ancestor                       and I(S2)→ true but I(S1⊔S2)→ false; therefore, add(k,l) /∈
+reachablebyexecutingwritetransactionssuchthatI(S1)→trueand                          {S1⊔S2}ordel(k,l)∈{S1⊔S2}. Intheformercase,neitherS1 nor
+I(S2)→true but I(S1⊔S2)→ false; therefore, val(c,S1⊔S2)≤                            S2 contain add(k,l) a contradiction. In the latter case, if either of
+k. However, this implies that val(c,S1)≤k), val(c,S2, or both, a                    S1 orS2 containsdel(k,l), it will be invalid, a contradiction.
+contradiction.
+                                                                                    Claim 16 (Modifying a list ADT is I-conﬂuent with respect to
+Claim 12 (Counter ADT increments are notI-conﬂuent with re-                         non-containment constraints).   Assume ADT list modiﬁcations are
+spect to less-than constraints).   Consider the following transac-                  notI-conﬂuent with respect to some non-containment constraint
+tions:                                                                              I(D)={add(k,l) /∈ D∧del(k,l)∈ D} for some constant k.  By
+                         T1i :=inc1(c); commit                                      deﬁnition, there must exist twoI-T-reachable states S1 and S2 with
+                         T2i :=inc2(c); commit                                      commonancestorreachablevialistmodiﬁcationssuchthatI(S1)→
+                                                                                    trueandI(S2)→truebutI(S1⊔S2)→ false;therefore,add(k,l)∈
+and the less-than inequality constraint:                                            {S1⊔S2} and del(k,l) /∈{S1⊔S2}.  But this would imply that
+                        Ii(D)={val(c,D)<2}                                          add(k,l)∈S1, add(k,l)∈S2, or both (while del(k,l) is in neither),
+Ii holds overthe empty databasestate (Ii({})→true) andwhen Ta                       a contradiction.
+
+and Tb are independently executed:                                                  Claim17(ArbitrarymodiﬁcationstoalistADTarenotI-conﬂuent
+        T1i({})={inc1(c)=1}, Ii({inc1(c)=1})→true                                   withrespecttoequalityconstraintsonthesizeofthelist).   Consider
+        T2i({})={inc2(c)}, Ii({inc2(c)})→true                                       the following transactions:
+However, merging these states results in invalid state:                                              T1l :=del(xi,l); add(xa,l); commit
+                  Iu({inc1(c)}⊔{inc2(c)})→ false                                                     T2l :=del(xi,l); add(xb,l); commit
+Therefore,{T1i,T2i} is notI-conﬂuent under Iu.                                      and the list size invariant:
+                                                                                                              Il(D)={size(l)=1}
+Claim 13 (Counter ADT decrements are notI-conﬂuent with re-                         Now,thesizeinvariantholdsonalistofsizeone(Iu({add(xi,l)})→
+specttogreater-thanconstraints).   Theproofissimilartotheproof                      true) and on independent state modiﬁcations:
+ofClaim14;substitutedecforincandchooseIi(D)={val(c,D)>                                     T1l({add(xi,l)})={add(xi,l), del(xi,l), add(xa,l)}
+−2}.
+                                                                                           T2l({add(xi,l)})={add(xi,l), del(xi,l), add(xb,1)}
+Claim14(CounterADTdecrementsareI-conﬂuentwithrespectto                              However, merging these states result in an invalid state:
+less-thanconstraints).   Unsurprisingly,theproofisalmostidentical                              Il({add(xi,l), del(xi,l), add(xa,l)}
+to the proof of Claim 11, but with< instead of> and dec instead
+of inc.                                                                                        ⊔{add(xi,l), del(xi,l), add(xb,l)})→ false
+  WeprovideproofsforADTlists;theremainderareremarkably                              Therefore,{T1l,T2l} is notI-conﬂuent under Iu.
+similar.  Our implementation of ADT lists in these proofs uses a                       Notethat,inourabovelistADT,modifyingthelistisI-conﬂuent
+lexicographic sorting of values to determine list order. Transactions               with respect to constraints on the head and tail of the list but not
+add a version v to list l via add(v,l) and remove it via del(v,l)                   intermediate elements of the list! That is, the head (resp. tail) of
+(whereanitemisconsideredcontainedinthelistifithasbeenadded                          the merged list will be the head (tail) of one of the un-merged lists.
+more times than it has been deleted) and access the length of l in                  However,thesecondelementmaycomefromeitherofthetwolists.

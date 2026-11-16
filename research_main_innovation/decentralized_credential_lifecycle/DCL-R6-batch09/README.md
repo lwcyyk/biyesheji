@@ -1,0 +1,7 @@
+# DCL-R6-batch09
+
+2026-11-12。**BLOCKED_STATIC_ADMISSION；目标执行0，T0/R均null。** 已收到完整条件执行授权并完成host静态准备。原版本字节及batch08归档核验通过，三项准入责任继续保留。
+
+入口：[最终裁决](BATCH09_FINAL_DECISION.md) → [静态准入](BATCH09_STATIC_ADMISSION.md) → [最小补充申请](BATCH09_MINIMAL_SUPPLEMENT_REQUEST.md) → [证据索引](EVIDENCE_INDEX.md)。
+
+RESOURCE_GATE_PASS=NOT_OBTAINED，F1/F4=UNRUN_RESOURCE_GATE，PASS_BOUNDED=[]，严格分离实例0，IMPLEMENTATION_GATE=CLOSED。该目录保存行政准备交付；独立运行窗尚待建立。

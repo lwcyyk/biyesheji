@@ -1,0 +1,161 @@
+SOURCE def atomic(
+119: def atomic(path, data, root_record=False, timing_stage='metadata.atomic'):
+120:     _check_root()
+121:     p = _inside(path, ROOT if root_record and os.geteuid() == 0 else OUT)
+122:     p.parent.mkdir(parents=True, exist_ok=True)
+123:     raw = timed(timing_stage+'.encode',lambda:json.dumps(data,ensure_ascii=False,sort_keys=True,indent=2).encode('utf-8'))
+124:     tmp = p.with_name(p.name + '.tmp.%s.%s' % (os.getpid(), threading.get_ident()))
+125:     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o640 if root_record else 0o600)
+126:     try:
+127:         if root_record:
+128:             os.fchown(fd,0,pwd.getpwnam('dcl-r6').pw_gid)
+129:             os.fchmod(fd,0o640)
+130:         timed(timing_stage+'.write',_full,fd,raw); sync_fd(fd,timing_stage+'.file')
+131:     finally: os.close(fd)
+132:     os.replace(tmp, p)
+133:     d = os.open(p.parent, os.O_RDONLY | os.O_DIRECTORY)
+134:     try: sync_fd(d,timing_stage+'.directory')
+135:     finally: os.close(d)
+136: def write(path, data): atomic(path, data)
+137: def identity(pid=None):
+138:     pid = os.getpid() if pid is None else int(pid)
+139:     raw = Path('/proc/%s/stat' % pid).read_text()
+140:     fields = raw[raw.rfind(')')+2:].split()
+141:     return {'pid': pid, 'start_ticks': int(fields[19]), 'boot_id': boot_id()}
+142: def _status(pid='self'):
+143:     return dict(line.split(':',1) for line in Path('/proc/%s/status' % pid).read_text().splitlines() if ':' in line)
+
+SOURCE def c09h_charge
+285: def c09h_charge(budget=None):
+286:     t=_TICKET
+287:     if t is None or t['case']!='C09H':raise AdmissionBlocked('C09H_CONTEXT_REQUIRED')
+288:     execution_deadline('C09H')
+289:     if count()>=t['c09h_visit_ceiling']:raise LimitReached('C09H_VISIT_LIMIT')
+290:     if budget is None:
+291:         if os.geteuid()!=0:raise AdmissionBlocked('ROOT_C09H_AUDIT_REQUIRED')
+292:         reserve_counter(OUT/'visits.bin',VISIT_CAP)
+293:     else:budget.visit()
+294: def root_verify_c09h():
+295:     global _TICKET
+296:     if os.geteuid()!=0:raise AdmissionBlocked('ROOT_C09H_VERIFIER_REQUIRED')
+297:     sys.path.insert(0,str(SOURCE))
+298:     import c09_oracle
+299:     old=_TICKET;_TICKET=ticket('C09H')
+300:     try:
+301:         cfg=c09_contract()
+302:         for job in cfg['jobs']:c09h_charge()
+303:         report=c09_oracle.check_suite(OUT/'c09_tests',cfg,safety_binding())
+304:         if not report['accepted']:raise AdmissionBlocked('C09H_RAW_ORACLE_FAILED')
+305:         report['checker_sha256']=digest(SOURCE/'c09_oracle.py')
+306:         report['contract_sha256']=digest(SOURCE.parent/'inputs/c09_contract.json')
+307:         _root_write(ROOT/'inputs/C09H_QUALIFICATION.json',report)
+308:         return report
+309:     finally:_TICKET=old
+
+SOURCE def root_verify_c09h
+294: def root_verify_c09h():
+295:     global _TICKET
+296:     if os.geteuid()!=0:raise AdmissionBlocked('ROOT_C09H_VERIFIER_REQUIRED')
+297:     sys.path.insert(0,str(SOURCE))
+298:     import c09_oracle
+299:     old=_TICKET;_TICKET=ticket('C09H')
+300:     try:
+301:         cfg=c09_contract()
+302:         for job in cfg['jobs']:c09h_charge()
+303:         report=c09_oracle.check_suite(OUT/'c09_tests',cfg,safety_binding())
+304:         if not report['accepted']:raise AdmissionBlocked('C09H_RAW_ORACLE_FAILED')
+305:         report['checker_sha256']=digest(SOURCE/'c09_oracle.py')
+306:         report['contract_sha256']=digest(SOURCE.parent/'inputs/c09_contract.json')
+307:         _root_write(ROOT/'inputs/C09H_QUALIFICATION.json',report)
+308:         return report
+309:     finally:_TICKET=old
+310: def safety_mode():
+311:     a,m=authorization();s=state();t=_TICKET
+312:     if t is None or t['case']!='RANGE' or s['status']!='CALIBRATING':
+313:         raise AdmissionBlocked('CALIBRATION_RANGE_MODE_ONLY')
+314:     if t['execution_lock_sha256']!=digest(SOURCE.parent/'inputs/execution_lock.json'):
+315:         raise AdmissionBlocked('SAFETY_EXECUTION_LOCK_DRIFT')
+316:     p=SOURCE.parent/'inputs/safety_contract.json'
+317:     if digest(p)!=m['safety_contract_sha256']:raise AdmissionBlocked('SAFETY_CONTRACT_DRIFT')
+318:     cfg=trusted(p)
+
+SOURCE def _counter_lock
+491: def _counter_lock(path,cap,case=None):
+492:     budget_health();p=_inside(path,OUT)
+493:     with _LOCKS_LOCK:lock=_LOCKS.setdefault(str(p),threading.RLock())
+494:     begin=monotonic_ns();utc=time.time_ns()
+495:     while not lock.acquire(timeout=.05):execution_deadline(case)
+496:     fd=None;acquired=False
+497:     try:
+498:         fd=os.open(p,os.O_RDWR|os.O_NOFOLLOW)
+499:         while not acquired:
+500:             try:fcntl.flock(fd,fcntl.LOCK_EX|fcntl.LOCK_NB);acquired=True
+501:             except BlockingIOError:execution_deadline(case);time.sleep(.005)
+502:         _timing('budget.lock_wait',begin,monotonic_ns(),utc,time.time_ns())
+503:         execution_deadline(case)
+504:         raw=os.pread(fd,24,0)
+505:         if len(raw)!=24 or raw[:8]!=COUNTER_MAGIC:raise AdmissionBlocked('TORN_COUNTER_OR_OLD_PROTOCOL')
+506:         used,storedcap=struct.unpack('<QQ',raw[8:])
+507:         if list(p.parent.glob(p.name+'.intent.json.tmp.*')):
+508:             raise AdmissionBlocked('AMBIGUOUS_RESERVATION_TEMP')
+509:         old=read(p.with_suffix(p.suffix+'.intent.json'))
+510:         if storedcap!=cap or used>cap:raise AdmissionBlocked('COUNTER_CAP_MISMATCH')
+511:         if old.get('protocol')!=BUDGET_PROTOCOL or old.get('status')!='COMMITTED' or old['after']!=used or old['cap']!=cap:
+512:             raise AdmissionBlocked('AMBIGUOUS_RESERVATION')
+513:         yield fd,used,p
+514:     finally:
+515:         if fd is not None:
+
+SOURCE def _reserve
+552: def _reserve(path,cap,amount=1,request=None,fault=None):
+553:     budget_health();timing_event('reserve.request')
+554:     if request is not None:raise AdmissionBlocked('EXACT_RANGE_CORE_REQUIRED')
+555:     if type(amount) is not int or amount<=0:raise AdmissionBlocked('RESERVATION_AMOUNT')
+556:     p=_inside(path,OUT);global_ledger=p==OUT/'visits.bin'
+557:     if fault and global_ledger:raise AdmissionBlocked('FAULT_IN_GLOBAL_LEDGER_FORBIDDEN')
+558:     if fault:
+559:         allowed=('prepared','short_write','counter_fsynced','journal_fsynced')
+560:         if (_TICKET is None or _TICKET['case']!='C11' or fault not in allowed or
+561:             p!=OUT/('C11.'+fault+'.bin')):
+562:             raise AdmissionBlocked('CALIBRATION_C11_FAULT_MODE_ONLY')
+563:     if amount!=1 and request is None:raise AdmissionBlocked('RANGE_REQUIRES_FROZEN_TASK')
+564:     case=request['case'] if request else None
+565:     try:
+566:         with _counter_lock(p,cap,case) as (fd,used,p):
+567:             if request is not None:
+568:                 checked,t=_task_contract(request['task_id'],amount)
+569:                 if checked!=request:raise AdmissionBlocked('REQUEST_BINDING_CHANGED')
+570:                 if _TICKET is None or _TICKET['case']!=case or t['main_identity']!=identity():
+571:                     raise AdmissionBlocked('EXACT_RESERVATION_OWNER_REQUIRED')
+572:                 fp=_fact_path(request['task_id'])
+573:                 if fp.exists():
+574:                     fact=read(fp);_validate_fact(fact,request,used)
+575:                     timing_event('reserve.idempotent_fact_only')
+576:                     return {'after':used,'fact':fact,'created':False}
+
+SOURCE if case=='C09':
+833:     if case=='C09':
+834:         while not (OUT/'C09.ready.json').exists() and now()<limit: time.sleep(.05)
+835:         if not (OUT/'C09.ready.json').exists(): raise AdmissionBlocked('C09_NOT_READY')
+836:         import c09_handoff as H
+837:         H.sender_prepare(sys.modules[__name__],_COORDINATOR_ID)
+838:         os._exit(23)  # one predeclared crash; resume retains T0/deadline/ledger
+839:     while now()<limit+5:
+840:         info=unit_show(unit)
+841:         if info.get('ActiveState') in ('inactive','failed'): break
+842:         time.sleep(.05)
+843:     else:
+844:         _run(['/usr/bin/systemctl','stop',unit]); raise LimitReached('CASE_DID_NOT_EXIT')
+845:     g=Path('/sys/fs/cgroup')/PARENT/unit/'cgroup.events'
+846:     if g.exists() and 'populated 1' in g.read_text(): raise AdmissionBlocked('CASE_DESCENDANTS_REMAIN')
+847:     probe=OUT/(case+'.probe.json'); status='FAIL'; actual={'unit_after':info,'ticket':t}
+848:     if probe.exists():
+849:         payload=read(probe);actual['probe']=payload
+850:         status='PASS' if payload.get('status')=='PASS' and info.get('ExecMainStatus')=='0' else 'FAIL'
+851:         if case=='C08':
+852:             if read(OUT/'C08.ready.json')['counter']!=count(): status='FAIL'
+853:     elif case=='FORMAL':
+854:         p=OUT/'reports/MODEL_SUMMARY.1.json'
+855:         if p.exists():
+856:             payload=read(p);actual['model_summary']=payload
+857:             status='PASS' if payload.get('status')=='FINISHED' and info.get('ExecMainStatus')=='0' else 'FAIL'
