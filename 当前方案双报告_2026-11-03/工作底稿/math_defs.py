@@ -1,0 +1,35 @@
+equations={
+'survey':[
+r'W_0=\{z:K\ne\varnothing\land \mathrm{Safe}(z)\land\mathrm{Goal}(z)\land O_{\mathrm{strict}}(z)=\varnothing\}',
+r'W_{r+1}=W_0\cup\{z:\exists a\ \mathrm{Pre}(z,a)\land\forall o\in\mathrm{Obs}(z,a),\ \mathrm{Post}(z,a,o)\in W_r\}',
+r'S_B(q)=\frac{n-m(q)}{c(q)},\qquad S_A(q)=\frac{n(n-1)-m(q)(m(q)-1)}{2c(q)}',
+r'r_{\min}=\max_j d_j,\qquad H_{\mathrm{ent}}(M)\ge\sum_j{\log_2|\mathrm{GL}(d_j,q)|}'],
+'technical':[
+r'z=(K,r,\mathrm{boundary}),\qquad\varnothing\ne K\subseteq\{(m,s)\}',
+r'\mathrm{Post}(K,a,o)=\{s^\prime:\exists s\in K,\ s\xrightarrow{a,o}s^\prime\}',
+r'W_0=\{z:K\ne\varnothing\land\neg\mathrm{boundary}\land\mathrm{Safe}(z)\land\mathrm{Goal}(z)\land O_{\mathrm{strict}}(z)=\varnothing\}',
+r'W_{r+1}=W_0\cup\{z:\exists a\ \mathrm{Pre}(z,a)\land\mathrm{Obs}(z,a)\ne\varnothing\land\forall o\ \mathrm{Post}(z,a,o)\in W_r\}',
+r'\mathrm{Native}(t,x)\iff\exists p\in C_t:\ R(p)\subseteq\mathrm{Live}(x)',
+r'\mathrm{Local}(t,x)\iff\exists p\in C_t:\ R(p)\subseteq\mathrm{Live}(x)\land \mathrm{EnvOpen}(p,x)\land\mathrm{GateOpen}(p,t,x)',
+r'G(C)=|\{u:\mathrm{affects}(u)\cap A(C)\ne\varnothing\}|,\qquad A(C)=\bigcup_{p\in C}{R(p)}',
+r'D(K)=\begin{cases}0,&\exists C:\ K\subseteq R_C\\ \min_q\{c(q)+\max_oD(K_o)\},&\mathrm{otherwise}\end{cases}',
+r'h(K)=\max\{h_{\mathrm{public}}(K),\ \mathrm{spent}+D(K)+\min_m\mathrm{tail}(m)\}',
+r'Y_S(a)=(a_iMv_i)_{i\in S},\qquad\varepsilon_S=\max_{a,b}\mathrm{TV}(\mathrm{Law}(Y_S(a)),\mathrm{Law}(Y_S(b)))',
+r'\eta_i=\Pr[Mv_i=0],\qquad\delta=\max_S\inf_{Q_S}\max_a\mathrm{TV}(\mathrm{Law}(Y_S(a)),Q_S)',
+r'\varepsilon_S+\eta_j\ge1\quad(j\in C),\qquad2\delta+\eta_j\ge1',
+r'\mathrm{Law}(Z)=\mathrm{Law}(ZT)\quad\forall T\in\Gamma,\qquad\Gamma=\prod_j\mathrm{GL}(d_j,q)',
+r'r_{\mathrm{mask},\min}=\max_jd_j,\qquad|\mathrm{GL}(d,q)|=\prod_{t=0}^{d-1}{(q^d-q^t)}',
+r'H_{\mathrm{ent}}(M)\ge H_{\mathrm{ent}}(Z)=H_{\mathrm{ent}}(U_1,\ldots,U_h)+\sum_j{\log_2|\mathrm{GL}(d_j,q)|}',
+r'\eta=\mathbb{E}\left[\frac{q^{k-\mathrm{rank}(M)}-1}{q^k-1}\right]',
+r'p_{\mathrm{miss}}(s)=\sum_{j=1}^{\min(s,k-r_{\mathrm{mask}})}{(-1)^{j+1}\binom{s}{j}\prod_{\ell=0}^{j-1}{\frac{q^{k-r_{\mathrm{mask}}}-q^\ell}{q^k-q^\ell}}}',
+r'E_0=\sum_{i\notin S^\prime}{d_i},\quad E_1=\sum_{i\notin S^\prime}{d_i\alpha_i},\quad z_0=\sigma E_0,\quad z_1=\sigma E_1',
+r'z_0\ne0\implies\alpha_j=\frac{z_1}{z_0}',
+r'H=\mathrm{AES}_K(0^{128}),\qquad J_0=N\parallel0^{31}\parallel1',
+r'd_{\mathrm{tag}}=[\mathrm{AES}_K(J_0)\oplus\mathrm{GHASH}_H(A,C)]\oplus T',
+r'd_{\mathrm{plain}}=[C\oplus\mathrm{AES}_K(\mathrm{inc32}(J_0))]\oplus\widehat P',
+r'b_i=d_i^{q-1},\qquad g=\sum_{T\in\mathcal F}{\left[\prod_{i\in T}{b_i}\prod_{i\notin T}{(1-b_i)}\right]}',
+r'\delta^*=1-\frac{\chi_V(q)}{(q-1)^d},\qquad A(V)\ne\varnothing,\quad r_{\mathrm{mask}}=1',
+r'C_Q=\begin{cases}Q_{\mathrm{total}},&U=1\\Q_{\mathrm{cap}}+1,&U=0\end{cases}',
+r'C_G=\begin{cases}G,&\text{合法交付}\\G_{\mathrm{cap}}+1,&\text{否则}\end{cases}'
+]}
+
