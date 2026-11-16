@@ -1,0 +1,111 @@
+> 可移交阅读副本。数学正文、章节和式号沿用冻结原件；仅转换链接、添加行定位锚点及本说明。[冻结原件](../../frozen/crypto_fi_640_fixed_A_correctness/FIXED_A_MODEL_AND_TARGET.md)。历史命令按来源记录保留；本包公开重放入口为根目录 REPLAY.md。
+
+# 官方640一次更新可靠性：逐固定公开矩阵模型
+
+2026-11-10，Asia/Shanghai。身份：`INFORMED_FIXED_A_PROBABILITY_DERIVATION_AND_DETERMINISTIC_FINITE_CERTIFICATES`。本轮完成纸面范围扩展及确定性标量证书；新增独立、人工、跨模型、盲审、子代理及证明助手审阅均为0。
+
+## 1. 结论与量词
+
+令 (R_q=\mathbb Z/32768\mathbb Z)。对每个在后续所有相关χ抽样前固定的 (A\in R_q^{640\times640})，每个预先固定的合法128位消息M，采用下列完整合同。记J为预先指定一行的8坐标全部正确，K为更新后完整消息正确，I为初始完整消息正确。本轮认证
+
+\[
+\begin{aligned}
+0.0000135117&\le\Pr(J\mid A)\le0.005043360,\\
+\Pr(K\mid A)&\le0.005043360,\\
+\Pr(K^c\mid A)&\ge0.994956640=99.4956640\%.
+\end{aligned}
+\tag{F1}
+\]
+
+初始界逐固定A成立：(\Pr(I\mid A)\ge1-2^{-132})。额外条件于I后，(F1)的显示端点保持。精确有理端点及有向比较见[FINITE_CERTIFICATES.json](../../frozen/crypto_fi_640_fixed_A_correctness/FINITE_CERTIFICATES.json)；完整证明见[PROOF_OR_OBSTRUCTION.md](PROOF_OR_OBSTRUCTION.md)。这是统一的概率界，平均两代诚实钥匙、Enc、一次TG和一次Upd的所有独立χ币。固定钥匙、固定token及被输出筛选后的概率属于其它量词。
+
+## 2. 冻结合同
+
+| 项目 | 本轮规范 |
+|---|---|
+| 论文对象 | Jurkiewicz–Prabucka，*Unidirectional Key Update in Updatable Encryption, Revisited*，DOI10.46298/fi.14425，冻结期刊/arXiv:2410.03948v4打印公式 |
+| 参数 | n=640，D=15，q=32768，m̄=n̄=8，B=2 |
+| A | 任意预先固定的640×640环矩阵，两代共用；允许奇异、零矩阵及seed生成矩阵 |
+| χ | 官方2021精确χ640；0及每个±k的分子依次为[9288,8720,7216,5264,3384,1918,958,422,164,56,17,4,1]，分母65536 |
+| 联合抽样 | 所有原始χ坐标及调用独立；给定A后保持此合同 |
+| 实验 | 两次诚实KeyGen；Enc_old(M)；一次诚实未筛选TG；一次Upd；Dec_new |
+| token | 所有rank均计入；包含P₂奇异及可逆情况，保留真实原始U/F/G乘积律 |
+| Ord | 实际n列各取D位0/1分解；位平面顺序与Tensor_D相配，H·Tensor_D(S)=C₁S modq |
+| Decode | 最近整数，平局向上；残差正确集合为{−4096,…,4095} mod32768 |
+
+所有χ小量使用[-12,12]整数代表，Ord使用环规范代表的0/1位。残差和特征函数在有限群R_q上精确计算，所有模回绕保留。参数、χ表及平局规则来自官方规范；UE公式采用FI打印算法及明确的Ord类型规范化。
+
+## 3. 残差与尺寸
+
+两代钥匙S_x/E_x为640×8，B_x=AS_x+E_x。Enc币U₀/F₀为8×640，G₀为8×8：
+
+\[
+C_1=U_0A+F_0,\quad C_2=U_0B_{old}+G_0+\operatorname{Encode}(M).
+\]
+
+TG币U₁/F₁为9600×640、G₁为9600×8；U₂/F₂为640×640、G₂为640×8。四块为
+
+\[
+\begin{aligned}
+P_1&=U_1A+F_1,&Q_1&=U_1B_{new}+G_1-\operatorname{Tensor}_D(S_{old}),\\
+P_2&=U_2A+F_2,&Q_2&=U_2B_{new}+G_2.
+\end{aligned}
+\]
+
+Upd另采R为8×640；H=Ord_n(C₁)为8×9600；返回C′₁=HP₁+RP₂、C′₂=C₂+HQ₁+RQ₂。代入并消去A及gadget项后，真实残差为
+
+\[
+\eta_0+\delta\pmod q,
+\quad\eta_0=U_0E_{old}-F_0S_{old}+G_0,
+\]
+\[
+\delta=(HU_1+RU_2)E_{new}-(HF_1+RF_2)S_{new}+HG_1+RG_2.
+\tag{F2}
+\]
+
+这些抵消为逐样本恒等式，适用于每个A。H与η₀的依赖在嵌套条件环境中保留。
+
+## 4. 旧模型与本轮范围
+
+| 结果 | A量词 | 更新完整正确率上界 | 初始已正确后的显示上界 |
+|---|---|---:|---:|
+| v2.1均匀Setup结果 | 对均匀A及诚实币平均 | 0.000030345 | 0.000030345 |
+| 本轮固定A扩展 | 对每个预先固定A，平均其后诚实币 | 0.005043360 | 0.005043360 |
+
+本轮增加统一适用范围。均匀Setup下仍可使用原有更紧数字。旧证明中的w≥4500来自：u含单位项时，均匀A逐列使uA+f均匀，随后9600位公平独立。本轮用逐固定A的χ平移界认证w≥450的高概率事件，再重新计算全频率包络。其余条件列包、真实系数律及八阶弦线由相同原始乘积采样结构成立。
+
+## 5. 公开seed及作者工件
+
+若公共前置变量Z先生成A=g(Z)，且每个正概率Z=z下后续原始χ仍满足上述独立合同、算法只按本轮规范使用它们，则
+
+\[
+\Pr(K)=E_Z\Pr(K\mid Z)\le0.005043360.
+\tag{F3}
+\]
+
+同理逐Z初始界和I条件化结论成立。这里涵盖固定矩阵、任意公共seed分布、确定性AES/SHAKE矩阵展开及其任意像分布；A生成器的均匀性、伪随机性及像大小不再承担本项可靠性概率的迁移责任。该结论对理想后续χ合同成立。
+
+作者实现状态保持 **WAITING_FOR_AUTHOR_ARTIFACT**。扩大到作者程序仍需核准的最小事实组为：
+
+1. 两代共用同一预先确定A，后续各阶段的实际χ输入联合律在给定公共seed后满足合同，或给出有数值损失的有效迁移；秘密seed展开和相关切片单列。
+2. 实际TG/Upd及Ord/Tensor与(F2)相符，所有额外噪声、筛选、重试和异常分母明确。
+3. 环算术、位代表、打包和官方半向上Decode的可证明对应。
+
+公开seed生成A与秘密seed生成噪声各有对应责任。当前无需为公共A建立与均匀全矩阵的统计或计算距离；秘密流和实际算法证据仍决定程序适用范围。若程序迁移给出更新正确事件偏差≤η_K及初始失败额外损失≤η_I，则可使用
+
+\[
+\Pr_{code}(K)\le U+\eta_K,\quad
+\Pr_{code}(K\mid I)\le\frac{U+\eta_K}{1-2^{-132}-\eta_I}
+\]
+
+（正分母），并以具体数字重新确定端点。
+
+## 6. 来源、审阅与贡献
+
+FI期刊PDF SHA256为`bc48416b8b88c989ecf98e2d466d10b80d13fd72d88890d905bc3b991ca3d0d4`，源TeX为`16b64cf629041614f1191b76ac35dbf16fb0776aa262f247c1f4d2a574127d8b`。本轮核读原图PDF12的KeyGen/Enc/Dec、PDF14的TG/Upd及源TeX相应段；官方2021 PDF10平局规则和PDF25精确表/参数也已视觉核读。PDF结构预检沿用相同字节哈希的PASS侧车。输入及交付指纹分别见[evidence/INPUT_LOCK.json](../../frozen/crypto_fi_640_fixed_A_correctness/evidence/INPUT_LOCK.json)和[evidence/DELIVERY_MANIFEST.json](../../frozen/crypto_fi_640_fixed_A_correctness/evidence/DELIVERY_MANIFEST.json)。
+
+v2.1记载两次作者证明可见的概率定向审阅，核心均匀Setup概率链通过且呈现修正已整合。补充轮还能看到前轮结论；精确后端型号及模型错误过程独立性均未认证。当前继承这两次记录的实际范围。原单坐标/联合作者目录中的早期pending状态属于其封存时点。
+
+本轮固定A的H下尾及新全频率常数属于知情新推导，新增独立审阅为0。有限整数证书支持所列标量比较，数学量词和条件分解由纸面证明承担。贡献定位为既有可靠性结果的适用范围扩展与公共A模型迁移分析；采用成熟Chernoff、有限群Fourier、Cauchy–Schwarz、凸性和有向有理算术，全球优先权沿用既有证据范围。本轮未实施新的全球检索。
+
+源Theorem6.3在官方640下的打印充分前提仍未满足；本轮给出前提之外的实际概率界。CF-1、其它尺寸、其它更新深度与作者程序按各自证据处理。
