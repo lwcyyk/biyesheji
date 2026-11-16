@@ -63,10 +63,25 @@ node('CG15','external_stop819-823 / M.seal414 / G.seal993','outer finally','nati
      'CLOSED/group empty/other-role exits, read-ready evidence','mr_seal lock; terminal reader locks','terminal review/disposition/manifest/ZIP as applicable','read-only budget','native UNRESOLVED/partial; MR_SEAL_UNKNOWN stderr')
 node('CG16','P.post_exit_export412 / host.finalize52','host after active client exit','admin/cleanup/native axes',
      'new admin command authorized by prior run; actual quiescence','read-only runtime inputs','audit/copy/host streams/admin manifest/ZIP/final receipt','no T0 or budget creation','DEFERRED/UNKNOWN or failed admin archive')
+node('CG17','observe_exit281-295 / resume_admission323-347','VERIFIED branch and admitted resumed scheduler',
+     'VERIFIED then optional source-approved RESUMED progression',
+     'genuine witness/ACK/resource checks and original once-resume predicates',
+     'H released before stop_tree(close=False), reacquired for verified/resumed publication',
+     'stop_result; handoff state; result_C09; batch_state; two stage rows already inmain',
+     'handoff counter conserved until admitted resume; later legitimate work belongs its own budget',
+     'existing exception wrappers, incomplete handoff/UNKNOWN if cleanup or publication fails')
+node('CG18','guard803-804 existing CLOSED result','observe_exit stopped return','stop_tree(close=False), exit125',
+     'genuine STOP/CLOSED absorption observed at255','H released before cleanup',
+     'stop_result if generated, no CLOSED publication at this specific close=False call',
+     'no grant','existing wrappers/finally; a fabricated CLOSED return lacks this precondition')
 save('B1_CLOSE_CALL_GRAPH.json', {'nodes':nodes,'edges':[
     ['CG01','CG02'],['CG02','CG03'],['CG03','CG04'],['CG04','CG05'],['CG05','CG06'],
     ['CG06','CG07'],['CG07','CG08'],['CG07','CG09'],['CG08','CG09'],['CG07','CG10'],
-    ['CG08','CG10'],['CG10','CG11'],['CG11','CG12'],['CG12','CG14'],['CG08','CG15'],['CG15','CG16']],
+    ['CG08','CG10'],['CG10','CG11'],['CG11','CG12'],['CG12','CG14'],['CG08','CG15'],['CG15','CG16'],
+    ['CG06','CG17'],['CG06','CG18'],['CG18','CG15']],
+    'edge_conditions':{'CG06->CG07':'only exception branch','CG06->CG17':'only VERIFIED branch',
+                       'CG06->CG18':'only genuine stopped/CLOSED branch',
+                       'CG06->CG02':'ordinary PENDING returns to polling; proposed exhaustion must end this repetition'},
     'parent_side_node':'CG13 is independent of Receiver ordering and may never publish if parent lost',
     'selected_semantics':'fixed existing AdmissionBlocked after last completePENDING and proposed cursor finalization, H unwinds, then existing808/817 exception chain',
     'alternatives':{
@@ -216,7 +231,8 @@ save('B1_CLOSE_BYTE_ALGEBRA.json', {
     'stable_plus_staging_union_E':'67983 +144*T +14*B +16*E +16*sumV',
     'union_caveat':'These count distinct path classes once. Separate maxima need not be simultaneously attainable. Generated production sum is another conservative upper; choose the minimum of valid bounds only after profiles are fixed.',
     'healthy_receiver_example':{'first_bound':941,'marker_bound':183,'cleanup_state_bound':1119,
-       'data_writes':14,'generated_bytes':'9272+2*sumV','notes':'source fixed quota error31 ASCII/AdmissionBlocked16, first receiver reason25 ASCII, healthy budget map387, no cleanup errors, source normal-role branches, still no completeV profile'},
+       'data_writes':14,'generated_bytes':'9272+2*sumV','fsync_calls':31,'budget_file_scans':12,
+       'notes':'source fixed quota error31 ASCII/AdmissionBlocked16, first receiver reason25 ASCII, healthy budget map387, no cleanup errors, source normal-role branches, still no completeV profile'},
     'B_B1_close_formula':'sum unique required core originals + actual failed staging + selected quota supplement + trusted external witness/index + physical allocation overhead in a separately measured unit',
     'B_B1_close_encoded_bytes':None,'B_B1_close_physical_bytes':None,'B_external_witness':None,'B_min_index':None,
     'normal_handoff_other_bytes':None,

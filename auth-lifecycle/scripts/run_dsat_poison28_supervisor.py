@@ -172,15 +172,17 @@ class ExplicitIO:
         row = self.rows.setdefault(key, {name: 0 for name in self.FIELDS})
         total = self.totals.setdefault(self.phase, {name: 0 for name in self.FIELDS})
         try:
-            require(all(value < self.MAX for value in total.values()), "IO_COUNTER_RANGE")
+            require(total["attempts"] < (1 << 127) - 1, "IO_COUNTER_RANGE")
             if direction == "read":
-                require(total["read_requested"] + requested <= self.MAX
-                        and total["read_returned"] + requested <= self.MAX, "IO_COUNTER_RANGE")
+                require(total["read_requested"] + requested <= (1 << 127) - 1
+                        and total["read_returned"] + requested <= (1 << 127) - 1, "IO_COUNTER_RANGE")
             if direction == "write":
-                require(total["write_requested"] + requested <= self.MAX
-                        and total["write_accepted"] + requested <= self.MAX, "IO_COUNTER_RANGE")
+                require(total["write_requested"] + requested <= (1 << 127) - 1
+                        and total["write_accepted"] + requested <= (1 << 127) - 1, "IO_COUNTER_RANGE")
             if self.phase == "PRE_QPC_COST" and self.limits is not None:
-                require(total["attempts"] < self.limits["io_attempts"], "PRE_QPC_IO_LIMIT")
+                # Preflight owns at most one FileIO at a time. Reserve its close.
+                ceiling = self.limits["io_attempts"] - (0 if operation == "close" else 1)
+                require(total["attempts"] < ceiling, "PRE_QPC_IO_LIMIT")
                 if direction == "read":
                     require(total["read_requested"] + requested <= self.limits["read_requested_bytes"]
                             and total["read_returned"] + requested <= self.limits["read_returned_bytes"],
@@ -771,7 +773,8 @@ class OutputController:
         return {name: {**value, "pending": dict(value["pending"]) if value["pending"] else None,
                        "witness_committed": dict(self.witness_prefix["raw"][name]),
                        "confirmation_scope": "COMPLETE_FRAMES_AFTER_FSYNC_RETURN",
-                       "last_confirmation_phase": "AFTER_FSYNC_AND_PREFIX_PUBLICATION"}
+                       "last_confirmation_phase": "AFTER_FSYNC_AND_PREFIX_PUBLICATION"
+                           if self.witness_prefix["raw"][name]["frames"] else "INITIAL_EMPTY_PREFIX"}
                 for name, value in self.raw_prefixes.items()}
 
     def open(self):
@@ -823,6 +826,8 @@ class OutputController:
                     and raw_frame["stream_seq"] == previous["frames"] + 1
                     and raw_frame["start"] == previous["bytes"] == state["persisted_bytes"] == state["accepted_bytes"]
                     and raw_frame["end"] == state["read_bytes"]
+                    and raw_frame["stream_seq"] == state["read_frames"]
+                    and raw_frame["sha256"] == state["read_sha256"]
                     and value["raw_bytes"] == raw_frame["end"] - raw_frame["start"]
                     and value["base64"] == raw_frame["base64"], "RAW_FRAME_PREFIX_MISMATCH")
         else:
@@ -843,20 +848,29 @@ class OutputController:
         try:
             self.deadline.admit(cleanup=final)
             write_attempted = True
+            if raw_name is not None:
+                self.raw_prefixes[raw_name]["pending"].update(
+                    serialized_bytes=len(data), write="ATTEMPT_INTENT")
             count = self.io.call("witness.write", "write", self.stream.write, data,
                                  requested=len(data), direction="write", result_bytes=lambda result: result)
+            if raw_name is not None:
+                self.raw_prefixes[raw_name]["pending"].update(
+                    write_accepted_serialized_bytes=count, write="WRITE_RETURNED")
             require(count == len(data), "WITNESS_SHORT_WRITE")
             if raw_name is not None:
                 self.raw_prefixes[raw_name] = {**self.raw_prefixes[raw_name], "accepted_bytes": raw_frame["end"],
                     "accepted_frames": raw_frame["stream_seq"], "accepted_sha256": raw_frame["sha256"]}
                 self.raw_prefixes[raw_name]["pending"]["stage"] = "RAW_WRITE_ACCEPTED_PREFIX"
             self.deadline.admit(cleanup=final)
+            if raw_name is not None: self.raw_prefixes[raw_name]["pending"]["flush"] = "ATTEMPT_INTENT"
             self.io.call("witness.flush", "flush", self.stream.flush)
             if raw_name is not None: self.raw_prefixes[raw_name]["pending"]["flush"] = "RETURNED_SUCCESS"
             self.deadline.admit(cleanup=final)
             descriptor = self.io.call("witness.fileno", "fileno", self.stream.fileno)
+            if raw_name is not None: self.raw_prefixes[raw_name]["pending"]["fsync"] = "ATTEMPT_INTENT"
             self.io.call("witness.fsync", "fsync", os.fsync, descriptor)
             persisted = True
+            if raw_name is not None: self.raw_prefixes[raw_name]["pending"]["fsync"] = "RETURNED_SUCCESS"
             self.io.persisted_serialized += len(data)
             committed_raw = {name: dict(prefix) for name, prefix in self.witness_prefix["raw"].items()}
             if raw_name is not None:
@@ -914,7 +928,9 @@ class OutputController:
                 state["read_sha256"] = "UNKNOWN"
                 state["pending"] = {"start": start, "end": self.raw_counts[name],
                     "global_seq": self.sequence + 1, "stream_seq": state["read_frames"],
-                    "stage": "RAW_READ_PREFIX", "flush": "NOT_ATTEMPTED", "fsync": "NOT_ATTEMPTED"}
+                    "stage": "RAW_READ_PREFIX", "write": "NOT_ATTEMPTED",
+                    "write_accepted_serialized_bytes": "UNKNOWN", "serialized_bytes": "UNKNOWN",
+                    "flush": "NOT_ATTEMPTED", "fsync": "NOT_ATTEMPTED"}
                 raw = buffer.raw[:returned.value]
                 self.raw_hashers[name].update(raw)
                 state["read_sha256"] = self.raw_hashers[name].hexdigest()
@@ -1113,6 +1129,7 @@ class ResourceObserver:
 def supervise(policy):
     api = WindowsApi(policy["observer"]["max_api_calls"])
     deadline = DeadlineController(api)
+    anchor_api_snapshot = dict(api.counts)
     api.deadline = deadline
     job = JobController(api)
     output = OutputController(api, deadline, policy)
@@ -1135,6 +1152,7 @@ def supervise(policy):
             "input_read_bytes_before_QPC": policy["_validated_reads"],
             "PRE_QPC_COST": {"explicit_io": policy["_pre_qpc_cost"],
                 "source_reads": policy["_source_read_records"],
+                "wrapped_calls_before_or_at_QPC_anchor": anchor_api_snapshot,
                 "run_id": policy["_policy_sha256"],
                 "unobserved_startup": ["Python_initialization", "module_imports", "DLL_lazy_loading",
                                        "native_loader_IO", "elapsed_time_before_QPC"],
@@ -1234,6 +1252,10 @@ def supervise(policy):
                 "last_api_snapshot_ref": "parent_overhead.api_calls",
                 "last_io_snapshot_ref": "process_io_after; sequential query timestamps apply",
                 "last_memory_snapshot_ref": "process_memory_peak; per-owner qpc applies",
+                "last_source_read_ref": {"field": "PRE_QPC_COST.source_reads",
+                    "read_id": len(policy["_source_read_records"])},
+                "receipt_write_phase": "AFTER_COVERAGE_SNAPSHOT_SUBJECT_TO_115_ADMISSION",
+                "receipt_commit_time": "UNKNOWN_AT_SERIALIZATION",
                 "raw_confirmation_phase": "AFTER_FULL_FRAME_WRITE_FLUSH_FSYNC_RETURN",
                 "witness_commit_phase": "AUTHORITATIVE_PREFIX_REFERENCE_PUBLICATION",
                 "handle_close_attempted": {"job": job.close_attempted,
