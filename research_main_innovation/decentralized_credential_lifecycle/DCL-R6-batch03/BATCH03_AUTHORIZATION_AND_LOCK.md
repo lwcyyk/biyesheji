@@ -1,0 +1,30 @@
+# batch03授权与启动前锁核验
+Material Passport：DCL-R6-batch03；2026-11-11；阶段PRELAUNCH；授权状态AUTHORIZED_PREFLIGHT_BLOCKED；资源结果RESOURCE_EVIDENCE_INCOMPLETE。
+
+本次已收到C00–C12及全部必要条件通过后的F1→F4自动执行授权，原文逐字节保存在evidence/TASK_REQUEST.txt，SHA-256为20bb383bfac1561825d3b0e745816b12263b1f61a74d5ee2d272827fea9050e2。研究收据在evidence/AUTHORIZATION_RECEIPT.json；可运行execution_authorization.json尚未生成。
+
+## 实际核验
+BF-static-1既有72行交付manifest已重新核验；正确host静态工作区24项hash全部匹配。Linux原生sha256sum --check --strict --quiet复核1266个唯一文件，exit0；覆盖1224项运行时树、31关键运行时、source/cache/inputs与3个旧unit，重叠路径已合并。输入检查清单自身hash及行数见evidence/HASH_SCOPE.json。全部11条实际命令均为只读身份/摘要/配置查询，原始stdout/stderr及argv在evidence/commands与COMMAND_PLAN.json。
+
+|锁|实际SHA-256|
+|---|---|
+|guard.py|752c92f6114ce7c2ec9d45d39e4d46256b778ee91ce3a59ec55f37b6a27e4a02|
+|guard_probe.py|32ed91e5135e09454d6634bf369193c7ccf4e8ae669e523b1dd781ed96109de3|
+|run_batch.py|c88fc3b07e6feddf5d2aa96adf3b3b63fc3f6f9897d585f42d6882a5279a63e7|
+|static_manifest.json|7c320d6183dff88bb032abd33ed2ff882301a7d06a8bac53e9c19bd327e7f41f|
+|execution_lock.json|5090e398d32295513b51249ac9942d9ce9c97fc37bc5d2f11242dd11347a3260|
+|child_contracts.json|d78be83c648b76a391708eddbb601724f83277392ae8fbdd3daf95d0e522eb7f|
+|Python可执行文件|e50d468e8b0adfb05733f5b87b3cff34829c4a8c1aea50c865aa8bdfe4bb150f|
+
+五业务文件和runner保持BF冻结字节，详见HOST_FREEZE_CHECK及前版SOURCE_DIFF_INDEX。此处源码/输入锁匹配，环境漂移未发现；阻断原因为当前必须测试能力与冻结调度的差异。
+
+## 授权条件与冻结程序的冲突
+用户本次§5：“若缺少某项故障注入能力，应记录为未验收，保持资源门关闭。”
+用户本次§6：“没有尚未解决的关键失败或 UNKNOWN。”“若实现无法核实其中任一关键条件，拒绝自动进入 F1/F4。”
+用户本次§9禁止修改BF-static-1冻结资源代码。
+
+BF原申请和条件证明已经记载S1–S9专用精确范围故障夹具尚缺。实际guard_probe C11仍为局部17-cap单信用镜像；固定C02/C03/C04没有N+1访问、同task重试/冲突或并发claim测试。guard.py:746–755仅按13个case的本地PASS生成RESOURCE_QUALIFICATION并进入FORMAL；262–273的formal admission没有精确范围专项证据检查。缺口详见CAPABILITY_MATRIX和源码摘录。
+
+当前冻结主流程没有calibrate-only开关；执行锁要求由完整launcher统一调用case。独立调case、修改结果或依赖外部抢停来拦截FORMAL均偏离被冻结时序。因此启动前阻断完整launcher，并保留窗口/账未初始化；该决定直接执行本次授权的必要条件。
+
+本次批准了条件执行范围，授权事实继续保留。后续涉及新增夹具、准入门或新源码hash时需另行静态修复与版本绑定，详见[BATCH03_GAP_CLOSURE_SCOPE](BATCH03_GAP_CLOSURE_SCOPE.md)。

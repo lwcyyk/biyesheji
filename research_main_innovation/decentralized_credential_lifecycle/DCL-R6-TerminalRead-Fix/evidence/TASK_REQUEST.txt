@@ -1,0 +1,640 @@
+# DCL-R6-TerminalRead-Fix：终态只读检查、关闭后期限读取与 native seal 证据修复
+
+## 一、任务背景与正式授权
+
+继续推进硕士毕业设计《面向用户与 AI 智能体的全生命周期密码与凭据管理系统》的 DCL 安全验证研究。
+
+当前最新批次：
+
+`DCL-R6-PTA-PF-A`
+
+实际结果：
+
+- 真实 WORK 和 C00 通过。
+- PT64 全部执行完成。
+- PF48 全部执行完成。
+- 17 项变异全部检出。
+- 自动行政封存成功。
+- 批次关闭后，期限读取触发活动态守卫。
+- native seal 保持 `UNRESOLVED`。
+- 内部关闭状态保持 `UNKNOWN`。
+- 最终累计预算 R=1907。
+- 所有受控角色退出，cgroup 清空。
+- 本轮没有源码修改或测试重跑。
+- 完整阶段 A 验收尚未取得。
+- F1/F4 仍为 `UNRUN_RESOURCE_GATE`。
+- IMPLEMENTATION_GATE=CLOSED。
+
+**我明确授权本次开展终态只读检查的有限静态分析、最小代码修复、专项回归设计和下一批次执行申请准备。**
+
+本轮只授权静态修复。
+
+不得启动 WSL 动态测试、创建 T0、初始化预算账、运行 PT/PF、执行完整资源校准或启动 F1/F4。
+
+## 二、恢复原始证据
+
+研究目录：
+
+`D:\毕业设计\research_main_innovation\decentralized_credential_lifecycle`
+
+优先读取：
+
+- `DCL-R6-PTA-PF-A/PFA_FINAL_DECISION.md`
+- `DCL-R6-PTA-PF-A/PFA_COUNTEREXAMPLES.md`
+- `DCL-R6-PTA-PF-A/PFA_AUTOMATIC_CLOSURE_RESULTS.md`
+- `DCL-R6-PTA-PF-A/PFA_ADMIN_FINALIZER_RESULTS.md`
+- `DCL-R6-PTA-PF-A/PFA_NATIVE_SEAL_RESULTS.md`
+- `DCL-R6-PTA-PF-A/PFA_RESOURCE_ACCOUNTING.md`
+- `DCL-R6-PTA-PF-A/PFA_EXECUTION_TIMELINE.md`
+- `DCL-R6-PTA-PF-A/PFA_EVIDENCE.zip`
+- `DCL-R6-PTA-PhaseFinalizer-Fix/FINAL_DECISION.md`
+- `DCL-R6-PTA-PhaseFinalizer-Fix/SOURCE_AND_INPUT_LOCK.md`
+- `DCL-R6-PTA-PhaseFinalizer-Fix/PHASE_CONSISTENCY_CONTRACT.md`
+- `DCL-R6-PTA-PhaseFinalizer-Fix/ADMIN_FINALIZER_EXECUTION_CONTRACT.md`
+- `DCL-R6-PreT0-Fix/FINAL_DECISION.md`
+
+实际文件名以本地证据索引为准。
+
+重点审查：
+
+1. 触发终态期限读取失败的源码调用栈。
+2. CLOSED 状态发布时刻。
+3. STOP_REQUEST 和关闭记录。
+4. T0、deadline、stop_at 的持久来源。
+5. 当前预算账与 journal。
+6. native seal 实际调用路径。
+7. 行政 finalizer 的运行结果。
+8. 内部 UNKNOWN 的具体来源。
+9. 进程退出与 cgroup 清空证据。
+
+不得用关闭后的系统默认值替代运行时原始数据。
+
+历史证据和裁决全部保持冻结。
+
+## 三、第一阶段：定位终态读取失败
+
+从原始 traceback 和源码定位：
+
+- 哪个函数读取了期限。
+- 读取发生在 CLOSED 之前还是之后。
+- 实际要求的活动态条件。
+- 实际运行阶段。
+- 期限数据存储位置。
+- 调用者是否属于 finalizer、seal 或健康检查器。
+- 该读取是否具有副作用。
+- 异常如何向上传播。
+- 是否直接影响 native seal。
+- 是否直接影响内部状态裁决。
+
+建立完整事件链：
+
+`WORK → STOP_REQUEST → CLOSED → 期限读取 → 守卫拒绝 → 后续seal/收尾`
+
+上述链仅作为分析起点，必须使用实际日志确定准确顺序。
+
+为每个事件保存：
+
+- 真实时间。
+- batch_id。
+- boot_id。
+- PID/starttime。
+- 生命周期状态。
+- 状态版本。
+- 调用函数。
+- 原始返回值。
+- 错误类型。
+- 原始证据位置。
+
+必须回答：
+
+**为什么 CLOSED 后的证据读取进入了只允许活动态使用的接口？**
+
+若原始证据无法确定 native seal 是否直接依赖该失败，保留：
+
+`NATIVE_SEAL_DEPENDENCY_UNRESOLVED`
+
+不得提前认定修复期限读取就能使 native seal 成功。
+
+## 四、第二阶段：区分活动态检查与终态证据读取
+
+建立两个具有明确不同权限的接口。
+
+### 4.1 活动态检查
+
+建议逻辑接口：
+
+`check_active_runtime()`
+
+用于：
+
+- 工作资格判断。
+- 当前运行态健康检查。
+- 新任务授权。
+- 活动预算使用。
+- 资源资格保持。
+
+要求：
+
+- 当前批次有效。
+- boot_id 有效。
+- 工作状态允许。
+- T0 和预算账有效。
+- 执行锁匹配。
+- 当前资源约束满足。
+- STOP_REQUEST/CLOSED 时拒绝新工作。
+
+原有安全约束全部保留。
+
+### 4.2 终态只读检查
+
+建议逻辑接口：
+
+`read_terminal_evidence()`
+
+仅用于：
+
+- 读取已持久化的 T0。
+- 读取 deadline 和 stop_at。
+- 读取最终预算记录。
+- 读取 CLOSED/ABORTED 状态。
+- 读取退出见证。
+- 读取 seal 所需的历史证据。
+- 生成终态审查和封存报告。
+
+要求：
+
+1. 只读取已有证据。
+2. 不创建运行态对象。
+3. 不发放执行资格。
+4. 不更新预算。
+5. 不改变生命周期状态。
+6. 不重新激活服务。
+7. 不修改已有 CLOSED。
+8. 不生成新的 T0 或 deadline。
+9. 保留证据缺失和损坏的错误。
+10. 对批次身份、来源和完整性进行核验。
+
+**终态只读接口必须在 CLOSED 后可用，同时保持 CLOSED 的不可恢复性。**
+
+不得通过取消全部活动态守卫实现修复。
+
+## 五、第三阶段：终态证据的一致性合同
+
+重点研究 CLOSED 后需要读取的字段：
+
+- batch_id。
+- boot_id。
+- T0。
+- deadline。
+- stop_at。
+- 最终 R。
+- journal 状态。
+- CLOSED 原因。
+- 状态版本。
+- 退出证据。
+- seal 状态。
+
+每个字段应明确：
+
+1. 创建主体。
+2. 首次持久化时间。
+3. 是否允许后续修改。
+4. 最终可信来源。
+5. 完整性校验方式。
+6. 终态读取规则。
+7. 缺失时的裁决。
+8. 与当前批次的绑定。
+
+### 5.1 终态快照
+
+评估是否需要在 CLOSED 转换过程中建立不可变的终态证据快照。
+
+若现有 journal 已包含全部必要记录，优先复用。
+
+如必须新增快照，应确保：
+
+- 来源真实。
+- 原子发布。
+- 与批次及执行锁绑定。
+- 完整性可校验。
+- 不覆盖原始 journal。
+- 不依赖活动态资格才能读取。
+
+### 5.2 禁止虚构缺失证据
+
+例如：
+
+- T0 缺失，保留缺失状态。
+- deadline 缺失，记录证据不足。
+- journal 不一致，保留 UNKNOWN。
+- seal 输入不完整，保留相应失败或未决状态。
+
+禁止通过构造默认值使终态检查 PASS。
+
+### 5.3 防止跨批次证据复用
+
+终态证据必须绑定：
+
+- 当前 batch_id。
+- 原运行 boot_id。
+- 执行锁。
+- 原始源码摘要。
+- 状态版本。
+- 必要的持久记录。
+
+如果当前审查发生在新的 boot，应保留证据来源对应的历史 boot 身份，不将历史运行证据重新解释为当前运行资格。
+
+## 六、第四阶段：检查 native seal 的失败依赖
+
+本次必须独立审查 native seal。
+
+将实际调用过程分解为：
+
+1. 读取运行窗口信息。
+2. 读取最终预算。
+3. 读取状态和关闭原因。
+4. 核验退出与清理证据。
+5. 核验原始执行锁。
+6. 生成 native seal 所要求的证据。
+7. 持久化 seal 结果。
+8. 更新对应审查记录。
+
+以上具体步骤以实际源码为准。
+
+逐项确定：
+
+- 是否执行。
+- 是否成功。
+- 失败位置。
+- 错误码。
+- 依赖对象。
+- 证据位置。
+
+### 6.1 native seal 裁决
+
+必须分别处理：
+
+- `NATIVE_SEAL_COMPLETED`
+- `NATIVE_SEAL_FAILED`
+- `NATIVE_SEAL_UNRESOLVED`
+- `NATIVE_SEAL_NOT_APPLICABLE`
+
+本次历史 PFA 保持：
+
+`NATIVE_SEAL_UNRESOLVED`
+
+新的源码修复不得倒填历史成功。
+
+### 6.2 行政 finalizer
+
+历史自动行政封存已经成功。
+
+优先保持现有实现和运行权限。
+
+若终态只读接口影响 finalizer，必须验证：
+
+- 固定源码入口仍然有效。
+- 资源限制仍先于模块装载。
+- 自动触发仍然有效。
+- 行政证据只读来源正确。
+- manifest 和 SHA-256 不发生语义退化。
+- 行政封存与 native seal 分别裁决。
+
+不要为了修复 native seal 而重写已经通过的自动行政收尾机制。
+
+## 七、第五阶段：内部 UNKNOWN 的处理
+
+当前真实结果：
+
+`internal = UNKNOWN`
+
+需要确定其来源：
+
+- 运行态检查点缺失。
+- 预算账审查未完成。
+- 期限读取失败。
+- native seal 未完成。
+- 关闭收据缺失。
+- 其他实际实现条件。
+
+仅在证据完整且符合冻结状态机时，才能收敛到对应终态。
+
+必须分别报告：
+
+- 进程是否退出。
+- cgroup 是否清空。
+- 是否发布 CLOSED。
+- 应用内部状态是否可审查。
+- 预算是否保持一致。
+- native seal 是否完成。
+- 行政封存是否完成。
+
+**进程组空、行政封存成功和内部终态完整性需要分别证明。**
+
+如果某项仍不可确定，保留 UNKNOWN。
+
+## 八、第六阶段：安全性质
+
+建立以下性质并映射到真实源码。
+
+**TR-1：TerminalReadOnly**
+
+终态检查不会修改运行状态或预算。
+
+**TR-2：ActiveGuardPreserved**
+
+活动态接口继续拒绝 CLOSED 后的工作请求。
+
+**TR-3：NoTerminalReactivation**
+
+终态读取不能重新激活批次。
+
+**TR-4：EvidenceAuthenticity**
+
+终态证据与真实批次、执行锁及持久来源绑定。
+
+**TR-5：DeadlineConsistency**
+
+T0、deadline 和 stop_at 使用有效的历史运行记录。
+
+**TR-6：BudgetConservation**
+
+终态审查不会改变已消耗或预留的预算。
+
+**TR-7：SealPreconditionCorrectness**
+
+native seal 使用完整且适用的终态证据。
+
+**TR-8：NoFalseSealSuccess**
+
+证据缺失或损坏时不得报告 seal 成功。
+
+**TR-9：UnknownPreservation**
+
+无法证明的内部状态继续保持 UNKNOWN。
+
+**TR-10：FinalizerCompatibility**
+
+自动行政收尾保持原有的安全性与证据完整性。
+
+## 九、第七阶段：新增专项回归与变异
+
+保留原 PT64、PF48 和全部 17 项变异的历史原件。
+
+新增针对终态读取的最小测试集。
+
+### A. 正常终态读取
+
+- RUNNING 时活动态检查通过。
+- STOP_REQUEST 后禁止新工作。
+- CLOSED 后读取历史 T0。
+- CLOSED 后读取 deadline。
+- CLOSED 后读取最终 R。
+- CLOSED 后读取关闭原因。
+- CLOSED 后核验 journal。
+- CLOSED 后行政 finalizer 正常工作。
+
+### B. 异常证据
+
+- T0 缺失。
+- deadline 缺失。
+- journal 损坏。
+- boot_id 不匹配。
+- batch_id 不匹配。
+- 执行锁不匹配。
+- 状态版本回退。
+- CLOSED 收据缺失。
+- 退出证据缺失。
+- native seal 输入不完整。
+
+### C. 权限隔离
+
+- CLOSED 后申请新工作。
+- CLOSED 后尝试重建预算。
+- CLOSED 后尝试修改阶段。
+- CLOSED 后重复执行 Launcher。
+- 利用终态读取接口访问其他批次。
+- 终态读取过程中修改原始持久记录。
+
+### D. native seal
+
+- 终态证据完整。
+- 期限读取正常。
+- 预算记录完整。
+- 原始记录缺失。
+- seal 持久化失败。
+- seal 重复调用。
+- seal 已完成后重复审查。
+- seal 与行政结果不同步。
+
+### E. 变异
+
+至少覆盖：
+
+- 终态接口误发工作资格。
+- CLOSED 后重建预算。
+- 跳过历史证据身份核验。
+- 使用默认 deadline。
+- 忽略 journal 损坏。
+- UNKNOWN 被错误升级为成功。
+- native seal 缺少必要证据仍 PASS。
+- 终态检查修改原始记录。
+
+所有测试使用独立 oracle。
+
+本轮只完成静态夹具、可达性审查和代码一致性检查。
+
+动态执行留待新的专项授权。
+
+## 十、最小修改范围
+
+建议建立独立版本：
+
+`TerminalRead-static-1`
+
+允许修改：
+
+- 终态只读证据接口。
+- 活动态与终态读取的调用分流。
+- 必要的终态记录核验。
+- native seal 读取终态证据的接入。
+- 必要的 finalizer 兼容接口。
+- 对应专项夹具与独立 oracle。
+
+保持：
+
+- 运行态工作资格守卫。
+- T0 和预算创建逻辑。
+- 预算预留核心。
+- RootIPC 权限合同。
+- C09 持久 ACK 协议。
+- C00Ready 八项资格。
+- BootContinuity。
+- ManagerRecovery 审查语义。
+- PT/PF 阶段一致性机制。
+- 原 PT64/PF48 业务判据。
+- C00–C12。
+- S1–S9。
+- 18 项负向资格门。
+- F1/F4 五份业务源码。
+- 原资源限制。
+
+如果需要修改其他对象，必须记录明确依赖并给出补充授权申请。
+
+原 `PTA-PhaseFinalizer-static-1/r3` 保持冻结。
+
+## 十一、静态验收
+
+至少完成：
+
+1. Python 语法检查。
+2. 活动态与终态接口调用关系审查。
+3. 只读性质检查。
+4. 状态机合法性审查。
+5. 终态证据身份绑定。
+6. 预算不变性检查。
+7. CLOSED 后拒绝工作检查。
+8. native seal 前置条件检查。
+9. 自动行政 finalizer 兼容检查。
+10. 新增正反及变异检查。
+11. 历史源码与输入哈希核验。
+12. 新完整校准访问硬界重算。
+13. 下一阶段动态执行锁检查。
+
+不得将静态审查直接标记为动态通过。
+
+## 十二、下一阶段独立动态验收
+
+静态修复完成后，准备新的有限动态申请。
+
+优先验证：
+
+1. 新批次正常预检。
+2. 真实 WORK/C00。
+3. PT64 和 PF48 的必要兼容回归。
+4. 终态只读检查。
+5. 真实 CLOSED 后期限读取。
+6. 活动态接口拒绝 CLOSED 后工作。
+7. native seal 实际结果。
+8. 自动行政封存。
+9. 内部状态与进程退出的独立裁决。
+10. 预算与资源保持。
+
+对于原 PT64/PF48 是否需要全量重跑，由新源码影响范围、完整资格合同及独立静态审查决定。
+
+历史 112 项动态结果可以作为该冻结版本的历史通过证据；新版本的动态资格仍需依据新的执行锁取得。
+
+阶段验收通过后关闭当前批次。
+
+后续 ManagerRecovery 和完整资源资格链需要独立许可。
+
+### 资源约束
+
+继续保持：
+
+- 全批访问≤1,000,000。
+- 校准软访问≤100,000。
+- 全批墙钟≤1,800秒。
+- 校准软窗口300秒。
+- T0前120秒启动TCB期限。
+- 单进程RLIMIT_AS≤1GiB。
+- 父slice TasksMax=4。
+
+新测试的访问及时间成本必须重新核算。
+
+不能直接沿用未经更新的历史上界。
+
+## 十三、交付文件
+
+建议建立：
+
+`DCL-R6-TerminalRead-Fix/`
+
+至少输出：
+
+- `TERMINAL_READ_FAILURE_TIMELINE.md`
+- `ACTIVE_TERMINAL_INTERFACE_AUDIT.md`
+- `TERMINAL_EVIDENCE_CONTRACT.md`
+- `DEADLINE_READ_ROOT_CAUSE.md`
+- `NATIVE_SEAL_DEPENDENCY_ANALYSIS.md`
+- `INTERNAL_UNKNOWN_ANALYSIS.md`
+- `TERMINAL_READ_SAFETY_PROPERTIES.md`
+- `TERMINAL_READ_FIX_IMPLEMENTATION.md`
+- `REGRESSION_AND_MUTATION_PLAN.md`
+- `STATIC_VERIFICATION_RESULTS.md`
+- `SOURCE_AND_INPUT_LOCK.md`
+- `NEXT_DYNAMIC_AUTHORIZATION.md`
+- `FINAL_DECISION.md`
+
+同步更新：
+
+- `CURRENT_VERDICT.md`
+- `NEXT_ACTION.md`
+- 研究证据索引。
+
+所有历史批次、原始执行证据及冻结源码保持不变。
+
+## 十四、验收门
+
+### TR-G1：故障定位
+
+确定 CLOSED 后期限读取错误的真实调用链、接口前置条件和受影响范围。
+
+### TR-G2：终态只读安全
+
+终态读取合法可用，活动态安全守卫仍然严格，预算与生命周期不发生变化。
+
+### TR-G3：native seal 与 UNKNOWN
+
+明确两者对终态读取的实际依赖，并保持证据不足时的未决裁决。
+
+### TR-G4：回归与执行准备
+
+静态检查、专项夹具、资源核算、版本摘要及下一阶段动态申请完整。
+
+状态使用：
+
+- PASS_STATIC
+- CONDITIONAL_PASS
+- PARTIAL
+- FAIL
+- UNRESOLVED
+
+本轮：
+
+`RESOURCE_GATE_PASS=NOT_OBTAINED`
+
+`F1=UNRUN_RESOURCE_GATE`
+
+`F4=UNRUN_RESOURCE_GATE`
+
+`IMPLEMENTATION_GATE=CLOSED`
+
+`STRICT_SEPARATION_INSTANCES=0`
+
+## 十五、立即执行
+
+本次明确授权终态只读接口的最小静态修复。
+
+按以下顺序：
+
+1. 读取 PTA-PF-A 原始执行和关闭证据。
+2. 定位 CLOSED 后期限读取的具体错误。
+3. 确认其与 native seal、内部 UNKNOWN 的真实依赖。
+4. 建立活动态与终态证据读取的接口边界。
+5. 修复终态期限与预算记录的只读访问。
+6. 保留 CLOSED 后工作授权拒绝。
+7. 检查终态快照及原始证据完整性。
+8. 检查 native seal 所需的终态证据。
+9. 保持自动行政封存的已有成功实现。
+10. 增加正反测试与变异。
+11. 静态审查 TR-1 至 TR-10。
+12. 重新核算资源和访问上界。
+13. 核验全部冻结源码和历史证据。
+14. 冻结 TerminalRead-static-1。
+15. 生成新批次独立动态验收申请。
+16. 更新研究裁决。
+
+**本轮成功标准：CLOSED 后能够安全读取真实的历史期限、预算和关闭证据，同时保证终态读取不会恢复执行资格、改变预算或伪造 native seal 成功。**
+
+现在开始 DCL-R6-TerminalRead-Fix。
